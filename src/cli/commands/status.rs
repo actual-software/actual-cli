@@ -24,10 +24,16 @@ fn load_and_run(args: &StatusArgs) -> Result<(), ActualError> {
     let config_path = config::paths::config_path()?;
     let config_exists = config_path.exists();
     let cfg = config::paths::load()?;
-    // current_dir() only fails if the CWD has been deleted; unwrap_or to "."
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = resolve_cwd();
     run_status(args, &cfg, &config_path, config_exists, &cwd);
     Ok(())
+}
+
+/// Resolve the current working directory, falling back to `"."` if unavailable
+/// (e.g. the directory was deleted while the process was running).
+fn resolve_cwd() -> PathBuf {
+    let fallback = PathBuf::from(".");
+    std::env::current_dir().unwrap_or(fallback)
 }
 
 fn run_status(
@@ -229,21 +235,17 @@ fn walk_for_claude_md(dir: &Path, results: &mut Vec<PathBuf>) {
     };
 
     for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
         let path = entry.path();
         if path.is_dir() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
             // Skip hidden directories and common ignore dirs
             if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
                 continue;
             }
             walk_for_claude_md(&path, results);
-        } else if path.is_file() {
-            if let Some(file_name) = path.file_name() {
-                if file_name == "CLAUDE.md" {
-                    results.push(path);
-                }
-            }
+        } else if name_str == "CLAUDE.md" {
+            results.push(path);
         }
     }
 }
@@ -587,6 +589,15 @@ mod tests {
             ..Config::default()
         };
         print_verbose_section(&cfg);
+    }
+
+    // ─── resolve_cwd ──────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_cwd_returns_path() {
+        let cwd = resolve_cwd();
+        // resolve_cwd always returns a valid path (either real CWD or ".")
+        assert!(!cwd.as_os_str().is_empty());
     }
 
     // ─── load_and_run / run_status ─────────────────────────────────
