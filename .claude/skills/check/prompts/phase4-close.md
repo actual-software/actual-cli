@@ -41,4 +41,4 @@ Write the following JSON to `.check/close-results.json`:
 
 - If `bd close` fails for a bead, record it in `beads_failed` with the error message. Continue with the next bead.
 - If there are 0 beads to close, skip to sync and write `total_closed: 0`.
-- If `bd sync` fails, record the error but don't retry.
+- If `bd sync --full` fails, record the error but don't retry.
