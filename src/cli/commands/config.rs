@@ -56,11 +56,8 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
 mod tests {
     use super::*;
     use crate::cli::args::ConfigSetArgs;
-    use std::sync::Mutex;
+    use crate::testutil::ENV_MUTEX;
     use tempfile::tempdir;
-
-    /// Mutex to serialize tests that manipulate env vars.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn restore_env(key: &str, saved: Option<String>) {
         match saved {

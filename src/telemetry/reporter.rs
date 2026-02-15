@@ -34,9 +34,7 @@ pub async fn report_metrics(metrics: &SyncMetrics, config: &Config, api_url: &st
 mod tests {
     use super::*;
     use crate::config::types::TelemetryConfig;
-    use std::sync::Mutex;
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    use crate::testutil::ENV_MUTEX;
 
     fn sample_metrics() -> SyncMetrics {
         SyncMetrics {

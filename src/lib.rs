@@ -9,6 +9,9 @@ pub mod generation;
 pub mod tailoring;
 pub mod telemetry;
 
+#[cfg(test)]
+pub(crate) mod testutil;
+
 pub use error::ActualError;
 
 // Re-export CLI types for backward compatibility with tests
