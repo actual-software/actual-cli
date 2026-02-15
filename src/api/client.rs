@@ -2,7 +2,8 @@ use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::analysis::types::{FrameworkCategory, Language, RepoAnalysis};
 use crate::api::types::{
-    ApiErrorResponse, MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse,
+    ApiErrorResponse, CategoriesResponse, FrameworksResponse, HealthResponse, LanguagesResponse,
+    MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse,
 };
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -34,7 +35,6 @@ impl ActualApiClient {
 
     pub async fn post_match(&self, request: &MatchRequest) -> Result<MatchResponse, ActualError> {
         let url = format!("{}/adrs/match", self.base_url);
-
         let response = self
             .client
             .post(&url)
@@ -42,12 +42,60 @@ impl ActualApiClient {
             .send()
             .await
             .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        Self::handle_response(response).await
+    }
 
+    pub async fn get_languages(&self) -> Result<LanguagesResponse, ActualError> {
+        let url = format!("{}/taxonomy/languages", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        Self::handle_response(response).await
+    }
+
+    pub async fn get_frameworks(&self) -> Result<FrameworksResponse, ActualError> {
+        let url = format!("{}/taxonomy/frameworks", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        Self::handle_response(response).await
+    }
+
+    pub async fn get_categories(&self) -> Result<CategoriesResponse, ActualError> {
+        let url = format!("{}/taxonomy/categories", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        Self::handle_response(response).await
+    }
+
+    pub async fn get_health(&self) -> Result<HealthResponse, ActualError> {
+        let url = format!("{}/health", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        Self::handle_response(response).await
+    }
+
+    async fn handle_response<T: serde::de::DeserializeOwned>(
+        response: reqwest::Response,
+    ) -> Result<T, ActualError> {
         let status = response.status();
-
         if status.is_success() {
             response
-                .json::<MatchResponse>()
+                .json::<T>()
                 .await
                 .map_err(|e| ActualError::ApiError(e.to_string()))
         } else if status.is_client_error() {
@@ -413,5 +461,370 @@ mod tests {
     #[test]
     fn test_user_agent_value() {
         assert!(USER_AGENT_VALUE.starts_with("actual-cli/"));
+    }
+
+    // --- get_languages tests ---
+
+    #[tokio::test]
+    async fn test_get_languages_success() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{
+            "languages": [
+                {"id": "rust", "display_name": "Rust", "aliases": ["rs"]},
+                {"id": "typescript", "display_name": "TypeScript", "aliases": ["ts", "tsx"]}
+            ]
+        }"#;
+
+        let mock = server
+            .mock("GET", "/taxonomy/languages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_languages().await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.languages.len(), 2);
+        assert_eq!(response.languages[0].id, "rust");
+        assert_eq!(response.languages[0].display_name, "Rust");
+        assert_eq!(response.languages[0].aliases, vec!["rs"]);
+        assert_eq!(response.languages[1].id, "typescript");
+        assert_eq!(response.languages[1].display_name, "TypeScript");
+        assert_eq!(response.languages[1].aliases, vec!["ts", "tsx"]);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_languages_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let body =
+            r#"{"error": {"code": "UNAUTHORIZED", "message": "Invalid API key", "details": null}}"#;
+
+        let mock = server
+            .mock("GET", "/taxonomy/languages")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_languages().await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiResponseError { ref code, ref message } if code == "UNAUTHORIZED" && message == "Invalid API key")
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_languages_server_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("GET", "/taxonomy/languages")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_languages().await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("500"))
+        );
+        mock.assert_async().await;
+    }
+
+    // --- get_frameworks tests ---
+
+    #[tokio::test]
+    async fn test_get_frameworks_success() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{
+            "frameworks": [
+                {
+                    "id": "nextjs",
+                    "display_name": "Next.js",
+                    "category": "frontend",
+                    "languages": ["typescript", "javascript"]
+                },
+                {
+                    "id": "actix-web",
+                    "display_name": "Actix Web",
+                    "category": "backend",
+                    "languages": ["rust"]
+                }
+            ]
+        }"#;
+
+        let mock = server
+            .mock("GET", "/taxonomy/frameworks")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_frameworks().await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.frameworks.len(), 2);
+        assert_eq!(response.frameworks[0].id, "nextjs");
+        assert_eq!(response.frameworks[0].display_name, "Next.js");
+        assert_eq!(response.frameworks[0].category, "frontend");
+        assert_eq!(
+            response.frameworks[0].languages,
+            vec!["typescript", "javascript"]
+        );
+        assert_eq!(response.frameworks[1].id, "actix-web");
+        assert_eq!(response.frameworks[1].display_name, "Actix Web");
+        assert_eq!(response.frameworks[1].category, "backend");
+        assert_eq!(response.frameworks[1].languages, vec!["rust"]);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_frameworks_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let body =
+            r#"{"error": {"code": "UNAUTHORIZED", "message": "Invalid API key", "details": null}}"#;
+
+        let mock = server
+            .mock("GET", "/taxonomy/frameworks")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_frameworks().await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiResponseError { ref code, ref message } if code == "UNAUTHORIZED" && message == "Invalid API key")
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_frameworks_server_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("GET", "/taxonomy/frameworks")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_frameworks().await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("500"))
+        );
+        mock.assert_async().await;
+    }
+
+    // --- get_categories tests ---
+
+    #[tokio::test]
+    async fn test_get_categories_success() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{
+            "categories": [
+                {
+                    "id": "frontend",
+                    "name": "Frontend",
+                    "path": "Frontend",
+                    "level": 0,
+                    "children": [
+                        {
+                            "id": "rendering",
+                            "name": "Rendering Model",
+                            "path": "Frontend > Rendering Model",
+                            "level": 1,
+                            "children": [
+                                {
+                                    "id": "ssr",
+                                    "name": "Server-Side Rendering",
+                                    "path": "Frontend > Rendering Model > Server-Side Rendering",
+                                    "level": 2,
+                                    "children": []
+                                }
+                            ]
+                        },
+                        {
+                            "id": "styling",
+                            "name": "Styling",
+                            "path": "Frontend > Styling",
+                            "level": 1,
+                            "children": []
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let mock = server
+            .mock("GET", "/taxonomy/categories")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_categories().await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.categories.len(), 1);
+
+        let frontend = &response.categories[0];
+        assert_eq!(frontend.id, "frontend");
+        assert_eq!(frontend.name, "Frontend");
+        assert_eq!(frontend.path, "Frontend");
+        assert_eq!(frontend.level, 0);
+        assert_eq!(frontend.children.len(), 2);
+
+        let rendering = &frontend.children[0];
+        assert_eq!(rendering.id, "rendering");
+        assert_eq!(rendering.name, "Rendering Model");
+        assert_eq!(rendering.path, "Frontend > Rendering Model");
+        assert_eq!(rendering.level, 1);
+        assert_eq!(rendering.children.len(), 1);
+
+        let ssr = &rendering.children[0];
+        assert_eq!(ssr.id, "ssr");
+        assert_eq!(ssr.name, "Server-Side Rendering");
+        assert_eq!(
+            ssr.path,
+            "Frontend > Rendering Model > Server-Side Rendering"
+        );
+        assert_eq!(ssr.level, 2);
+        assert!(ssr.children.is_empty());
+
+        let styling = &frontend.children[1];
+        assert_eq!(styling.id, "styling");
+        assert_eq!(styling.name, "Styling");
+        assert!(styling.children.is_empty());
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_categories_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let body =
+            r#"{"error": {"code": "UNAUTHORIZED", "message": "Invalid API key", "details": null}}"#;
+
+        let mock = server
+            .mock("GET", "/taxonomy/categories")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_categories().await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiResponseError { ref code, ref message } if code == "UNAUTHORIZED" && message == "Invalid API key")
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_categories_server_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("GET", "/taxonomy/categories")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_categories().await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("500"))
+        );
+        mock.assert_async().await;
+    }
+
+    // --- get_health tests ---
+
+    #[tokio::test]
+    async fn test_get_health_success() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{"status": "ok", "version": "1.2.3"}"#;
+
+        let mock = server
+            .mock("GET", "/health")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_health().await;
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.status, "ok");
+        assert_eq!(response.version, "1.2.3");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_health_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let body =
+            r#"{"error": {"code": "UNAUTHORIZED", "message": "Invalid API key", "details": null}}"#;
+
+        let mock = server
+            .mock("GET", "/health")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_health().await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiResponseError { ref code, ref message } if code == "UNAUTHORIZED" && message == "Invalid API key")
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_health_server_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("GET", "/health")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.get_health().await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("500"))
+        );
+        mock.assert_async().await;
     }
 }
