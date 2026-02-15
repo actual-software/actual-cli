@@ -28,15 +28,14 @@ fn test_version() {
 }
 
 #[test]
-fn test_sync_stub_message() {
-    // Use --dry-run to avoid interactive prompt (RealTerminal blocks in CI).
+fn test_sync_without_claude_binary() {
+    // When Claude binary is not found, sync should exit with code 2.
     cmd()
         .args(["sync", "--dry-run"])
+        .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Sync pipeline: phases 1-2 not yet connected",
-        ));
+        .code(2)
+        .stderr(predicate::str::contains("Claude Code not found"));
 }
 
 #[test]
@@ -158,7 +157,8 @@ fn test_no_args_shows_error() {
 }
 
 #[test]
-fn test_sync_with_flags() {
+fn test_sync_with_flags_without_claude() {
+    // Sync with flags but without Claude binary — exits with code 2.
     cmd()
         .args([
             "sync",
@@ -177,69 +177,63 @@ fn test_sync_with_flags() {
             "--max-budget-usd",
             "1.50",
         ])
+        .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Sync pipeline: phases 1-2 not yet connected",
-        ));
+        .code(2)
+        .stderr(predicate::str::contains("Claude Code not found"));
 }
 
 #[test]
-fn test_sync_dry_run() {
+fn test_sync_dry_run_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
         .args(["sync", "--dry-run"])
         .current_dir(dir.path())
+        .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Sync pipeline: phases 1-2 not yet connected",
-        ));
+        .code(2)
+        .stderr(predicate::str::contains("Claude Code not found"));
 
     // No CLAUDE.md files should be written
     assert!(!dir.path().join("CLAUDE.md").exists());
 }
 
 #[test]
-fn test_sync_force() {
+fn test_sync_force_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
         .args(["sync", "--force"])
         .current_dir(dir.path())
+        .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Sync pipeline: phases 1-2 not yet connected",
-        ));
+        .code(2)
+        .stderr(predicate::str::contains("Claude Code not found"));
 }
 
 #[test]
-fn test_sync_no_tailor() {
+fn test_sync_no_tailor_without_claude() {
     let dir = tempfile::tempdir().unwrap();
-    // Use --force to avoid interactive prompt (RealTerminal blocks in CI).
     cmd()
         .args(["sync", "--no-tailor", "--force"])
         .current_dir(dir.path())
+        .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Sync pipeline: phases 1-2 not yet connected",
-        ));
+        .code(2)
+        .stderr(predicate::str::contains("Claude Code not found"));
 }
 
 #[test]
-fn test_sync_force_dry_run() {
+fn test_sync_force_dry_run_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
         .args(["sync", "--force", "--dry-run"])
         .current_dir(dir.path())
+        .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Sync pipeline: phases 1-2 not yet connected",
-        ));
+        .code(2)
+        .stderr(predicate::str::contains("Claude Code not found"));
 
-    // dry-run takes precedence: no files written
+    // No CLAUDE.md files should be written
     assert!(!dir.path().join("CLAUDE.md").exists());
 }
 
