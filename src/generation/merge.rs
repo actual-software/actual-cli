@@ -103,7 +103,7 @@ pub fn merge_content(
     version: u32,
     is_root: bool,
 ) -> MergeResult {
-    let managed_section = markers::wrap_in_markers(managed_content, version);
+    let managed_section = markers::wrap_in_markers(managed_content, version, &[]);
 
     let content = match existing_content {
         None => {
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_existing_with_markers_replaces_content() {
-        let existing = format!("{}\n", markers::wrap_in_markers("old content", 1));
+        let existing = format!("{}\n", markers::wrap_in_markers("old content", 1, &[]));
         let result = merge_content(Some(&existing), "new content", 2, false);
         assert!(
             result.content.contains("new content"),
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_existing_preserves_content_above_and_below_markers() {
-        let managed = markers::wrap_in_markers("old managed", 1);
+        let managed = markers::wrap_in_markers("old managed", 1, &[]);
         let existing = format!("# User Header\n\n{managed}\n\n## User Footer\n");
         let result = merge_content(Some(&existing), "new managed", 2, false);
         assert!(
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn test_existing_markers_only_replaces() {
-        let existing = format!("{}\n", markers::wrap_in_markers("original", 1));
+        let existing = format!("{}\n", markers::wrap_in_markers("original", 1, &[]));
         let result = merge_content(Some(&existing), "replacement", 2, false);
         assert!(
             result.content.contains("replacement"),
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn test_existing_with_markers_no_trailing_newline() {
         // END_MARKER is not followed by \n (no trailing newline)
-        let managed = markers::wrap_in_markers("old content", 1);
+        let managed = markers::wrap_in_markers("old content", 1, &[]);
         let existing = managed.clone(); // no trailing \n
         let result = merge_content(Some(&existing), "new content", 2, false);
         assert!(
