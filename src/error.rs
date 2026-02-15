@@ -31,6 +31,9 @@ pub enum ActualError {
 
     #[error("User cancelled")]
     UserCancelled,
+
+    #[error("Tailoring output validation failed: {0}")]
+    TailoringValidationError(String),
 }
 
 impl ActualError {
@@ -86,6 +89,10 @@ mod tests {
         );
         assert_eq!(ActualError::ClaudeTimeout { seconds: 30 }.exit_code(), 1);
         assert_eq!(ActualError::UserCancelled.exit_code(), 4);
+        assert_eq!(
+            ActualError::TailoringValidationError("test".to_string()).exit_code(),
+            1
+        );
     }
 
     #[test]
@@ -136,5 +143,15 @@ mod tests {
 
         let msg = ActualError::UserCancelled.to_string();
         assert!(msg.contains("cancelled"), "expected 'cancelled' in: {msg}");
+
+        let msg = ActualError::TailoringValidationError("empty content".to_string()).to_string();
+        assert!(
+            msg.contains("Tailoring output validation failed"),
+            "expected 'Tailoring output validation failed' in: {msg}"
+        );
+        assert!(
+            msg.contains("empty content"),
+            "expected 'empty content' in: {msg}"
+        );
     }
 }
