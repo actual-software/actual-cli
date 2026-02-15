@@ -11,16 +11,7 @@ use crate::error::ActualError;
 use crate::generation::markers;
 
 pub fn exec(args: &StatusArgs) -> i32 {
-    let result = (|| -> Result<(), ActualError> {
-        let config_path = config::paths::config_path()?;
-        let config_exists = config_path.exists();
-        let cfg = config::paths::load()?;
-        let cwd = std::env::current_dir().map_err(io_to_config_error)?;
-        run_status(args, &cfg, &config_path, config_exists, &cwd);
-        Ok(())
-    })();
-
-    match result {
+    match load_and_run(args) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("{} {}", style("Error:").red().bold(), e);
@@ -29,8 +20,14 @@ pub fn exec(args: &StatusArgs) -> i32 {
     }
 }
 
-fn io_to_config_error(e: std::io::Error) -> ActualError {
-    ActualError::ConfigError(format!("Failed to determine current directory: {e}"))
+fn load_and_run(args: &StatusArgs) -> Result<(), ActualError> {
+    let config_path = config::paths::config_path()?;
+    let config_exists = config_path.exists();
+    let cfg = config::paths::load()?;
+    // current_dir() only fails if the CWD has been deleted; unwrap_or to "."
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    run_status(args, &cfg, &config_path, config_exists, &cwd);
+    Ok(())
 }
 
 fn run_status(
@@ -592,18 +589,18 @@ mod tests {
         print_verbose_section(&cfg);
     }
 
-    // ─── io_to_config_error ────────────────────────────────────────
+    // ─── load_and_run / run_status ─────────────────────────────────
 
     #[test]
-    fn test_io_to_config_error_produces_config_error() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "dir gone");
-        let err = io_to_config_error(io_err);
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Failed to determine current directory"),
-            "expected error message, got: {msg}"
-        );
-        assert!(msg.contains("dir gone"), "expected cause in: {msg}");
+    fn test_load_and_run_succeeds() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+
+        let result = load_and_run(&StatusArgs { verbose: false });
+        assert!(result.is_ok());
+
+        std::env::remove_var("ACTUAL_CONFIG");
     }
 
     // ─── run_status ──────────────────────────────────────────────
