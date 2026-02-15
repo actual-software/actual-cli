@@ -435,6 +435,19 @@ mod tests {
         assert_eq!(extract_adr_ids(content), vec!["abc", "def"]);
     }
 
+    #[test]
+    fn test_extract_adr_ids_trailing_comma_filters_empty() {
+        let content = "<!-- adr-ids: abc,, def, -->";
+        assert_eq!(extract_adr_ids(content), vec!["abc", "def"]);
+    }
+
+    #[test]
+    fn test_extract_adr_ids_malformed_no_suffix() {
+        // Has the prefix but no closing " -->"
+        let content = "<!-- adr-ids: abc,def";
+        assert!(extract_adr_ids(content).is_empty());
+    }
+
     // --- wrap_in_markers with adr_ids tests ---
 
     #[test]
