@@ -60,14 +60,18 @@ jobs:
 
       - name: Run coverage
         run: |
-          cargo llvm-cov --workspace --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
+          # Exclude main.rs (thin binary wrapper with process::exit) and test
+          # files from coverage measurement. main.rs cannot be instrumented
+          # through subprocess tests. Test files contain unreachable branches
+          # by design. All testable logic lives in lib.rs and src/ modules.
+          cargo llvm-cov --workspace --ignore-filename-regex '(src/main\.rs|tests/)' --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
           COV_EXIT=${PIPESTATUS[0]}
           echo "cov_exit=$COV_EXIT" >> $GITHUB_ENV
 
       - name: Generate text report
         if: always()
         run: |
-          cargo llvm-cov report 2>&1 | tee coverage-summary.txt || true
+          cargo llvm-cov report --ignore-filename-regex '(src/main\.rs|tests/)' 2>&1 | tee coverage-summary.txt || true
 
       - name: Enforce 100% coverage
         if: always()
@@ -139,7 +143,7 @@ jobs:
       - name: Generate HTML report
         if: always()
         run: |
-          cargo llvm-cov report --html --output-dir coverage-html 2>/dev/null || true
+          cargo llvm-cov report --ignore-filename-regex '(src/main\.rs|tests/)' --html --output-dir coverage-html 2>/dev/null || true
 
       - name: Upload coverage artifacts
         if: always()
