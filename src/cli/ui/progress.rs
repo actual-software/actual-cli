@@ -98,4 +98,48 @@ mod tests {
         assert_eq!(ERROR_SYMBOL, "✖", "expected red X symbol");
         assert_eq!(WARN_SYMBOL, "⚠", "expected yellow triangle symbol");
     }
+
+    #[test]
+    fn test_spinner_active_update() {
+        let spinner = Spinner::new("initial", false);
+        spinner.update("updated message");
+        let bar = spinner.bar.as_ref().expect("expected active spinner");
+        assert_eq!(bar.message(), "updated message");
+    }
+
+    #[test]
+    fn test_spinner_active_success() {
+        let spinner = Spinner::new("working", false);
+        spinner.success("completed");
+        let bar = spinner.bar.as_ref().expect("expected active spinner");
+        let msg = bar.message().to_string();
+        assert!(msg.contains("completed"), "expected 'completed' in: {msg}");
+        assert!(bar.is_finished(), "expected spinner to be finished");
+    }
+
+    #[test]
+    fn test_spinner_active_error() {
+        let spinner = Spinner::new("working", false);
+        spinner.error("something broke");
+        let bar = spinner.bar.as_ref().expect("expected active spinner");
+        let msg = bar.message().to_string();
+        assert!(
+            msg.contains("something broke"),
+            "expected 'something broke' in: {msg}"
+        );
+        assert!(bar.is_finished(), "expected spinner to be finished");
+    }
+
+    #[test]
+    fn test_spinner_active_warn() {
+        let spinner = Spinner::new("working", false);
+        spinner.warn("be careful");
+        let bar = spinner.bar.as_ref().expect("expected active spinner");
+        let msg = bar.message().to_string();
+        assert!(
+            msg.contains("be careful"),
+            "expected 'be careful' in: {msg}"
+        );
+        assert!(bar.is_finished(), "expected spinner to be finished");
+    }
 }
