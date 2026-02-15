@@ -197,18 +197,30 @@ fn test_run_auth() {
 
 #[test]
 fn test_run_config_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+    std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "config", "show"]);
     assert_eq!(run(cli), 0);
+    std::env::remove_var("ACTUAL_CONFIG");
 }
 
 #[test]
 fn test_run_config_set() {
-    let cli = Cli::parse_from(["actual", "config", "set", "foo", "bar"]);
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+    std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let cli = Cli::parse_from(["actual", "config", "set", "batch_size", "10"]);
     assert_eq!(run(cli), 0);
+    std::env::remove_var("ACTUAL_CONFIG");
 }
 
 #[test]
 fn test_run_config_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+    std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "config", "path"]);
     assert_eq!(run(cli), 0);
+    std::env::remove_var("ACTUAL_CONFIG");
 }
