@@ -40,7 +40,18 @@ fn run_sync(args: &SyncArgs) -> Result<(), ActualError> {
         ActualError::ConfigError(format!("cannot determine working directory: {e}"))
     })?;
     let term = RealTerminal::default();
+    run_sync_inner(args, &root_dir, &term)
+}
 
+/// Core sync logic, separated for testability.
+///
+/// Accepts injected `root_dir` and `term` so unit tests can avoid
+/// `RealTerminal` (which blocks on stdin) and control the working directory.
+fn run_sync_inner(
+    args: &SyncArgs,
+    root_dir: &Path,
+    term: &dyn TerminalIO,
+) -> Result<(), ActualError> {
     // TODO: Phase 1 - env check + analysis (actual-cli-a59)
     // TODO: Phase 2 - fetch + tailor (actual-cli-e29)
     // For now, produce an empty TailoringOutput since upstream phases are not connected.
@@ -63,14 +74,7 @@ fn run_sync(args: &SyncArgs) -> Result<(), ActualError> {
     // Phase 3 - confirm + write (fully implemented)
     // --no-tailor: when Phase 2 is connected, this flag will skip Claude tailoring.
     // For now it has no additional effect since tailoring isn't wired yet.
-    let _result = confirm_and_write(
-        &output,
-        &root_dir,
-        args.force,
-        args.dry_run,
-        args.full,
-        &term,
-    )?;
+    let _result = confirm_and_write(&output, root_dir, args.force, args.dry_run, args.full, term)?;
     Ok(())
 }
 
@@ -582,105 +586,110 @@ mod tests {
         );
     }
 
-    // ── run_sync flag-passthrough tests ──
+    // ── run_sync_inner flag-passthrough tests ──
 
-    #[test]
-    fn test_run_sync_dry_run_returns_ok() {
-        let args = SyncArgs {
-            dry_run: true,
-            full: false,
-            force: false,
+    fn make_sync_args(dry_run: bool, full: bool, force: bool, no_tailor: bool) -> SyncArgs {
+        SyncArgs {
+            dry_run,
+            full,
+            force,
             reset_rejections: false,
             projects: vec![],
             model: None,
             api_url: None,
             verbose: false,
-            no_tailor: false,
+            no_tailor,
             max_budget_usd: None,
-        };
-        // run_sync with dry_run=true should succeed and write no files
-        let result = run_sync(&args);
-        assert!(result.is_ok(), "run_sync with --dry-run should succeed");
+        }
     }
 
     #[test]
-    fn test_run_sync_dry_run_full_returns_ok() {
-        let args = SyncArgs {
-            dry_run: true,
-            full: true,
-            force: false,
-            reset_rejections: false,
-            projects: vec![],
-            model: None,
-            api_url: None,
-            verbose: false,
-            no_tailor: false,
-            max_budget_usd: None,
-        };
-        let result = run_sync(&args);
+    fn test_run_sync_inner_dry_run_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let args = make_sync_args(true, false, false, false);
+        let result = run_sync_inner(&args, dir.path(), &term);
         assert!(
             result.is_ok(),
-            "run_sync with --dry-run --full should succeed"
+            "run_sync_inner with --dry-run should succeed"
         );
     }
 
     #[test]
-    fn test_run_sync_force_returns_ok() {
-        let args = SyncArgs {
-            dry_run: false,
-            full: false,
-            force: true,
-            reset_rejections: false,
-            projects: vec![],
-            model: None,
-            api_url: None,
-            verbose: false,
-            no_tailor: false,
-            max_budget_usd: None,
-        };
-        let result = run_sync(&args);
-        assert!(result.is_ok(), "run_sync with --force should succeed");
-    }
-
-    #[test]
-    fn test_run_sync_no_tailor_returns_ok() {
-        // Use force=true to avoid interactive prompt (RealTerminal blocks in tests).
-        // The key assertion is that no_tailor=true doesn't cause an error.
-        let args = SyncArgs {
-            dry_run: false,
-            full: false,
-            force: true,
-            reset_rejections: false,
-            projects: vec![],
-            model: None,
-            api_url: None,
-            verbose: false,
-            no_tailor: true,
-            max_budget_usd: None,
-        };
-        let result = run_sync(&args);
-        assert!(result.is_ok(), "run_sync with --no-tailor should succeed");
-    }
-
-    #[test]
-    fn test_run_sync_force_dry_run_returns_ok() {
-        let args = SyncArgs {
-            dry_run: true,
-            full: false,
-            force: true,
-            reset_rejections: false,
-            projects: vec![],
-            model: None,
-            api_url: None,
-            verbose: false,
-            no_tailor: false,
-            max_budget_usd: None,
-        };
-        // dry-run takes precedence over force
-        let result = run_sync(&args);
+    fn test_run_sync_inner_dry_run_full_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let args = make_sync_args(true, true, false, false);
+        let result = run_sync_inner(&args, dir.path(), &term);
         assert!(
             result.is_ok(),
-            "run_sync with --force --dry-run should succeed"
+            "run_sync_inner with --dry-run --full should succeed"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_inner_force_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let args = make_sync_args(false, false, true, false);
+        let result = run_sync_inner(&args, dir.path(), &term);
+        assert!(result.is_ok(), "run_sync_inner with --force should succeed");
+        // With empty output + force, terminal should show "No files to write."
+        let text = term.output_text();
+        assert!(
+            text.contains("No files to write."),
+            "expected 'No files to write.' in: {text}"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_inner_no_tailor_force_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let args = make_sync_args(false, false, true, true);
+        let result = run_sync_inner(&args, dir.path(), &term);
+        assert!(
+            result.is_ok(),
+            "run_sync_inner with --no-tailor --force should succeed"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_inner_force_dry_run_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let args = make_sync_args(true, false, true, false);
+        // dry-run takes precedence over force
+        let result = run_sync_inner(&args, dir.path(), &term);
+        assert!(
+            result.is_ok(),
+            "run_sync_inner with --force --dry-run should succeed"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_inner_no_flags_prompts_user() {
+        let dir = tempfile::tempdir().unwrap();
+        // Provide "a" (accept) input so the interactive prompt completes
+        let term = MockTerminal::new(vec!["a"]);
+        let args = make_sync_args(false, false, false, false);
+        let result = run_sync_inner(&args, dir.path(), &term);
+        assert!(
+            result.is_ok(),
+            "run_sync_inner with no flags should succeed when user accepts"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_inner_dry_run_writes_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let args = make_sync_args(true, false, false, false);
+        run_sync_inner(&args, dir.path(), &term).unwrap();
+        // Verify no CLAUDE.md was created
+        assert!(
+            !dir.path().join("CLAUDE.md").exists(),
+            "dry-run should not create any files"
         );
     }
 
@@ -689,18 +698,7 @@ mod tests {
     #[test]
     fn test_exec_returns_zero() {
         // Use dry_run=true to avoid interactive prompt (RealTerminal blocks in tests).
-        let args = SyncArgs {
-            dry_run: true,
-            full: false,
-            force: false,
-            reset_rejections: false,
-            projects: vec![],
-            model: None,
-            api_url: None,
-            verbose: false,
-            no_tailor: false,
-            max_budget_usd: None,
-        };
+        let args = make_sync_args(true, false, false, false);
         let code = exec(&args);
         assert_eq!(code, 0);
     }
