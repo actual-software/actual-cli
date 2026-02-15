@@ -139,20 +139,14 @@ mod tests {
         ) -> Result<T, ActualError> {
             let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
             let mut responses = self.responses.lock().unwrap();
-            match &responses[idx] {
+            // Take ownership by swapping with a placeholder
+            let entry = std::mem::replace(&mut responses[idx], MockResponse::Json(String::new()));
+            match entry {
                 MockResponse::Json(json) => {
-                    let parsed: T = serde_json::from_str(json)?;
+                    let parsed: T = serde_json::from_str(&json)?;
                     Ok(parsed)
                 }
-                MockResponse::Error(_) => {
-                    // Take ownership by replacing with a placeholder
-                    let entry =
-                        std::mem::replace(&mut responses[idx], MockResponse::Json(String::new()));
-                    match entry {
-                        MockResponse::Error(e) => Err(e),
-                        _ => unreachable!(),
-                    }
-                }
+                MockResponse::Error(e) => Err(e),
             }
         }
     }
