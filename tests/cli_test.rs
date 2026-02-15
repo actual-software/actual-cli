@@ -28,12 +28,15 @@ fn test_version() {
 }
 
 #[test]
-fn test_sync_not_implemented() {
+fn test_sync_stub_message() {
+    // Use --dry-run to avoid interactive prompt (RealTerminal blocks in CI).
     cmd()
-        .arg("sync")
+        .args(["sync", "--dry-run"])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Sync pipeline not yet connected"));
+        .stderr(predicate::str::contains(
+            "Sync pipeline: phases 1-2 not yet connected",
+        ));
 }
 
 #[test]
@@ -176,7 +179,68 @@ fn test_sync_with_flags() {
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Sync pipeline not yet connected"));
+        .stderr(predicate::str::contains(
+            "Sync pipeline: phases 1-2 not yet connected",
+        ));
+}
+
+#[test]
+fn test_sync_dry_run() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["sync", "--dry-run"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Sync pipeline: phases 1-2 not yet connected",
+        ));
+
+    // No CLAUDE.md files should be written
+    assert!(!dir.path().join("CLAUDE.md").exists());
+}
+
+#[test]
+fn test_sync_force() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["sync", "--force"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Sync pipeline: phases 1-2 not yet connected",
+        ));
+}
+
+#[test]
+fn test_sync_no_tailor() {
+    let dir = tempfile::tempdir().unwrap();
+    // Use --force to avoid interactive prompt (RealTerminal blocks in CI).
+    cmd()
+        .args(["sync", "--no-tailor", "--force"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Sync pipeline: phases 1-2 not yet connected",
+        ));
+}
+
+#[test]
+fn test_sync_force_dry_run() {
+    let dir = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["sync", "--force", "--dry-run"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Sync pipeline: phases 1-2 not yet connected",
+        ));
+
+    // dry-run takes precedence: no files written
+    assert!(!dir.path().join("CLAUDE.md").exists());
 }
 
 #[test]
