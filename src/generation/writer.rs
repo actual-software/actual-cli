@@ -326,4 +326,85 @@ mod tests {
             "core subdirectory should not have header"
         );
     }
+
+    #[test]
+    fn test_write_fails_when_parent_dir_cannot_be_created() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        // Create a regular file where the parent directory needs to be
+        std::fs::write(dir.path().join("blocker"), "I am a file").unwrap();
+
+        let files = vec![FileOutput {
+            path: "blocker/nested/CLAUDE.md".to_string(),
+            content: "content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(dir.path(), &files);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed action when directory creation fails"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        assert!(
+            results[0].error.is_some(),
+            "expected error message on failure"
+        );
+        assert!(
+            results[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Failed to create directory"),
+            "expected directory creation error message, got: {:?}",
+            results[0].error
+        );
+    }
+
+    #[test]
+    fn test_write_fails_when_file_cannot_be_written() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        // Create a read-only directory so file writing fails
+        let readonly_dir = dir.path().join("readonly");
+        std::fs::create_dir_all(&readonly_dir).unwrap();
+        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let files = vec![FileOutput {
+            path: "readonly/CLAUDE.md".to_string(),
+            content: "content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(dir.path(), &files);
+
+        // Restore permissions so temp dir cleanup succeeds
+        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed action when file write fails"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        assert!(
+            results[0].error.is_some(),
+            "expected error message on write failure"
+        );
+        assert!(
+            results[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("Failed to write file"),
+            "expected file write error message, got: {:?}",
+            results[0].error
+        );
+    }
 }
