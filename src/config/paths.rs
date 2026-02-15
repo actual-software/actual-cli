@@ -10,6 +10,10 @@ use crate::error::ActualError;
 /// 2. If `ACTUAL_CONFIG_DIR` is set, return that path.
 /// 3. Otherwise, `$HOME/.actualai/actual`.
 pub fn config_dir() -> Result<PathBuf, ActualError> {
+    config_dir_with_home(dirs::home_dir())
+}
+
+fn config_dir_with_home(home: Option<PathBuf>) -> Result<PathBuf, ActualError> {
     if let Ok(config_file) = std::env::var("ACTUAL_CONFIG") {
         let p = PathBuf::from(config_file);
         return p.parent().map(|d| d.to_path_buf()).ok_or_else(|| {
@@ -21,8 +25,7 @@ pub fn config_dir() -> Result<PathBuf, ActualError> {
         return Ok(PathBuf::from(dir));
     }
 
-    dirs::home_dir()
-        .map(|h| h.join(".actualai").join("actual"))
+    home.map(|h| h.join(".actualai").join("actual"))
         .ok_or_else(|| ActualError::ConfigError("Unable to determine home directory".into()))
 }
 
@@ -324,6 +327,157 @@ mod tests {
         // ACTUAL_CONFIG should take precedence
         let dir = config_dir().unwrap();
         assert_eq!(dir, tmp1.path());
+
+        restore_env_vars(saved);
+    }
+
+    #[test]
+    fn test_load_from_unreadable_directory() {
+        // Attempt to read from a path inside a nonexistent restricted location.
+        // On any OS, reading a file that exists but contains invalid YAML triggers
+        // the parse error path; reading from a nonexistent file triggers auto-create.
+        // We test the read error by making the file a directory instead.
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        std::fs::create_dir_all(&config_file).unwrap();
+
+        let err = load_from(&config_file).unwrap_err();
+        let msg = err.to_string();
+        // The read_to_string will fail because config_file is a directory
+        assert!(
+            msg.contains("Failed to read config file"),
+            "expected read error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_save_to_invalid_path() {
+        // Try to save to a path that can't be created (under /dev/null on unix)
+        #[cfg(unix)]
+        {
+            let path = PathBuf::from("/dev/null/impossible/config.yaml");
+            let err = save_to(&Config::default(), &path).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("Failed to create config directory"),
+                "expected dir creation error, got: {msg}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_to_readonly_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let readonly_dir = dir.path().join("readonly");
+        std::fs::create_dir_all(&readonly_dir).unwrap();
+
+        // Create the file first, then make the directory read-only
+        let config_file = readonly_dir.join("config.yaml");
+        std::fs::write(&config_file, "old content").unwrap();
+        // Make file read-only
+        std::fs::set_permissions(&config_file, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // Make directory read-only
+        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let err = save_to(&Config::default(), &config_file).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Failed to write config file"),
+            "expected write error, got: {msg}"
+        );
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&config_file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn test_config_dir_actual_config_bare_filename() {
+        // When ACTUAL_CONFIG is set to a bare filename, parent is Some("").
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = clear_env_vars();
+
+        std::env::set_var("ACTUAL_CONFIG", "config.yaml");
+        let dir = config_dir().unwrap();
+        assert_eq!(dir, PathBuf::from(""));
+
+        restore_env_vars(saved);
+    }
+
+    #[test]
+    fn test_config_dir_actual_config_empty_string() {
+        // When ACTUAL_CONFIG is set to an empty string, parent() returns None.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = clear_env_vars();
+
+        std::env::set_var("ACTUAL_CONFIG", "");
+        let err = config_dir().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ACTUAL_CONFIG has no parent directory"),
+            "expected no-parent error, got: {msg}"
+        );
+
+        restore_env_vars(saved);
+    }
+
+    #[test]
+    fn test_load_via_env_var_absent_creates_default() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = clear_env_vars();
+
+        let tmp = tempdir().unwrap();
+        let config_file = tmp.path().join("new_config.yaml");
+        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+
+        // load() with env var pointing to nonexistent file should auto-create
+        let config = load().unwrap();
+        assert_eq!(config, Config::default());
+        assert!(config_file.exists());
+
+        restore_env_vars(saved);
+    }
+
+    #[test]
+    fn test_config_path_with_config_dir_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = clear_env_vars();
+
+        let tmp = tempdir().unwrap();
+        std::env::set_var("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let path = config_path().unwrap();
+        assert_eq!(path, tmp.path().join("config.yaml"));
+
+        restore_env_vars(saved);
+    }
+
+    #[test]
+    fn test_config_dir_no_home_directory() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = clear_env_vars();
+
+        let err = config_dir_with_home(None).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unable to determine home directory"),
+            "expected home dir error, got: {msg}"
+        );
+
+        restore_env_vars(saved);
+    }
+
+    #[test]
+    fn test_config_dir_with_home_provided() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = clear_env_vars();
+
+        let home = PathBuf::from("/fake/home");
+        let dir = config_dir_with_home(Some(home)).unwrap();
+        assert_eq!(dir, PathBuf::from("/fake/home/.actualai/actual"));
 
         restore_env_vars(saved);
     }
