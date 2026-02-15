@@ -1,0 +1,17 @@
+[package]
+name = "actual-cli"
+version = "0.1.0"
+edition = "2021"
+description = "ADR-powered CLAUDE.md generator"
+default-run = "actual"
+
+[[bin]]
+name = "actual"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
