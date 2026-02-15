@@ -8,7 +8,7 @@ You are the commit scanner for a bead sync check. Your job is to scan recent com
    ```bash
    git log --oneline main --since="3 months ago"
    ```
-2. Extract every unique bead ID from commit messages. Bead IDs follow the pattern: `actual-cli-XXXX` (where XXXX is alphanumeric, 2-5 characters).
+2. Extract every unique bead ID from commit messages. Bead IDs follow the pattern: `actual-cli-XXX` (where XXX is 3 alphanumeric characters).
 3. For each unique bead ID, record which commit(s) reference it.
 
 ## Output
