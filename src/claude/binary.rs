@@ -34,6 +34,7 @@ pub fn find_claude_binary() -> Result<PathBuf, ActualError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::ENV_MUTEX;
     use std::env;
 
     #[test]
@@ -48,6 +49,7 @@ mod tests {
 
     #[test]
     fn test_env_var_override_with_valid_path() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let fake_binary = dir.path().join("fake-claude");
         std::fs::File::create(&fake_binary).unwrap();
@@ -62,6 +64,7 @@ mod tests {
 
     #[test]
     fn test_env_var_override_with_nonexistent_path() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
         let result = find_claude_binary();
         env::remove_var("CLAUDE_BINARY");
@@ -72,6 +75,7 @@ mod tests {
 
     #[test]
     fn test_not_found_when_binary_missing() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         env::remove_var("CLAUDE_BINARY");
         let original_path = env::var("PATH").unwrap_or_default();
         env::set_var("PATH", "");
