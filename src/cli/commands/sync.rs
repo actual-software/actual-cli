@@ -60,7 +60,7 @@ fn run(args: &SyncArgs) -> Result<(), ActualError> {
     }
 
     let runner = CliClaudeRunner::new(binary_path, Duration::from_secs(300));
-    let reader = StdinReader;
+    let reader = crate::cli::ui::real_terminal::StdinReader;
     run_sync(args, &root_dir, &term, &runner, &reader)
 }
 
@@ -69,17 +69,6 @@ fn run(args: &SyncArgs) -> Result<(), ActualError> {
 fn resolve_cwd() -> std::path::PathBuf {
     let fallback = std::path::PathBuf::from(".");
     std::env::current_dir().unwrap_or(fallback)
-}
-
-/// Reads a line from stdin for the project confirmation prompt.
-struct StdinReader;
-
-impl InputReader for StdinReader {
-    fn read_line(&self) -> std::io::Result<String> {
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf)?;
-        Ok(buf)
-    }
 }
 
 /// Core sync logic.
