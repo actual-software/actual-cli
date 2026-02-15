@@ -90,7 +90,11 @@ mod tests {
     #[cfg(unix)]
     fn create_fake_binary(dir: &Path, stdout_content: &str, exit_code: i32) -> std::path::PathBuf {
         let script = dir.join("fake-claude");
-        let content = format!("#!/bin/sh\necho '{}'\nexit {}\n", stdout_content, exit_code);
+        let content = format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\nexit {}\n",
+            stdout_content.replace('\'', "'\\''"),
+            exit_code
+        );
         std::fs::write(&script, &content).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
