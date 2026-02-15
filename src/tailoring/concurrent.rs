@@ -195,10 +195,7 @@ mod tests {
             let mut responses = self.responses.lock().unwrap();
             let entry = std::mem::replace(&mut responses[idx], MockResponse::Json(String::new()));
             match entry {
-                MockResponse::Json(json) => {
-                    let parsed: T = serde_json::from_str(&json)?;
-                    Ok(parsed)
-                }
+                MockResponse::Json(json) => serde_json::from_str(&json).map_err(Into::into),
                 MockResponse::Error(e) => Err(e),
             }
         }
@@ -468,10 +465,11 @@ mod tests {
             "missing content from project C in: {content}"
         );
 
-        // Verify the concatenation separator
+        // Verify the concatenation separator: order depends on concurrent execution
+        let has_a_then_b = content.contains("Rules from project A\n\nRules from project B");
+        let has_b_then_a = content.contains("Rules from project B\n\nRules from project A");
         assert!(
-            content.contains("Rules from project A\n\nRules from project B")
-                || content.contains("Rules from project B\n\nRules from project A"),
+            has_a_then_b || has_b_then_a,
             "expected content concatenated with newlines, got: {content}"
         );
     }
@@ -507,7 +505,10 @@ mod tests {
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
 
         let err = result.unwrap_err();
-        assert!(matches!(err, ActualError::ClaudeSubprocessFailed { .. }));
+        match err {
+            ActualError::ClaudeSubprocessFailed { .. } => {} // expected
+            other => panic!("expected ClaudeSubprocessFailed, got: {other}"),
+        }
     }
 
     // --- Test 6: multi-batch per project passes context to later batches ---
