@@ -14,6 +14,9 @@ pub enum ActualError {
     #[error("Failed to parse Claude Code output: {0}")]
     ClaudeOutputParse(#[from] serde_json::Error),
 
+    #[error("Analysis returned no projects")]
+    AnalysisEmpty,
+
     #[error("API request failed: {0}")]
     ApiError(String),
 
@@ -85,6 +88,7 @@ mod tests {
             1
         );
         assert_eq!(ActualError::ClaudeTimeout { seconds: 30 }.exit_code(), 1);
+        assert_eq!(ActualError::AnalysisEmpty.exit_code(), 1);
         assert_eq!(ActualError::UserCancelled.exit_code(), 4);
     }
 
@@ -133,6 +137,12 @@ mod tests {
         let msg = ActualError::ClaudeTimeout { seconds: 30 }.to_string();
         assert!(msg.contains("30"), "expected '30' in: {msg}");
         assert!(msg.contains("timed out"), "expected 'timed out' in: {msg}");
+
+        let msg = ActualError::AnalysisEmpty.to_string();
+        assert!(
+            msg.contains("no projects"),
+            "expected 'no projects' in: {msg}"
+        );
 
         let msg = ActualError::UserCancelled.to_string();
         assert!(msg.contains("cancelled"), "expected 'cancelled' in: {msg}");
