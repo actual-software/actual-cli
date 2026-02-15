@@ -110,6 +110,77 @@ pub fn create_fake_claude_binary_capturing(
     script
 }
 
+/// Create a fake Claude binary that captures all args AND distinguishes
+/// analysis from tailoring (by checking for `skipped_adrs` in `$@`).
+///
+/// Each invocation is written to `capture_file` with args delimited by `\x00`
+/// and invocations separated by `---INVOCATION---\n`. Use
+/// [`parse_captured_invocations`] to parse the output.
+#[cfg(unix)]
+pub fn create_fake_claude_binary_capturing_with_tailoring(
+    dir: &std::path::Path,
+    auth_json: &str,
+    analysis_json: &str,
+    tailoring_json: &str,
+    capture_file: &std::path::Path,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.join("fake-claude");
+    let capture_str = capture_file.to_str().unwrap();
+    // Use printf with \0 delimiters between args and a clear invocation separator
+    let script_content = format!(
+        r#"#!/bin/sh
+if [ "$1" = "auth" ]; then
+  printf '%s\n' '{auth}'
+  exit 0
+elif [ "$1" = "--print" ]; then
+  printf '%s\n' '---INVOCATION---' >> '{capture}'
+  for arg in "$@"; do
+    printf '%s\0' "$arg" >> '{capture}'
+  done
+  printf '\n' >> '{capture}'
+  if echo "$@" | grep -q "skipped_adrs"; then
+    printf '%s\n' '{tailoring}'
+    exit 0
+  else
+    printf '%s\n' '{analysis}'
+    exit 0
+  fi
+else
+  echo "unexpected args: $@" >&2
+  exit 1
+fi
+"#,
+        auth = auth_json,
+        capture = capture_str,
+        tailoring = tailoring_json,
+        analysis = analysis_json,
+    );
+    std::fs::write(&script, script_content).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+/// Parse the captured invocations file written by
+/// `create_fake_claude_binary_capturing_with_tailoring`.
+///
+/// Returns a list of invocations, where each invocation is a list of args.
+#[cfg(unix)]
+pub fn parse_captured_invocations(content: &str) -> Vec<Vec<String>> {
+    content
+        .split("---INVOCATION---\n")
+        .filter(|s| !s.is_empty())
+        .map(|invocation| {
+            invocation
+                .trim_end_matches('\n')
+                .split('\0')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .collect()
+}
+
 // ── JSON builders ───────────────────────────────────────────────────
 
 /// Wrap an ADR array JSON string in a full MatchResponse envelope.
@@ -186,6 +257,29 @@ impl TestEnv {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
         let binary_path = create_fake_claude_binary(dir.path(), auth_json, analysis_json);
+        let api_url = server.url();
+        Self {
+            dir,
+            config_path,
+            binary_path,
+            api_url,
+        }
+    }
+
+    pub fn new_with_tailoring(
+        server: &mockito::Server,
+        auth_json: &str,
+        analysis_json: &str,
+        tailoring_json: &str,
+    ) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        let binary_path = create_fake_claude_binary_with_tailoring(
+            dir.path(),
+            auth_json,
+            analysis_json,
+            tailoring_json,
+        );
         let api_url = server.url();
         Self {
             dir,
