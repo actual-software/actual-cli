@@ -15,7 +15,7 @@ Read ALL files from `.check/bead-status/batch-*.json`.
    ```
 3. After closing all beads, sync to beads-sync branch:
    ```bash
-   bd sync
+   bd sync --full
    ```
 
 ## Output
