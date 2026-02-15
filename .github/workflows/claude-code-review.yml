@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
       issues: read
       id-token: write
 
@@ -29,16 +29,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
 
+            Review this pull request. Read AGENTS.md first to understand the project's architectural guidelines, conventions, and quality standards.
+
+            REVIEW PROCESS:
+            1. Read the PR diff to understand what changed.
+            2. For EVERY potential issue you find, BEFORE commenting:
+               a. Use the Read tool to read the FULL source file(s) involved — not just the diff.
+               b. Verify that the problem actually exists in the code as written.
+               c. Check that your suggested fix isn't already implemented.
+               d. If you cannot confirm the issue after reading the source, DO NOT comment.
+            3. Only after verification, post the comment.
+
+            COMMENTING RULES:
+            - ONLY comment when something needs to change: bugs, security issues, performance problems, violations of project conventions/architecture, or meaningful refactoring opportunities.
+            - DO NOT comment on things that look good, are well-written, or follow best practices. No praise, no "LGTM", no positive affirmations.
+            - DO NOT leave a top-level summary comment if there are no actionable issues. If the PR is clean, post nothing at all.
+            - Every comment must be actionable — it should describe what is wrong and what should change.
+            - NEVER post a suggestion that is identical to what the code already does. If your suggestion matches the existing code, the issue does not exist — discard the comment.
+            - Be concise and direct.
+
+            Note: The PR branch is already checked out in the current working directory. You have full access to read any file.
+
+            Use `mcp__github_inline_comment__create_inline_comment` for code-specific issues.
+            Use `gh pr comment` ONLY if there is a cross-cutting concern that doesn't map to a single line.
+            If there are no issues, do not post any comments.
+          claude_args: |
+            --allowedTools "Read,Glob,Grep,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
