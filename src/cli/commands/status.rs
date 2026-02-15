@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn test_print_claude_md_section_managed() {
         let dir = tempdir().unwrap();
-        let managed = markers::wrap_in_markers("test content", 2);
+        let managed = markers::wrap_in_markers("test content", 2, &[]);
         std::fs::write(dir.path().join("CLAUDE.md"), &managed).unwrap();
         print_claude_md_section(dir.path());
     }
