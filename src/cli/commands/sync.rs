@@ -569,6 +569,20 @@ mod tests {
     }
 
     #[test]
+    fn test_sync_result_debug_clone_eq() {
+        let result = SyncResult {
+            files_created: 1,
+            files_updated: 2,
+            files_failed: 3,
+            files_rejected: 4,
+        };
+        let cloned = result.clone();
+        assert_eq!(result, cloned);
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("SyncResult"));
+    }
+
+    #[test]
     fn test_handle_result_user_cancelled() {
         let code = handle_result(Err(ActualError::UserCancelled));
         assert_eq!(code, 4);
