@@ -603,6 +603,21 @@ mod tests {
         assert_eq!(code, 1);
     }
 
+    // ── MockTerminal edge case tests ──
+
+    #[test]
+    fn test_mock_terminal_read_line_exhausted() {
+        let term = MockTerminal::new(vec!["only"]);
+        // First call succeeds
+        assert_eq!(term.read_line("prompt").unwrap(), "only");
+        // Second call returns UserCancelled because inputs are empty
+        let err = term.read_line("prompt").unwrap_err();
+        assert!(
+            matches!(err, ActualError::UserCancelled),
+            "expected UserCancelled when inputs exhausted"
+        );
+    }
+
     // ── report_write_results tests ──
 
     #[test]
