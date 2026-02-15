@@ -33,7 +33,7 @@ fn test_sync_not_implemented() {
         .arg("sync")
         .assert()
         .success()
-        .stderr(predicate::str::contains("not implemented yet"));
+        .stderr(predicate::str::contains("Sync pipeline not yet connected"));
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn test_sync_with_flags() {
         ])
         .assert()
         .success()
-        .stderr(predicate::str::contains("not implemented yet"));
+        .stderr(predicate::str::contains("Sync pipeline not yet connected"));
 }
 
 #[test]
