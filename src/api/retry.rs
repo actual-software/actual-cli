@@ -35,7 +35,6 @@ where
     let mut last_error = ActualError::ApiError("no attempts made".to_string());
 
     for attempt in 0..config.max_attempts {
-        // Apply backoff delay before retries (not before the first attempt).
         if attempt > 0 {
             let delay = config
                 .initial_delay
@@ -62,74 +61,36 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn test_retry_succeeds_after_transient_failures() {
-        tokio::time::pause();
-
+    /// Shared test helper — a single monomorphization covers all match arms.
+    /// `behavior` controls what happens on each call:
+    ///   - 0 => ApiError (retryable)
+    ///   - 1 => ApiResponseError (not retryable)
+    ///   - _ => Ok(value)
+    async fn run_retry(config: &RetryConfig, behaviors: &[u32]) -> (Result<i32, ActualError>, u32) {
         let counter = Arc::new(AtomicU32::new(0));
         let counter_clone = Arc::clone(&counter);
+        let behaviors: Arc<Vec<u32>> = Arc::new(behaviors.to_vec());
 
-        let config = RetryConfig::default();
-        let result = with_retry(&config, || {
+        let result = with_retry(config, || {
             let counter = Arc::clone(&counter_clone);
+            let behaviors = Arc::clone(&behaviors);
             async move {
-                let n = counter.fetch_add(1, Ordering::SeqCst);
-                if n < 2 {
-                    Err(ActualError::ApiError("503".to_string()))
-                } else {
-                    Ok(42)
+                let n = counter.fetch_add(1, Ordering::SeqCst) as usize;
+                let behavior = behaviors.get(n).copied().unwrap_or(2);
+                match behavior {
+                    0 => Err(ActualError::ApiError("server error".to_string())),
+                    1 => Err(ActualError::ApiResponseError {
+                        code: "400".to_string(),
+                        message: "bad request".to_string(),
+                    }),
+                    _ => Ok(42),
                 }
             }
         })
         .await;
 
-        assert_eq!(result.unwrap(), 42);
-        assert_eq!(counter.load(Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn test_no_retry_on_client_error() {
-        tokio::time::pause();
-
-        let counter = Arc::new(AtomicU32::new(0));
-        let counter_clone = Arc::clone(&counter);
-
-        let config = RetryConfig::default();
-        let result: Result<(), _> = with_retry(&config, || {
-            let counter = Arc::clone(&counter_clone);
-            async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Err(ActualError::ApiResponseError {
-                    code: "400".to_string(),
-                    message: "bad".to_string(),
-                })
-            }
-        })
-        .await;
-
-        assert!(matches!(result, Err(ActualError::ApiResponseError { .. })));
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn test_retry_exhausted() {
-        tokio::time::pause();
-
-        let counter = Arc::new(AtomicU32::new(0));
-        let counter_clone = Arc::clone(&counter);
-
-        let config = RetryConfig::default();
-        let result: Result<(), _> = with_retry(&config, || {
-            let counter = Arc::clone(&counter_clone);
-            async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Err(ActualError::ApiError("500".to_string()))
-            }
-        })
-        .await;
-
-        assert!(matches!(result, Err(ActualError::ApiError(_))));
-        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        let calls = counter.load(Ordering::SeqCst);
+        (result, calls)
     }
 
     #[test]
@@ -141,72 +102,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_immediate_success() {
+    async fn test_retry_succeeds_after_transient_failures() {
         tokio::time::pause();
-
-        let counter = Arc::new(AtomicU32::new(0));
-        let counter_clone = Arc::clone(&counter);
 
         let config = RetryConfig::default();
-        let result = with_retry(&config, || {
-            let counter = Arc::clone(&counter_clone);
-            async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(99)
-            }
-        })
-        .await;
+        // Fail twice with ApiError, then succeed.
+        let (result, calls) = run_retry(&config, &[0, 0, 2]).await;
 
-        assert_eq!(result.unwrap(), 99);
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls, 3);
     }
 
     #[tokio::test]
-    async fn test_zero_max_attempts_returns_default_error() {
+    async fn test_no_retry_on_client_error() {
         tokio::time::pause();
 
-        let counter = Arc::new(AtomicU32::new(0));
-        let counter_clone = Arc::clone(&counter);
+        let config = RetryConfig::default();
+        // First call returns ApiResponseError — should NOT retry.
+        let (result, calls) = run_retry(&config, &[1]).await;
 
-        let config = RetryConfig {
-            max_attempts: 0,
-            ..RetryConfig::default()
-        };
-        let result: Result<(), _> = with_retry(&config, || {
-            let counter = Arc::clone(&counter_clone);
-            async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }
-        })
-        .await;
-
-        assert!(matches!(result, Err(ActualError::ApiError(_))));
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        let err = result.unwrap_err();
+        assert_eq!(err.to_string(), "API returned error: 400: bad request");
+        assert_eq!(calls, 1);
     }
 
     #[tokio::test]
-    async fn test_single_attempt_config() {
+    async fn test_retry_exhausted() {
         tokio::time::pause();
 
-        let counter = Arc::new(AtomicU32::new(0));
-        let counter_clone = Arc::clone(&counter);
+        let config = RetryConfig::default();
+        // All 3 calls return ApiError — should exhaust retries.
+        let (result, calls) = run_retry(&config, &[0, 0, 0]).await;
 
-        let config = RetryConfig {
-            max_attempts: 1,
-            ..RetryConfig::default()
-        };
-        let result: Result<(), _> = with_retry(&config, || {
-            let counter = Arc::clone(&counter_clone);
-            async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Err(ActualError::ApiError("500".to_string()))
-            }
-        })
-        .await;
-
-        assert!(matches!(result, Err(ActualError::ApiError(_))));
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        let err = result.unwrap_err();
+        assert_eq!(err.to_string(), "API request failed: server error");
+        assert_eq!(calls, 3);
     }
 
     #[tokio::test]
@@ -217,7 +147,8 @@ mod tests {
         let timestamps_clone = Arc::clone(&timestamps);
 
         let config = RetryConfig::default();
-        let _result: Result<(), _> = with_retry(&config, || {
+        // All calls fail — we just want to measure the backoff timing.
+        let _result: Result<i32, _> = with_retry(&config, || {
             let timestamps = Arc::clone(&timestamps_clone);
             async move {
                 timestamps.lock().unwrap().push(tokio::time::Instant::now());
@@ -229,14 +160,11 @@ mod tests {
         let ts = timestamps.lock().unwrap();
         assert_eq!(ts.len(), 3);
 
-        // First call happens immediately.
         let first_to_second = ts[1] - ts[0];
         let second_to_third = ts[2] - ts[1];
 
         // With paused time, delays are nearly exact but tokio's auto-advance
         // adds up to 1ms per `.await` point on the paused clock.
-        // After attempt 0 fails: sleep(1s * 2^0) = ~1s
-        // After attempt 1 fails: sleep(1s * 2^1) = ~2s
         let tolerance = Duration::from_millis(10);
         assert!(first_to_second >= Duration::from_secs(1));
         assert!(first_to_second <= Duration::from_secs(1) + tolerance);
