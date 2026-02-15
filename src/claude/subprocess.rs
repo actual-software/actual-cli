@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use tokio::process::Command;
 
@@ -12,7 +11,10 @@ use crate::error::ActualError;
 /// Generic over the output type T at the method level — any `DeserializeOwned` type
 /// can be returned. This allows callers to use the same runner for different schemas
 /// (e.g., `RepoAnalysis`, `TailoringOutput`).
-#[async_trait]
+///
+/// Uses native async fn in trait (stable since Rust 1.75). The lint is suppressed
+/// because this trait is internal and all implementors are `Send + Sync`.
+#[allow(async_fn_in_trait)]
 pub trait ClaudeRunner: Send + Sync {
     async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError>;
 }
@@ -83,8 +85,8 @@ fn resolve_output(
 
 /// Spawn the binary, wait with timeout, and parse JSON output.
 ///
-/// Extracted from the `ClaudeRunner` impl so the `async_trait` wrapper is a
-/// thin delegation, keeping generated boilerplate out of coverage measurement.
+/// Extracted from the `ClaudeRunner` impl so the trait method is a
+/// thin delegation.
 async fn run_subprocess<T: DeserializeOwned>(
     binary_path: &std::path::Path,
     timeout: Duration,
@@ -110,7 +112,6 @@ async fn run_subprocess<T: DeserializeOwned>(
     parse_output(output)
 }
 
-#[async_trait]
 impl ClaudeRunner for CliClaudeRunner {
     async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError> {
         run_subprocess(&self.binary_path, self.timeout, args).await
@@ -127,7 +128,6 @@ mod tests {
         json_response: String,
     }
 
-    #[async_trait]
     impl ClaudeRunner for MockClaudeRunner {
         async fn run<T: DeserializeOwned + Send>(
             &self,
@@ -136,6 +136,18 @@ mod tests {
             let parsed: T = serde_json::from_str(&self.json_response)?;
             Ok(parsed)
         }
+    }
+
+    #[tokio::test]
+    async fn test_mock_claude_runner_invalid_json() {
+        let runner = MockClaudeRunner {
+            json_response: "not valid json".to_string(),
+        };
+        let result: Result<serde_json::Value, _> = runner.run(&[]).await;
+        assert!(
+            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
+            "expected ClaudeOutputParse, got: {result:?}"
+        );
     }
 
     #[tokio::test]
