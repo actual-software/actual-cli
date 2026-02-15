@@ -18,6 +18,9 @@ Thumbs.db
 # Git worktrees (used for parallel agent work)
 .worktrees/
 
+# Serena (memories are generated per-user by onboarding)
+.serena/memories/
+
 # Environment
 .env
 .env.local
