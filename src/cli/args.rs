@@ -28,7 +28,7 @@ pub struct SyncArgs {
     pub dry_run: bool,
 
     /// With --dry-run, output the full rendered CLAUDE.md to stdout
-    #[arg(long)]
+    #[arg(long, requires = "dry_run")]
     pub full: bool,
 
     /// Skip user confirmation
@@ -58,6 +58,10 @@ pub struct SyncArgs {
     /// Skip the local tailoring step; use ADRs as-is from the bank
     #[arg(long)]
     pub no_tailor: bool,
+
+    /// Maximum budget per tailoring invocation (USD)
+    #[arg(long)]
+    pub max_budget_usd: Option<f64>,
 }
 
 /// Arguments for the `status` command
