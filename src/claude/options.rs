@@ -118,16 +118,8 @@ mod tests {
         assert_arg_value(&args, "--tools", "Read,Glob,Grep,Bash");
 
         // allowedTools includes Bash patterns
-        assert!(
-            args.windows(2)
-                .any(|w| w[0] == "--allowedTools" && w[1] == "Bash(git:*)"),
-            "expected --allowedTools Bash(git:*) in args: {args:?}"
-        );
-        assert!(
-            args.windows(2)
-                .any(|w| w[0] == "--allowedTools" && w[1] == "Bash(ls:*)"),
-            "expected --allowedTools Bash(ls:*) in args: {args:?}"
-        );
+        assert!(has_allowed_tool(&args, "Bash(git:*)"));
+        assert!(has_allowed_tool(&args, "Bash(ls:*)"));
     }
 
     #[test]
@@ -139,12 +131,7 @@ mod tests {
         assert_arg_value(&args, "--max-turns", "15");
 
         // No Bash anywhere in the args
-        for arg in &args {
-            assert!(
-                !arg.contains("Bash"),
-                "expected no Bash in tailoring args, found: {arg}"
-            );
-        }
+        assert_eq!(args.iter().filter(|a| a.contains("Bash")).count(), 0);
     }
 
     #[test]
@@ -152,14 +139,8 @@ mod tests {
         let opts = InvocationOptions::for_analysis(None);
         let args = opts.to_args();
 
-        assert!(
-            !args.contains(&"--json-schema".to_string()),
-            "expected --json-schema to be absent when None"
-        );
-        assert!(
-            !args.contains(&"--max-budget-usd".to_string()),
-            "expected --max-budget-usd to be absent when None"
-        );
+        assert!(!args.contains(&"--json-schema".to_string()));
+        assert!(!args.contains(&"--max-budget-usd".to_string()));
     }
 
     #[test]
@@ -202,14 +183,8 @@ mod tests {
         let args = opts.to_args();
 
         assert_arg_value(&args, "--output-format", "json");
-        assert!(
-            args.contains(&"--allow-dangerously-skip-permissions".to_string()),
-            "expected --allow-dangerously-skip-permissions in args"
-        );
-        assert!(
-            args.contains(&"--no-session-persistence".to_string()),
-            "expected --no-session-persistence in args"
-        );
+        assert!(args.contains(&"--allow-dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"--no-session-persistence".to_string()));
     }
 
     #[test]
@@ -217,14 +192,8 @@ mod tests {
         let analysis_args = InvocationOptions::for_analysis(None).to_args();
         let tailoring_args = InvocationOptions::for_tailoring(None).to_args();
 
-        assert!(
-            !analysis_args.contains(&"--print".to_string()),
-            "expected --print to NOT be in analysis args"
-        );
-        assert!(
-            !tailoring_args.contains(&"--print".to_string()),
-            "expected --print to NOT be in tailoring args"
-        );
+        assert!(!analysis_args.contains(&"--print".to_string()));
+        assert!(!tailoring_args.contains(&"--print".to_string()));
     }
 
     #[test]
@@ -250,16 +219,15 @@ mod tests {
         assert!(debug.contains("sonnet"));
     }
 
-    /// Helper: assert that `--flag value` appears as consecutive elements.
+    /// Returns true when `--allowedTools <tool>` appears as consecutive args.
+    fn has_allowed_tool(args: &[String], tool: &str) -> bool {
+        args.windows(2)
+            .any(|w| w[0] == "--allowedTools" && w[1] == tool)
+    }
+
+    /// Assert that `--flag value` appears as consecutive elements.
     fn assert_arg_value(args: &[String], flag: &str, expected: &str) {
-        let pos = args
-            .iter()
-            .position(|a| a == flag)
-            .unwrap_or_else(|| panic!("flag {flag} not found in args: {args:?}"));
-        let actual = &args[pos + 1];
-        assert_eq!(
-            actual, expected,
-            "expected {flag} {expected}, got {flag} {actual}"
-        );
+        let pos = args.iter().position(|a| a == flag).unwrap();
+        assert_eq!(&args[pos + 1], expected);
     }
 }
