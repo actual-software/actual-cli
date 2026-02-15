@@ -12,7 +12,6 @@ use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmatio
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::{confirm_files, TerminalIO};
 use crate::cli::ui::progress::{Spinner, ERROR_SYMBOL, SUCCESS_SYMBOL};
-use crate::config::paths::config_path;
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::writer::{write_files, WriteAction, WriteResult};
@@ -62,6 +61,7 @@ pub(crate) fn resolve_cwd() -> std::path::PathBuf {
 pub(crate) fn run_sync<R: ClaudeRunner>(
     args: &SyncArgs,
     root_dir: &Path,
+    cfg_path: &Path,
     term: &dyn TerminalIO,
     runner: &R,
     reader: &dyn InputReader,
@@ -82,13 +82,12 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
 
     // 3. Run analysis (cached if in a git repo)
     let spinner = Spinner::new("Analyzing repository...", false);
-    let cfg_path = config_path()?;
     let rt = tokio::runtime::Runtime::new().expect("Failed to create async runtime");
     let analysis = rt.block_on(run_analysis_cached(
         runner,
         args.model.as_deref(),
         root_dir,
-        &cfg_path,
+        cfg_path,
     ))?;
     spinner.success("Analysis complete");
 
@@ -122,7 +121,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     // ── Phase 3: confirm + write (fully implemented) ──
     // --no-tailor: when Phase 2 is connected, this flag will skip Claude tailoring.
     // For now it has no additional effect since tailoring isn't wired yet.
-    let _result = confirm_and_write(&output, root_dir, args.force, args.dry_run, args.full, term)?;
+    confirm_and_write(&output, root_dir, args.force, args.dry_run, args.full, term)?;
     Ok(())
 }
 
@@ -836,7 +835,14 @@ mod tests {
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, true, false);
-        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
         assert!(result.is_ok(), "run_sync with --force should succeed");
         // With empty tailoring output + force, terminal should show "No files to write."
         let text = term.output_text();
@@ -853,7 +859,14 @@ mod tests {
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, true, true);
-        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
         assert!(
             result.is_ok(),
             "run_sync with --no-tailor --force should succeed"
@@ -868,7 +881,14 @@ mod tests {
         let reader = MockInputReader::accept();
         let args = make_sync_args(true, false, true, false);
         // dry-run takes precedence over force
-        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
         assert!(
             result.is_ok(),
             "run_sync with --force --dry-run should succeed"
@@ -883,7 +903,14 @@ mod tests {
         // Accept project confirmation prompt
         let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, false, false);
-        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
         assert!(
             result.is_ok(),
             "run_sync with no flags should succeed when user accepts"
@@ -898,7 +925,14 @@ mod tests {
         // Reject project confirmation prompt
         let reader = MockInputReader::reject();
         let args = make_sync_args(false, false, false, false);
-        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
             "run_sync should return UserCancelled when user rejects"
@@ -913,7 +947,14 @@ mod tests {
         // Reader would reject, but --force should skip it
         let reader = MockInputReader::reject();
         let args = make_sync_args(false, false, true, false);
-        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
         assert!(
             result.is_ok(),
             "run_sync with --force should skip confirmation and succeed"
@@ -927,7 +968,15 @@ mod tests {
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
         let args = make_sync_args(true, false, false, false);
-        run_sync(&args, dir.path(), &term, &runner, &reader).unwrap();
+        run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        )
+        .unwrap();
         // Verify no CLAUDE.md was created
         assert!(
             !dir.path().join("CLAUDE.md").exists(),
@@ -944,7 +993,14 @@ mod tests {
         let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
         let args = make_sync_args_with_projects(true, vec!["apps/web"]);
-        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
         assert!(
             result.is_ok(),
             "run_sync with --project apps/web should succeed"
@@ -958,7 +1014,14 @@ mod tests {
         let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
         let args = make_sync_args_with_projects(true, vec!["nonexistent/path"]);
-        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
         assert!(
             matches!(result, Err(ActualError::ConfigError(_))),
             "run_sync with non-matching --project should return ConfigError"
@@ -1089,10 +1152,44 @@ mod tests {
         let runner = MockRunner::new("not valid json");
         let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, true, false);
-        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
         assert!(
             matches!(result, Err(ActualError::ClaudeOutputParse(_))),
             "expected ClaudeOutputParse error, got: {result:?}"
+        );
+    }
+
+    // ── run_sync confirm_and_write error test ──
+
+    #[test]
+    fn test_run_sync_confirm_and_write_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // MockTerminal with no inputs — when confirm_files calls read_line, it returns
+        // UserCancelled, which propagates through confirm_and_write's ? operator.
+        let term = MockTerminal::new(vec!["q"]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
+        // force=false so confirm_and_write enters the confirmation flow
+        let args = make_sync_args(false, false, false, false);
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
+
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "expected UserCancelled from confirm_and_write, got: {result:?}"
         );
     }
 
