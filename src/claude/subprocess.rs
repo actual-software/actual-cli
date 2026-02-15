@@ -68,7 +68,9 @@ impl ClaudeRunner for CliClaudeRunner {
         let mut cmd = Command::new(&self.binary_path);
         cmd.arg("--print");
         cmd.args(args);
-        // Ensure the child process is killed if the timeout fires and drops the future.
+        // When the timeout fires, the `wait_with_output` future is dropped, which drops
+        // the `Child` it owns. With `kill_on_drop(true)`, tokio sends SIGKILL to the child
+        // on drop, preventing orphaned processes.
         cmd.kill_on_drop(true);
 
         let child = cmd
@@ -124,7 +126,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_cli_runner_subprocess_failure() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
         std::fs::write(
@@ -132,11 +136,7 @@ mod tests {
             "#!/bin/sh\necho 'something went wrong' >&2\nexit 1\n",
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
@@ -157,15 +157,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_cli_runner_invalid_json() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
         std::fs::write(&script, "#!/bin/sh\necho 'not json'\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
@@ -183,7 +181,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_cli_runner_success() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
         std::fs::write(
@@ -191,11 +191,7 @@ mod tests {
             "#!/bin/sh\necho '{\"name\":\"test\",\"count\":42}'\n",
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
         let result: TestOutput = runner.run(&[]).await.unwrap();
@@ -205,15 +201,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_cli_runner_timeout() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
         std::fs::write(&script, "#!/bin/sh\nsleep 10\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = CliClaudeRunner::new(script, Duration::from_millis(100));
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
@@ -273,7 +267,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_cli_runner_passes_args() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
         // Script writes all args (one per line) to a file, then outputs valid JSON
@@ -283,11 +279,7 @@ mod tests {
             args_file.display()
         );
         std::fs::write(&script, script_content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let args = vec!["--model".to_string(), "opus".to_string()];
         let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
