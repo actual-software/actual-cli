@@ -11,7 +11,16 @@ use crate::error::ActualError;
 use crate::generation::markers;
 
 pub fn exec(args: &StatusArgs) -> i32 {
-    match run_status(args) {
+    let result = (|| -> Result<(), ActualError> {
+        let config_path = config::paths::config_path()?;
+        let config_exists = config_path.exists();
+        let cfg = config::paths::load()?;
+        let cwd = std::env::current_dir().map_err(io_to_config_error)?;
+        run_status(args, &cfg, &config_path, config_exists, &cwd);
+        Ok(())
+    })();
+
+    match result {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("{} {}", style("Error:").red().bold(), e);
@@ -20,35 +29,30 @@ pub fn exec(args: &StatusArgs) -> i32 {
     }
 }
 
-fn run_status(args: &StatusArgs) -> Result<(), ActualError> {
-    let config_path = config::paths::config_path()?;
-    let config_exists = config_path.exists();
-    let cfg = config::paths::load()?;
+fn io_to_config_error(e: std::io::Error) -> ActualError {
+    ActualError::ConfigError(format!("Failed to determine current directory: {e}"))
+}
 
+fn run_status(
+    args: &StatusArgs,
+    cfg: &Config,
+    config_path: &Path,
+    config_exists: bool,
+    cwd: &Path,
+) {
     // 1. Config section
-    print_config_section(&cfg, &config_path, config_exists, args.verbose);
+    print_config_section(cfg, config_path, config_exists, args.verbose);
 
     println!();
 
     // 2. CLAUDE.md files section
-    let cwd = current_dir()?;
-    print_claude_md_section(&cwd);
+    print_claude_md_section(cwd);
 
     // 3. Verbose: cached analysis
     if args.verbose {
         println!();
-        print_verbose_section(&cfg);
+        print_verbose_section(cfg);
     }
-
-    Ok(())
-}
-
-fn current_dir() -> Result<PathBuf, ActualError> {
-    std::env::current_dir().map_err(cwd_error)
-}
-
-fn cwd_error(e: std::io::Error) -> ActualError {
-    ActualError::ConfigError(format!("Failed to determine current directory: {e}"))
 }
 
 fn print_config_section(cfg: &Config, config_path: &Path, config_exists: bool, verbose: bool) {
@@ -588,23 +592,47 @@ mod tests {
         print_verbose_section(&cfg);
     }
 
-    // ─── current_dir / cwd_error ─────────────────────────────────
+    // ─── io_to_config_error ────────────────────────────────────────
 
     #[test]
-    fn test_current_dir_succeeds() {
-        let result = current_dir();
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_cwd_error_produces_config_error() {
+    fn test_io_to_config_error_produces_config_error() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "dir gone");
-        let err = cwd_error(io_err);
+        let err = io_to_config_error(io_err);
         let msg = err.to_string();
         assert!(
             msg.contains("Failed to determine current directory"),
             "expected error message, got: {msg}"
         );
         assert!(msg.contains("dir gone"), "expected cause in: {msg}");
+    }
+
+    // ─── run_status ──────────────────────────────────────────────
+
+    #[test]
+    fn test_run_status_normal_mode() {
+        let dir = tempdir().unwrap();
+        let cfg = Config::default();
+        let config_path = dir.path().join("config.yaml");
+        run_status(
+            &StatusArgs { verbose: false },
+            &cfg,
+            &config_path,
+            true,
+            dir.path(),
+        );
+    }
+
+    #[test]
+    fn test_run_status_verbose_mode() {
+        let dir = tempdir().unwrap();
+        let cfg = Config::default();
+        let config_path = dir.path().join("config.yaml");
+        run_status(
+            &StatusArgs { verbose: true },
+            &cfg,
+            &config_path,
+            true,
+            dir.path(),
+        );
     }
 }
