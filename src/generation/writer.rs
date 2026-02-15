@@ -265,7 +265,7 @@ mod tests {
 
         let results = write_files(dir.path(), &files);
 
-        assert_eq!(results.len(), 3, "expected 3 results");
+        assert_eq!(results.len(), 3);
 
         // All should succeed
         for result in &results {
@@ -281,33 +281,19 @@ mod tests {
 
         // Verify all files exist and have managed sections
         for file in &files {
-            let written = std::fs::read_to_string(dir.path().join(&file.path))
-                .unwrap_or_else(|_| panic!("failed to read {}", file.path));
-            assert!(
-                markers::has_managed_section(&written),
-                "{} should have managed section",
-                file.path
-            );
+            let written = std::fs::read_to_string(dir.path().join(&file.path)).unwrap();
+            assert!(markers::has_managed_section(&written));
         }
 
         // Root should have header, subdirectories should not
         let root = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
-        assert!(
-            root.contains("# Project Guidelines"),
-            "root should have header"
-        );
+        assert!(root.contains("# Project Guidelines"));
 
         let web = std::fs::read_to_string(dir.path().join("apps/web/CLAUDE.md")).unwrap();
-        assert!(
-            !web.contains("# Project Guidelines"),
-            "web subdirectory should not have header"
-        );
+        assert!(!web.contains("# Project Guidelines"));
 
         let core = std::fs::read_to_string(dir.path().join("libs/core/CLAUDE.md")).unwrap();
-        assert!(
-            !core.contains("# Project Guidelines"),
-            "core subdirectory should not have header"
-        );
+        assert!(!core.contains("# Project Guidelines"));
     }
 
     #[test]
