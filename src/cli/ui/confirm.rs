@@ -534,6 +534,16 @@ mod tests {
     }
 
     #[test]
+    fn prompt_sequence_exhausted_returns_reject() {
+        let analysis = make_single_project_analysis();
+        // All responses are invalid, so the reader is exhausted → Err → Reject
+        let reader = SequenceReader::new(vec!["x"]);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        assert_eq!(result, ConfirmAction::Reject);
+    }
+
+    #[test]
     fn prompt_writes_summary_to_output() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("a");
