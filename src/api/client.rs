@@ -827,4 +827,38 @@ mod tests {
         );
         mock.assert_async().await;
     }
+
+    // --- Network error tests for GET endpoints ---
+
+    #[tokio::test]
+    async fn test_get_languages_network_error() {
+        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let result = client.get_languages().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_get_frameworks_network_error() {
+        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let result = client.get_frameworks().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_get_categories_network_error() {
+        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let result = client.get_categories().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_get_health_network_error() {
+        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let result = client.get_health().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
+    }
 }
