@@ -31,9 +31,7 @@ fn run_status(args: &StatusArgs) -> Result<(), ActualError> {
     println!();
 
     // 2. CLAUDE.md files section
-    let cwd = std::env::current_dir().map_err(|e| {
-        ActualError::ConfigError(format!("Failed to determine current directory: {e}"))
-    })?;
+    let cwd = current_dir()?;
     print_claude_md_section(&cwd);
 
     // 3. Verbose: cached analysis
@@ -43,6 +41,14 @@ fn run_status(args: &StatusArgs) -> Result<(), ActualError> {
     }
 
     Ok(())
+}
+
+fn current_dir() -> Result<PathBuf, ActualError> {
+    std::env::current_dir().map_err(cwd_error)
+}
+
+fn cwd_error(e: std::io::Error) -> ActualError {
+    ActualError::ConfigError(format!("Failed to determine current directory: {e}"))
 }
 
 fn print_config_section(cfg: &Config, config_path: &Path, config_exists: bool, verbose: bool) {
@@ -580,5 +586,25 @@ mod tests {
             ..Config::default()
         };
         print_verbose_section(&cfg);
+    }
+
+    // ─── current_dir / cwd_error ─────────────────────────────────
+
+    #[test]
+    fn test_current_dir_succeeds() {
+        let result = current_dir();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cwd_error_produces_config_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "dir gone");
+        let err = cwd_error(io_err);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Failed to determine current directory"),
+            "expected error message, got: {msg}"
+        );
+        assert!(msg.contains("dir gone"), "expected cause in: {msg}");
     }
 }
