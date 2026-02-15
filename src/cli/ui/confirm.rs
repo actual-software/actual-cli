@@ -1,7 +1,6 @@
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
 use console::style;
-use dialoguer::Input;
 use std::fmt::Write;
 use std::io;
 
@@ -10,23 +9,15 @@ pub trait InputReader {
     fn read_line(&self) -> io::Result<String>;
 }
 
-/// Default implementation that reads from stdin via dialoguer.
-pub struct StdinReader;
-
-impl InputReader for StdinReader {
-    fn read_line(&self) -> io::Result<String> {
-        Input::<String>::new()
-            .with_prompt(format!(
-                "  {} {} {} {}",
-                style("[a]").green().bold(),
-                "accept",
-                style("[r]").red().bold(),
-                "reject"
-            ))
-            .allow_empty(true)
-            .interact_text()
-            .map_err(io::Error::other)
-    }
+/// Build the styled prompt string shown to the user.
+pub fn prompt_text() -> String {
+    format!(
+        "  {} {} {} {}",
+        style("[a]").green().bold(),
+        "accept",
+        style("[r]").red().bold(),
+        "reject"
+    )
 }
 
 /// Format the project summary for display.
@@ -93,13 +84,11 @@ pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
     output
 }
 
-/// Display detected projects and prompt the user for confirmation.
-pub fn prompt_project_confirmation(analysis: &RepoAnalysis) -> ConfirmAction {
-    prompt_project_confirmation_with_reader(analysis, &StdinReader)
-}
-
-/// Display detected projects and prompt with an injectable reader (for testing).
-pub fn prompt_project_confirmation_with_reader(
+/// Display detected projects and prompt with an injectable reader.
+///
+/// Prints the project summary to stderr, then loops reading input from `reader`
+/// until the user enters a valid response (`a`/`accept` or `r`/`reject`/`q`/`quit`).
+pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
     reader: &dyn InputReader,
 ) -> ConfirmAction {
@@ -368,13 +357,22 @@ mod tests {
         );
     }
 
-    // ── prompt_project_confirmation_with_reader tests ──
+    // ── prompt_text tests ──
+
+    #[test]
+    fn prompt_text_contains_accept_and_reject() {
+        let text = prompt_text();
+        assert!(text.contains("accept"), "expected 'accept' in: {text}");
+        assert!(text.contains("reject"), "expected 'reject' in: {text}");
+    }
+
+    // ── prompt_project_confirmation tests ──
 
     #[test]
     fn prompt_accept_short() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("a");
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -382,7 +380,7 @@ mod tests {
     fn prompt_accept_full() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("accept");
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -390,7 +388,7 @@ mod tests {
     fn prompt_accept_case_insensitive() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("Accept");
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -398,7 +396,7 @@ mod tests {
     fn prompt_reject_short() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("r");
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -406,7 +404,7 @@ mod tests {
     fn prompt_reject_full() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("reject");
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -414,7 +412,7 @@ mod tests {
     fn prompt_quit_short() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("q");
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -422,7 +420,7 @@ mod tests {
     fn prompt_quit_full() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("quit");
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -430,7 +428,7 @@ mod tests {
     fn prompt_invalid_then_accept() {
         let analysis = make_single_project_analysis();
         let reader = SequenceReader::new(vec!["x", "invalid", "a"]);
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -438,7 +436,7 @@ mod tests {
     fn prompt_invalid_then_reject() {
         let analysis = make_single_project_analysis();
         let reader = SequenceReader::new(vec!["", "nope", "r"]);
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -446,7 +444,7 @@ mod tests {
     fn prompt_io_error_returns_reject() {
         let analysis = make_single_project_analysis();
         let reader = ErrorReader;
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -454,7 +452,7 @@ mod tests {
     fn prompt_whitespace_trimmed() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("  a  ");
-        let result = prompt_project_confirmation_with_reader(&analysis, &reader);
+        let result = prompt_project_confirmation(&analysis, &reader);
         assert_eq!(result, ConfirmAction::Accept);
     }
 }
