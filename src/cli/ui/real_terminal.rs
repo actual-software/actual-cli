@@ -17,6 +17,7 @@ use crate::cli::commands::auth::check_auth;
 use crate::cli::commands::sync::{resolve_cwd, run_sync};
 use crate::cli::ui::confirm::InputReader;
 use crate::cli::ui::file_confirm::TerminalIO;
+use crate::config::paths::config_path;
 use crate::error::ActualError;
 
 /// Production terminal backed by `console::Term`.
@@ -69,9 +70,10 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
         return Err(ActualError::ClaudeNotAuthenticated);
     }
 
+    let cfg_path = config_path()?;
     let runner = CliClaudeRunner::new(binary_path, Duration::from_secs(300));
     let reader = StdinReader;
-    run_sync(args, &root_dir, &term, &runner, &reader)
+    run_sync(args, &root_dir, &cfg_path, &term, &runner, &reader)
 }
 
 /// Reads a line from stdin for the project confirmation prompt.
