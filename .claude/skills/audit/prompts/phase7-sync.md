@@ -11,7 +11,7 @@ Read ALL files from:
 
 ## Tasks
 
-1. **Sync beads**: Run `bd sync` to export beads to JSONL and push to the beads-sync branch.
+1. **Sync beads**: Run `bd sync --full` to export beads to JSONL and push to the beads-sync branch.
 2. **Verify sync**: Confirm the sync succeeded (look for export confirmation in output).
 3. **Generate report**: Assemble the final structured report from all phase outputs.
 

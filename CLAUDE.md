@@ -61,7 +61,7 @@ When you discover a bug, gap, or follow-up work item during any task:
 
 ### Beads Sync Workflow
 
-- **After closing/updating beads, always run `bd sync`** to commit changes to the `beads-sync` branch
+- **After closing/updating beads, always run `bd sync --full`** to commit changes to the `beads-sync` branch
 - The `beads-sync` branch is parallel to `main` and never merged — it's solely for tracking bead state
 - `.beads/issues.jsonl` is gitignored on `main` to prevent PR conflicts
 - The daemon auto-pulls from `beads-sync` to discover new beads from other agents/CI
@@ -117,7 +117,7 @@ The `claude-review` CI check may fail or should be considered non-blocking in th
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   bd sync --full
    git push
    git status  # MUST show "up to date with origin"
    ```

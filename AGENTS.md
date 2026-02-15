@@ -9,7 +9,7 @@ bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --status in_progress  # Claim work
 bd close <id>         # Complete work
-bd sync               # Sync with git
+bd sync --full        # Sync with git
 ```
 
 ## Beads Sync Workflow
@@ -31,19 +31,19 @@ The repository is configured with:
 sync-branch: "beads-sync"
 ```
 
-This ensures `bd sync` commits to `beads-sync` instead of requiring manual branch configuration.
+This ensures `bd sync --full` commits to `beads-sync` instead of requiring manual branch configuration.
 
 ### Key Commands
 
 ```bash
-bd sync                  # Export to JSONL, commit to beads-sync, push
+bd sync --full            # Export to JSONL, commit to beads-sync, push
 git fetch origin beads-sync  # Pull latest beads from remote (daemon does this automatically)
 bd sync --pull          # Pull from beads-sync and import to local database
 ```
 
 ### Important Rules
 
-1. **ALWAYS run `bd sync` after creating, closing, or updating beads** - this pushes state to `beads-sync`. CI needs beads in `beads-sync` to find parent bead IDs from PR titles.
+1. **ALWAYS run `bd sync --full` after creating, closing, or updating beads** - this pushes state to `beads-sync`. CI needs beads in `beads-sync` to find parent bead IDs from PR titles.
 2. **The daemon auto-syncs** - it watches `beads-sync` and imports changes automatically
 3. **Never merge `beads-sync` into `main`** - they are parallel branches
 4. **`.beads/issues.jsonl` is gitignored on main** - it only exists in `beads-sync`
@@ -68,7 +68,7 @@ bd sync --pull          # Pull from beads-sync and import to local database
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   bd sync --full
    git push
    git status  # MUST show "up to date with origin"
    ```
@@ -100,7 +100,7 @@ bd create "Subtask 2" -p 1 --parent <epic-id>
 bd dep add <verification-task> <subtask-1>  # Set up blockers
 
 # 2. Sync beads so CI can find them
-bd sync
+bd sync --full
 
 # 3. Pull latest main before creating worktrees
 git checkout main && git pull origin main
@@ -133,7 +133,7 @@ When spawning a sub-agent, provide this context:
 - Working directory: /path/to/worktree
 - Set BEADS_NO_DAEMON=1 for all bd commands (required in worktrees)
 - Branch: feature/task-name
-- IMPORTANT: .beads/issues.jsonl is gitignored on main to prevent PR conflicts. Beads state is tracked on the `beads-sync` branch and synced via `bd sync`.
+- IMPORTANT: .beads/issues.jsonl is gitignored on main to prevent PR conflicts. Beads state is tracked on the `beads-sync` branch and synced via `bd sync --full`.
 
 ## Quality Gates (run before committing)
 All of these MUST pass before you push:

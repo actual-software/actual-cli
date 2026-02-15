@@ -91,7 +91,7 @@ After all complete, update checkpoint: `phases.phase3.status = "done"`.
 
 Spawn **1 general agent** with the prompt from `prompts/phase4-close.md`.
 
-- Agent reads all batch files, closes beads that need closing, runs `bd sync`.
+- Agent reads all batch files, closes beads that need closing, runs `bd sync --full`.
 - Agent writes `.check/close-results.json`.
 - Update checkpoint: `phases.phase4.status = "done"`.
 

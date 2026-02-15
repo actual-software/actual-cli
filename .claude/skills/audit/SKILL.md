@@ -142,7 +142,7 @@ Spawn **1 general agent** with the prompt from `prompts/phase6-verify.md`.
 
 Spawn **1 general agent** with the prompt from `prompts/phase7-sync.md`.
 
-- Agent runs `bd sync`, generates `.audit/report.json`.
+- Agent runs `bd sync --full`, generates `.audit/report.json`.
 - Update checkpoint: `phases.phase7.status = "done"`.
 
 ### Final Output
