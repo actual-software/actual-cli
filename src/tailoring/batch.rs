@@ -256,4 +256,35 @@ mod tests {
         let batches = create_batches(&[], 10);
         assert!(batches.is_empty(), "expected no batches for empty input");
     }
+
+    #[test]
+    fn test_batch_small_then_large_category_flushes_current() {
+        // cat-a has 3 ADRs (fits in batch), cat-b has 10 ADRs (exceeds batch_size=5).
+        // BTreeMap sorts by key, so cat-a comes first, filling current_batch with 3.
+        // Then cat-b triggers the large-category branch, which must flush the 3 from cat-a
+        // before chunking cat-b.
+        let mut adrs = Vec::new();
+        for i in 0..3 {
+            adrs.push(make_adr(&format!("a-{i}"), "cat-a", "Category A"));
+        }
+        for i in 0..10 {
+            adrs.push(make_adr(&format!("b-{i}"), "cat-b", "Category B"));
+        }
+
+        let batches = create_batches(&adrs, 5);
+
+        // Batch 0: cat-a (3 items, flushed)
+        // Batch 1: cat-b chunk 1 (5 items)
+        // Batch 2: cat-b chunk 2 (5 items)
+        assert_eq!(
+            batches.len(),
+            3,
+            "expected 3 batches, got {}",
+            batches.len()
+        );
+        assert_eq!(batches[0].len(), 3);
+        assert!(batches[0].iter().all(|a| a.category.id == "cat-a"));
+        assert_eq!(batches[1].len(), 5);
+        assert_eq!(batches[2].len(), 5);
+    }
 }
