@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 
+use super::markers::{self, END_MARKER, START_MARKER};
 use crate::tailoring::types::{FileOutput, SkippedAdr, TailoringOutput, TailoringSummary};
 
 /// Merge multiple [`TailoringOutput`]s into a single combined output.
@@ -71,6 +72,74 @@ pub fn merge_outputs(outputs: Vec<TailoringOutput>) -> TailoringOutput {
             files_generated,
         },
     }
+}
+
+/// The result of merging managed content into a file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeResult {
+    pub content: String,
+}
+
+/// Merge new managed content into an existing (or new) CLAUDE.md file.
+///
+/// # Arguments
+/// * `existing_content` - The current file content, or `None` for a new file.
+/// * `managed_content` - The new AI-generated content to place inside markers.
+/// * `version` - The version number for the managed section header.
+/// * `is_root` - Whether this is the root CLAUDE.md (adds "# Project Guidelines" header).
+///
+/// # Behavior
+/// 1. New root file (`existing_content` is `None`, `is_root` is `true`):
+///    Output starts with "# Project Guidelines\n\n", followed by managed section.
+/// 2. New subdirectory file (`existing_content` is `None`, `is_root` is `false`):
+///    Output is just the managed section.
+/// 3. Existing file with markers: content between markers is replaced (from start of
+///    START_MARKER line to end of END_MARKER line), content outside preserved exactly.
+/// 4. Existing file without markers: managed section is appended after existing content
+///    (separated by "\n\n").
+pub fn merge_content(
+    existing_content: Option<&str>,
+    managed_content: &str,
+    version: u32,
+    is_root: bool,
+) -> MergeResult {
+    let managed_section = markers::wrap_in_markers(managed_content, version);
+
+    let content = match existing_content {
+        None => {
+            // New file
+            if is_root {
+                format!("# Project Guidelines\n\n{managed_section}\n")
+            } else {
+                format!("{managed_section}\n")
+            }
+        }
+        Some(existing) => {
+            if markers::has_managed_section(existing) {
+                // Replace content between markers (inclusive of marker lines)
+                let start_idx = existing.find(START_MARKER).unwrap();
+                let end_idx = existing.find(END_MARKER).unwrap() + END_MARKER.len();
+                // Also consume the trailing newline after END_MARKER if present
+                let end_idx = if existing[end_idx..].starts_with('\n') {
+                    end_idx + 1
+                } else {
+                    end_idx
+                };
+                let before = &existing[..start_idx];
+                let after = &existing[end_idx..];
+                format!("{before}{managed_section}\n{after}")
+            } else {
+                // Append managed section after existing content
+                if existing.ends_with('\n') {
+                    format!("{existing}\n{managed_section}\n")
+                } else {
+                    format!("{existing}\n\n{managed_section}\n")
+                }
+            }
+        }
+    };
+
+    MergeResult { content }
 }
 
 #[cfg(test)]
@@ -218,5 +287,160 @@ mod tests {
         assert_eq!(merged.summary.applicable, 0);
         assert_eq!(merged.summary.not_applicable, 0);
         assert_eq!(merged.summary.files_generated, 0);
+    }
+
+    // ---- merge_content tests ----
+
+    #[test]
+    fn test_new_root_file_has_header_and_managed_section() {
+        let result = merge_content(None, "some content", 1, true);
+        assert!(
+            result.content.starts_with("# Project Guidelines\n\n"),
+            "expected root header, got: {}",
+            result.content
+        );
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected managed section in output"
+        );
+        assert!(
+            result.content.contains("some content"),
+            "expected managed content in output"
+        );
+    }
+
+    #[test]
+    fn test_new_subdirectory_file_is_managed_section_only() {
+        let result = merge_content(None, "some content", 1, false);
+        assert!(
+            result.content.starts_with(START_MARKER),
+            "expected output to start with START_MARKER, got: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("# Project Guidelines"),
+            "subdirectory file should NOT have Project Guidelines header"
+        );
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected managed section in output"
+        );
+        assert!(
+            result.content.contains("some content"),
+            "expected managed content in output"
+        );
+    }
+
+    #[test]
+    fn test_existing_with_markers_replaces_content() {
+        let existing = format!("{}\n", markers::wrap_in_markers("old content", 1));
+        let result = merge_content(Some(&existing), "new content", 2, false);
+        assert!(
+            result.content.contains("new content"),
+            "expected new content in output: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("old content"),
+            "expected old content to be replaced: {}",
+            result.content
+        );
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected managed section in output"
+        );
+    }
+
+    #[test]
+    fn test_existing_without_markers_appends() {
+        let existing = "# My Custom Rules\n\nDo stuff";
+        let result = merge_content(Some(existing), "managed stuff", 1, false);
+        assert!(
+            result.content.starts_with("# My Custom Rules\n\nDo stuff"),
+            "expected existing content preserved at start: {}",
+            result.content
+        );
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected managed section appended"
+        );
+        assert!(
+            result.content.contains("managed stuff"),
+            "expected managed content in output"
+        );
+    }
+
+    #[test]
+    fn test_existing_preserves_content_above_and_below_markers() {
+        let managed = markers::wrap_in_markers("old managed", 1);
+        let existing = format!("# User Header\n\n{managed}\n\n## User Footer\n");
+        let result = merge_content(Some(&existing), "new managed", 2, false);
+        assert!(
+            result.content.contains("# User Header"),
+            "expected user header preserved: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("## User Footer"),
+            "expected user footer preserved: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("new managed"),
+            "expected new managed content: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("old managed"),
+            "expected old managed content replaced: {}",
+            result.content
+        );
+    }
+
+    #[test]
+    fn test_empty_managed_content() {
+        let result = merge_content(None, "", 1, false);
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected valid managed section even with empty content"
+        );
+        assert!(
+            result.content.contains(START_MARKER),
+            "expected START_MARKER"
+        );
+        assert!(result.content.contains(END_MARKER), "expected END_MARKER");
+    }
+
+    #[test]
+    fn test_existing_markers_only_replaces() {
+        let existing = format!("{}\n", markers::wrap_in_markers("original", 1));
+        let result = merge_content(Some(&existing), "replacement", 2, false);
+        assert!(
+            result.content.contains("replacement"),
+            "expected replacement content: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("original"),
+            "expected original content removed: {}",
+            result.content
+        );
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected valid managed section"
+        );
+    }
+
+    #[test]
+    fn test_new_root_file_roundtrip() {
+        let original = "line one\nline two\nline three";
+        let result = merge_content(None, original, 1, true);
+        let extracted =
+            markers::extract_managed_content(&result.content).expect("should extract content");
+        assert!(
+            extracted.contains(original),
+            "expected original content in extracted: {:?}",
+            extracted
+        );
     }
 }
