@@ -67,11 +67,7 @@ fn test_config_show() {
         .env("ACTUAL_CONFIG", config_file.to_str().unwrap())
         .assert()
         .success()
-        .stdout(
-            predicate::str::contains("---")
-                .not()
-                .or(predicate::str::is_empty().not()),
-        );
+        .stdout(predicate::str::is_empty().not());
 }
 
 #[test]
