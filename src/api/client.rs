@@ -209,4 +209,94 @@ mod tests {
 
         mock.assert_async().await;
     }
+
+    #[tokio::test]
+    async fn test_post_match_client_error_unparseable_body() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/adrs/match")
+            .with_status(422)
+            .with_body("not valid json")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.post_match(&sample_request()).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ActualError::ApiError(msg) => {
+                assert!(
+                    msg.contains("422"),
+                    "expected '422' in error message: {msg}"
+                );
+                assert!(
+                    msg.contains("failed to parse error response"),
+                    "expected parse error info in message: {msg}"
+                );
+            }
+            other => panic!("expected ApiError, got: {other:?}"),
+        }
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_match_success_unparseable_response() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not valid json")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let result = client.post_match(&sample_request()).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ActualError::ApiError(msg) => {
+                assert!(
+                    msg.contains("error decoding response body"),
+                    "expected decode error in message: {msg}"
+                );
+            }
+            other => panic!("expected ApiError, got: {other:?}"),
+        }
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_match_network_error() {
+        // Connect to a port that's not listening
+        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let result = client.post_match(&sample_request()).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ActualError::ApiError(msg) => {
+                assert!(
+                    !msg.is_empty(),
+                    "expected non-empty error message for network error"
+                );
+            }
+            other => panic!("expected ApiError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_new_trims_trailing_slash() {
+        let client = ActualApiClient::new("http://example.com/");
+        assert_eq!(client.base_url, "http://example.com");
+    }
+
+    #[test]
+    fn test_default_api_url() {
+        assert_eq!(DEFAULT_API_URL, "https://api-service.api.prod.actual.ai");
+    }
 }
