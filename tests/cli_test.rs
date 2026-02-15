@@ -69,11 +69,8 @@ fn test_auth_success_with_fake_binary() {
         "#!/bin/sh\necho '{\"loggedIn\": true, \"authMethod\": \"claude.ai\", \"email\": \"user@example.com\"}'\nexit 0\n",
     )
     .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     cmd()
         .arg("auth")
         .env("CLAUDE_BINARY", script.to_str().unwrap())
@@ -88,11 +85,8 @@ fn test_auth_not_authenticated_with_fake_binary() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("fake-claude");
     std::fs::write(&script, "#!/bin/sh\necho '{\"loggedIn\": false}'\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     cmd()
         .arg("auth")
         .env("CLAUDE_BINARY", script.to_str().unwrap())
