@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+thiserror = "2"
+serde_json = "1"
 
 [dev-dependencies]
 assert_cmd = "2"
