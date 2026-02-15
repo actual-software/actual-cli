@@ -1038,6 +1038,43 @@ mod tests {
         assert_eq!(code, 2, "expected exit code 2 (ClaudeNotFound)");
     }
 
+    /// Exercises `run()` → `run_sync<CliClaudeRunner>` in the **unit-test binary**
+    /// so that LLVM coverage counts the `CliClaudeRunner` monomorphization as hit.
+    /// Without this test the generic instantiation exists (because `run()` references
+    /// it) but is never called, causing 1 missed line in `llvm-cov report`.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_with_fake_claude_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+
+        let auth_json = r#"{"loggedIn":true,"authMethod":"claude.ai","email":"t@t.com"}"#;
+        let analysis_json = r#"{"is_monorepo":false,"projects":[{"path":".","name":"app","languages":["rust"],"frameworks":[],"package_manager":"cargo"}]}"#;
+
+        let script = dir.path().join("fake-claude");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then\nprintf '%s\\n' '{}'\nexit 0\n\
+             elif [ \"$1\" = \"--print\" ]; then\nprintf '%s\\n' '{}'\nexit 0\n\
+             else\nexit 1\nfi\n",
+            auth_json, analysis_json,
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+
+        let args = make_sync_args(false, false, true, false);
+        let code = exec(&args);
+
+        std::env::remove_var("CLAUDE_BINARY");
+        std::env::remove_var("ACTUAL_CONFIG");
+
+        assert_eq!(code, 0, "exec with fake Claude binary should succeed");
+    }
+
     #[test]
     fn test_handle_result_ok() {
         assert_eq!(handle_result(Ok(())), 0);
