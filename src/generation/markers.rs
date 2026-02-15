@@ -11,9 +11,11 @@ pub fn wrap_in_markers(content: &str, version: u32) -> String {
 
 /// Returns true when both START and END markers are present in the correct order.
 pub fn has_managed_section(content: &str) -> bool {
-    let start_pos = content.find(START_MARKER);
-    let end_pos = content.find(END_MARKER);
-    matches!((start_pos, end_pos), (Some(s), Some(e)) if s < e)
+    if let (Some(s), Some(e)) = (content.find(START_MARKER), content.find(END_MARKER)) {
+        s < e
+    } else {
+        false
+    }
 }
 
 /// Returns the content between the START and END markers, or None if markers are absent.
@@ -206,6 +208,16 @@ mod tests {
             extracted.contains(original),
             "expected original content in extracted: {:?}",
             extracted
+        );
+    }
+
+    #[test]
+    fn test_extract_managed_content_returns_none_only_end() {
+        let content = format!("some content\n{END_MARKER}");
+        assert_eq!(
+            extract_managed_content(&content),
+            None,
+            "expected None with only end marker"
         );
     }
 
