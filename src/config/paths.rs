@@ -89,16 +89,17 @@ pub fn save_to(config: &Config, path: &Path) -> Result<(), ActualError> {
             .map_err(|e| config_error(format!("Failed to create config directory: {e}")))?;
     }
 
-    let yaml = serialize_config(config)?;
+    let yaml = serialize_config(config);
     write_config_file(path, &yaml)?;
     set_config_permissions(path)?;
 
     Ok(())
 }
 
-fn serialize_config(config: &Config) -> Result<String, ActualError> {
-    serde_yaml::to_string(config)
-        .map_err(|e| config_error(format!("Failed to serialize config: {e}")))
+fn serialize_config(config: &Config) -> String {
+    // Config only uses Option<String>, Option<bool>, Option<usize>, etc.
+    // serde_yaml::to_string never fails for these types.
+    serde_yaml::to_string(config).expect("Config serialization should never fail")
 }
 
 fn write_config_file(path: &Path, contents: &str) -> Result<(), ActualError> {
@@ -500,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_serialize_config_success() {
-        let yaml = serialize_config(&Config::default()).unwrap();
+        let yaml = serialize_config(&Config::default());
         assert!(!yaml.is_empty());
     }
 
