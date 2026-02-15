@@ -50,12 +50,55 @@ fn test_status_shows_config() {
 }
 
 #[test]
-fn test_auth_not_implemented() {
+fn test_auth_binary_not_found() {
     cmd()
         .arg("auth")
+        .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("Claude Code not found"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_auth_success_with_fake_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("fake-claude");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\necho '{\"loggedIn\": true, \"authMethod\": \"claude.ai\", \"email\": \"user@example.com\"}'\nexit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    cmd()
+        .arg("auth")
+        .env("CLAUDE_BINARY", script.to_str().unwrap())
         .assert()
         .success()
-        .stderr(predicate::str::contains("not implemented yet"));
+        .stdout(predicate::str::contains("authenticated"));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_auth_not_authenticated_with_fake_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("fake-claude");
+    std::fs::write(&script, "#!/bin/sh\necho '{\"loggedIn\": false}'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    cmd()
+        .arg("auth")
+        .env("CLAUDE_BINARY", script.to_str().unwrap())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("not authenticated"));
 }
 
 #[test]

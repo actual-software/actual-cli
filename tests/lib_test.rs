@@ -201,8 +201,11 @@ fn test_run_status() {
 
 #[test]
 fn test_run_auth() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
     let cli = Cli::parse_from(["actual", "auth"]);
-    assert_eq!(run(cli), 0);
+    assert_eq!(run(cli), 2);
+    std::env::remove_var("CLAUDE_BINARY");
 }
 
 #[test]
