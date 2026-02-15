@@ -122,41 +122,25 @@ mod tests {
         let batches = create_batches(&adrs, 15);
 
         // Should produce 2-3 batches
-        assert!(
-            (2..=3).contains(&batches.len()),
-            "expected 2-3 batches, got {}",
-            batches.len()
-        );
+        assert!((2..=3).contains(&batches.len()));
 
         // Verify total ADRs preserved
         let total: usize = batches.iter().map(|b| b.len()).sum();
         assert_eq!(total, 30);
 
         // Verify no batch exceeds batch_size
-        for (i, batch) in batches.iter().enumerate() {
-            assert!(
-                batch.len() <= 15,
-                "batch {i} has {} items, exceeds batch_size 15",
-                batch.len()
-            );
+        for batch in &batches {
+            assert!(batch.len() <= 15);
         }
 
         // Verify categories are NOT split across batches when possible.
         // Each category that fits within 15 should appear in exactly one batch.
         for cat_id in &["cat-a", "cat-b", "cat-c", "cat-d"] {
-            let batches_containing: Vec<usize> = batches
+            let batches_containing: usize = batches
                 .iter()
-                .enumerate()
-                .filter(|(_, b)| b.iter().any(|a| a.category.id == *cat_id))
-                .map(|(i, _)| i)
-                .collect();
-            assert_eq!(
-                batches_containing.len(),
-                1,
-                "category {cat_id} appears in {} batches (expected 1): {:?}",
-                batches_containing.len(),
-                batches_containing
-            );
+                .filter(|b| b.iter().any(|a| a.category.id == *cat_id))
+                .count();
+            assert_eq!(batches_containing, 1);
         }
     }
 
@@ -168,7 +152,7 @@ mod tests {
 
         let batches = create_batches(&adrs, 15);
 
-        assert_eq!(batches.len(), 1, "expected 1 batch, got {}", batches.len());
+        assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 5);
     }
 
@@ -200,35 +184,17 @@ mod tests {
 
         let summary = batch_context_summary(&[output]);
 
-        assert!(
-            summary.contains("CLAUDE.md"),
-            "summary should mention CLAUDE.md: {summary}"
-        );
-        assert!(
-            summary.contains("apps/web/CLAUDE.md"),
-            "summary should mention apps/web/CLAUDE.md: {summary}"
-        );
-        assert!(
-            summary.contains("2 ADRs"),
-            "summary should mention 2 ADRs for CLAUDE.md: {summary}"
-        );
-        assert!(
-            summary.contains("1 ADRs"),
-            "summary should mention 1 ADRs for apps/web/CLAUDE.md: {summary}"
-        );
-        assert!(
-            summary.contains("Total files so far: 2"),
-            "summary should mention total files: {summary}"
-        );
+        assert!(summary.contains("CLAUDE.md"));
+        assert!(summary.contains("apps/web/CLAUDE.md"));
+        assert!(summary.contains("2 ADRs"));
+        assert!(summary.contains("1 ADRs"));
+        assert!(summary.contains("Total files so far: 2"));
     }
 
     #[test]
     fn test_batch_context_summary_empty() {
         let summary = batch_context_summary(&[]);
-        assert!(
-            summary.is_empty(),
-            "expected empty string for no previous outputs, got: {summary}"
-        );
+        assert!(summary.is_empty());
     }
 
     #[test]
@@ -240,12 +206,7 @@ mod tests {
 
         let batches = create_batches(&adrs, 8);
 
-        assert_eq!(
-            batches.len(),
-            3,
-            "expected 3 batches for 20 ADRs with batch_size 8, got {}",
-            batches.len()
-        );
+        assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].len(), 8);
         assert_eq!(batches[1].len(), 8);
         assert_eq!(batches[2].len(), 4);
@@ -254,7 +215,7 @@ mod tests {
     #[test]
     fn test_batch_empty_input() {
         let batches = create_batches(&[], 10);
-        assert!(batches.is_empty(), "expected no batches for empty input");
+        assert!(batches.is_empty());
     }
 
     #[test]
@@ -276,12 +237,7 @@ mod tests {
         // Batch 0: cat-a (3 items, flushed)
         // Batch 1: cat-b chunk 1 (5 items)
         // Batch 2: cat-b chunk 2 (5 items)
-        assert_eq!(
-            batches.len(),
-            3,
-            "expected 3 batches, got {}",
-            batches.len()
-        );
+        assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].len(), 3);
         assert!(batches[0].iter().all(|a| a.category.id == "cat-a"));
         assert_eq!(batches[1].len(), 5);
