@@ -62,34 +62,58 @@ fn parse_output<T: DeserializeOwned>(output: std::process::Output) -> Result<T, 
     Ok(parsed)
 }
 
+/// Resolve the result of a timeout-wrapped `wait_with_output` call.
+///
+/// Maps the three possible outcomes:
+/// - `Ok(Ok(output))` — subprocess finished within the timeout
+/// - `Ok(Err(e))` — subprocess I/O error (e.g., pipe failure during wait)
+/// - `Err(_)` — timeout expired before subprocess finished
+fn resolve_output(
+    result: Result<Result<std::process::Output, std::io::Error>, tokio::time::error::Elapsed>,
+    timeout: Duration,
+) -> Result<std::process::Output, ActualError> {
+    match result {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(io_err("Failed to wait for Claude Code", e)),
+        Err(_) => Err(ActualError::ClaudeTimeout {
+            seconds: timeout.as_secs(),
+        }),
+    }
+}
+
+/// Spawn the binary, wait with timeout, and parse JSON output.
+///
+/// Extracted from the `ClaudeRunner` impl so the `async_trait` wrapper is a
+/// thin delegation, keeping generated boilerplate out of coverage measurement.
+async fn run_subprocess<T: DeserializeOwned>(
+    binary_path: &std::path::Path,
+    timeout: Duration,
+    args: &[String],
+) -> Result<T, ActualError> {
+    let mut cmd = Command::new(binary_path);
+    cmd.arg("--print");
+    cmd.args(args);
+    // When the timeout fires, the `wait_with_output` future is dropped, which drops
+    // the `Child` it owns. With `kill_on_drop(true)`, tokio sends SIGKILL to the child
+    // on drop, preventing orphaned processes.
+    cmd.kill_on_drop(true);
+
+    let child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| io_err("Failed to spawn Claude Code", e))?;
+
+    let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    let output = resolve_output(result, timeout)?;
+
+    parse_output(output)
+}
+
 #[async_trait]
 impl ClaudeRunner for CliClaudeRunner {
     async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError> {
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.arg("--print");
-        cmd.args(args);
-        // When the timeout fires, the `wait_with_output` future is dropped, which drops
-        // the `Child` it owns. With `kill_on_drop(true)`, tokio sends SIGKILL to the child
-        // on drop, preventing orphaned processes.
-        cmd.kill_on_drop(true);
-
-        let child = cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| io_err("Failed to spawn Claude Code", e))?;
-
-        let output = match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => return Err(io_err("Failed to wait for Claude Code", e)),
-            Err(_) => {
-                return Err(ActualError::ClaudeTimeout {
-                    seconds: self.timeout.as_secs(),
-                });
-            }
-        };
-
-        parse_output(output)
+        run_subprocess(&self.binary_path, self.timeout, args).await
     }
 }
 
@@ -311,6 +335,60 @@ mod tests {
                 assert!(stderr.is_empty());
             }
             other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_output_success() {
+        // Use a real subprocess to get a valid Output with a real ExitStatus
+        let output = std::process::Command::new("echo")
+            .arg("hello")
+            .output()
+            .unwrap();
+        let result = resolve_output(Ok(Ok(output)), Duration::from_secs(30));
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("hello"),
+            "expected stdout to contain 'hello'"
+        );
+    }
+
+    #[test]
+    fn test_resolve_output_io_error() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke");
+        let result = resolve_output(Ok(Err(io_error)), Duration::from_secs(30));
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, stderr }) => {
+                assert!(
+                    message.contains("Failed to wait for Claude Code"),
+                    "expected context in message: {message}"
+                );
+                assert!(
+                    message.contains("pipe broke"),
+                    "expected error in message: {message}"
+                );
+                assert!(stderr.is_empty());
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_output_timeout() {
+        // Create a real Elapsed error by timing out
+        let elapsed = tokio::time::timeout(
+            Duration::from_nanos(1),
+            tokio::time::sleep(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap_err();
+        let result = resolve_output(Err(elapsed), Duration::from_secs(30));
+        match result {
+            Err(ActualError::ClaudeTimeout { seconds }) => {
+                assert_eq!(seconds, 30);
+            }
+            other => panic!("expected ClaudeTimeout, got: {other:?}"),
         }
     }
 }
