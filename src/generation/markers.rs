@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_extract_version_from_managed_section() {
-        let wrapped = wrap_in_markers("content", 5);
+        let wrapped = wrap_in_markers("content", 5, &[]);
         assert_eq!(extract_version(&wrapped), Some(5));
     }
 
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_next_version_increments() {
-        let content = wrap_in_markers("some content", 3);
+        let content = wrap_in_markers("some content", 3, &[]);
         assert_eq!(next_version(Some(&content)), 4);
     }
 
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_extract_last_synced_returns_timestamp() {
-        let wrapped = wrap_in_markers("content", 1);
+        let wrapped = wrap_in_markers("content", 1, &[]);
         let timestamp = extract_last_synced(&wrapped).expect("should find timestamp");
         // Verify it parses as a valid RFC 3339 / ISO 8601 timestamp
         chrono::DateTime::parse_from_rfc3339(timestamp)
