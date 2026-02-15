@@ -32,6 +32,34 @@ impl CliClaudeRunner {
     }
 }
 
+/// Convert an I/O error from subprocess operations into an `ActualError`.
+fn io_err(context: &str, e: std::io::Error) -> ActualError {
+    ActualError::ClaudeSubprocessFailed {
+        message: format!("{context}: {e}"),
+        stderr: String::new(),
+    }
+}
+
+/// Parse the output of a completed subprocess, returning the deserialized result
+/// or an appropriate error.
+fn parse_output<T: DeserializeOwned>(output: std::process::Output) -> Result<T, ActualError> {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let code = output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Err(ActualError::ClaudeSubprocessFailed {
+            message: format!("Claude Code exited with code {code}"),
+            stderr,
+        });
+    }
+
+    let parsed: T = serde_json::from_slice(&output.stdout)?;
+    Ok(parsed)
+}
+
 #[async_trait]
 impl ClaudeRunner for CliClaudeRunner {
     async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError> {
@@ -43,16 +71,11 @@ impl ClaudeRunner for CliClaudeRunner {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| ActualError::ClaudeSubprocessFailed {
-                message: format!("Failed to spawn Claude Code: {e}"),
-                stderr: String::new(),
-            })?;
+            .map_err(|e| io_err("Failed to spawn Claude Code", e))?;
 
         let output = match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
-            Ok(result) => result.map_err(|e| ActualError::ClaudeSubprocessFailed {
-                message: format!("Failed to wait for Claude Code: {e}"),
-                stderr: String::new(),
-            })?,
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return Err(io_err("Failed to wait for Claude Code", e)),
             Err(_) => {
                 return Err(ActualError::ClaudeTimeout {
                     seconds: self.timeout.as_secs(),
@@ -60,22 +83,7 @@ impl ClaudeRunner for CliClaudeRunner {
             }
         };
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let code = output
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            return Err(ActualError::ClaudeSubprocessFailed {
-                message: format!("Claude Code exited with code {code}"),
-                stderr,
-            });
-        }
-
-        let stdout = &output.stdout;
-        let parsed: T = serde_json::from_slice(stdout)?;
-        Ok(parsed)
+        parse_output(output)
     }
 }
 
@@ -288,5 +296,25 @@ mod tests {
         assert_eq!(lines[0], "--print");
         assert_eq!(lines[1], "--model");
         assert_eq!(lines[2], "opus");
+    }
+
+    #[test]
+    fn test_io_err_produces_subprocess_failed() {
+        let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke");
+        let result = io_err("Failed to wait for Claude Code", error);
+        match result {
+            ActualError::ClaudeSubprocessFailed { message, stderr } => {
+                assert!(
+                    message.contains("Failed to wait for Claude Code"),
+                    "expected context in message: {message}"
+                );
+                assert!(
+                    message.contains("pipe broke"),
+                    "expected error in message: {message}"
+                );
+                assert!(stderr.is_empty());
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
+        }
     }
 }
