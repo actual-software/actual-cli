@@ -886,4 +886,53 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
     }
+
+    // --- post_telemetry tests ---
+
+    #[tokio::test]
+    async fn test_post_telemetry_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/counter/record")
+            .match_header("authorization", "Bearer test-key")
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let request = TelemetryRequest { metrics: vec![] };
+        let result = client.post_telemetry(&request, "test-key").await;
+        assert!(result.is_ok());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_telemetry_server_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/counter/record")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url());
+        let request = TelemetryRequest { metrics: vec![] };
+        let result = client.post_telemetry(&request, "test-key").await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("500"))
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_telemetry_network_error() {
+        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let request = TelemetryRequest { metrics: vec![] };
+        let result = client.post_telemetry(&request, "test-key").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
+    }
 }
