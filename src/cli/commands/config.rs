@@ -17,7 +17,14 @@ pub fn exec(args: &ConfigArgs) -> i32 {
 }
 
 fn run(args: &ConfigArgs) -> Result<(), ActualError> {
-    let path = config::paths::config_path()?;
+    run_with_resolver(args, config::paths::config_path)
+}
+
+fn run_with_resolver(
+    args: &ConfigArgs,
+    resolve_path: impl FnOnce() -> Result<std::path::PathBuf, ActualError>,
+) -> Result<(), ActualError> {
+    let path = resolve_path()?;
     run_with_path(args, &path)
 }
 
@@ -236,41 +243,21 @@ mod tests {
         });
     }
 
-    /// Exercise the `config_path()?` error branch inside `run()`.
+    /// Exercise the `resolve_path()?` error branch inside `run_with_resolver()`.
     ///
-    /// On Linux (CI), unsetting HOME causes `dirs::home_dir()` to return
-    /// `None`, making `config_path()` fail when ACTUAL_CONFIG is also unset.
-    /// On macOS, `dirs::home_dir()` uses getpwuid and always succeeds, so
-    /// this test accepts either outcome — it only needs to run on CI.
+    /// Uses a closure that always fails, so this is fully deterministic
+    /// and does not depend on environment variables or platform behavior.
     #[test]
-    fn test_run_config_path_error() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved_config = std::env::var("ACTUAL_CONFIG").ok();
-        let saved_config_dir = std::env::var("ACTUAL_CONFIG_DIR").ok();
-        let saved_home = std::env::var("HOME").ok();
-
-        std::env::remove_var("ACTUAL_CONFIG");
-        std::env::remove_var("ACTUAL_CONFIG_DIR");
-        std::env::remove_var("HOME");
-
+    fn test_run_with_resolver_error() {
         let args = ConfigArgs {
             action: ConfigAction::Path,
         };
-        // On Linux: run() fails at config_path() → Err propagated via ?
-        // On macOS: run() succeeds (home_dir still works) — that's fine
-        let _result = run(&args);
-
-        // Restore env vars immediately
-        if let Some(v) = saved_home {
-            std::env::set_var("HOME", v);
-        }
-        if let Some(v) = saved_config_dir {
-            std::env::set_var("ACTUAL_CONFIG_DIR", v);
-        }
-        match saved_config {
-            Some(v) => std::env::set_var("ACTUAL_CONFIG", v),
-            None => std::env::remove_var("ACTUAL_CONFIG"),
-        }
+        let result = run_with_resolver(&args, || {
+            Err(ActualError::ConfigError(
+                "simulated config_path failure".into(),
+            ))
+        });
+        assert!(result.is_err());
     }
 
     // --- Deterministic tests using run_with_path (no env var races) ---
@@ -300,6 +287,7 @@ mod tests {
     ///
     /// Uses an explicit path (no env vars) so this test is fully
     /// deterministic and cannot race with other test modules.
+    #[cfg(unix)]
     #[test]
     fn test_run_with_path_set_save_error() {
         use std::os::unix::fs::PermissionsExt;
