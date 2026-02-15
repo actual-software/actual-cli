@@ -285,6 +285,20 @@ fn test_run_sync_force_with_fake_claude() {
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
 
+    // Start a mock API server returning an empty match response
+    let mut server = mockito::Server::new();
+    server
+        .mock("POST", "/adrs/match")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+            "matched_adrs": [],
+            "metadata": {"total_matched": 0, "by_framework": {}, "deduplicated_count": 0}
+        }"#,
+        )
+        .create();
+
     let auth_json = r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "test@example.com"}"#;
     let analysis_json = r#"{"is_monorepo": false, "projects": [{"path": ".", "name": "test-app", "languages": ["rust"], "frameworks": [], "package_manager": "cargo"}]}"#;
 
@@ -293,7 +307,7 @@ fn test_run_sync_force_with_fake_claude() {
     std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
     std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
 
-    let cli = Cli::parse_from(["actual", "sync", "--force"]);
+    let cli = Cli::parse_from(["actual", "sync", "--force", "--api-url", &server.url()]);
     let exit_code = run(cli);
 
     std::env::remove_var("CLAUDE_BINARY");

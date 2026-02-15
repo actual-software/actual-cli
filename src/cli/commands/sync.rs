@@ -1,10 +1,14 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use console::style;
+use sha2::{Digest, Sha256};
 
 use crate::analysis::cache::{get_git_head, run_analysis_cached};
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
+use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
+use crate::api::retry::{with_retry, RetryConfig};
 use crate::branding::banner::print_banner;
 use crate::claude::subprocess::ClaudeRunner;
 use crate::cli::args::SyncArgs;
@@ -12,10 +16,14 @@ use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmatio
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::{confirm_files, TerminalIO};
 use crate::cli::ui::progress::{Spinner, ERROR_SYMBOL, SUCCESS_SYMBOL};
+use crate::config::paths::{load_from, save_to};
+use crate::config::rejections::{clear_rejections, get_rejections};
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::writer::{write_files, WriteAction, WriteResult};
-use crate::tailoring::types::{TailoringOutput, TailoringSummary};
+use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfig};
+use crate::tailoring::filter::pre_filter_rejected;
+use crate::tailoring::types::{FileOutput, TailoringOutput, TailoringSummary};
 
 /// Result summary from the confirm + write phase.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,21 +115,113 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         }
     }
 
-    // ── Phase 2: fetch + tailor (TODO: actual-cli-e29) ──
-    let output = TailoringOutput {
-        files: vec![],
-        skipped_adrs: vec![],
-        summary: TailoringSummary {
-            total_input: 0,
-            applicable: 0,
-            not_applicable: 0,
-            files_generated: 0,
-        },
+    // ── Phase 2: fetch + tailor ──
+
+    // 2a. Load config and handle --reset-rejections
+    let mut config = load_from(cfg_path)?;
+    let repo_key = compute_repo_key(root_dir);
+
+    if args.reset_rejections {
+        clear_rejections(&mut config, &repo_key);
+        save_to(&config, cfg_path)?;
+        eprintln!(
+            "{} Cleared ADR rejection memory for this repository",
+            style(SUCCESS_SYMBOL).green()
+        );
+    }
+
+    let rejected_ids = get_rejections(&config, &repo_key);
+
+    // 2b. Fetch ADRs from API with retry
+    let api_url = args
+        .api_url
+        .as_deref()
+        .or(config.api_url.as_deref())
+        .unwrap_or(DEFAULT_API_URL);
+
+    let request = build_match_request(&analysis, &config);
+    let client = ActualApiClient::new(api_url);
+
+    if args.verbose {
+        eprintln!("API request to: {api_url}/adrs/match");
+        eprintln!(
+            "  projects: {}",
+            request
+                .projects
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    let spinner = Spinner::new("Fetching ADRs...", false);
+    let response = rt.block_on(async {
+        with_retry(&RetryConfig::default(), || client.post_match(&request)).await
+    });
+
+    let response = match response {
+        Ok(r) => {
+            spinner.success(&format!("Fetched {} ADRs", r.matched_adrs.len()));
+            r
+        }
+        Err(e) => {
+            spinner.error(&format!("API request failed: {e}"));
+            return Err(e);
+        }
+    };
+
+    if args.verbose {
+        eprintln!(
+            "  matched: {}, by_framework: {:?}",
+            response.metadata.total_matched, response.metadata.by_framework
+        );
+    }
+
+    // 2c. Filter by rejections
+    let filtered_adrs = pre_filter_rejected(&response.matched_adrs, &rejected_ids);
+
+    if !rejected_ids.is_empty() && args.verbose {
+        let removed = response.matched_adrs.len() - filtered_adrs.len();
+        eprintln!("  filtered out {removed} previously rejected ADRs");
+    }
+
+    // 2d. Tailor or skip (--no-tailor)
+    let existing_paths = find_existing_claude_md(root_dir);
+
+    let output = if args.no_tailor {
+        raw_adrs_to_output(&filtered_adrs)
+    } else {
+        let spinner = Spinner::new("Tailoring ADRs...", false);
+        let tailoring_config = ConcurrentTailoringConfig {
+            concurrency: config.concurrency.unwrap_or(3),
+            batch_size: config.batch_size.unwrap_or(15),
+            existing_claude_md_paths: &existing_paths,
+            model_override: args.model.as_deref(),
+            max_budget_usd: args.max_budget_usd.or(config.max_budget_usd),
+        };
+        let result = rt.block_on(tailor_all_projects(
+            runner,
+            &analysis.projects,
+            &filtered_adrs,
+            &tailoring_config,
+        ));
+        match result {
+            Ok(output) => {
+                spinner.success(&format!(
+                    "Tailored {} ADRs into {} files",
+                    output.summary.applicable, output.summary.files_generated
+                ));
+                output
+            }
+            Err(e) => {
+                spinner.error(&format!("Tailoring failed: {e}"));
+                return Err(e);
+            }
+        }
     };
 
     // ── Phase 3: confirm + write (fully implemented) ──
-    // --no-tailor: when Phase 2 is connected, this flag will skip Claude tailoring.
-    // For now it has no additional effect since tailoring isn't wired yet.
     confirm_and_write(&output, root_dir, args.force, args.dry_run, args.full, term)?;
     Ok(())
 }
@@ -154,6 +254,140 @@ fn filter_projects(
         projects: filtered_projects,
         ..analysis
     })
+}
+
+/// Compute a stable repo key by hashing the git origin URL.
+///
+/// Falls back to hashing the root directory path if not a git repo or
+/// if the remote URL cannot be determined.
+fn compute_repo_key(root_dir: &Path) -> String {
+    let input = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(root_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|| root_dir.to_string_lossy().to_string());
+
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Convert raw ADRs into a [`TailoringOutput`] without Claude tailoring.
+///
+/// Groups ADRs by their `matched_projects` field. Each group produces a
+/// `FileOutput` whose content is the ADR policies/instructions formatted as
+/// markdown. ADRs with no `matched_projects` are assigned to root `CLAUDE.md`.
+fn raw_adrs_to_output(adrs: &[crate::api::types::Adr]) -> TailoringOutput {
+    let mut project_adrs: HashMap<String, Vec<&crate::api::types::Adr>> = HashMap::new();
+
+    for adr in adrs {
+        if adr.matched_projects.is_empty() {
+            project_adrs
+                .entry("CLAUDE.md".to_string())
+                .or_default()
+                .push(adr);
+        } else {
+            for project_path in &adr.matched_projects {
+                let file_path = if project_path == "." {
+                    "CLAUDE.md".to_string()
+                } else {
+                    format!("{project_path}/CLAUDE.md")
+                };
+                project_adrs.entry(file_path).or_default().push(adr);
+            }
+        }
+    }
+
+    let mut files: Vec<FileOutput> = project_adrs
+        .into_iter()
+        .map(|(path, adrs_for_file)| {
+            let mut content_parts = Vec::new();
+            let mut adr_ids = Vec::new();
+
+            for adr in &adrs_for_file {
+                adr_ids.push(adr.id.clone());
+                let mut section = format!("## {}\n", adr.title);
+                for policy in &adr.policies {
+                    section.push_str(&format!("- {policy}\n"));
+                }
+                if let Some(instructions) = &adr.instructions {
+                    if !instructions.is_empty() {
+                        section.push('\n');
+                        for instruction in instructions {
+                            section.push_str(&format!("- {instruction}\n"));
+                        }
+                    }
+                }
+                content_parts.push(section);
+            }
+
+            FileOutput {
+                path,
+                content: content_parts.join("\n"),
+                reasoning: "Raw ADR output (--no-tailor mode)".to_string(),
+                adr_ids,
+            }
+        })
+        .collect();
+
+    // Sort for deterministic output
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let applicable = adrs.len();
+    let files_generated = files.len();
+
+    TailoringOutput {
+        files,
+        skipped_adrs: vec![],
+        summary: TailoringSummary {
+            total_input: applicable,
+            applicable,
+            not_applicable: 0,
+            files_generated,
+        },
+    }
+}
+
+/// Scan the repository for existing CLAUDE.md files and return their
+/// contents concatenated as a string, for use as context during tailoring.
+fn find_existing_claude_md(root_dir: &Path) -> String {
+    let mut results = Vec::new();
+
+    fn walk(dir: &Path, root: &Path, results: &mut Vec<String>) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Skip hidden directories and common non-project dirs
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with('.')
+                    || name_str == "node_modules"
+                    || name_str == "target"
+                    || name_str == "dist"
+                    || name_str == "build"
+                {
+                    continue;
+                }
+                walk(&path, root, results);
+            } else if entry.file_name() == "CLAUDE.md" {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
+                    results.push(format!("=== {rel} ===\n{content}"));
+                }
+            }
+        }
+    }
+
+    walk(root_dir, root_dir, &mut results);
+    results.sort();
+    results.join("\n\n")
 }
 
 /// Execute the confirm + write phase of the sync pipeline.
@@ -799,7 +1033,31 @@ mod tests {
 
     // ── run_sync flag-passthrough tests ──
 
-    fn make_sync_args(dry_run: bool, full: bool, force: bool, no_tailor: bool) -> SyncArgs {
+    /// JSON body for an empty API match response.
+    const EMPTY_MATCH_RESPONSE: &str = r#"{
+        "matched_adrs": [],
+        "metadata": {"total_matched": 0, "by_framework": {}, "deduplicated_count": 0}
+    }"#;
+
+    /// Start a mockito server that returns an empty match response.
+    fn mock_api_server() -> mockito::ServerGuard {
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(EMPTY_MATCH_RESPONSE)
+            .create();
+        server
+    }
+
+    fn make_sync_args(
+        dry_run: bool,
+        full: bool,
+        force: bool,
+        no_tailor: bool,
+        api_url: &str,
+    ) -> SyncArgs {
         SyncArgs {
             dry_run,
             full,
@@ -807,14 +1065,14 @@ mod tests {
             reset_rejections: false,
             projects: vec![],
             model: None,
-            api_url: None,
+            api_url: Some(api_url.to_string()),
             verbose: false,
             no_tailor,
             max_budget_usd: None,
         }
     }
 
-    fn make_sync_args_with_projects(force: bool, projects: Vec<&str>) -> SyncArgs {
+    fn make_sync_args_with_projects(force: bool, projects: Vec<&str>, api_url: &str) -> SyncArgs {
         SyncArgs {
             dry_run: false,
             full: false,
@@ -822,7 +1080,7 @@ mod tests {
             reset_rejections: false,
             projects: projects.into_iter().map(String::from).collect(),
             model: None,
-            api_url: None,
+            api_url: Some(api_url.to_string()),
             verbose: false,
             no_tailor: false,
             max_budget_usd: None,
@@ -831,11 +1089,12 @@ mod tests {
 
     #[test]
     fn test_run_sync_force_returns_ok() {
+        let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
-        let args = make_sync_args(false, false, true, false);
+        let args = make_sync_args(false, false, true, false, &server.url());
         let result = run_sync(
             &args,
             dir.path(),
@@ -845,7 +1104,7 @@ mod tests {
             &reader,
         );
         assert!(result.is_ok(), "run_sync with --force should succeed");
-        // With empty tailoring output + force, terminal should show "No files to write."
+        // With empty API response + force, terminal should show "No files to write."
         let text = term.output_text();
         assert!(
             text.contains("No files to write."),
@@ -855,11 +1114,12 @@ mod tests {
 
     #[test]
     fn test_run_sync_no_tailor_force_returns_ok() {
+        let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
-        let args = make_sync_args(false, false, true, true);
+        let args = make_sync_args(false, false, true, true, &server.url());
         let result = run_sync(
             &args,
             dir.path(),
@@ -876,11 +1136,12 @@ mod tests {
 
     #[test]
     fn test_run_sync_force_dry_run_returns_ok() {
+        let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
-        let args = make_sync_args(true, false, true, false);
+        let args = make_sync_args(true, false, true, false, &server.url());
         // dry-run takes precedence over force
         let result = run_sync(
             &args,
@@ -898,12 +1159,13 @@ mod tests {
 
     #[test]
     fn test_run_sync_no_flags_prompts_user() {
+        let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec!["a"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         // Accept project confirmation prompt
         let reader = MockInputReader::accept();
-        let args = make_sync_args(false, false, false, false);
+        let args = make_sync_args(false, false, false, false, &server.url());
         let result = run_sync(
             &args,
             dir.path(),
@@ -923,9 +1185,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        // Reject project confirmation prompt
+        // Reject project confirmation prompt — this happens before API call
         let reader = MockInputReader::reject();
-        let args = make_sync_args(false, false, false, false);
+        let args = make_sync_args(false, false, false, false, "http://unused");
         let result = run_sync(
             &args,
             dir.path(),
@@ -942,12 +1204,13 @@ mod tests {
 
     #[test]
     fn test_run_sync_force_skips_confirmation() {
+        let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         // Reader would reject, but --force should skip it
         let reader = MockInputReader::reject();
-        let args = make_sync_args(false, false, true, false);
+        let args = make_sync_args(false, false, true, false, &server.url());
         let result = run_sync(
             &args,
             dir.path(),
@@ -964,11 +1227,12 @@ mod tests {
 
     #[test]
     fn test_run_sync_dry_run_writes_no_files() {
+        let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
-        let args = make_sync_args(true, false, false, false);
+        let args = make_sync_args(true, false, false, false, &server.url());
         run_sync(
             &args,
             dir.path(),
@@ -989,11 +1253,12 @@ mod tests {
 
     #[test]
     fn test_run_sync_project_filter_matches() {
+        let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
-        let args = make_sync_args_with_projects(true, vec!["apps/web"]);
+        let args = make_sync_args_with_projects(true, vec!["apps/web"], &server.url());
         let result = run_sync(
             &args,
             dir.path(),
@@ -1014,7 +1279,8 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
-        let args = make_sync_args_with_projects(true, vec!["nonexistent/path"]);
+        // No server needed — fails before API call
+        let args = make_sync_args_with_projects(true, vec!["nonexistent/path"], "http://unused");
         let result = run_sync(
             &args,
             dir.path(),
@@ -1079,7 +1345,7 @@ mod tests {
         // Set an invalid binary path to ensure it fails predictably
         let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
         std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
-        let args = make_sync_args(true, false, false, false);
+        let args = make_sync_args(true, false, false, false, "http://unused");
         let code = exec(&args);
         std::env::remove_var("CLAUDE_BINARY");
         assert_eq!(code, 2, "expected exit code 2 (ClaudeNotFound)");
@@ -1149,10 +1415,10 @@ mod tests {
     fn test_run_sync_analysis_error() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
-        // Invalid JSON causes parse error in run_analysis_cached
+        // Invalid JSON causes parse error in run_analysis_cached — before API call
         let runner = MockRunner::new("not valid json");
         let reader = MockInputReader::accept();
-        let args = make_sync_args(false, false, true, false);
+        let args = make_sync_args(false, false, true, false, "http://unused");
         let result = run_sync(
             &args,
             dir.path(),
@@ -1171,14 +1437,47 @@ mod tests {
 
     #[test]
     fn test_run_sync_confirm_and_write_error() {
+        // Use a server that returns ADRs so confirm_and_write has files to confirm
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "matched_adrs": [{
+                    "id": "adr-001",
+                    "title": "Test ADR",
+                    "context": null,
+                    "policies": ["Do the thing"],
+                    "instructions": null,
+                    "category": {"id": "cat-1", "name": "General", "path": "General"},
+                    "applies_to": {"languages": ["rust"], "frameworks": []},
+                    "matched_projects": ["."]
+                }],
+                "metadata": {"total_matched": 1, "by_framework": {}, "deduplicated_count": 1}
+            }"#,
+            )
+            .create();
+
         let dir = tempfile::tempdir().unwrap();
-        // MockTerminal with no inputs — when confirm_files calls read_line, it returns
-        // UserCancelled, which propagates through confirm_and_write's ? operator.
+        // MockTerminal: user quits the confirmation flow
         let term = MockTerminal::new(vec!["q"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let reader = MockInputReader::accept();
-        // force=false so confirm_and_write enters the confirmation flow
-        let args = make_sync_args(false, false, false, false);
+        // force=false, no_tailor=true so we get raw output and enter confirmation flow
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: false,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
         let result = run_sync(
             &args,
             dir.path(),
@@ -1317,5 +1616,339 @@ mod tests {
         assert_eq!(created, 1);
         assert_eq!(updated, 1);
         assert_eq!(failed, 1);
+    }
+
+    // ── compute_repo_key tests ──
+
+    #[test]
+    fn test_compute_repo_key_non_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = compute_repo_key(dir.path());
+        // Should be a hex-encoded SHA-256 (64 chars)
+        assert_eq!(key.len(), 64, "expected 64-char hex hash, got: {key}");
+        // Should be deterministic
+        let key2 = compute_repo_key(dir.path());
+        assert_eq!(key, key2, "expected deterministic result");
+    }
+
+    #[test]
+    fn test_compute_repo_key_different_dirs_differ() {
+        let dir1 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
+        let key1 = compute_repo_key(dir1.path());
+        let key2 = compute_repo_key(dir2.path());
+        assert_ne!(key1, key2, "different dirs should produce different keys");
+    }
+
+    // ── raw_adrs_to_output tests ──
+
+    fn make_test_adr(id: &str, title: &str, projects: Vec<&str>) -> crate::api::types::Adr {
+        crate::api::types::Adr {
+            id: id.to_string(),
+            title: title.to_string(),
+            context: None,
+            policies: vec![format!("Policy for {title}")],
+            instructions: Some(vec![format!("Instruction for {title}")]),
+            category: crate::api::types::AdrCategory {
+                id: "cat-1".to_string(),
+                name: "General".to_string(),
+                path: "General".to_string(),
+            },
+            applies_to: crate::api::types::AppliesTo {
+                languages: vec!["rust".to_string()],
+                frameworks: vec![],
+            },
+            matched_projects: projects.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_empty() {
+        let output = raw_adrs_to_output(&[]);
+        assert!(output.files.is_empty());
+        assert_eq!(output.summary.total_input, 0);
+        assert_eq!(output.summary.applicable, 0);
+        assert_eq!(output.summary.files_generated, 0);
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_single_adr_no_projects() {
+        let adrs = vec![make_test_adr("adr-001", "Test ADR", vec![])];
+        let output = raw_adrs_to_output(&adrs);
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "CLAUDE.md");
+        assert!(output.files[0].content.contains("Test ADR"));
+        assert!(output.files[0].content.contains("Policy for Test ADR"));
+        assert!(output.files[0].content.contains("Instruction for Test ADR"));
+        assert_eq!(output.files[0].adr_ids, vec!["adr-001"]);
+        assert_eq!(output.summary.total_input, 1);
+        assert_eq!(output.summary.files_generated, 1);
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_adr_with_project() {
+        let adrs = vec![make_test_adr("adr-001", "Web Rules", vec!["apps/web"])];
+        let output = raw_adrs_to_output(&adrs);
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "apps/web/CLAUDE.md");
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_adr_with_dot_project() {
+        let adrs = vec![make_test_adr("adr-001", "Root Rules", vec!["."])];
+        let output = raw_adrs_to_output(&adrs);
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "CLAUDE.md");
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_multiple_projects() {
+        let adrs = vec![
+            make_test_adr("adr-001", "Web ADR", vec!["apps/web"]),
+            make_test_adr("adr-002", "API ADR", vec!["services/api"]),
+            make_test_adr("adr-003", "Shared ADR", vec![]),
+        ];
+        let output = raw_adrs_to_output(&adrs);
+        assert_eq!(output.files.len(), 3);
+        let paths: Vec<&str> = output.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"CLAUDE.md"));
+        assert!(paths.contains(&"apps/web/CLAUDE.md"));
+        assert!(paths.contains(&"services/api/CLAUDE.md"));
+        assert_eq!(output.summary.total_input, 3);
+        assert_eq!(output.summary.files_generated, 3);
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_adr_without_instructions() {
+        let mut adr = make_test_adr("adr-001", "Test ADR", vec![]);
+        adr.instructions = None;
+        let output = raw_adrs_to_output(&[adr]);
+        assert_eq!(output.files.len(), 1);
+        assert!(output.files[0].content.contains("Policy for Test ADR"));
+        // With instructions=None, the instruction line should not appear
+        assert!(
+            !output.files[0].content.contains("Instruction for"),
+            "expected no instruction lines, got: {}",
+            output.files[0].content
+        );
+    }
+
+    // ── find_existing_claude_md tests ──
+
+    #[test]
+    fn test_find_existing_claude_md_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = find_existing_claude_md(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_find_existing_claude_md_finds_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "Root content").unwrap();
+        let result = find_existing_claude_md(dir.path());
+        assert!(result.contains("Root content"));
+        assert!(result.contains("CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_find_existing_claude_md_finds_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("apps").join("web")).unwrap();
+        std::fs::write(
+            dir.path().join("apps").join("web").join("CLAUDE.md"),
+            "Web content",
+        )
+        .unwrap();
+        let result = find_existing_claude_md(dir.path());
+        assert!(result.contains("Web content"));
+    }
+
+    #[test]
+    fn test_find_existing_claude_md_skips_hidden_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git").join("CLAUDE.md"), "Git content").unwrap();
+        let result = find_existing_claude_md(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_find_existing_claude_md_skips_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules")).unwrap();
+        std::fs::write(
+            dir.path().join("node_modules").join("CLAUDE.md"),
+            "Module content",
+        )
+        .unwrap();
+        let result = find_existing_claude_md(dir.path());
+        assert!(result.is_empty());
+    }
+
+    // ── Phase 2 integration tests ──
+
+    #[test]
+    fn test_run_sync_api_error_returns_error() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create();
+
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
+        assert!(
+            matches!(result, Err(ActualError::ApiError(_))),
+            "expected ApiError, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_no_tailor_with_adrs_creates_files() {
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "matched_adrs": [{
+                    "id": "adr-001",
+                    "title": "Use consistent error handling",
+                    "context": null,
+                    "policies": ["Use Result for all fallible operations"],
+                    "instructions": ["Return ActualError from all public functions"],
+                    "category": {"id": "cat-1", "name": "Error Handling", "path": "Error Handling"},
+                    "applies_to": {"languages": ["rust"], "frameworks": []},
+                    "matched_projects": ["."]
+                }],
+                "metadata": {"total_matched": 1, "by_framework": {}, "deduplicated_count": 1}
+            }"#,
+            )
+            .create();
+
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+
+        // Verify CLAUDE.md was created
+        assert!(dir.path().join("CLAUDE.md").exists());
+        let content = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+        assert!(
+            content.contains("Use consistent error handling"),
+            "expected ADR title in CLAUDE.md, got: {content}"
+        );
+        assert!(
+            content.contains("Use Result for all fallible operations"),
+            "expected policy in CLAUDE.md, got: {content}"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_verbose_shows_details() {
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: true,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        // This should succeed and print verbose output to stderr
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn test_run_sync_reset_rejections() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+
+        // Pre-populate config with rejections
+        let mut config = crate::config::Config::default();
+        let repo_key = compute_repo_key(dir.path());
+        crate::config::rejections::add_rejection(&mut config, &repo_key, "adr-001");
+        save_to(&config, &cfg_path).unwrap();
+
+        // Verify rejections exist
+        let loaded = load_from(&cfg_path).unwrap();
+        assert!(!get_rejections(&loaded, &repo_key).is_empty());
+
+        let server = mock_api_server();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: true,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, &reader);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+
+        // Verify rejections were cleared
+        let loaded = load_from(&cfg_path).unwrap();
+        assert!(
+            get_rejections(&loaded, &repo_key).is_empty(),
+            "expected rejections to be cleared"
+        );
     }
 }
