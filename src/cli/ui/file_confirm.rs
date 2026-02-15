@@ -379,11 +379,10 @@ mod tests {
         let output = make_test_output(2);
         let term = MockTerminal::new(vec!["q"]);
         let result = confirm_files(&output, false, &term);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ActualError::UserCancelled => {}
-            other => panic!("expected UserCancelled, got: {other}"),
-        }
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "expected UserCancelled"
+        );
     }
 
     #[test]
