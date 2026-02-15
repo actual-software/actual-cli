@@ -391,4 +391,37 @@ mod tests {
             "expected file write error message"
         );
     }
+
+    #[test]
+    fn test_write_result_and_action_clone() {
+        // Exercise Clone for WriteResult with all WriteAction variants
+        let cases = vec![
+            WriteResult {
+                path: "CLAUDE.md".to_string(),
+                action: WriteAction::Created,
+                version: 1,
+                error: None,
+            },
+            WriteResult {
+                path: "sub/CLAUDE.md".to_string(),
+                action: WriteAction::Updated,
+                version: 2,
+                error: None,
+            },
+            WriteResult {
+                path: "fail.md".to_string(),
+                action: WriteAction::Failed,
+                version: 0,
+                error: Some("test error".to_string()),
+            },
+        ];
+
+        for result in &cases {
+            let cloned = result.clone();
+            assert_eq!(cloned.path, result.path);
+            assert_eq!(cloned.action, result.action);
+            assert_eq!(cloned.version, result.version);
+            assert_eq!(cloned.error, result.error);
+        }
+    }
 }
