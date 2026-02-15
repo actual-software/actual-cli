@@ -19,7 +19,9 @@ pub trait ClaudeRunner: Send + Sync {
 
 /// Production implementation that spawns `claude --print` as a subprocess.
 pub struct CliClaudeRunner {
+    /// Path to the Claude CLI binary.
     binary_path: PathBuf,
+    /// Maximum time to wait for subprocess completion.
     timeout: Duration,
 }
 
@@ -66,6 +68,8 @@ impl ClaudeRunner for CliClaudeRunner {
         let mut cmd = Command::new(&self.binary_path);
         cmd.arg("--print");
         cmd.args(args);
+        // Ensure the child process is killed if the timeout fires and drops the future.
+        cmd.kill_on_drop(true);
 
         let child = cmd
             .stdout(std::process::Stdio::piped())
