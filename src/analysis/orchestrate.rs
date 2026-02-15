@@ -141,4 +141,39 @@ mod tests {
         assert!(matches!(result, Err(ActualError::ClaudeOutputParse(_))));
         assert_eq!(runner.calls(), 2);
     }
+
+    /// Mock runner that always returns a specific error (non-parse).
+    struct ErrorMockRunner;
+
+    impl ClaudeRunner for ErrorMockRunner {
+        async fn run<T: DeserializeOwned + Send>(
+            &self,
+            _args: &[String],
+        ) -> Result<T, ActualError> {
+            Err(ActualError::ClaudeSubprocessFailed {
+                message: "process crashed".to_string(),
+                stderr: "segfault".to_string(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_non_parse_error_propagates_without_retry() {
+        let runner = ErrorMockRunner;
+        let result = run_analysis(&runner, None).await;
+
+        assert!(matches!(
+            result,
+            Err(ActualError::ClaudeSubprocessFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_model_override_passed_to_args() {
+        let runner = SequenceMockRunner::new(vec![VALID_ANALYSIS_JSON]);
+        let result = run_analysis(&runner, Some("opus")).await.unwrap();
+
+        assert_eq!(result.projects[0].name, "my-app");
+        assert_eq!(runner.calls(), 1);
+    }
 }
