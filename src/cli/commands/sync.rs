@@ -35,10 +35,12 @@ fn handle_result(result: Result<(), ActualError>) -> i32 {
     }
 }
 
+fn cwd_error(e: std::io::Error) -> ActualError {
+    ActualError::ConfigError(format!("cannot determine working directory: {e}"))
+}
+
 fn run_sync(args: &SyncArgs) -> Result<(), ActualError> {
-    let root_dir = std::env::current_dir().map_err(|e| {
-        ActualError::ConfigError(format!("cannot determine working directory: {e}"))
-    })?;
+    let root_dir = std::env::current_dir().map_err(cwd_error)?;
     let term = RealTerminal::default();
     run_sync_inner(args, &root_dir, &term)
 }
@@ -584,6 +586,24 @@ mod tests {
             text.contains("Sync complete: 1 created, 1 updated, 1 failed, 1 rejected"),
             "expected correct summary line in: {text}"
         );
+    }
+
+    // ── cwd_error test ──
+
+    #[test]
+    fn test_cwd_error_formats_message() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "dir gone");
+        let err = cwd_error(io_err);
+        match err {
+            ActualError::ConfigError(msg) => {
+                assert!(
+                    msg.contains("cannot determine working directory"),
+                    "expected cwd context in: {msg}"
+                );
+                assert!(msg.contains("dir gone"), "expected io error in: {msg}");
+            }
+            other => panic!("expected ConfigError, got: {other:?}"),
+        }
     }
 
     // ── run_sync_inner flag-passthrough tests ──
