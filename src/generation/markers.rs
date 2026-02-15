@@ -18,6 +18,36 @@ pub fn has_managed_section(content: &str) -> bool {
     }
 }
 
+/// Extracts the version number from a `<!-- version: N -->` comment in the content.
+/// Returns `Some(N)` if found, `None` otherwise.
+pub fn extract_version(content: &str) -> Option<u32> {
+    let prefix = "<!-- version: ";
+    let start = content.find(prefix)? + prefix.len();
+    let rest = &content[start..];
+    let end = rest.find(" -->")?;
+    rest[..end].parse().ok()
+}
+
+/// Returns the next version number to use for a managed section.
+/// If `existing_content` contains a version comment, returns version + 1.
+/// If `existing_content` is `Some` but has no version, or is `None`, returns 1.
+pub fn next_version(existing_content: Option<&str>) -> u32 {
+    match existing_content.and_then(extract_version) {
+        Some(v) => v + 1,
+        None => 1,
+    }
+}
+
+/// Extracts the timestamp string from a `<!-- last-synced: TIMESTAMP -->` comment.
+/// Returns a zero-copy `&str` of the timestamp, or `None` if not found.
+pub fn extract_last_synced(content: &str) -> Option<&str> {
+    let prefix = "<!-- last-synced: ";
+    let start = content.find(prefix)? + prefix.len();
+    let rest = &content[start..];
+    let end = rest.find(" -->")?;
+    Some(&rest[..end])
+}
+
 /// Returns the content between the START and END markers, or None if markers are absent.
 pub fn extract_managed_content(content: &str) -> Option<&str> {
     let start_idx = content.find(START_MARKER)?;
@@ -230,6 +260,42 @@ mod tests {
             None,
             "expected None when markers are reversed"
         );
+    }
+
+    #[test]
+    fn test_extract_version_from_comment() {
+        assert_eq!(extract_version("<!-- version: 3 -->"), Some(3));
+    }
+
+    #[test]
+    fn test_extract_version_from_managed_section() {
+        let wrapped = wrap_in_markers("content", 5);
+        assert_eq!(extract_version(&wrapped), Some(5));
+    }
+
+    #[test]
+    fn test_extract_version_none_when_absent() {
+        assert_eq!(extract_version("no version here"), None);
+    }
+
+    #[test]
+    fn test_next_version_increments() {
+        let content = wrap_in_markers("some content", 3);
+        assert_eq!(next_version(Some(&content)), 4);
+    }
+
+    #[test]
+    fn test_next_version_none_returns_1() {
+        assert_eq!(next_version(None), 1);
+    }
+
+    #[test]
+    fn test_extract_last_synced_returns_timestamp() {
+        let wrapped = wrap_in_markers("content", 1);
+        let timestamp = extract_last_synced(&wrapped).expect("should find timestamp");
+        // Verify it parses as a valid RFC 3339 / ISO 8601 timestamp
+        chrono::DateTime::parse_from_rfc3339(timestamp)
+            .expect("timestamp should be valid RFC 3339");
     }
 
     #[test]
