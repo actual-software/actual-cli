@@ -22,7 +22,11 @@ fn run_auth() -> Result<(), ActualError> {
     run_auth_with_binary(&binary_path)
 }
 
-fn run_auth_with_binary(binary_path: &Path) -> Result<(), ActualError> {
+/// Check Claude Code authentication status using the given binary path.
+///
+/// Runs `claude auth status --json`, parses the response, and returns the
+/// status. This is reusable from other commands (e.g., `sync`).
+pub fn check_auth(binary_path: &Path) -> Result<ClaudeAuthStatus, ActualError> {
     let output = std::process::Command::new(binary_path)
         .args(["auth", "status", "--json"])
         .output()
@@ -43,6 +47,11 @@ fn run_auth_with_binary(binary_path: &Path) -> Result<(), ActualError> {
     }
 
     let status: ClaudeAuthStatus = serde_json::from_slice(&output.stdout)?;
+    Ok(status)
+}
+
+fn run_auth_with_binary(binary_path: &Path) -> Result<(), ActualError> {
+    let status = check_auth(binary_path)?;
 
     print_auth_status(&status);
 

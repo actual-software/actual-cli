@@ -1,12 +1,22 @@
 use std::path::Path;
+use std::time::Duration;
 
 use console::style;
 
+use crate::analysis::cache::{get_git_head, run_analysis_cached};
+use crate::analysis::confirm::ConfirmAction;
+use crate::analysis::types::RepoAnalysis;
+use crate::branding::banner::print_banner;
+use crate::claude::binary::find_claude_binary;
+use crate::claude::subprocess::{ClaudeRunner, CliClaudeRunner};
 use crate::cli::args::SyncArgs;
+use crate::cli::commands::auth::check_auth;
+use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation, InputReader};
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::{confirm_files, TerminalIO};
-use crate::cli::ui::progress::{ERROR_SYMBOL, SUCCESS_SYMBOL};
+use crate::cli::ui::progress::{Spinner, ERROR_SYMBOL, SUCCESS_SYMBOL};
 use crate::cli::ui::real_terminal::RealTerminal;
+use crate::config::paths::config_path;
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::writer::{write_files, WriteAction, WriteResult};
@@ -35,13 +45,23 @@ fn handle_result(result: Result<(), ActualError>) -> i32 {
     }
 }
 
-/// Thin wrapper that resolves system dependencies (cwd, terminal) and
-/// delegates to [`run_sync`].  Kept minimal so nearly all logic lives
+/// Thin wrapper that resolves system dependencies (cwd, terminal, Claude binary)
+/// and delegates to [`run_sync`].  Kept minimal so nearly all logic lives
 /// in the fully-testable [`run_sync`].
 fn run(args: &SyncArgs) -> Result<(), ActualError> {
     let root_dir = resolve_cwd();
     let term = RealTerminal::default();
-    run_sync(args, &root_dir, &term)
+
+    // Phase 1 env check: locate Claude binary and verify auth
+    let binary_path = find_claude_binary()?;
+    let auth_status = check_auth(&binary_path)?;
+    if !auth_status.is_usable() {
+        return Err(ActualError::ClaudeNotAuthenticated);
+    }
+
+    let runner = CliClaudeRunner::new(binary_path, Duration::from_secs(300));
+    let reader = StdinReader;
+    run_sync(args, &root_dir, &term, &runner, &reader)
 }
 
 /// Resolve the current working directory, falling back to `"."` if
@@ -51,19 +71,72 @@ fn resolve_cwd() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or(fallback)
 }
 
+/// Reads a line from stdin for the project confirmation prompt.
+struct StdinReader;
+
+impl InputReader for StdinReader {
+    fn read_line(&self) -> std::io::Result<String> {
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf)?;
+        Ok(buf)
+    }
+}
+
 /// Core sync logic.
 ///
-/// Accepts injected `root_dir` and `term` so unit tests can avoid
-/// `RealTerminal` (which blocks on stdin) and control the working directory.
-fn run_sync(args: &SyncArgs, root_dir: &Path, term: &dyn TerminalIO) -> Result<(), ActualError> {
-    // TODO: Phase 1 - env check + analysis (actual-cli-a59)
-    // TODO: Phase 2 - fetch + tailor (actual-cli-e29)
-    // For now, produce an empty TailoringOutput since upstream phases are not connected.
+/// Accepts injected `root_dir`, `term`, `runner`, and `reader` so unit tests
+/// can avoid `RealTerminal` (which blocks on stdin) and control the working
+/// directory, Claude runner, and user input.
+fn run_sync<R: ClaudeRunner>(
+    args: &SyncArgs,
+    root_dir: &Path,
+    term: &dyn TerminalIO,
+    runner: &R,
+    reader: &dyn InputReader,
+) -> Result<(), ActualError> {
+    // ── Phase 1: env check + analysis ──
 
-    eprintln!(
-        "Sync pipeline: phases 1-2 not yet connected; running confirm + write with empty output."
-    );
+    // 1. Show banner
+    print_banner(false);
 
+    // 2. Check environment (git status)
+    let spinner = Spinner::new("Checking environment...", false);
+    let is_git = get_git_head(root_dir).is_some();
+    if is_git {
+        spinner.success("Environment OK");
+    } else {
+        spinner.warn("Not a git repository (caching disabled)");
+    }
+
+    // 3. Run analysis (cached if in a git repo)
+    let spinner = Spinner::new("Analyzing repository...", false);
+    let cfg_path = config_path()?;
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| ActualError::ConfigError(format!("Failed to create async runtime: {e}")))?;
+    let analysis = rt.block_on(run_analysis_cached(
+        runner,
+        args.model.as_deref(),
+        root_dir,
+        &cfg_path,
+    ))?;
+    spinner.success("Analysis complete");
+
+    // 4. Display projects
+    let summary = format_project_summary(&analysis);
+    eprintln!("{summary}");
+
+    // 5. Filter by --project if specified
+    let analysis = filter_projects(analysis, &args.projects)?;
+
+    // 6. Confirmation (unless --force)
+    if !args.force {
+        let action = prompt_project_confirmation(&analysis, reader, &mut std::io::stderr());
+        if matches!(action, ConfirmAction::Reject) {
+            return Err(ActualError::UserCancelled);
+        }
+    }
+
+    // ── Phase 2: fetch + tailor (TODO: actual-cli-e29) ──
     let output = TailoringOutput {
         files: vec![],
         skipped_adrs: vec![],
@@ -75,11 +148,41 @@ fn run_sync(args: &SyncArgs, root_dir: &Path, term: &dyn TerminalIO) -> Result<(
         },
     };
 
-    // Phase 3 - confirm + write (fully implemented)
+    // ── Phase 3: confirm + write (fully implemented) ──
     // --no-tailor: when Phase 2 is connected, this flag will skip Claude tailoring.
     // For now it has no additional effect since tailoring isn't wired yet.
     let _result = confirm_and_write(&output, root_dir, args.force, args.dry_run, args.full, term)?;
     Ok(())
+}
+
+/// Filter the analysis to only include projects matching the given filters.
+///
+/// If `filters` is empty, returns the analysis unchanged.
+/// If no projects match, returns an error.
+fn filter_projects(
+    analysis: RepoAnalysis,
+    filters: &[String],
+) -> Result<RepoAnalysis, ActualError> {
+    if filters.is_empty() {
+        return Ok(analysis);
+    }
+
+    let filtered_projects: Vec<_> = analysis
+        .projects
+        .into_iter()
+        .filter(|p| filters.contains(&p.path))
+        .collect();
+
+    if filtered_projects.is_empty() {
+        return Err(ActualError::ConfigError(format!(
+            "No projects matched the filter: {filters:?}"
+        )));
+    }
+
+    Ok(RepoAnalysis {
+        projects: filtered_projects,
+        ..analysis
+    })
 }
 
 /// Execute the confirm + write phase of the sync pipeline.
@@ -223,10 +326,13 @@ fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
     use crate::cli::ui::file_confirm::TerminalIO;
     use crate::error::ActualError;
     use crate::generation::markers;
     use crate::tailoring::types::{FileOutput, TailoringSummary};
+    use serde::de::DeserializeOwned;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     struct MockTerminal {
@@ -261,6 +367,81 @@ mod tests {
         }
     }
 
+    /// Valid fixture JSON matching the RepoAnalysis schema.
+    const VALID_ANALYSIS_JSON: &str = r#"{
+        "is_monorepo": false,
+        "projects": [{
+            "path": ".",
+            "name": "my-app",
+            "languages": ["rust"],
+            "frameworks": [{"name": "actix-web", "category": "web-backend"}],
+            "package_manager": "cargo",
+            "description": "A web application"
+        }]
+    }"#;
+
+    /// Mock runner that returns a predetermined JSON response.
+    struct MockRunner {
+        json_response: String,
+    }
+
+    impl MockRunner {
+        fn new(json: &str) -> Self {
+            Self {
+                json_response: json.to_string(),
+            }
+        }
+    }
+
+    impl ClaudeRunner for MockRunner {
+        async fn run<T: DeserializeOwned + Send>(
+            &self,
+            _args: &[String],
+        ) -> Result<T, ActualError> {
+            let parsed: T = serde_json::from_str(&self.json_response)?;
+            Ok(parsed)
+        }
+    }
+
+    /// Mock reader that returns a fixed sequence of responses.
+    struct MockInputReader {
+        responses: Vec<String>,
+        index: AtomicUsize,
+    }
+
+    impl MockInputReader {
+        fn new(responses: Vec<&str>) -> Self {
+            Self {
+                responses: responses.into_iter().map(String::from).collect(),
+                index: AtomicUsize::new(0),
+            }
+        }
+
+        /// A reader that immediately accepts.
+        fn accept() -> Self {
+            Self::new(vec!["a"])
+        }
+
+        /// A reader that immediately rejects.
+        fn reject() -> Self {
+            Self::new(vec!["r"])
+        }
+    }
+
+    impl InputReader for MockInputReader {
+        fn read_line(&self) -> std::io::Result<String> {
+            let i = self.index.fetch_add(1, Ordering::SeqCst);
+            if i < self.responses.len() {
+                Ok(self.responses[i].clone())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "no more input",
+                ))
+            }
+        }
+    }
+
     fn make_output(files: Vec<FileOutput>) -> TailoringOutput {
         let file_count = files.len();
         TailoringOutput {
@@ -283,6 +464,53 @@ mod tests {
             adr_ids: adr_ids.into_iter().map(|s| s.to_string()).collect(),
         }
     }
+
+    fn make_monorepo_analysis() -> RepoAnalysis {
+        RepoAnalysis {
+            is_monorepo: true,
+            projects: vec![
+                Project {
+                    path: "apps/web".to_string(),
+                    name: "Web App".to_string(),
+                    languages: vec![Language::TypeScript],
+                    frameworks: vec![Framework {
+                        name: "nextjs".to_string(),
+                        category: FrameworkCategory::WebFrontend,
+                    }],
+                    package_manager: Some("npm".to_string()),
+                    description: None,
+                },
+                Project {
+                    path: "services/api".to_string(),
+                    name: "API Service".to_string(),
+                    languages: vec![Language::Rust],
+                    frameworks: vec![],
+                    package_manager: Some("cargo".to_string()),
+                    description: None,
+                },
+            ],
+        }
+    }
+
+    const MONOREPO_ANALYSIS_JSON: &str = r#"{
+        "is_monorepo": true,
+        "projects": [
+            {
+                "path": "apps/web",
+                "name": "Web App",
+                "languages": ["typescript"],
+                "frameworks": [{"name": "nextjs", "category": "web-frontend"}],
+                "package_manager": "npm"
+            },
+            {
+                "path": "services/api",
+                "name": "API Service",
+                "languages": ["rust"],
+                "frameworks": [],
+                "package_manager": "cargo"
+            }
+        ]
+    }"#;
 
     // ── test_confirm_and_write_force_mode ──
 
@@ -615,35 +843,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_run_sync_dry_run_returns_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let term = MockTerminal::new(vec![]);
-        let args = make_sync_args(true, false, false, false);
-        let result = run_sync(&args, dir.path(), &term);
-        assert!(result.is_ok(), "run_sync with --dry-run should succeed");
-    }
-
-    #[test]
-    fn test_run_sync_dry_run_full_returns_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let term = MockTerminal::new(vec![]);
-        let args = make_sync_args(true, true, false, false);
-        let result = run_sync(&args, dir.path(), &term);
-        assert!(
-            result.is_ok(),
-            "run_sync with --dry-run --full should succeed"
-        );
+    fn make_sync_args_with_projects(force: bool, projects: Vec<&str>) -> SyncArgs {
+        SyncArgs {
+            dry_run: false,
+            full: false,
+            force,
+            reset_rejections: false,
+            projects: projects.into_iter().map(String::from).collect(),
+            model: None,
+            api_url: None,
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+        }
     }
 
     #[test]
     fn test_run_sync_force_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, true, false);
-        let result = run_sync(&args, dir.path(), &term);
+        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
         assert!(result.is_ok(), "run_sync with --force should succeed");
-        // With empty output + force, terminal should show "No files to write."
+        // With empty tailoring output + force, terminal should show "No files to write."
         let text = term.output_text();
         assert!(
             text.contains("No files to write."),
@@ -655,8 +879,10 @@ mod tests {
     fn test_run_sync_no_tailor_force_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, true, true);
-        let result = run_sync(&args, dir.path(), &term);
+        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
         assert!(
             result.is_ok(),
             "run_sync with --no-tailor --force should succeed"
@@ -667,9 +893,11 @@ mod tests {
     fn test_run_sync_force_dry_run_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
         let args = make_sync_args(true, false, true, false);
         // dry-run takes precedence over force
-        let result = run_sync(&args, dir.path(), &term);
+        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
         assert!(
             result.is_ok(),
             "run_sync with --force --dry-run should succeed"
@@ -679,10 +907,12 @@ mod tests {
     #[test]
     fn test_run_sync_no_flags_prompts_user() {
         let dir = tempfile::tempdir().unwrap();
-        // Provide "a" (accept) input so the interactive prompt completes
         let term = MockTerminal::new(vec!["a"]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        // Accept project confirmation prompt
+        let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, false, false);
-        let result = run_sync(&args, dir.path(), &term);
+        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
         assert!(
             result.is_ok(),
             "run_sync with no flags should succeed when user accepts"
@@ -690,11 +920,43 @@ mod tests {
     }
 
     #[test]
+    fn test_run_sync_user_rejects_returns_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        // Reject project confirmation prompt
+        let reader = MockInputReader::reject();
+        let args = make_sync_args(false, false, false, false);
+        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "run_sync should return UserCancelled when user rejects"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_force_skips_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        // Reader would reject, but --force should skip it
+        let reader = MockInputReader::reject();
+        let args = make_sync_args(false, false, true, false);
+        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        assert!(
+            result.is_ok(),
+            "run_sync with --force should skip confirmation and succeed"
+        );
+    }
+
+    #[test]
     fn test_run_sync_dry_run_writes_no_files() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
         let args = make_sync_args(true, false, false, false);
-        run_sync(&args, dir.path(), &term).unwrap();
+        run_sync(&args, dir.path(), &term, &runner, &reader).unwrap();
         // Verify no CLAUDE.md was created
         assert!(
             !dir.path().join("CLAUDE.md").exists(),
@@ -702,14 +964,90 @@ mod tests {
         );
     }
 
+    // ── project filtering tests ──
+
+    #[test]
+    fn test_run_sync_project_filter_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
+        let args = make_sync_args_with_projects(true, vec!["apps/web"]);
+        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        assert!(
+            result.is_ok(),
+            "run_sync with --project apps/web should succeed"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_project_filter_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
+        let args = make_sync_args_with_projects(true, vec!["nonexistent/path"]);
+        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        assert!(
+            matches!(result, Err(ActualError::ConfigError(_))),
+            "run_sync with non-matching --project should return ConfigError"
+        );
+    }
+
+    // ── filter_projects unit tests ──
+
+    #[test]
+    fn test_filter_projects_empty_filters_returns_all() {
+        let analysis = make_monorepo_analysis();
+        let result = filter_projects(analysis, &[]).unwrap();
+        assert_eq!(result.projects.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_projects_matches_one() {
+        let analysis = make_monorepo_analysis();
+        let filters = vec!["apps/web".to_string()];
+        let result = filter_projects(analysis, &filters).unwrap();
+        assert_eq!(result.projects.len(), 1);
+        assert_eq!(result.projects[0].path, "apps/web");
+    }
+
+    #[test]
+    fn test_filter_projects_matches_multiple() {
+        let analysis = make_monorepo_analysis();
+        let filters = vec!["apps/web".to_string(), "services/api".to_string()];
+        let result = filter_projects(analysis, &filters).unwrap();
+        assert_eq!(result.projects.len(), 2);
+    }
+
+    #[test]
+    fn test_filter_projects_no_match_returns_error() {
+        let analysis = make_monorepo_analysis();
+        let filters = vec!["nonexistent".to_string()];
+        let result = filter_projects(analysis, &filters);
+        assert!(matches!(result, Err(ActualError::ConfigError(_))));
+    }
+
+    #[test]
+    fn test_filter_projects_preserves_is_monorepo() {
+        let analysis = make_monorepo_analysis();
+        let filters = vec!["apps/web".to_string()];
+        let result = filter_projects(analysis, &filters).unwrap();
+        assert!(result.is_monorepo);
+    }
+
     // ── exec / handle_result tests ──
 
     #[test]
-    fn test_exec_returns_zero() {
-        // Use dry_run=true to avoid interactive prompt (RealTerminal blocks in tests).
+    fn test_exec_claude_not_found() {
+        // exec() now calls find_claude_binary() which will fail if Claude is not found
+        // Set an invalid binary path to ensure it fails predictably
+        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
         let args = make_sync_args(true, false, false, false);
         let code = exec(&args);
-        assert_eq!(code, 0);
+        std::env::remove_var("CLAUDE_BINARY");
+        assert_eq!(code, 2, "expected exit code 2 (ClaudeNotFound)");
     }
 
     #[test]

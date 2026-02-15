@@ -183,10 +183,14 @@ fn test_cli_parse_config_path() {
 }
 
 #[test]
-fn test_run_sync() {
-    // Use --dry-run to avoid interactive prompt (RealTerminal blocks in tests).
+fn test_run_sync_without_claude() {
+    // Sync now requires Claude binary for Phase 1 env check.
+    // Without it, we expect exit code 2 (ClaudeNotFound).
+    let _lock = ENV_MUTEX.lock().unwrap();
+    std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
     let cli = Cli::parse_from(["actual", "sync", "--dry-run"]);
-    assert_eq!(run(cli), 0);
+    assert_eq!(run(cli), 2);
+    std::env::remove_var("CLAUDE_BINARY");
 }
 
 #[test]
