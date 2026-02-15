@@ -100,8 +100,7 @@ fn run_sync<R: ClaudeRunner>(
     // 3. Run analysis (cached if in a git repo)
     let spinner = Spinner::new("Analyzing repository...", false);
     let cfg_path = config_path()?;
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| ActualError::ConfigError(format!("Failed to create async runtime: {e}")))?;
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create async runtime");
     let analysis = rt.block_on(run_analysis_cached(
         runner,
         args.model.as_deref(),
