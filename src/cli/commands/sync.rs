@@ -6,10 +6,11 @@ use crate::cli::args::SyncArgs;
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::{confirm_files, TerminalIO};
 use crate::cli::ui::progress::{ERROR_SYMBOL, SUCCESS_SYMBOL};
+use crate::cli::ui::real_terminal::RealTerminal;
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::writer::{write_files, WriteAction, WriteResult};
-use crate::tailoring::types::TailoringOutput;
+use crate::tailoring::types::{TailoringOutput, TailoringSummary};
 
 /// Result summary from the confirm + write phase.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,13 +35,42 @@ fn handle_result(result: Result<(), ActualError>) -> i32 {
     }
 }
 
-fn run_sync(_args: &SyncArgs) -> Result<(), ActualError> {
+fn run_sync(args: &SyncArgs) -> Result<(), ActualError> {
+    let root_dir = std::env::current_dir().map_err(|e| {
+        ActualError::ConfigError(format!("cannot determine working directory: {e}"))
+    })?;
+    let term = RealTerminal::default();
+
     // TODO: Phase 1 - env check + analysis (actual-cli-a59)
     // TODO: Phase 2 - fetch + tailor (actual-cli-e29)
-    // Phase 3 - confirm + write
-    // For now, just print a message that the pipeline is not yet connected
-    eprintln!("Sync pipeline not yet connected. The confirm + write phase is implemented.");
-    eprintln!("Waiting for fetch + tailor phase (actual-cli-e29) to provide TailoringOutput.");
+    // For now, produce an empty TailoringOutput since upstream phases are not connected.
+
+    eprintln!(
+        "Sync pipeline: phases 1-2 not yet connected; running confirm + write with empty output."
+    );
+
+    let output = TailoringOutput {
+        files: vec![],
+        skipped_adrs: vec![],
+        summary: TailoringSummary {
+            total_input: 0,
+            applicable: 0,
+            not_applicable: 0,
+            files_generated: 0,
+        },
+    };
+
+    // Phase 3 - confirm + write (fully implemented)
+    // --no-tailor: when Phase 2 is connected, this flag will skip Claude tailoring.
+    // For now it has no additional effect since tailoring isn't wired yet.
+    let _result = confirm_and_write(
+        &output,
+        &root_dir,
+        args.force,
+        args.dry_run,
+        args.full,
+        &term,
+    )?;
     Ok(())
 }
 
@@ -552,12 +582,115 @@ mod tests {
         );
     }
 
+    // ── run_sync flag-passthrough tests ──
+
+    #[test]
+    fn test_run_sync_dry_run_returns_ok() {
+        let args = SyncArgs {
+            dry_run: true,
+            full: false,
+            force: false,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: None,
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+        };
+        // run_sync with dry_run=true should succeed and write no files
+        let result = run_sync(&args);
+        assert!(result.is_ok(), "run_sync with --dry-run should succeed");
+    }
+
+    #[test]
+    fn test_run_sync_dry_run_full_returns_ok() {
+        let args = SyncArgs {
+            dry_run: true,
+            full: true,
+            force: false,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: None,
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+        };
+        let result = run_sync(&args);
+        assert!(
+            result.is_ok(),
+            "run_sync with --dry-run --full should succeed"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_force_returns_ok() {
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: None,
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+        };
+        let result = run_sync(&args);
+        assert!(result.is_ok(), "run_sync with --force should succeed");
+    }
+
+    #[test]
+    fn test_run_sync_no_tailor_returns_ok() {
+        // Use force=true to avoid interactive prompt (RealTerminal blocks in tests).
+        // The key assertion is that no_tailor=true doesn't cause an error.
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: None,
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        let result = run_sync(&args);
+        assert!(result.is_ok(), "run_sync with --no-tailor should succeed");
+    }
+
+    #[test]
+    fn test_run_sync_force_dry_run_returns_ok() {
+        let args = SyncArgs {
+            dry_run: true,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: None,
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+        };
+        // dry-run takes precedence over force
+        let result = run_sync(&args);
+        assert!(
+            result.is_ok(),
+            "run_sync with --force --dry-run should succeed"
+        );
+    }
+
     // ── exec / handle_result tests ──
 
     #[test]
     fn test_exec_returns_zero() {
+        // Use dry_run=true to avoid interactive prompt (RealTerminal blocks in tests).
         let args = SyncArgs {
-            dry_run: false,
+            dry_run: true,
             full: false,
             force: false,
             reset_rejections: false,

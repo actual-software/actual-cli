@@ -184,7 +184,8 @@ fn test_cli_parse_config_path() {
 
 #[test]
 fn test_run_sync() {
-    let cli = Cli::parse_from(["actual", "sync"]);
+    // Use --dry-run to avoid interactive prompt (RealTerminal blocks in tests).
+    let cli = Cli::parse_from(["actual", "sync", "--dry-run"]);
     assert_eq!(run(cli), 0);
 }
 
