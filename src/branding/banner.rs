@@ -52,4 +52,33 @@ mod tests {
         // Calling with quiet=true should return immediately without error.
         print_banner(true);
     }
+
+    #[test]
+    fn print_banner_non_quiet_produces_no_panic() {
+        // Calling with quiet=false should print the banner to stderr without error.
+        // This exercises the styling and printing code paths.
+        print_banner(false);
+    }
+
+    #[test]
+    fn banner_contains_box_drawing_characters() {
+        assert!(
+            BANNER.contains('╔'),
+            "BANNER should contain top-left corner"
+        );
+        assert!(
+            BANNER.contains('╗'),
+            "BANNER should contain top-right corner"
+        );
+        assert!(
+            BANNER.contains('╚'),
+            "BANNER should contain bottom-left corner"
+        );
+        assert!(
+            BANNER.contains('╝'),
+            "BANNER should contain bottom-right corner"
+        );
+        assert!(BANNER.contains('║'), "BANNER should contain vertical bar");
+        assert!(BANNER.contains('═'), "BANNER should contain horizontal bar");
+    }
 }
