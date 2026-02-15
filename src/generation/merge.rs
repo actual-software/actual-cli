@@ -432,6 +432,45 @@ mod tests {
     }
 
     #[test]
+    fn test_existing_without_markers_appends_when_trailing_newline() {
+        let existing = "# My Custom Rules\n\nDo stuff\n";
+        let result = merge_content(Some(existing), "managed stuff", 1, false);
+        assert!(
+            result
+                .content
+                .starts_with("# My Custom Rules\n\nDo stuff\n"),
+            "expected existing content preserved at start: {}",
+            result.content
+        );
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected managed section appended"
+        );
+    }
+
+    #[test]
+    fn test_existing_with_markers_no_trailing_newline() {
+        // END_MARKER is not followed by \n (no trailing newline)
+        let managed = markers::wrap_in_markers("old content", 1);
+        let existing = managed.clone(); // no trailing \n
+        let result = merge_content(Some(&existing), "new content", 2, false);
+        assert!(
+            result.content.contains("new content"),
+            "expected new content: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("old content"),
+            "expected old content replaced: {}",
+            result.content
+        );
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected managed section in output"
+        );
+    }
+
+    #[test]
     fn test_new_root_file_roundtrip() {
         let original = "line one\nline two\nline three";
         let result = merge_content(None, original, 1, true);
