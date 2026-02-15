@@ -8,7 +8,7 @@ use crate::cli::ui::file_confirm::{confirm_files, TerminalIO};
 use crate::cli::ui::progress::{ERROR_SYMBOL, SUCCESS_SYMBOL};
 use crate::error::ActualError;
 use crate::generation::markers;
-use crate::generation::writer::{write_files, WriteAction};
+use crate::generation::writer::{write_files, WriteAction, WriteResult};
 use crate::tailoring::types::TailoringOutput;
 
 /// Result summary from the confirm + write phase.
@@ -118,11 +118,35 @@ pub fn confirm_and_write(
     let results = write_files(root_dir, &confirmed);
 
     // Step 6: Report results and return SyncResult
+    let (files_created, files_updated, files_failed) = report_write_results(&results, term);
+
+    let sync_result = SyncResult {
+        files_created,
+        files_updated,
+        files_failed,
+        files_rejected,
+    };
+
+    term.write_line(&format!(
+        "\nSync complete: {} created, {} updated, {} failed, {} rejected",
+        sync_result.files_created,
+        sync_result.files_updated,
+        sync_result.files_failed,
+        sync_result.files_rejected,
+    ));
+
+    Ok(sync_result)
+}
+
+/// Report per-file write results to the terminal.
+///
+/// Returns `(created, updated, failed)` counts.
+fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usize, usize, usize) {
     let mut files_created = 0;
     let mut files_updated = 0;
     let mut files_failed = 0;
 
-    for result in &results {
+    for result in results {
         match result.action {
             WriteAction::Created => {
                 files_created += 1;
@@ -155,22 +179,7 @@ pub fn confirm_and_write(
         }
     }
 
-    let sync_result = SyncResult {
-        files_created,
-        files_updated,
-        files_failed,
-        files_rejected,
-    };
-
-    term.write_line(&format!(
-        "\nSync complete: {} created, {} updated, {} failed, {} rejected",
-        sync_result.files_created,
-        sync_result.files_updated,
-        sync_result.files_failed,
-        sync_result.files_rejected,
-    ));
-
-    Ok(sync_result)
+    (files_created, files_updated, files_failed)
 }
 
 #[cfg(test)]
@@ -592,5 +601,130 @@ mod tests {
     fn test_handle_result_config_error() {
         let code = handle_result(Err(ActualError::ConfigError("bad".to_string())));
         assert_eq!(code, 1);
+    }
+
+    // ── report_write_results tests ──
+
+    #[test]
+    fn test_report_write_results_failed_without_error_message() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![WriteResult {
+            path: "CLAUDE.md".to_string(),
+            action: WriteAction::Failed,
+            version: 0,
+            error: None,
+        }];
+
+        let (created, updated, failed) = report_write_results(&results, &term);
+
+        assert_eq!(created, 0);
+        assert_eq!(updated, 0);
+        assert_eq!(failed, 1);
+
+        let text = term.output_text();
+        assert!(
+            text.contains("unknown error"),
+            "expected 'unknown error' fallback in: {text}"
+        );
+    }
+
+    #[test]
+    fn test_report_write_results_created() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![WriteResult {
+            path: "CLAUDE.md".to_string(),
+            action: WriteAction::Created,
+            version: 1,
+            error: None,
+        }];
+
+        let (created, updated, failed) = report_write_results(&results, &term);
+
+        assert_eq!(created, 1);
+        assert_eq!(updated, 0);
+        assert_eq!(failed, 0);
+
+        let text = term.output_text();
+        assert!(
+            text.contains("CLAUDE.md") && text.contains("created"),
+            "expected created message in: {text}"
+        );
+    }
+
+    #[test]
+    fn test_report_write_results_updated() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![WriteResult {
+            path: "apps/web/CLAUDE.md".to_string(),
+            action: WriteAction::Updated,
+            version: 3,
+            error: None,
+        }];
+
+        let (created, updated, failed) = report_write_results(&results, &term);
+
+        assert_eq!(created, 0);
+        assert_eq!(updated, 1);
+        assert_eq!(failed, 0);
+
+        let text = term.output_text();
+        assert!(
+            text.contains("apps/web/CLAUDE.md") && text.contains("updated"),
+            "expected updated message in: {text}"
+        );
+    }
+
+    #[test]
+    fn test_report_write_results_failed_with_error_message() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![WriteResult {
+            path: "bad/CLAUDE.md".to_string(),
+            action: WriteAction::Failed,
+            version: 0,
+            error: Some("permission denied".to_string()),
+        }];
+
+        let (created, updated, failed) = report_write_results(&results, &term);
+
+        assert_eq!(created, 0);
+        assert_eq!(updated, 0);
+        assert_eq!(failed, 1);
+
+        let text = term.output_text();
+        assert!(
+            text.contains("permission denied"),
+            "expected error message in: {text}"
+        );
+    }
+
+    #[test]
+    fn test_report_write_results_mixed() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![
+            WriteResult {
+                path: "CLAUDE.md".to_string(),
+                action: WriteAction::Created,
+                version: 1,
+                error: None,
+            },
+            WriteResult {
+                path: "apps/web/CLAUDE.md".to_string(),
+                action: WriteAction::Updated,
+                version: 2,
+                error: None,
+            },
+            WriteResult {
+                path: "bad/CLAUDE.md".to_string(),
+                action: WriteAction::Failed,
+                version: 0,
+                error: None,
+            },
+        ];
+
+        let (created, updated, failed) = report_write_results(&results, &term);
+
+        assert_eq!(created, 1);
+        assert_eq!(updated, 1);
+        assert_eq!(failed, 1);
     }
 }
