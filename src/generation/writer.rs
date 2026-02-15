@@ -269,24 +269,9 @@ mod tests {
 
         // All should succeed
         for result in &results {
-            assert_eq!(
-                result.action,
-                WriteAction::Created,
-                "expected Created for {}, got {:?}",
-                result.path,
-                result.action
-            );
-            assert!(
-                result.error.is_none(),
-                "expected no error for {}, got {:?}",
-                result.path,
-                result.error
-            );
-            assert_eq!(
-                result.version, 1,
-                "expected version 1 for new file {}",
-                result.path
-            );
+            assert_eq!(result.action, WriteAction::Created);
+            assert!(result.error.is_none());
+            assert_eq!(result.version, 1);
         }
 
         // Verify paths
