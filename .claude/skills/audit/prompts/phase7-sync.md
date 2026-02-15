@@ -72,7 +72,7 @@ Write the following JSON to `.audit/report.json`:
 
 ## Rules
 
-- If `bd sync` fails, set `sync.success` to false and include the error message. Do NOT retry — report the failure.
+- If `bd sync --full` fails, set `sync.success` to false and include the error message. Do NOT retry — report the failure.
 - `top_priority` should include all P0 and P1 findings for visibility.
 - The report must be complete — the orchestrator uses this to present the final output to the user.
 - Do NOT clean up `.audit/` — the orchestrator handles cleanup.
