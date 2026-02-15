@@ -6,6 +6,7 @@ use crate::api::DEFAULT_API_URL;
 use crate::cli::args::StatusArgs;
 use crate::cli::ui::progress::{SUCCESS_SYMBOL, WARN_SYMBOL};
 use crate::config;
+use crate::config::types::Config;
 use crate::error::ActualError;
 use crate::generation::markers;
 
@@ -20,28 +21,31 @@ pub fn exec(args: &StatusArgs) -> i32 {
 }
 
 fn run_status(args: &StatusArgs) -> Result<(), ActualError> {
+    let config_path = config::paths::config_path()?;
+    let config_exists = config_path.exists();
+    let cfg = config::paths::load()?;
+
     // 1. Config section
-    print_config_section(args.verbose)?;
+    print_config_section(&cfg, &config_path, config_exists, args.verbose);
 
     println!();
 
     // 2. CLAUDE.md files section
-    print_claude_md_section()?;
+    let cwd = std::env::current_dir().map_err(|e| {
+        ActualError::ConfigError(format!("Failed to determine current directory: {e}"))
+    })?;
+    print_claude_md_section(&cwd);
 
     // 3. Verbose: cached analysis
     if args.verbose {
         println!();
-        print_verbose_section()?;
+        print_verbose_section(&cfg);
     }
 
     Ok(())
 }
 
-fn print_config_section(verbose: bool) -> Result<(), ActualError> {
-    let config_path = config::paths::config_path()?;
-    let config_exists = config_path.exists();
-    let cfg = config::paths::load()?;
-
+fn print_config_section(cfg: &Config, config_path: &Path, config_exists: bool, verbose: bool) {
     println!("{}:", style("Config").bold());
 
     let exists_label = if config_exists {
@@ -71,16 +75,10 @@ fn print_config_section(verbose: bool) -> Result<(), ActualError> {
             .unwrap_or("not set (will use server default)");
         println!("  {:<14} {}", "Model:", model);
     }
-
-    Ok(())
 }
 
-fn print_claude_md_section() -> Result<(), ActualError> {
-    let cwd = std::env::current_dir().map_err(|e| {
-        ActualError::ConfigError(format!("Failed to determine current directory: {e}"))
-    })?;
-
-    let files = find_claude_md_files(&cwd);
+fn print_claude_md_section(cwd: &Path) {
+    let files = find_claude_md_files(cwd);
 
     println!("{}:", style("CLAUDE.md files").bold());
 
@@ -90,11 +88,11 @@ fn print_claude_md_section() -> Result<(), ActualError> {
             "  Run {} to generate CLAUDE.md files for this repository.",
             style("`actual sync`").cyan()
         );
-        return Ok(());
+        return;
     }
 
     for file_path in &files {
-        let relative = file_path.strip_prefix(&cwd).unwrap_or(file_path);
+        let relative = file_path.strip_prefix(cwd).unwrap_or(file_path);
         let display_path = format!("./{}", relative.display());
 
         let content = std::fs::read_to_string(file_path).unwrap_or_default();
@@ -133,13 +131,9 @@ fn print_claude_md_section() -> Result<(), ActualError> {
             );
         }
     }
-
-    Ok(())
 }
 
-fn print_verbose_section() -> Result<(), ActualError> {
-    let cfg = config::paths::load()?;
-
+fn print_verbose_section(cfg: &Config) {
     println!("{}:", style("Details").bold());
 
     // Telemetry
@@ -195,8 +189,6 @@ fn print_verbose_section() -> Result<(), ActualError> {
     } else {
         println!("  {:<20} {}", "Cached analysis:", style("none").dim());
     }
-
-    Ok(())
 }
 
 /// Recursively find all files named `CLAUDE.md` under the given root directory.
@@ -252,7 +244,11 @@ fn walk_for_claude_md(dir: &Path, results: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::types::{CachedAnalysis, TelemetryConfig};
+    use std::collections::HashMap;
     use tempfile::tempdir;
+
+    // ─── find_claude_md_files ────────────────────────────────────
 
     #[test]
     fn test_find_claude_md_files_empty_dir() {
@@ -323,13 +319,31 @@ mod tests {
         std::fs::write(a_dir.join("CLAUDE.md"), "# A").unwrap();
         let files = find_claude_md_files(dir.path());
         assert_eq!(files.len(), 2);
-        // Should be sorted: a/CLAUDE.md before b/CLAUDE.md
         assert!(files[0] < files[1]);
     }
 
     #[test]
+    fn test_find_claude_md_files_nonexistent_dir() {
+        let files = find_claude_md_files(Path::new("/nonexistent/path/that/does/not/exist"));
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_find_claude_md_files_skips_all_ignored_dirs() {
+        let dir = tempdir().unwrap();
+        for skip in SKIP_DIRS {
+            let d = dir.path().join(skip);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("CLAUDE.md"), "# Skip").unwrap();
+        }
+        let files = find_claude_md_files(dir.path());
+        assert!(files.is_empty());
+    }
+
+    // ─── exec ────────────────────────────────────────────────────
+
+    #[test]
     fn test_exec_returns_zero() {
-        // Set ACTUAL_CONFIG to a temp location to avoid side effects
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");
         std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
@@ -339,5 +353,232 @@ mod tests {
         assert_eq!(code, 0);
 
         std::env::remove_var("ACTUAL_CONFIG");
+    }
+
+    #[test]
+    fn test_exec_verbose_returns_zero() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+
+        let args = StatusArgs { verbose: true };
+        let code = exec(&args);
+        assert_eq!(code, 0);
+
+        std::env::remove_var("ACTUAL_CONFIG");
+    }
+
+    #[test]
+    fn test_exec_error_path() {
+        // Set ACTUAL_CONFIG to empty string which will cause config_path to fail
+        std::env::set_var("ACTUAL_CONFIG", "");
+        let args = StatusArgs { verbose: false };
+        let code = exec(&args);
+        assert_ne!(code, 0);
+        std::env::remove_var("ACTUAL_CONFIG");
+    }
+
+    // ─── print_config_section ────────────────────────────────────
+
+    #[test]
+    fn test_print_config_section_default_config() {
+        let cfg = Config::default();
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        // Exercises the config_exists=true branch and api_url=None branch
+        print_config_section(&cfg, &path, true, false);
+    }
+
+    #[test]
+    fn test_print_config_section_created_config() {
+        let cfg = Config::default();
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        // Exercises the config_exists=false (created) branch
+        print_config_section(&cfg, &path, false, false);
+    }
+
+    #[test]
+    fn test_print_config_section_custom_api_url() {
+        let cfg = Config {
+            api_url: Some("https://custom.api.com".to_string()),
+            ..Config::default()
+        };
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        // Exercises the api_url.is_some() branch
+        print_config_section(&cfg, &path, true, false);
+    }
+
+    #[test]
+    fn test_print_config_section_verbose_with_model() {
+        let cfg = Config {
+            model: Some("opus".to_string()),
+            ..Config::default()
+        };
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        // Exercises verbose=true with model set
+        print_config_section(&cfg, &path, true, true);
+    }
+
+    #[test]
+    fn test_print_config_section_verbose_no_model() {
+        let cfg = Config::default();
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        // Exercises verbose=true with model=None
+        print_config_section(&cfg, &path, true, true);
+    }
+
+    // ─── print_claude_md_section ─────────────────────────────────
+
+    #[test]
+    fn test_print_claude_md_section_empty() {
+        let dir = tempdir().unwrap();
+        print_claude_md_section(dir.path());
+    }
+
+    #[test]
+    fn test_print_claude_md_section_unmanaged() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "# No markers").unwrap();
+        print_claude_md_section(dir.path());
+    }
+
+    #[test]
+    fn test_print_claude_md_section_managed() {
+        let dir = tempdir().unwrap();
+        let managed = markers::wrap_in_markers("test content", 2);
+        std::fs::write(dir.path().join("CLAUDE.md"), &managed).unwrap();
+        print_claude_md_section(dir.path());
+    }
+
+    #[test]
+    fn test_print_claude_md_section_managed_no_metadata() {
+        let dir = tempdir().unwrap();
+        // Managed section but without version/last-synced metadata
+        let content = format!(
+            "{}\ncontent only\n{}",
+            markers::START_MARKER,
+            markers::END_MARKER
+        );
+        std::fs::write(dir.path().join("CLAUDE.md"), &content).unwrap();
+        print_claude_md_section(dir.path());
+    }
+
+    // ─── print_verbose_section ───────────────────────────────────
+
+    #[test]
+    fn test_print_verbose_section_defaults() {
+        let cfg = Config::default();
+        print_verbose_section(&cfg);
+    }
+
+    #[test]
+    fn test_print_verbose_section_telemetry_disabled() {
+        let cfg = Config {
+            telemetry: Some(TelemetryConfig {
+                enabled: Some(false),
+            }),
+            ..Config::default()
+        };
+        print_verbose_section(&cfg);
+    }
+
+    #[test]
+    fn test_print_verbose_section_telemetry_enabled_explicit() {
+        let cfg = Config {
+            telemetry: Some(TelemetryConfig {
+                enabled: Some(true),
+            }),
+            ..Config::default()
+        };
+        print_verbose_section(&cfg);
+    }
+
+    #[test]
+    fn test_print_verbose_section_telemetry_none_in_struct() {
+        let cfg = Config {
+            telemetry: Some(TelemetryConfig { enabled: None }),
+            ..Config::default()
+        };
+        print_verbose_section(&cfg);
+    }
+
+    #[test]
+    fn test_print_verbose_section_with_custom_batch_and_concurrency() {
+        let cfg = Config {
+            batch_size: Some(25),
+            concurrency: Some(8),
+            ..Config::default()
+        };
+        print_verbose_section(&cfg);
+    }
+
+    #[test]
+    fn test_print_verbose_section_with_rejected_adrs() {
+        let mut rejected = HashMap::new();
+        rejected.insert(
+            "repo1".to_string(),
+            vec!["adr-001".to_string(), "adr-002".to_string()],
+        );
+        rejected.insert("repo2".to_string(), vec!["adr-003".to_string()]);
+        let cfg = Config {
+            rejected_adrs: Some(rejected),
+            ..Config::default()
+        };
+        print_verbose_section(&cfg);
+    }
+
+    #[test]
+    fn test_print_verbose_section_with_cached_analysis_long_commit() {
+        let cfg = Config {
+            cached_analysis: Some(CachedAnalysis {
+                repo_path: "/home/user/project".to_string(),
+                head_commit: Some("abc123def456789".to_string()),
+                analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                analyzed_at: chrono::Utc::now(),
+            }),
+            ..Config::default()
+        };
+        print_verbose_section(&cfg);
+    }
+
+    #[test]
+    fn test_print_verbose_section_with_cached_analysis_short_commit() {
+        let cfg = Config {
+            cached_analysis: Some(CachedAnalysis {
+                repo_path: "/home/user/project".to_string(),
+                head_commit: Some("abc".to_string()),
+                analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                analyzed_at: chrono::Utc::now(),
+            }),
+            ..Config::default()
+        };
+        print_verbose_section(&cfg);
+    }
+
+    #[test]
+    fn test_print_verbose_section_with_cached_analysis_no_commit() {
+        let cfg = Config {
+            cached_analysis: Some(CachedAnalysis {
+                repo_path: "/home/user/project".to_string(),
+                head_commit: None,
+                analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                analyzed_at: chrono::Utc::now(),
+            }),
+            ..Config::default()
+        };
+        print_verbose_section(&cfg);
+    }
+
+    #[test]
+    fn test_print_verbose_section_with_cached_analysis_exactly_7_char_commit() {
+        let cfg = Config {
+            cached_analysis: Some(CachedAnalysis {
+                repo_path: "/home/user/project".to_string(),
+                head_commit: Some("abcdefg".to_string()),
+                analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                analyzed_at: chrono::Utc::now(),
+            }),
+            ..Config::default()
+        };
+        print_verbose_section(&cfg);
     }
 }

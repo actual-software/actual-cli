@@ -412,6 +412,7 @@ mod tests {
     // --- extract_adr_ids tests ---
 
     #[test]
+<<<<<<< HEAD
     fn test_extract_adr_ids_basic() {
         let content = "<!-- adr-ids: abc,def -->";
         assert_eq!(extract_adr_ids(content), vec!["abc", "def"]);
@@ -554,5 +555,21 @@ mod tests {
         let managed = extract_managed_content(&wrapped).expect("should have managed section");
         let recovered = extract_adr_ids(managed);
         assert_eq!(recovered, ids);
+=======
+    fn test_extract_version_malformed_value() {
+        // Version comment present but with non-numeric value
+        assert_eq!(extract_version("<!-- version: abc -->"), None);
+    }
+
+    #[test]
+    fn test_extract_last_synced_absent() {
+        assert_eq!(extract_last_synced("no timestamp here"), None);
+    }
+
+    #[test]
+    fn test_next_version_no_version_in_content() {
+        // Content exists but has no version comment
+        assert_eq!(next_version(Some("no version here")), 1);
+>>>>>>> 7998d67 (actual-cli-u23: Add comprehensive tests for 100% coverage)
     }
 }
