@@ -162,6 +162,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_zero_max_attempts_returns_default_error() {
+        tokio::time::pause();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let config = RetryConfig {
+            max_attempts: 0,
+            ..RetryConfig::default()
+        };
+        let result: Result<(), _> = with_retry(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(ActualError::ApiError(_))));
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_single_attempt_config() {
+        tokio::time::pause();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let config = RetryConfig {
+            max_attempts: 1,
+            ..RetryConfig::default()
+        };
+        let result: Result<(), _> = with_retry(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err(ActualError::ApiError("500".to_string()))
+            }
+        })
+        .await;
+
+        assert!(matches!(result, Err(ActualError::ApiError(_))));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn test_backoff_delays() {
         tokio::time::pause();
 
