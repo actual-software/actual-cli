@@ -40,6 +40,30 @@ pub enum Language {
     Other,
 }
 
+impl std::fmt::Display for Language {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Language::TypeScript => "typescript",
+            Language::JavaScript => "javascript",
+            Language::Python => "python",
+            Language::Rust => "rust",
+            Language::Go => "go",
+            Language::Java => "java",
+            Language::Kotlin => "kotlin",
+            Language::Swift => "swift",
+            Language::Ruby => "ruby",
+            Language::Php => "php",
+            Language::C => "c",
+            Language::Cpp => "cpp",
+            Language::CSharp => "csharp",
+            Language::Scala => "scala",
+            Language::Elixir => "elixir",
+            Language::Other => "other",
+        };
+        write!(f, "{s}")
+    }
+}
+
 /// A framework detected in a project.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Framework {
@@ -144,6 +168,19 @@ mod tests {
         );
         assert_eq!(restored.package_manager, original.package_manager);
         assert_eq!(restored.description, original.description);
+    }
+
+    #[test]
+    fn language_display_matches_serde() {
+        // Verify Display output matches serde serialization (without quotes)
+        let lang = Language::TypeScript;
+        let display = lang.to_string();
+        let serde = serde_json::to_string(&lang).unwrap();
+        assert_eq!(
+            format!("\"{display}\""),
+            serde,
+            "Display and serde should match"
+        );
     }
 
     #[test]
