@@ -227,6 +227,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_clone_produces_independent_copy() {
+        let mut opts = InvocationOptions::for_analysis(None);
+        opts.json_schema = Some("schema".to_string());
+        opts.max_budget_usd = Some(1.0);
+        let cloned = opts.clone();
+
+        assert_eq!(cloned.model, opts.model);
+        assert_eq!(cloned.max_turns, opts.max_turns);
+        assert_eq!(cloned.tools, opts.tools);
+        assert_eq!(cloned.allowed_tools, opts.allowed_tools);
+        assert_eq!(cloned.json_schema, opts.json_schema);
+        assert_eq!(cloned.max_budget_usd, opts.max_budget_usd);
+    }
+
+    #[test]
+    fn test_debug_output() {
+        let opts = InvocationOptions::for_analysis(None);
+        let debug = format!("{opts:?}");
+        assert!(debug.contains("InvocationOptions"));
+        assert!(debug.contains("sonnet"));
+    }
+
     /// Helper: assert that `--flag value` appears as consecutive elements.
     fn assert_arg_value(args: &[String], flag: &str, expected: &str) {
         let pos = args
