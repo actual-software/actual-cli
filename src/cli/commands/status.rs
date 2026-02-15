@@ -255,7 +255,28 @@ mod tests {
     use super::*;
     use crate::config::types::{CachedAnalysis, TelemetryConfig};
     use std::collections::HashMap;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    /// Mutex to serialize tests that manipulate env vars.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn restore_env(key: &str, saved: Option<String>) {
+        match saved {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    fn with_temp_config<F: FnOnce()>(f: F) {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        let saved = std::env::var("ACTUAL_CONFIG").ok();
+        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        f();
+        restore_env("ACTUAL_CONFIG", saved);
+    }
 
     // ─── find_claude_md_files ────────────────────────────────────
 
@@ -353,38 +374,32 @@ mod tests {
 
     #[test]
     fn test_exec_returns_zero() {
-        let dir = tempdir().unwrap();
-        let config_file = dir.path().join("config.yaml");
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
-
-        let args = StatusArgs { verbose: false };
-        let code = exec(&args);
-        assert_eq!(code, 0);
-
-        std::env::remove_var("ACTUAL_CONFIG");
+        with_temp_config(|| {
+            let args = StatusArgs { verbose: false };
+            let code = exec(&args);
+            assert_eq!(code, 0);
+        });
     }
 
     #[test]
     fn test_exec_verbose_returns_zero() {
-        let dir = tempdir().unwrap();
-        let config_file = dir.path().join("config.yaml");
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
-
-        let args = StatusArgs { verbose: true };
-        let code = exec(&args);
-        assert_eq!(code, 0);
-
-        std::env::remove_var("ACTUAL_CONFIG");
+        with_temp_config(|| {
+            let args = StatusArgs { verbose: true };
+            let code = exec(&args);
+            assert_eq!(code, 0);
+        });
     }
 
     #[test]
     fn test_exec_error_path() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = std::env::var("ACTUAL_CONFIG").ok();
         // Set ACTUAL_CONFIG to empty string which will cause config_path to fail
         std::env::set_var("ACTUAL_CONFIG", "");
         let args = StatusArgs { verbose: false };
         let code = exec(&args);
         assert_ne!(code, 0);
-        std::env::remove_var("ACTUAL_CONFIG");
+        restore_env("ACTUAL_CONFIG", saved);
     }
 
     // ─── print_config_section ────────────────────────────────────
@@ -604,14 +619,10 @@ mod tests {
 
     #[test]
     fn test_load_and_run_succeeds() {
-        let dir = tempdir().unwrap();
-        let config_file = dir.path().join("config.yaml");
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
-
-        let result = load_and_run(&StatusArgs { verbose: false });
-        assert!(result.is_ok());
-
-        std::env::remove_var("ACTUAL_CONFIG");
+        with_temp_config(|| {
+            let result = load_and_run(&StatusArgs { verbose: false });
+            assert!(result.is_ok());
+        });
     }
 
     // ─── run_status ──────────────────────────────────────────────
