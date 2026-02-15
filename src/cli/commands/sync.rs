@@ -21,7 +21,11 @@ pub struct SyncResult {
 }
 
 pub fn exec(args: &SyncArgs) -> i32 {
-    match run_sync(args) {
+    handle_result(run_sync(args))
+}
+
+fn handle_result(result: Result<(), ActualError>) -> i32 {
+    match result {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("{} {}", style("Error:").red().bold(), e);
@@ -539,7 +543,7 @@ mod tests {
         );
     }
 
-    // ── exec tests ──
+    // ── exec / handle_result tests ──
 
     #[test]
     fn test_exec_returns_zero() {
@@ -557,5 +561,22 @@ mod tests {
         };
         let code = exec(&args);
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn test_handle_result_ok() {
+        assert_eq!(handle_result(Ok(())), 0);
+    }
+
+    #[test]
+    fn test_handle_result_user_cancelled() {
+        let code = handle_result(Err(ActualError::UserCancelled));
+        assert_eq!(code, 4);
+    }
+
+    #[test]
+    fn test_handle_result_config_error() {
+        let code = handle_result(Err(ActualError::ConfigError("bad".to_string())));
+        assert_eq!(code, 1);
     }
 }
