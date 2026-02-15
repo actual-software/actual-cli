@@ -130,22 +130,16 @@ mod tests {
 
     #[test]
     fn repo_analysis_schema_is_valid_json() {
-        let result: Result<serde_json::Value, _> = serde_json::from_str(REPO_ANALYSIS_SCHEMA);
-        assert!(
-            result.is_ok(),
-            "REPO_ANALYSIS_SCHEMA is not valid JSON: {}",
-            result.unwrap_err()
-        );
+        let schema: serde_json::Value = serde_json::from_str(REPO_ANALYSIS_SCHEMA)
+            .expect("REPO_ANALYSIS_SCHEMA is not valid JSON");
+        assert_eq!(schema["type"], "object");
     }
 
     #[test]
     fn tailoring_output_schema_is_valid_json() {
-        let result: Result<serde_json::Value, _> = serde_json::from_str(TAILORING_OUTPUT_SCHEMA);
-        assert!(
-            result.is_ok(),
-            "TAILORING_OUTPUT_SCHEMA is not valid JSON: {}",
-            result.unwrap_err()
-        );
+        let schema: serde_json::Value = serde_json::from_str(TAILORING_OUTPUT_SCHEMA)
+            .expect("TAILORING_OUTPUT_SCHEMA is not valid JSON");
+        assert_eq!(schema["type"], "object");
     }
 
     #[test]
