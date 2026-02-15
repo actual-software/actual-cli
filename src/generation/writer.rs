@@ -365,25 +365,19 @@ mod tests {
 
     #[test]
     fn test_write_fails_when_file_cannot_be_written() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        // Create a read-only directory so file writing fails
-        let readonly_dir = dir.path().join("readonly");
-        std::fs::create_dir_all(&readonly_dir).unwrap();
-        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // Create a directory at the target file path — writing to a directory always fails
+        let target = dir.path().join("subdir").join("CLAUDE.md");
+        std::fs::create_dir_all(&target).unwrap();
 
         let files = vec![FileOutput {
-            path: "readonly/CLAUDE.md".to_string(),
+            path: "subdir/CLAUDE.md".to_string(),
             content: "content".to_string(),
             reasoning: "test".to_string(),
             adr_ids: vec![],
         }];
 
         let results = write_files(dir.path(), &files);
-
-        // Restore permissions so temp dir cleanup succeeds
-        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(
