@@ -26,6 +26,8 @@ fn test_cli_parse_sync_with_flags() {
         "apps/web",
         "--project",
         "apps/api",
+        "--max-budget-usd",
+        "1.50",
     ]);
     let Command::Sync(args) = cli.command else {
         unreachable!()
@@ -39,6 +41,7 @@ fn test_cli_parse_sync_with_flags() {
     assert_eq!(args.model.as_deref(), Some("sonnet"));
     assert_eq!(args.api_url.as_deref(), Some("https://example.com"));
     assert_eq!(args.projects, vec!["apps/web", "apps/api"]);
+    assert_eq!(args.max_budget_usd, Some(1.50));
 }
 
 #[test]
@@ -56,6 +59,61 @@ fn test_cli_parse_sync_defaults() {
     assert!(args.model.is_none());
     assert!(args.api_url.is_none());
     assert!(args.projects.is_empty());
+    assert!(args.max_budget_usd.is_none());
+}
+
+#[test]
+fn test_cli_parse_sync_full_requires_dry_run() {
+    let result = Cli::try_parse_from(["actual", "sync", "--full"]);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("--dry-run"),
+        "error should mention --dry-run: {err}"
+    );
+}
+
+#[test]
+fn test_cli_parse_sync_dry_run_full_accepted() {
+    let cli = Cli::parse_from(["actual", "sync", "--dry-run", "--full"]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert!(args.dry_run);
+    assert!(args.full);
+}
+
+#[test]
+fn test_cli_parse_sync_multiple_projects() {
+    let cli = Cli::parse_from([
+        "actual",
+        "sync",
+        "--project",
+        "apps/web",
+        "--project",
+        "apps/api",
+    ]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert_eq!(args.projects, vec!["apps/web", "apps/api"]);
+}
+
+#[test]
+fn test_cli_parse_sync_model_and_budget() {
+    let cli = Cli::parse_from([
+        "actual",
+        "sync",
+        "--model",
+        "opus",
+        "--max-budget-usd",
+        "0.50",
+    ]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert_eq!(args.model.as_deref(), Some("opus"));
+    assert_eq!(args.max_budget_usd, Some(0.50));
 }
 
 #[test]
