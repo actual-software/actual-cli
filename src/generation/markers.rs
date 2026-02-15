@@ -210,6 +210,38 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_managed_content_returns_none_reversed_markers() {
+        // End marker appears before start marker
+        let content = format!("{END_MARKER}\nsome content\n{START_MARKER}");
+        assert_eq!(
+            extract_managed_content(&content),
+            None,
+            "expected None when markers are reversed"
+        );
+    }
+
+    #[test]
+    fn test_extract_managed_content_no_newlines_around_content() {
+        // Markers directly adjacent to content without newlines
+        let content = format!("{START_MARKER}content{END_MARKER}");
+        let extracted = extract_managed_content(&content);
+        assert_eq!(
+            extracted,
+            Some("content"),
+            "expected 'content' when no newlines around it"
+        );
+    }
+
+    #[test]
+    fn test_has_managed_section_false_reversed_markers() {
+        let content = format!("{END_MARKER}\nsome content\n{START_MARKER}");
+        assert!(
+            !has_managed_section(&content),
+            "expected false when markers are reversed"
+        );
+    }
+
+    #[test]
     fn test_timestamp_is_valid_iso8601() {
         let output = wrap_in_markers("test", 1);
         let prefix = "<!-- last-synced: ";
