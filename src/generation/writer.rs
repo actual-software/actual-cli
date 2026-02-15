@@ -43,62 +43,61 @@ pub struct WriteResult {
 pub fn write_files(root_dir: &Path, files: &[FileOutput]) -> Vec<WriteResult> {
     files
         .iter()
-        .map(|file| write_single_file(root_dir, file))
+        .map(|file| {
+            let full_path = root_dir.join(&file.path);
+
+            // Determine if root file (no directory component)
+            let is_root = Path::new(&file.path)
+                .parent()
+                .is_none_or(|p| p == Path::new(""));
+
+            // Read existing content
+            let existing_content = std::fs::read_to_string(&full_path).ok();
+            let existing_ref = existing_content.as_deref();
+
+            // Determine if this is a create or update
+            let action = if existing_content.is_some() {
+                WriteAction::Updated
+            } else {
+                WriteAction::Created
+            };
+
+            // Compute version
+            let version = markers::next_version(existing_ref);
+
+            // Merge content
+            let result =
+                merge::merge_content(existing_ref, &file.content, version, is_root, &file.adr_ids);
+
+            // Create parent directories (full_path always has a parent since it's root_dir.join(path))
+            let parent = full_path.parent().expect("joined path always has a parent");
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return WriteResult {
+                    path: file.path.clone(),
+                    action: WriteAction::Failed,
+                    version: 0,
+                    error: Some(format!("Failed to create directory: {e}")),
+                };
+            }
+
+            // Write file
+            if let Err(e) = std::fs::write(&full_path, &result.content) {
+                return WriteResult {
+                    path: file.path.clone(),
+                    action: WriteAction::Failed,
+                    version: 0,
+                    error: Some(format!("Failed to write file: {e}")),
+                };
+            }
+
+            WriteResult {
+                path: file.path.clone(),
+                action,
+                version,
+                error: None,
+            }
+        })
         .collect()
-}
-
-fn write_single_file(root_dir: &Path, file: &FileOutput) -> WriteResult {
-    let full_path = root_dir.join(&file.path);
-
-    // Determine if root file (no directory component)
-    let is_root = Path::new(&file.path)
-        .parent()
-        .is_none_or(|p| p == Path::new(""));
-
-    // Read existing content
-    let existing_content = std::fs::read_to_string(&full_path).ok();
-    let existing_ref = existing_content.as_deref();
-
-    // Determine if this is a create or update
-    let action = if existing_content.is_some() {
-        WriteAction::Updated
-    } else {
-        WriteAction::Created
-    };
-
-    // Compute version
-    let version = markers::next_version(existing_ref);
-
-    // Merge content
-    let result = merge::merge_content(existing_ref, &file.content, version, is_root, &file.adr_ids);
-
-    // Create parent directories (full_path always has a parent since it's root_dir.join(path))
-    let parent = full_path.parent().expect("joined path always has a parent");
-    if let Err(e) = std::fs::create_dir_all(parent) {
-        return WriteResult {
-            path: file.path.clone(),
-            action: WriteAction::Failed,
-            version: 0,
-            error: Some(format!("Failed to create directory: {e}")),
-        };
-    }
-
-    // Write file
-    if let Err(e) = std::fs::write(&full_path, &result.content) {
-        return WriteResult {
-            path: file.path.clone(),
-            action: WriteAction::Failed,
-            version: 0,
-            error: Some(format!("Failed to write file: {e}")),
-        };
-    }
-
-    WriteResult {
-        path: file.path.clone(),
-        action,
-        version,
-        error: None,
-    }
 }
 
 #[cfg(test)]
