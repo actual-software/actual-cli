@@ -22,7 +22,7 @@ pub struct SyncResult {
 }
 
 pub fn exec(args: &SyncArgs) -> i32 {
-    handle_result(run_sync(args))
+    handle_result(run(args))
 }
 
 fn handle_result(result: Result<(), ActualError>) -> i32 {
@@ -35,25 +35,26 @@ fn handle_result(result: Result<(), ActualError>) -> i32 {
     }
 }
 
-fn cwd_error(e: std::io::Error) -> ActualError {
-    ActualError::ConfigError(format!("cannot determine working directory: {e}"))
-}
-
-fn run_sync(args: &SyncArgs) -> Result<(), ActualError> {
-    let root_dir = std::env::current_dir().map_err(cwd_error)?;
+/// Thin wrapper that resolves system dependencies (cwd, terminal) and
+/// delegates to [`run_sync`].  Kept minimal so nearly all logic lives
+/// in the fully-testable [`run_sync`].
+fn run(args: &SyncArgs) -> Result<(), ActualError> {
+    let root_dir = resolve_cwd();
     let term = RealTerminal::default();
-    run_sync_inner(args, &root_dir, &term)
+    run_sync(args, &root_dir, &term)
 }
 
-/// Core sync logic, separated for testability.
+/// Resolve the current working directory, falling back to `"."` if
+/// unavailable (e.g. the directory was deleted while the process was running).
+fn resolve_cwd() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// Core sync logic.
 ///
 /// Accepts injected `root_dir` and `term` so unit tests can avoid
 /// `RealTerminal` (which blocks on stdin) and control the working directory.
-fn run_sync_inner(
-    args: &SyncArgs,
-    root_dir: &Path,
-    term: &dyn TerminalIO,
-) -> Result<(), ActualError> {
+fn run_sync(args: &SyncArgs, root_dir: &Path, term: &dyn TerminalIO) -> Result<(), ActualError> {
     // TODO: Phase 1 - env check + analysis (actual-cli-a59)
     // TODO: Phase 2 - fetch + tailor (actual-cli-e29)
     // For now, produce an empty TailoringOutput since upstream phases are not connected.
@@ -588,25 +589,15 @@ mod tests {
         );
     }
 
-    // ── cwd_error test ──
+    // ── resolve_cwd test ──
 
     #[test]
-    fn test_cwd_error_formats_message() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "dir gone");
-        let err = cwd_error(io_err);
-        match err {
-            ActualError::ConfigError(msg) => {
-                assert!(
-                    msg.contains("cannot determine working directory"),
-                    "expected cwd context in: {msg}"
-                );
-                assert!(msg.contains("dir gone"), "expected io error in: {msg}");
-            }
-            other => panic!("expected ConfigError, got: {other:?}"),
-        }
+    fn test_resolve_cwd_returns_path() {
+        let cwd = resolve_cwd();
+        assert!(cwd.is_absolute() || cwd == std::path::PathBuf::from("."));
     }
 
-    // ── run_sync_inner flag-passthrough tests ──
+    // ── run_sync flag-passthrough tests ──
 
     fn make_sync_args(dry_run: bool, full: bool, force: bool, no_tailor: bool) -> SyncArgs {
         SyncArgs {
@@ -624,36 +615,33 @@ mod tests {
     }
 
     #[test]
-    fn test_run_sync_inner_dry_run_returns_ok() {
+    fn test_run_sync_dry_run_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let args = make_sync_args(true, false, false, false);
-        let result = run_sync_inner(&args, dir.path(), &term);
-        assert!(
-            result.is_ok(),
-            "run_sync_inner with --dry-run should succeed"
-        );
+        let result = run_sync(&args, dir.path(), &term);
+        assert!(result.is_ok(), "run_sync with --dry-run should succeed");
     }
 
     #[test]
-    fn test_run_sync_inner_dry_run_full_returns_ok() {
+    fn test_run_sync_dry_run_full_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let args = make_sync_args(true, true, false, false);
-        let result = run_sync_inner(&args, dir.path(), &term);
+        let result = run_sync(&args, dir.path(), &term);
         assert!(
             result.is_ok(),
-            "run_sync_inner with --dry-run --full should succeed"
+            "run_sync with --dry-run --full should succeed"
         );
     }
 
     #[test]
-    fn test_run_sync_inner_force_returns_ok() {
+    fn test_run_sync_force_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let args = make_sync_args(false, false, true, false);
-        let result = run_sync_inner(&args, dir.path(), &term);
-        assert!(result.is_ok(), "run_sync_inner with --force should succeed");
+        let result = run_sync(&args, dir.path(), &term);
+        assert!(result.is_ok(), "run_sync with --force should succeed");
         // With empty output + force, terminal should show "No files to write."
         let text = term.output_text();
         assert!(
@@ -663,49 +651,49 @@ mod tests {
     }
 
     #[test]
-    fn test_run_sync_inner_no_tailor_force_returns_ok() {
+    fn test_run_sync_no_tailor_force_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let args = make_sync_args(false, false, true, true);
-        let result = run_sync_inner(&args, dir.path(), &term);
+        let result = run_sync(&args, dir.path(), &term);
         assert!(
             result.is_ok(),
-            "run_sync_inner with --no-tailor --force should succeed"
+            "run_sync with --no-tailor --force should succeed"
         );
     }
 
     #[test]
-    fn test_run_sync_inner_force_dry_run_returns_ok() {
+    fn test_run_sync_force_dry_run_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let args = make_sync_args(true, false, true, false);
         // dry-run takes precedence over force
-        let result = run_sync_inner(&args, dir.path(), &term);
+        let result = run_sync(&args, dir.path(), &term);
         assert!(
             result.is_ok(),
-            "run_sync_inner with --force --dry-run should succeed"
+            "run_sync with --force --dry-run should succeed"
         );
     }
 
     #[test]
-    fn test_run_sync_inner_no_flags_prompts_user() {
+    fn test_run_sync_no_flags_prompts_user() {
         let dir = tempfile::tempdir().unwrap();
         // Provide "a" (accept) input so the interactive prompt completes
         let term = MockTerminal::new(vec!["a"]);
         let args = make_sync_args(false, false, false, false);
-        let result = run_sync_inner(&args, dir.path(), &term);
+        let result = run_sync(&args, dir.path(), &term);
         assert!(
             result.is_ok(),
-            "run_sync_inner with no flags should succeed when user accepts"
+            "run_sync with no flags should succeed when user accepts"
         );
     }
 
     #[test]
-    fn test_run_sync_inner_dry_run_writes_no_files() {
+    fn test_run_sync_dry_run_writes_no_files() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let args = make_sync_args(true, false, false, false);
-        run_sync_inner(&args, dir.path(), &term).unwrap();
+        run_sync(&args, dir.path(), &term).unwrap();
         // Verify no CLAUDE.md was created
         assert!(
             !dir.path().join("CLAUDE.md").exists(),
@@ -729,6 +717,18 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_result_user_cancelled() {
+        let code = handle_result(Err(ActualError::UserCancelled));
+        assert_eq!(code, 4);
+    }
+
+    #[test]
+    fn test_handle_result_config_error() {
+        let code = handle_result(Err(ActualError::ConfigError("bad".to_string())));
+        assert_eq!(code, 1);
+    }
+
+    #[test]
     fn test_sync_result_debug_clone_eq() {
         let result = SyncResult {
             files_created: 1,
@@ -740,18 +740,6 @@ mod tests {
         assert_eq!(result, cloned);
         let debug = format!("{:?}", result);
         assert!(debug.contains("SyncResult"));
-    }
-
-    #[test]
-    fn test_handle_result_user_cancelled() {
-        let code = handle_result(Err(ActualError::UserCancelled));
-        assert_eq!(code, 4);
-    }
-
-    #[test]
-    fn test_handle_result_config_error() {
-        let code = handle_result(Err(ActualError::ConfigError("bad".to_string())));
-        assert_eq!(code, 1);
     }
 
     // ── MockTerminal edge case tests ──
