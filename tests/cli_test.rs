@@ -37,12 +37,16 @@ fn test_sync_not_implemented() {
 }
 
 #[test]
-fn test_status_not_implemented() {
+fn test_status_shows_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
     cmd()
         .arg("status")
+        .env("ACTUAL_CONFIG", config_file.to_str().unwrap())
         .assert()
         .success()
-        .stderr(predicate::str::contains("not implemented yet"));
+        .stdout(predicate::str::contains("Config"))
+        .stdout(predicate::str::contains("CLAUDE.md files"));
 }
 
 #[test]
