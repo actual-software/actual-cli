@@ -26,6 +26,9 @@ pub enum ActualError {
     #[error("Config error: {0}")]
     ConfigError(String),
 
+    #[error("Claude Code subprocess timed out after {seconds}s")]
+    ClaudeTimeout { seconds: u64 },
+
     #[error("User cancelled")]
     UserCancelled,
 }
@@ -81,6 +84,7 @@ mod tests {
             ActualError::ConfigError("bad key".to_string()).exit_code(),
             1
         );
+        assert_eq!(ActualError::ClaudeTimeout { seconds: 30 }.exit_code(), 1);
         assert_eq!(ActualError::UserCancelled.exit_code(), 4);
     }
 
@@ -125,6 +129,10 @@ mod tests {
 
         let msg = ActualError::ConfigError("bad key".to_string()).to_string();
         assert!(msg.contains("bad key"), "expected 'bad key' in: {msg}");
+
+        let msg = ActualError::ClaudeTimeout { seconds: 30 }.to_string();
+        assert!(msg.contains("30"), "expected '30' in: {msg}");
+        assert!(msg.contains("timed out"), "expected 'timed out' in: {msg}");
 
         let msg = ActualError::UserCancelled.to_string();
         assert!(msg.contains("cancelled"), "expected 'cancelled' in: {msg}");
