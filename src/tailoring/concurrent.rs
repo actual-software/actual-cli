@@ -54,12 +54,9 @@ pub async fn tailor_all_projects<R: ClaudeRunner>(
     let results = futures::future::join_all(futures).await;
 
     // Collect results, returning the first error encountered.
-    let mut outputs = Vec::with_capacity(results.len());
-    for result in results {
-        outputs.push(result?);
-    }
+    let outputs: Result<Vec<TailoringOutput>, ActualError> = results.into_iter().collect();
 
-    Ok(merge_outputs(outputs))
+    Ok(merge_outputs(outputs?))
 }
 
 /// Process a single project: batch its ADRs, invoke tailoring for each batch,
