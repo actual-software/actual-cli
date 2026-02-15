@@ -1085,6 +1085,35 @@ mod tests {
         );
     }
 
+    // ── MockInputReader edge case tests ──
+
+    #[test]
+    fn test_mock_input_reader_exhausted() {
+        let reader = MockInputReader::new(vec!["one"]);
+        // First call succeeds
+        assert_eq!(reader.read_line().unwrap(), "one");
+        // Second call returns an error because responses are exhausted
+        let err = reader.read_line().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    // ── run_sync analysis error test ──
+
+    #[test]
+    fn test_run_sync_analysis_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        // Invalid JSON causes parse error in run_analysis_cached
+        let runner = MockRunner::new("not valid json");
+        let reader = MockInputReader::accept();
+        let args = make_sync_args(false, false, true, false);
+        let result = run_sync(&args, dir.path(), &term, &runner, &reader);
+        assert!(
+            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
+            "expected ClaudeOutputParse error, got: {result:?}"
+        );
+    }
+
     // ── report_write_results tests ──
 
     #[test]
