@@ -152,9 +152,16 @@ mod tests {
         }
     }
 
+    /// A response entry for the mock runner: either a JSON string to parse,
+    /// or a non-parse error to return directly.
+    enum MockResponse {
+        Json(String),
+        Error(ActualError),
+    }
+
     /// Mock runner that tracks concurrency and returns canned responses.
     struct ConcurrentMockRunner {
-        responses: Mutex<Vec<String>>,
+        responses: Mutex<Vec<MockResponse>>,
         call_count: AtomicU32,
         delay: Duration,
         tracker: ConcurrencyTracker,
@@ -162,6 +169,15 @@ mod tests {
 
     impl ConcurrentMockRunner {
         fn new(responses: Vec<String>, delay: Duration) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().map(MockResponse::Json).collect()),
+                call_count: AtomicU32::new(0),
+                delay,
+                tracker: ConcurrencyTracker::new(),
+            }
+        }
+
+        fn with_responses(responses: Vec<MockResponse>, delay: Duration) -> Self {
             Self {
                 responses: Mutex::new(responses),
                 call_count: AtomicU32::new(0),
@@ -178,10 +194,15 @@ mod tests {
         ) -> Result<T, ActualError> {
             let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
             self.tracker.record(self.delay).await;
-            let responses = self.responses.lock().unwrap();
-            let json = &responses[idx];
-            let parsed: T = serde_json::from_str(json)?;
-            Ok(parsed)
+            let mut responses = self.responses.lock().unwrap();
+            let entry = std::mem::replace(&mut responses[idx], MockResponse::Json(String::new()));
+            match entry {
+                MockResponse::Json(json) => {
+                    let parsed: T = serde_json::from_str(&json)?;
+                    Ok(parsed)
+                }
+                MockResponse::Error(e) => Err(e),
+            }
         }
     }
 
@@ -455,5 +476,112 @@ mod tests {
                 || content.contains("Rules from project B\n\nRules from project A"),
             "expected content concatenated with newlines, got: {content}"
         );
+    }
+
+    // --- Test 5: error from one project propagates ---
+
+    #[tokio::test]
+    async fn test_error_propagates() {
+        let projects = vec![make_project("a"), make_project("b")];
+        let adrs = vec![make_adr("adr-001")];
+
+        let responses = vec![
+            MockResponse::Json(make_output_json(
+                "apps/a/CLAUDE.md",
+                "Rules for A",
+                &["adr-001"],
+            )),
+            MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+                message: "process crashed".to_string(),
+                stderr: "segfault".to_string(),
+            }),
+        ];
+
+        let runner = ConcurrentMockRunner::with_responses(responses, Duration::from_millis(10));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 2,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+        };
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, ActualError::ClaudeSubprocessFailed { .. }));
+    }
+
+    // --- Test 6: multi-batch per project passes context to later batches ---
+
+    #[tokio::test]
+    async fn test_multi_batch_passes_context() {
+        let projects = vec![make_project("a")];
+        // 3 ADRs in different categories with batch_size=1 → 3 batches
+        let adr1 = Adr {
+            id: "adr-001".to_string(),
+            title: "ADR 001".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-a".to_string(),
+                name: "Category A".to_string(),
+                path: "Category A".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adr2 = Adr {
+            id: "adr-002".to_string(),
+            title: "ADR 002".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-b".to_string(),
+                name: "Category B".to_string(),
+                path: "Category B".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adrs = vec![adr1, adr2];
+
+        // batch_size=1 means 2 batches (one per category since BTreeMap sorts by cat id).
+        // Batch 1 (cat-a): returns CLAUDE.md with adr-001
+        // Batch 2 (cat-b): returns apps/a/CLAUDE.md with adr-002
+        let responses = vec![
+            make_output_json("CLAUDE.md", "Batch 1 rules", &["adr-001"]),
+            make_output_json("apps/a/CLAUDE.md", "Batch 2 rules", &["adr-002"]),
+        ];
+
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(10));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 1,
+            existing_claude_md_paths: "existing context",
+            model_override: None,
+            max_budget_usd: None,
+        };
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+
+        let output = result.unwrap();
+
+        // Verify both batch outputs merged
+        assert_eq!(output.files.len(), 2);
+        let paths: Vec<&str> = output.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"CLAUDE.md"));
+        assert!(paths.contains(&"apps/a/CLAUDE.md"));
+
+        // Both batches should have been called
+        assert_eq!(runner.call_count.load(Ordering::SeqCst), 2);
     }
 }
