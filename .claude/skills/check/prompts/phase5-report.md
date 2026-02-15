@@ -18,12 +18,21 @@ Read:
    ```bash
    bd ready
    ```
-3. For the top 5 highest-priority ready items, get details:
+3. Filter completed epics from ready work:
+   - For each item in `bd ready` output
+   - If item is an epic (`issue_type == "epic"`), check if all children are closed:
+     ```bash
+     bd show <epic-id> --children --json
+     ```
+   - Count total children and closed children
+   - If `total_children > 0` AND `closed_children == total_children`, exclude from ready work list
+   - Keep track of these completable epics separately for reporting
+4. For the top 5 highest-priority ready items (after filtering), get details:
    ```bash
    bd show <id>
    ```
-4. Estimate effort for each ready item: trivial / small / medium / large.
-5. Formulate a recommendation on what to start with and why.
+5. Estimate effort for each ready item: trivial / small / medium / large.
+6. Formulate a recommendation on what to start with and why.
 
 ## Output
 
@@ -51,6 +60,15 @@ Write the following JSON to `.check/report.json`:
       "description_summary": "CI workflow if conditions are wrong, causing auto-remediation to not trigger."
     }
   ],
+  "completable_epics": [
+    {
+      "id": "actual-cli-xyz",
+      "title": "Epic: Some completed feature",
+      "total_children": 5,
+      "closed_children": 5,
+      "note": "All children closed, epic can be manually closed"
+    }
+  ],
   "recommendation": {
     "start_with": "actual-cli-eco",
     "reason": "P0 priority, small effort, unblocks CI automation pipeline."
@@ -60,8 +78,11 @@ Write the following JSON to `.check/report.json`:
 
 ## Rules
 
-- Order ready work by priority: P0 > P1 > P2 > P3.
-- Within the same priority, prefer smaller effort items (quicker wins).
-- The recommendation should consider both priority and effort — a quick P0 fix beats a large P1.
-- Include a brief description summary (1-2 sentences) for each item.
-- Do NOT claim or update any beads — just report.
+- Filter out completed epics: Epics where all children are closed should NOT appear in ready_work
+- Report completable epics separately in the completable_epics array
+- Order ready work by priority: P0 > P1 > P2 > P3
+- Within the same priority, prefer smaller effort items (quicker wins)
+- The recommendation should consider both priority and effort — a quick P0 fix beats a large P1
+- Include a brief description summary (1-2 sentences) for each item
+- Do NOT claim or update any beads — just report
+- If an epic has no children (empty array from `bd show --children`), include it in ready_work (not filtered)
