@@ -1,11 +1,19 @@
 use console::Style;
 
-/// ASCII art banner displayed on CLI startup.
+/// ASCII art banner based on the actual logo.
+///
+/// The logo is a stylized "a" shaped like a bird with speed lines and
+/// circuit nodes extending from the right, representing AI-powered
+/// code management.
 pub const BANNER: &str = r#"
-    ╔═══════════════════════════════════╗
-    ║           actual CLI              ║
-    ║     ADR-powered CLAUDE.md         ║
-    ╚═══════════════════════════════════╝
+           ▄███████▄
+      ▄▄  ███▀   ▀███    ━━━━━━━
+    ▄████ ██   ▄█▄  ██  ●━━━━━━━
+     ▀▀▀  ███ ▀█▀  ██▀ ●━━━━━━━
+          ▀████▄▄███▀
+       ███▀▀▀████▀     actual
+        ▀██▄▄█▀▀
+          ▀▀▀
 "#;
 
 /// Print the ASCII banner to stderr.
@@ -16,20 +24,30 @@ pub fn print_banner(quiet: bool) {
         return;
     }
 
-    let frame_style = Style::new().cyan();
-    let text_style = Style::new().bold();
+    let logo_style = Style::new().cyan().bold();
+    let lines_style = Style::new().blue();
+    let label_style = Style::new().white().bold();
 
     for line in BANNER.trim_matches('\n').lines() {
-        // Style frame characters (box-drawing) differently from inner text.
-        // Split each line into frame and content portions.
-        if let Some(inner) = line.strip_prefix("    ║").and_then(|s| s.strip_suffix('║')) {
-            // Content line: frame in cyan, inner text in bold
-            eprint!("    {}", frame_style.apply_to("║"));
-            eprint!("{}", text_style.apply_to(inner));
-            eprintln!("{}", frame_style.apply_to("║"));
+        // Lines containing circuit nodes get split styling
+        if let Some(idx) = line.find('●') {
+            // Circuit node + speed lines in blue, logo part in cyan
+            eprint!("{}", logo_style.apply_to(&line[..idx]));
+            eprintln!("{}", lines_style.apply_to(&line[idx..]));
+        } else if line.contains("actual") {
+            // The "actual" label line
+            if let Some(idx) = line.find("actual") {
+                eprint!("{}", logo_style.apply_to(&line[..idx]));
+                eprintln!("{}", label_style.apply_to(&line[idx..]));
+            } else {
+                eprintln!("{}", logo_style.apply_to(line));
+            }
+        } else if let Some(idx) = line.find("━━━") {
+            // Top speed line (no circuit node)
+            eprint!("{}", logo_style.apply_to(&line[..idx]));
+            eprintln!("{}", lines_style.apply_to(&line[idx..]));
         } else {
-            // Pure frame line (top/bottom borders)
-            eprintln!("{}", frame_style.apply_to(line));
+            eprintln!("{}", logo_style.apply_to(line));
         }
     }
 }
@@ -48,7 +66,7 @@ mod tests {
     }
 
     #[test]
-    fn print_banner_quiet_produces_no_panic() {
+    fn print_banner_quiet_produces_no_output() {
         // Calling with quiet=true should return immediately without error.
         print_banner(true);
     }
@@ -56,29 +74,26 @@ mod tests {
     #[test]
     fn print_banner_non_quiet_produces_no_panic() {
         // Calling with quiet=false should print the banner to stderr without error.
-        // This exercises the styling and printing code paths.
+        // This exercises all the styling and printing code paths.
         print_banner(false);
     }
 
     #[test]
-    fn banner_contains_box_drawing_characters() {
+    fn banner_contains_logo_elements() {
+        // The banner should contain block characters for the logo shape
         assert!(
-            BANNER.contains('╔'),
-            "BANNER should contain top-left corner"
+            BANNER.contains('█'),
+            "BANNER should contain block characters for the logo"
         );
+        // Speed lines
         assert!(
-            BANNER.contains('╗'),
-            "BANNER should contain top-right corner"
+            BANNER.contains('━'),
+            "BANNER should contain speed line characters"
         );
+        // Circuit nodes
         assert!(
-            BANNER.contains('╚'),
-            "BANNER should contain bottom-left corner"
+            BANNER.contains('●'),
+            "BANNER should contain circuit node characters"
         );
-        assert!(
-            BANNER.contains('╝'),
-            "BANNER should contain bottom-right corner"
-        );
-        assert!(BANNER.contains('║'), "BANNER should contain vertical bar");
-        assert!(BANNER.contains('═'), "BANNER should contain horizontal bar");
     }
 }
