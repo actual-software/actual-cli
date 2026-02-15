@@ -5,27 +5,27 @@ use crate::error::ActualError;
 
 pub const DEFAULT_API_URL: &str = "https://api-service.api.prod.actual.ai";
 
+const USER_AGENT_VALUE: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
 pub struct ActualApiClient {
     client: reqwest::Client,
     base_url: String,
 }
 
 impl ActualApiClient {
-    pub fn new(base_url: &str) -> Self {
-        let user_agent = format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-
+    pub fn new(base_url: &str) -> Result<Self, ActualError> {
         let mut default_headers = HeaderMap::new();
-        default_headers.insert(USER_AGENT, HeaderValue::from_str(&user_agent).unwrap());
+        default_headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
 
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
             .build()
-            .expect("failed to build reqwest client");
+            .map_err(|e| ActualError::ApiError(format!("failed to build HTTP client: {e}")))?;
 
-        Self {
+        Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
-        }
+        })
     }
 
     pub async fn post_match(&self, request: &MatchRequest) -> Result<MatchResponse, ActualError> {
@@ -110,7 +110,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_request()).await;
 
         assert!(result.is_ok());
@@ -142,7 +142,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_request()).await;
 
         assert!(result.is_err());
@@ -168,7 +168,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_request()).await;
 
         assert!(result.is_err());
@@ -202,7 +202,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_request()).await;
 
         assert!(result.is_ok());
@@ -221,7 +221,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_request()).await;
 
         assert!(result.is_err());
@@ -254,7 +254,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_request()).await;
 
         assert!(result.is_err());
@@ -274,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_match_network_error() {
         // Connect to a port that's not listening
-        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let client = ActualApiClient::new("http://127.0.0.1:1").unwrap();
         let result = client.post_match(&sample_request()).await;
 
         assert!(result.is_err());
@@ -291,12 +291,22 @@ mod tests {
 
     #[test]
     fn test_new_trims_trailing_slash() {
-        let client = ActualApiClient::new("http://example.com/");
+        let client = ActualApiClient::new("http://example.com/").unwrap();
         assert_eq!(client.base_url, "http://example.com");
+    }
+
+    #[test]
+    fn test_new_returns_ok() {
+        assert!(ActualApiClient::new("http://localhost").is_ok());
     }
 
     #[test]
     fn test_default_api_url() {
         assert_eq!(DEFAULT_API_URL, "https://api-service.api.prod.actual.ai");
+    }
+
+    #[test]
+    fn test_user_agent_value() {
+        assert!(USER_AGENT_VALUE.starts_with("actual-cli/"));
     }
 }
