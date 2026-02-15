@@ -115,7 +115,6 @@ mod tests {
 
     enum MockResponse {
         Json(String),
-        #[allow(dead_code)]
         Error(ActualError),
     }
 
@@ -133,6 +132,13 @@ mod tests {
                         .map(|s| MockResponse::Json(s.to_string()))
                         .collect(),
                 ),
+                call_count: AtomicU32::new(0),
+            }
+        }
+
+        fn from_error(error: ActualError) -> Self {
+            Self {
+                responses: Mutex::new(vec![MockResponse::Error(error)]),
                 call_count: AtomicU32::new(0),
             }
         }
@@ -469,5 +475,85 @@ mod tests {
         let cfg = config::paths::load_from(&config_path).unwrap();
         let cached = cfg.cached_analysis.unwrap();
         assert_eq!(cached.head_commit, Some(head_hash));
+    }
+
+    #[test]
+    fn test_get_git_head_returns_none_for_nonexistent_path() {
+        let result = get_git_head(Path::new("/nonexistent/path/that/does/not/exist"));
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn test_cache_miss_config_load_error_propagates() {
+        let repo_dir = tempdir().unwrap();
+        create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Write invalid YAML to the config file
+        std::fs::write(&config_path, "{{{{invalid yaml").unwrap();
+
+        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
+
+        let err = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Failed to parse config YAML"));
+        assert_eq!(runner.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cache_miss_runner_error_propagates() {
+        let repo_dir = tempdir().unwrap();
+        create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        let runner = MockRunner::from_error(ActualError::ClaudeSubprocessFailed {
+            message: "process crashed".to_string(),
+            stderr: "segfault".to_string(),
+        });
+
+        let err = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("subprocess failed"));
+        assert_eq!(runner.calls(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_cache_miss_save_error_propagates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo_dir = tempdir().unwrap();
+        create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Create the config file, then make it read-only
+        config::paths::save_to(&config::Config::default(), &config_path).unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        std::fs::set_permissions(config_dir.path(), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+
+        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
+
+        let err = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Failed to write config file"));
+        assert_eq!(runner.calls(), 1);
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(config_dir.path(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 }
