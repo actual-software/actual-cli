@@ -57,14 +57,7 @@ pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
             let langs: Vec<String> = project
                 .languages
                 .iter()
-                .map(|l| {
-                    // Use serde serialization to get the lowercase name
-                    // (Language has rename_all = "lowercase")
-                    serde_json::to_value(l)
-                        .ok()
-                        .and_then(|v| v.as_str().map(String::from))
-                        .unwrap_or_else(|| format!("{l:?}").to_lowercase())
-                })
+                .map(|l| format!("{l:?}").to_lowercase())
                 .collect();
             writeln!(output, "    Languages: {}", langs.join(", ")).unwrap();
         }
