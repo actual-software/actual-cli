@@ -227,4 +227,57 @@ mod tests {
             "expected ClaudeOutputParse"
         );
     }
+
+    #[test]
+    fn test_exec_binary_not_found() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let code = exec();
+        std::env::remove_var("CLAUDE_BINARY");
+        assert_eq!(code, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_success() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(
+            dir.path(),
+            r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "user@example.com"}"#,
+            0,
+        );
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let code = exec();
+        std::env::remove_var("CLAUDE_BINARY");
+        assert_eq!(code, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_not_authenticated() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(dir.path(), r#"{"loggedIn": false}"#, 0);
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let code = exec();
+        std::env::remove_var("CLAUDE_BINARY");
+        assert_eq!(code, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_auth_via_env_success() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(
+            dir.path(),
+            r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "user@example.com"}"#,
+            0,
+        );
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let result = run_auth();
+        std::env::remove_var("CLAUDE_BINARY");
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
 }
