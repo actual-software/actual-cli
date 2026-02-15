@@ -25,7 +25,7 @@ jobs:
   lint:
     name: Lint
     needs: sync-beads
-    if: always() && (needs.sync-beads.result == 'success' || needs.sync-beads.result == 'skipped')
+    if: always() && needs.sync-beads.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
