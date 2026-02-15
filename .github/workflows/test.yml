@@ -1,0 +1,123 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+
+jobs:
+  sync-beads:
+    name: Sync Beads
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: sync
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Test
+    needs: sync-beads
+    if: always() && (needs.sync-beads.result == 'success' || needs.sync-beads.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Run tests
+        run: |
+          cargo test --workspace 2>&1 | tee test-output.txt
+          TEST_EXIT=${PIPESTATUS[0]}
+          echo "test_exit=$TEST_EXIT" >> $GITHUB_ENV
+          exit $TEST_EXIT
+
+      - name: Create test summary
+        if: always()
+        run: |
+          echo "## Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ env.test_exit }}" = "0" ]; then
+            PASSED=$(grep -c "^test .* ok$" test-output.txt 2>/dev/null || echo "0")
+            echo ":white_check_mark: **All $PASSED tests passed**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo ":x: **Tests failed**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -E "^(test .* FAILED|failures:)" test-output.txt >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "See full output" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output
+          path: test-output.txt
+
+  create-fix-bead:
+    name: Create Fix Bead
+    if: always() && needs.test.result == 'failure' && github.event_name == 'pull_request'
+    needs: [sync-beads, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download test output
+        uses: actions/download-artifact@v4
+        with:
+          name: test-output
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: create
+          failure-type: test_failure
+          failure-summary: "Tests failed - see artifacts for details"
+          failure-details-file: test-output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup-fix-beads:
+    name: Cleanup Fix Beads
+    if: always() && needs.test.result == 'success' && github.event_name == 'pull_request'
+    needs: [sync-beads, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: cleanup
+          failure-type: test_failure
+          github-token: ${{ secrets.GITHUB_TOKEN }}
