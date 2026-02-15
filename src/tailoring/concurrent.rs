@@ -89,7 +89,8 @@ async fn tailor_single_project<R: ClaudeRunner>(
             config.model_override,
             config.max_budget_usd,
         )
-        .await?;
+        .await;
+        let output = output?;
 
         previous_outputs.push(output);
     }
