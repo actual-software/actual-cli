@@ -1,5 +1,10 @@
 use actual_cli::*;
 use clap::Parser;
+use std::sync::Mutex;
+
+/// Mutex to serialize tests that manipulate env vars, since env vars are
+/// process-global and tests run in parallel by default.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 #[test]
 fn test_cli_parse_sync() {
@@ -185,8 +190,13 @@ fn test_run_sync() {
 
 #[test]
 fn test_run_status() {
+    let _lock = ENV_MUTEX.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+    std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "status"]);
     assert_eq!(run(cli), 0);
+    std::env::remove_var("ACTUAL_CONFIG");
 }
 
 #[test]
@@ -197,6 +207,7 @@ fn test_run_auth() {
 
 #[test]
 fn test_run_config_show() {
+    let _lock = ENV_MUTEX.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
     std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
@@ -207,6 +218,7 @@ fn test_run_config_show() {
 
 #[test]
 fn test_run_config_set() {
+    let _lock = ENV_MUTEX.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
     std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
@@ -217,6 +229,7 @@ fn test_run_config_set() {
 
 #[test]
 fn test_run_config_path() {
+    let _lock = ENV_MUTEX.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
     std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
