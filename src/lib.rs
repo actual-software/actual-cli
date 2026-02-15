@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
 
+pub mod error;
+pub use error::ActualError;
+
 /// ADR-powered CLAUDE.md generator
 #[derive(Parser, Debug)]
 #[command(name = "actual", version, about)]
