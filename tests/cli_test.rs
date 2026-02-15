@@ -106,8 +106,43 @@ fn test_sync_with_flags() {
             "https://example.com",
             "--project",
             "apps/web",
+            "--max-budget-usd",
+            "1.50",
         ])
         .assert()
         .success()
         .stderr(predicate::str::contains("not implemented yet"));
+}
+
+#[test]
+fn test_sync_help_shows_all_flags() {
+    cmd()
+        .args(["sync", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--dry-run"))
+        .stdout(predicate::str::contains("--full"))
+        .stdout(predicate::str::contains("--force"))
+        .stdout(predicate::str::contains("--reset-rejections"))
+        .stdout(predicate::str::contains("--project"))
+        .stdout(predicate::str::contains("--model"))
+        .stdout(predicate::str::contains("--api-url"))
+        .stdout(predicate::str::contains("--verbose"))
+        .stdout(predicate::str::contains("--no-tailor"))
+        .stdout(predicate::str::contains("--max-budget-usd"))
+        .stdout(predicate::str::contains(
+            "Show summary of what would change",
+        ))
+        .stdout(predicate::str::contains(
+            "Maximum budget per tailoring invocation",
+        ));
+}
+
+#[test]
+fn test_sync_full_without_dry_run_fails() {
+    cmd()
+        .args(["sync", "--full"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--dry-run"));
 }
