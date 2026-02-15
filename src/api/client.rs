@@ -13,19 +13,19 @@ pub struct ActualApiClient {
 }
 
 impl ActualApiClient {
-    pub fn new(base_url: &str) -> Result<Self, ActualError> {
+    pub fn new(base_url: &str) -> Self {
         let mut default_headers = HeaderMap::new();
         default_headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
 
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
             .build()
-            .map_err(|e| ActualError::ApiError(format!("failed to build HTTP client: {e}")))?;
+            .expect("failed to build HTTP client");
 
-        Ok(Self {
+        Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
-        })
+        }
     }
 
     pub async fn post_match(&self, request: &MatchRequest) -> Result<MatchResponse, ActualError> {
@@ -110,7 +110,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url()).unwrap();
+        let client = ActualApiClient::new(&server.url());
         let result = client.post_match(&sample_request()).await;
 
         assert!(result.is_ok());
@@ -142,17 +142,15 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url()).unwrap();
+        let client = ActualApiClient::new(&server.url());
         let result = client.post_match(&sample_request()).await;
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ActualError::ApiResponseError { code, message } => {
-                assert_eq!(code, "INVALID_REQUEST");
-                assert_eq!(message, "At least one project is required");
-            }
-            other => panic!("expected ApiResponseError, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            ActualError::ApiResponseError { code, message }
+            if code == "INVALID_REQUEST" && message == "At least one project is required"
+        ));
 
         mock.assert_async().await;
     }
@@ -168,19 +166,11 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url()).unwrap();
+        let client = ActualApiClient::new(&server.url());
         let result = client.post_match(&sample_request()).await;
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ActualError::ApiError(msg) => {
-                assert!(
-                    msg.contains("500"),
-                    "expected '500' in error message: {msg}"
-                );
-            }
-            other => panic!("expected ApiError, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(matches!(&err, ActualError::ApiError(msg) if msg.contains("500")));
 
         mock.assert_async().await;
     }
@@ -202,7 +192,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url()).unwrap();
+        let client = ActualApiClient::new(&server.url());
         let result = client.post_match(&sample_request()).await;
 
         assert!(result.is_ok());
@@ -221,23 +211,15 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url()).unwrap();
+        let client = ActualApiClient::new(&server.url());
         let result = client.post_match(&sample_request()).await;
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ActualError::ApiError(msg) => {
-                assert!(
-                    msg.contains("422"),
-                    "expected '422' in error message: {msg}"
-                );
-                assert!(
-                    msg.contains("failed to parse error response"),
-                    "expected parse error info in message: {msg}"
-                );
-            }
-            other => panic!("expected ApiError, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            ActualError::ApiError(msg)
+            if msg.contains("422") && msg.contains("failed to parse error response")
+        ));
 
         mock.assert_async().await;
     }
@@ -254,19 +236,14 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url()).unwrap();
+        let client = ActualApiClient::new(&server.url());
         let result = client.post_match(&sample_request()).await;
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ActualError::ApiError(msg) => {
-                assert!(
-                    msg.contains("error decoding response body"),
-                    "expected decode error in message: {msg}"
-                );
-            }
-            other => panic!("expected ApiError, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            ActualError::ApiError(msg) if msg.contains("error decoding response body")
+        ));
 
         mock.assert_async().await;
     }
@@ -274,30 +251,25 @@ mod tests {
     #[tokio::test]
     async fn test_post_match_network_error() {
         // Connect to a port that's not listening
-        let client = ActualApiClient::new("http://127.0.0.1:1").unwrap();
+        let client = ActualApiClient::new("http://127.0.0.1:1");
         let result = client.post_match(&sample_request()).await;
 
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ActualError::ApiError(msg) => {
-                assert!(
-                    !msg.is_empty(),
-                    "expected non-empty error message for network error"
-                );
-            }
-            other => panic!("expected ApiError, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            ActualError::ApiError(msg) if !msg.is_empty()
+        ));
     }
 
     #[test]
     fn test_new_trims_trailing_slash() {
-        let client = ActualApiClient::new("http://example.com/").unwrap();
+        let client = ActualApiClient::new("http://example.com/");
         assert_eq!(client.base_url, "http://example.com");
     }
 
     #[test]
     fn test_new_returns_ok() {
-        assert!(ActualApiClient::new("http://localhost").is_ok());
+        let _client = ActualApiClient::new("http://localhost");
     }
 
     #[test]
