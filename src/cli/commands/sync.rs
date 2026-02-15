@@ -1726,10 +1726,25 @@ mod tests {
         assert_eq!(output.files.len(), 1);
         assert!(output.files[0].content.contains("Policy for Test ADR"));
         // With instructions=None, the instruction line should not appear
+        let content = &output.files[0].content;
         assert!(
-            !output.files[0].content.contains("Instruction for"),
-            "expected no instruction lines, got: {}",
-            output.files[0].content
+            !content.contains("Instruction for"),
+            "expected no instruction lines"
+        );
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_adr_with_empty_instructions() {
+        let mut adr = make_test_adr("adr-001", "Test ADR", vec![]);
+        adr.instructions = Some(vec![]);
+        let output = raw_adrs_to_output(&[adr]);
+        assert_eq!(output.files.len(), 1);
+        assert!(output.files[0].content.contains("Policy for Test ADR"));
+        // With empty instructions vec, no instruction lines should appear
+        let content = &output.files[0].content;
+        assert!(
+            !content.contains("Instruction for"),
+            "expected no instruction lines"
         );
     }
 
@@ -1784,6 +1799,20 @@ mod tests {
         .unwrap();
         let result = find_existing_claude_md(dir.path());
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_find_existing_claude_md_unreadable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = dir.path().join("noperm");
+        std::fs::create_dir(&unreadable).unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Should not panic, just skip the unreadable dir
+        let result = find_existing_claude_md(dir.path());
+        assert!(result.is_empty());
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     // ── Phase 2 integration tests ──
@@ -1950,5 +1979,94 @@ mod tests {
             get_rejections(&loaded, &repo_key).is_empty(),
             "expected rejections to be cleared"
         );
+    }
+
+    const ADR_MATCH_RESPONSE: &str = r#"{
+        "matched_adrs": [{
+            "id": "adr-001",
+            "title": "Use consistent error handling",
+            "context": null,
+            "policies": ["Use Result for all fallible operations"],
+            "instructions": ["Return ActualError from all public functions"],
+            "category": {"id": "cat-1", "name": "Error Handling", "path": "Error Handling"},
+            "applies_to": {"languages": ["rust"], "frameworks": []},
+            "matched_projects": ["."]
+        }],
+        "metadata": {"total_matched": 1, "by_framework": {}, "deduplicated_count": 1}
+    }"#;
+
+    fn mock_api_server_with_adrs() -> mockito::ServerGuard {
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ADR_MATCH_RESPONSE)
+            .create();
+        server
+    }
+
+    #[test]
+    fn test_run_sync_verbose_with_rejections_shows_filter_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+
+        // Pre-populate config with a rejection for adr-001
+        let mut config = crate::config::Config::default();
+        let repo_key = compute_repo_key(dir.path());
+        crate::config::rejections::add_rejection(&mut config, &repo_key, "adr-001");
+        save_to(&config, &cfg_path).unwrap();
+
+        let server = mock_api_server_with_adrs();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: true,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, &reader);
+        // adr-001 is rejected, so no ADRs remain → "No files to write."
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[test]
+    fn test_run_sync_tailoring_error_returns_error() {
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        // MockRunner returns analysis JSON which is not valid tailoring output.
+        // Phase 1 (analysis) parses it fine, but Phase 2 (tailoring) will fail.
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let reader = MockInputReader::accept();
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: false, // Triggers tailoring path
+            max_budget_usd: None,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            &reader,
+        );
+        assert!(result.is_err(), "expected tailoring to fail");
     }
 }
