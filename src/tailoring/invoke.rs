@@ -101,15 +101,22 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
 
-    /// Mock runner that returns pre-configured JSON responses in sequence.
+    /// A response entry for the mock runner: either a JSON string to parse,
+    /// or a non-parse error to return directly.
+    enum MockResponse {
+        Json(String),
+        Error(ActualError),
+    }
+
+    /// Mock runner that returns pre-configured responses in sequence.
     /// First call returns responses[0], second returns responses[1], etc.
     struct MockClaudeRunner {
-        responses: Mutex<Vec<String>>,
+        responses: Mutex<Vec<MockResponse>>,
         call_count: AtomicU32,
     }
 
     impl MockClaudeRunner {
-        fn new(responses: Vec<String>) -> Self {
+        fn new(responses: Vec<MockResponse>) -> Self {
             Self {
                 responses: Mutex::new(responses),
                 call_count: AtomicU32::new(0),
@@ -117,7 +124,11 @@ mod tests {
         }
 
         fn single(json: &str) -> Self {
-            Self::new(vec![json.to_string()])
+            Self::new(vec![MockResponse::Json(json.to_string())])
+        }
+
+        fn from_json_strings(strings: Vec<String>) -> Self {
+            Self::new(strings.into_iter().map(MockResponse::Json).collect())
         }
     }
 
@@ -127,10 +138,22 @@ mod tests {
             _args: &[String],
         ) -> Result<T, ActualError> {
             let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
-            let responses = self.responses.lock().unwrap();
-            let json = &responses[idx];
-            let parsed: T = serde_json::from_str(json)?;
-            Ok(parsed)
+            let mut responses = self.responses.lock().unwrap();
+            match &responses[idx] {
+                MockResponse::Json(json) => {
+                    let parsed: T = serde_json::from_str(json)?;
+                    Ok(parsed)
+                }
+                MockResponse::Error(_) => {
+                    // Take ownership by replacing with a placeholder
+                    let entry =
+                        std::mem::replace(&mut responses[idx], MockResponse::Json(String::new()));
+                    match entry {
+                        MockResponse::Error(e) => Err(e),
+                        _ => unreachable!(),
+                    }
+                }
+            }
         }
     }
 
@@ -286,7 +309,8 @@ mod tests {
     async fn test_retry_on_invalid_json() {
         let adrs = vec![make_adr("adr-001")];
         let valid_json = valid_output_json(&["adr-001"]);
-        let runner = MockClaudeRunner::new(vec!["not valid json".to_string(), valid_json]);
+        let runner =
+            MockClaudeRunner::from_json_strings(vec!["not valid json".to_string(), valid_json]);
 
         let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
 
@@ -294,5 +318,22 @@ mod tests {
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "CLAUDE.md");
         assert_eq!(runner.call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_non_parse_error_not_retried() {
+        let adrs = vec![make_adr("adr-001")];
+        let runner = MockClaudeRunner::new(vec![MockResponse::Error(
+            ActualError::ClaudeSubprocessFailed {
+                message: "process crashed".to_string(),
+                stderr: "segfault".to_string(),
+            },
+        )]);
+
+        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, ActualError::ClaudeSubprocessFailed { .. }));
+        assert_eq!(runner.call_count.load(Ordering::SeqCst), 1);
     }
 }
