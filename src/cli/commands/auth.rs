@@ -164,10 +164,7 @@ mod tests {
         let result = run_auth();
         std::env::remove_var("CLAUDE_BINARY");
         assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), ActualError::ClaudeNotFound),
-            "expected ClaudeNotFound"
-        );
+        assert!(matches!(result.unwrap_err(), ActualError::ClaudeNotFound));
     }
 
     // Tests below use run_auth_with_binary() directly to avoid env var races
@@ -193,10 +190,10 @@ mod tests {
         let script = create_fake_binary(dir.path(), r#"{"loggedIn": false}"#, 0);
         let result = run_auth_with_binary(&script);
         assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), ActualError::ClaudeNotAuthenticated),
-            "expected ClaudeNotAuthenticated"
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            ActualError::ClaudeNotAuthenticated
+        ));
     }
 
     #[cfg(unix)]
@@ -206,13 +203,10 @@ mod tests {
         let script = create_fake_binary(dir.path(), "error output", 1);
         let result = run_auth_with_binary(&script);
         assert!(result.is_err());
-        assert!(
-            matches!(
-                result.unwrap_err(),
-                ActualError::ClaudeSubprocessFailed { .. }
-            ),
-            "expected ClaudeSubprocessFailed"
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            ActualError::ClaudeSubprocessFailed { .. }
+        ));
     }
 
     #[cfg(unix)]
@@ -222,10 +216,10 @@ mod tests {
         let script = create_fake_binary(dir.path(), "not json", 0);
         let result = run_auth_with_binary(&script);
         assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), ActualError::ClaudeOutputParse(_)),
-            "expected ClaudeOutputParse"
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            ActualError::ClaudeOutputParse(_)
+        ));
     }
 
     #[test]
@@ -279,5 +273,82 @@ mod tests {
         let result = run_auth();
         std::env::remove_var("CLAUDE_BINARY");
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_auth_with_binary_not_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_executable = dir.path().join("not-executable");
+        std::fs::write(&not_executable, "not a script").unwrap();
+        // File exists but is NOT executable, so Command::new().output() will fail
+        let result = run_auth_with_binary(&not_executable);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ActualError::ClaudeSubprocessFailed { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_subprocess_failed() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let not_executable = dir.path().join("not-executable");
+        std::fs::write(&not_executable, "not a script").unwrap();
+        // File exists but is NOT executable — goes through exec -> run_auth -> run_auth_with_binary
+        std::env::set_var("CLAUDE_BINARY", not_executable.to_str().unwrap());
+        let code = exec();
+        std::env::remove_var("CLAUDE_BINARY");
+        assert_eq!(code, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_auth_subprocess_exit_nonzero() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(dir.path(), "error output", 1);
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let result = run_auth();
+        std::env::remove_var("CLAUDE_BINARY");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ActualError::ClaudeSubprocessFailed { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_auth_invalid_json_via_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(dir.path(), "not json", 0);
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let result = run_auth();
+        std::env::remove_var("CLAUDE_BINARY");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ActualError::ClaudeOutputParse(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_auth_not_authenticated_via_env() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(dir.path(), r#"{"loggedIn": false}"#, 0);
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let result = run_auth();
+        std::env::remove_var("CLAUDE_BINARY");
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ActualError::ClaudeNotAuthenticated
+        ));
     }
 }
