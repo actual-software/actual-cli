@@ -6,7 +6,7 @@
 # Issue prefix for this repository (used by bd init)
 # If not set, bd init will auto-detect from directory name
 # Example: issue-prefix: "myproject" creates issues like "myproject-1", "myproject-2", etc.
-# issue-prefix: ""
+issue-prefix: "actual-cli"
 
 # Use no-db mode: load from JSONL, no SQLite, write back after each command
 # When true, bd will use .beads/issues.jsonl as the source of truth
@@ -56,6 +56,24 @@ sync-branch: "beads-sync"
 #   additional:   # Additional repos to hydrate from (read-only)
 #     - ~/beads-planning  # Personal planning repo
 #     - ~/work-planning   # Work planning repo
+
+# CI Auto-Remediation Configuration
+ci:
+  auto-remediation:
+    # Enable/disable CI auto-remediation
+    enabled: true
+    
+    # Assign fix beads to PR author?
+    assign-to-pr-author: true
+    
+    # Priority for auto-created fix beads (0-4, 0=highest)
+    fix-bead-priority: 1
+    
+    # Mark parent bead as blocked when child created?
+    block-parent: true
+    
+    # Auto-close fix beads when parent PR CI passes?
+    auto-close-on-success: true
 
 # Integration settings (access with 'bd config get/set')
 # These are stored in the database, not in this file:
