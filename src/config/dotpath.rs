@@ -352,4 +352,60 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("not set"), "got: {msg}");
     }
+
+    #[test]
+    fn test_get_unset_model() {
+        let config = Config::default();
+        let err = get(&config, "model").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_get_unset_batch_size() {
+        let config = Config::default();
+        let err = get(&config, "batch_size").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_get_unset_concurrency() {
+        let config = Config::default();
+        let err = get(&config, "concurrency").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_get_unset_max_budget_usd() {
+        let config = Config::default();
+        let err = get(&config, "max_budget_usd").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_get_unset_include_general() {
+        let config = Config::default();
+        let err = get(&config, "include_general").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_get_unset_include_categories() {
+        let config = Config::default();
+        let err = get(&config, "include_categories").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_get_unset_exclude_categories() {
+        let config = Config::default();
+        let err = get(&config, "exclude_categories").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
 }
