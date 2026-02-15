@@ -96,4 +96,28 @@ mod tests {
         let rejections = get_rejections(&config, "unknown_repo");
         assert!(rejections.is_empty());
     }
+
+    #[test]
+    fn test_clear_rejections_leaves_other_repos() {
+        let mut config = Config::default();
+        add_rejection(&mut config, "repo_a", "adr-001");
+        add_rejection(&mut config, "repo_b", "adr-002");
+
+        clear_rejections(&mut config, "repo_a");
+
+        assert!(get_rejections(&config, "repo_a").is_empty());
+        assert_eq!(get_rejections(&config, "repo_b"), vec!["adr-002"]);
+        // Map should still exist because repo_b remains
+        assert!(config.rejected_adrs.is_some());
+    }
+
+    #[test]
+    fn test_clear_rejections_noop_when_none() {
+        let mut config = Config::default();
+        assert!(config.rejected_adrs.is_none());
+
+        clear_rejections(&mut config, "nonexistent");
+
+        assert!(config.rejected_adrs.is_none());
+    }
 }
