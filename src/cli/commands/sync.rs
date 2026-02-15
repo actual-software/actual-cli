@@ -47,7 +47,8 @@ fn run(args: &SyncArgs) -> Result<(), ActualError> {
 /// Resolve the current working directory, falling back to `"."` if
 /// unavailable (e.g. the directory was deleted while the process was running).
 fn resolve_cwd() -> std::path::PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    let fallback = std::path::PathBuf::from(".");
+    std::env::current_dir().unwrap_or(fallback)
 }
 
 /// Core sync logic.
