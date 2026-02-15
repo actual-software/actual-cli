@@ -91,15 +91,16 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     ))?;
     spinner.success("Analysis complete");
 
-    // 4. Display projects
-    let summary = format_project_summary(&analysis);
-    eprintln!("{summary}");
-
-    // 5. Filter by --project if specified
+    // 4. Filter by --project if specified
     let analysis = filter_projects(analysis, &args.projects)?;
 
-    // 6. Confirmation (unless --force)
-    if !args.force {
+    // 5. Confirmation (unless --force)
+    if args.force {
+        // Show project summary even in --force mode for visibility
+        let summary = format_project_summary(&analysis);
+        eprintln!("{summary}");
+    } else {
+        // prompt_project_confirmation displays the project summary itself
         let action = prompt_project_confirmation(&analysis, reader, &mut std::io::stderr());
         if matches!(action, ConfirmAction::Reject) {
             return Err(ActualError::UserCancelled);
