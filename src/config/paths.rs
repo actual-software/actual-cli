@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::error::ActualError;
 
+fn config_error(msg: impl std::fmt::Display) -> ActualError {
+    ActualError::ConfigError(msg.to_string())
+}
+
 /// Returns the config directory: `~/.actualai/actual/`.
 ///
 /// Resolution order:
@@ -16,9 +20,10 @@ pub fn config_dir() -> Result<PathBuf, ActualError> {
 fn config_dir_with_home(home: Option<PathBuf>) -> Result<PathBuf, ActualError> {
     if let Ok(config_file) = std::env::var("ACTUAL_CONFIG") {
         let p = PathBuf::from(config_file);
-        return p.parent().map(|d| d.to_path_buf()).ok_or_else(|| {
-            ActualError::ConfigError("ACTUAL_CONFIG has no parent directory".into())
-        });
+        return p
+            .parent()
+            .map(|d| d.to_path_buf())
+            .ok_or_else(|| config_error("ACTUAL_CONFIG has no parent directory"));
     }
 
     if let Ok(dir) = std::env::var("ACTUAL_CONFIG_DIR") {
@@ -26,7 +31,7 @@ fn config_dir_with_home(home: Option<PathBuf>) -> Result<PathBuf, ActualError> {
     }
 
     home.map(|h| h.join(".actualai").join("actual"))
-        .ok_or_else(|| ActualError::ConfigError("Unable to determine home directory".into()))
+        .ok_or_else(|| config_error("Unable to determine home directory"))
 }
 
 /// Returns the config file path: `~/.actualai/actual/config.yaml`.
@@ -60,10 +65,10 @@ pub fn load_from(path: &Path) -> Result<Config, ActualError> {
     }
 
     let contents = std::fs::read_to_string(path)
-        .map_err(|e| ActualError::ConfigError(format!("Failed to read config file: {e}")))?;
+        .map_err(|e| config_error(format!("Failed to read config file: {e}")))?;
 
     serde_yaml::from_str(&contents)
-        .map_err(|e| ActualError::ConfigError(format!("Failed to parse config YAML: {e}")))
+        .map_err(|e| config_error(format!("Failed to parse config YAML: {e}")))
 }
 
 /// Save config to disk using the default config path.
@@ -80,26 +85,37 @@ pub fn save(config: &Config) -> Result<(), ActualError> {
 /// On unix, sets file permissions to `0600`.
 pub fn save_to(config: &Config, path: &Path) -> Result<(), ActualError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            ActualError::ConfigError(format!("Failed to create config directory: {e}"))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| config_error(format!("Failed to create config directory: {e}")))?;
     }
 
-    let yaml = serde_yaml::to_string(config)
-        .map_err(|e| ActualError::ConfigError(format!("Failed to serialize config: {e}")))?;
+    let yaml = serialize_config(config)?;
+    write_config_file(path, &yaml)?;
+    set_config_permissions(path)?;
 
-    std::fs::write(path, &yaml)
-        .map_err(|e| ActualError::ConfigError(format!("Failed to write config file: {e}")))?;
+    Ok(())
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms).map_err(|e| {
-            ActualError::ConfigError(format!("Failed to set config file permissions: {e}"))
-        })?;
-    }
+fn serialize_config(config: &Config) -> Result<String, ActualError> {
+    serde_yaml::to_string(config)
+        .map_err(|e| config_error(format!("Failed to serialize config: {e}")))
+}
 
+fn write_config_file(path: &Path, contents: &str) -> Result<(), ActualError> {
+    std::fs::write(path, contents)
+        .map_err(|e| config_error(format!("Failed to write config file: {e}")))
+}
+
+#[cfg(unix)]
+fn set_config_permissions(path: &Path) -> Result<(), ActualError> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o600);
+    std::fs::set_permissions(path, perms)
+        .map_err(|e| config_error(format!("Failed to set config file permissions: {e}")))
+}
+
+#[cfg(not(unix))]
+fn set_config_permissions(_path: &Path) -> Result<(), ActualError> {
     Ok(())
 }
 
@@ -480,5 +496,66 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/fake/home/.actualai/actual"));
 
         restore_env_vars(saved);
+    }
+
+    #[test]
+    fn test_serialize_config_success() {
+        let yaml = serialize_config(&Config::default()).unwrap();
+        assert!(!yaml.is_empty());
+    }
+
+    #[test]
+    fn test_write_config_file_success() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.yaml");
+        write_config_file(&path, "test: value\n").unwrap();
+        assert!(path.exists());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, "test: value\n");
+    }
+
+    #[test]
+    fn test_write_config_file_error() {
+        // Write to an invalid path to trigger the error
+        #[cfg(unix)]
+        {
+            let path = PathBuf::from("/dev/null/impossible.yaml");
+            let err = write_config_file(&path, "test").unwrap_err();
+            assert!(
+                err.to_string().contains("Failed to write config file"),
+                "unexpected error: {}",
+                err
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_set_config_permissions_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.yaml");
+        std::fs::write(&path, "content").unwrap();
+
+        set_config_permissions(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_set_config_permissions_nonexistent_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nonexistent.yaml");
+
+        let err = set_config_permissions(&path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to set config file permissions"),
+            "unexpected error: {}",
+            err
+        );
     }
 }
