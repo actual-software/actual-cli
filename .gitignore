@@ -1,0 +1,23 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Beads (tracked on beads-sync branch, not main)
+.beads/issues.jsonl
+
+# Git worktrees (used for parallel agent work)
+.worktrees/
+
+# Environment
+.env
+.env.local
