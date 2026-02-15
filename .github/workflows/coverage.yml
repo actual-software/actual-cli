@@ -77,48 +77,69 @@ jobs:
       - name: Enforce 100% coverage
         if: always()
         run: |
-          echo "==> Enforcing 100% coverage..."
+          echo "==> Enforcing 100% per-file line coverage (LCOV)..."
           echo ""
 
-          FAILED=0
-
-          if [ -f coverage-summary.txt ]; then
-            # Parse the cargo-llvm-cov report for per-file coverage
-            # Lines look like: src/main.rs    ... 100.00%
-            while IFS= read -r line; do
-              # Skip header/separator lines
-              if echo "$line" | grep -qE '^\-|^Filename|^TOTAL'; then
-                continue
-              fi
-
-              # Extract filename and coverage percentage
-              FILE=$(echo "$line" | awk '{print $1}')
-              COVERAGE=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+%' | tail -1)
-
-              if [ -z "$FILE" ] || [ -z "$COVERAGE" ]; then
-                continue
-              fi
-
-              # Strip the % sign for comparison
-              COV_NUM=$(echo "$COVERAGE" | sed 's/%//')
-
-              if [ "$(echo "$COV_NUM < 100" | bc -l)" = "1" ]; then
-                echo "  ✗ FAIL: $FILE has $COVERAGE coverage"
-                FAILED=1
-              else
-                echo "  ✓ $FILE: $COVERAGE"
-              fi
-            done < coverage-summary.txt
-          fi
-
-          echo ""
-          if [ "$FAILED" -eq 1 ]; then
-            echo "✗ FAIL: Some files have < 100% coverage"
-            echo "Every source file must have 100% test coverage."
+          if [ ! -f lcov.info ]; then
+            echo "ERROR: lcov.info not found"
             exit 1
-          else
-            echo "✓ SUCCESS: All files have 100% coverage!"
           fi
+
+          # Use LCOV data for per-file line coverage enforcement.
+          # LCOV correctly counts a line as covered when ANY execution
+          # region on that line is hit. This avoids false negatives from
+          # `llvm-cov report` which can report phantom missed lines from
+          # ? operator and matches! macro region expansions even when the
+          # source line itself was executed.
+          python3 -c "
+          import sys
+
+          def parse_lcov(path):
+              files = {}
+              current_file = None
+              for line in open(path):
+                  line = line.strip()
+                  if line.startswith('SF:'):
+                      current_file = line[3:]
+                      files[current_file] = {'hit': 0, 'total': 0}
+                  elif line.startswith('DA:') and current_file:
+                      parts = line[3:].split(',')
+                      count = int(parts[1])
+                      files[current_file]['total'] += 1
+                      if count > 0:
+                          files[current_file]['hit'] += 1
+                  elif line == 'end_of_record':
+                      current_file = None
+              return files
+
+          files = parse_lcov('lcov.info')
+          failed = False
+
+          for filepath in sorted(files):
+              data = files[filepath]
+              total = data['total']
+              hit = data['hit']
+              pct = 100.0 if total == 0 else (hit / total) * 100.0
+
+              rel = filepath
+              src_idx = filepath.find('/src/')
+              if src_idx >= 0:
+                  rel = filepath[src_idx + 5:]
+
+              if pct < 100.0:
+                  print(f'  X FAIL: {rel} has {pct:.2f}% coverage ({hit}/{total} lines)')
+                  failed = True
+              else:
+                  print(f'  OK {rel}: {pct:.2f}%')
+
+          print()
+          if failed:
+              print('X FAIL: Some files have < 100% line coverage')
+              print('Every source file must have 100% test coverage.')
+              sys.exit(1)
+          else:
+              print('OK SUCCESS: All files have 100% line coverage!')
+          "
 
       - name: Create coverage summary
         if: always()
