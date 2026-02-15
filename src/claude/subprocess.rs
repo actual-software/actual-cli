@@ -213,4 +213,80 @@ mod tests {
             other => panic!("expected ClaudeTimeout, got: {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn test_cli_runner_spawn_failure() {
+        let runner = CliClaudeRunner::new(
+            PathBuf::from("/nonexistent/binary/that/does/not/exist"),
+            Duration::from_secs(10),
+        );
+        let result: Result<serde_json::Value, _> = runner.run(&[]).await;
+
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, stderr }) => {
+                assert!(
+                    message.contains("Failed to spawn Claude Code"),
+                    "expected spawn failure in message: {message}"
+                );
+                assert!(stderr.is_empty(), "expected empty stderr: {stderr}");
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_killed_by_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        // Script kills itself with SIGKILL — no exit code available
+        std::fs::write(&script, "#!/bin/sh\nkill -9 $$\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
+        let result: Result<serde_json::Value, _> = runner.run(&[]).await;
+
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+                assert!(
+                    message.contains("unknown"),
+                    "expected 'unknown' exit code in message: {message}"
+                );
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cli_runner_passes_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        // Script writes all args (one per line) to a file, then outputs valid JSON
+        let args_file = dir.path().join("captured-args.txt");
+        let script_content = format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{{\"ok\":true}}'\n",
+            args_file.display()
+        );
+        std::fs::write(&script, script_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let args = vec!["--model".to_string(), "opus".to_string()];
+        let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
+        let result: serde_json::Value = runner.run(&args).await.unwrap();
+        assert_eq!(result["ok"], true);
+
+        // Verify captured args: first should be "--print", then our args
+        let captured = std::fs::read_to_string(&args_file).unwrap();
+        let lines: Vec<&str> = captured.lines().collect();
+        assert_eq!(lines[0], "--print");
+        assert_eq!(lines[1], "--model");
+        assert_eq!(lines[2], "opus");
+    }
 }
