@@ -173,14 +173,33 @@ mod tests {
     #[test]
     fn language_display_matches_serde() {
         // Verify Display output matches serde serialization (without quotes)
-        let lang = Language::TypeScript;
-        let display = lang.to_string();
-        let serde = serde_json::to_string(&lang).unwrap();
-        assert_eq!(
-            format!("\"{display}\""),
-            serde,
-            "Display and serde should match"
-        );
+        let all_languages = vec![
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Python,
+            Language::Rust,
+            Language::Go,
+            Language::Java,
+            Language::Kotlin,
+            Language::Swift,
+            Language::Ruby,
+            Language::Php,
+            Language::C,
+            Language::Cpp,
+            Language::CSharp,
+            Language::Scala,
+            Language::Elixir,
+            Language::Other,
+        ];
+        for lang in all_languages {
+            let display = lang.to_string();
+            let serde = serde_json::to_string(&lang).unwrap();
+            assert_eq!(
+                format!("\"{display}\""),
+                serde,
+                "Display and serde should match for {lang}"
+            );
+        }
     }
 
     #[test]
