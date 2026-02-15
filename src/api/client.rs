@@ -3,7 +3,7 @@ use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 use crate::analysis::types::{FrameworkCategory, Language, RepoAnalysis};
 use crate::api::types::{
     ApiErrorResponse, CategoriesResponse, FrameworksResponse, HealthResponse, LanguagesResponse,
-    MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse,
+    MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse, TelemetryRequest,
 };
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -87,6 +87,31 @@ impl ActualApiClient {
             .await
             .map_err(|e| ActualError::ApiError(e.to_string()))?;
         Self::handle_response(response).await
+    }
+
+    pub async fn post_telemetry(
+        &self,
+        request: &TelemetryRequest,
+        service_key: &str,
+    ) -> Result<(), ActualError> {
+        let url = format!("{}/counter/record", self.base_url);
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {service_key}"))
+            .header("Content-Type", "application/json")
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(ActualError::ApiError(format!("HTTP {status}: {body}")))
+        }
     }
 
     async fn handle_response<T: serde::de::DeserializeOwned>(
