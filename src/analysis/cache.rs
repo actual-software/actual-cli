@@ -7,6 +7,23 @@ use crate::config;
 use crate::config::types::CachedAnalysis;
 use crate::error::ActualError;
 
+/// Parse the output of `git rev-parse HEAD` into a commit hash.
+///
+/// Returns `None` if the output is not a successful command, not valid UTF-8,
+/// or the trimmed output is empty.
+fn parse_git_head_output(output: std::process::Output) -> Option<String> {
+    if !output.status.success() {
+        return None;
+    }
+
+    let hash = String::from_utf8(output.stdout).ok()?;
+    let trimmed = hash.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 /// Get the current HEAD commit hash for a git repository.
 ///
 /// Returns `None` if the path is not a git repo, git is not installed,
@@ -18,16 +35,7 @@ pub fn get_git_head(repo_path: &Path) -> Option<String> {
         .output()
         .ok()?;
 
-    if !output.status.success() {
-        return None;
-    }
-
-    let hash = String::from_utf8(output.stdout).ok()?;
-    let trimmed = hash.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.to_string())
+    parse_git_head_output(output)
 }
 
 /// Run repository analysis with caching based on git HEAD.
@@ -217,6 +225,55 @@ mod tests {
     }
 
     // -- Tests --
+
+    /// Helper: create a fake successful process output with given stdout.
+    fn fake_output_success(stdout: &[u8]) -> std::process::Output {
+        std::process::Command::new("true")
+            .output()
+            .map(|mut o| {
+                o.stdout = stdout.to_vec();
+                o
+            })
+            .unwrap()
+    }
+
+    /// Helper: create a fake failed process output.
+    fn fake_output_failure() -> std::process::Output {
+        std::process::Command::new("false").output().unwrap()
+    }
+
+    #[test]
+    fn test_parse_git_head_output_success() {
+        let output = fake_output_success(b"abc123def456\n");
+        assert_eq!(
+            parse_git_head_output(output),
+            Some("abc123def456".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_git_head_output_failure_status() {
+        let output = fake_output_failure();
+        assert_eq!(parse_git_head_output(output), None);
+    }
+
+    #[test]
+    fn test_parse_git_head_output_empty_stdout() {
+        let output = fake_output_success(b"");
+        assert_eq!(parse_git_head_output(output), None);
+    }
+
+    #[test]
+    fn test_parse_git_head_output_whitespace_only() {
+        let output = fake_output_success(b"  \n  ");
+        assert_eq!(parse_git_head_output(output), None);
+    }
+
+    #[test]
+    fn test_parse_git_head_output_invalid_utf8() {
+        let output = fake_output_success(&[0xff, 0xfe, 0xfd]);
+        assert_eq!(parse_git_head_output(output), None);
+    }
 
     #[test]
     fn test_get_git_head_returns_hash_for_git_repo() {
