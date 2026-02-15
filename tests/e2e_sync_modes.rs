@@ -349,20 +349,6 @@ User footer";
             content.contains("- Should appear"),
             "expected adr-002 policy in output, got:\n{content}"
         );
-        assert!(
-            !content.contains("Should be filtered"),
-            "expected adr-001 policy to be filtered, got:\n{content}"
-        );
-
-        // adr-002 should be present
-        assert!(
-            content.contains("## Accepted Rule"),
-            "expected adr-002 title in output, got:\n{content}"
-        );
-        assert!(
-            content.contains("- Should appear"),
-            "expected adr-002 policy in output, got:\n{content}"
-        );
     }
 
     #[test]
