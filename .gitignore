@@ -21,6 +21,10 @@ Thumbs.db
 # Serena (memories are generated per-user by onboarding)
 .serena/memories/
 
+# Skill scratch directories (created during /audit and /check runs)
+.audit/
+.check/
+
 # Environment
 .env
 .env.local
