@@ -107,14 +107,16 @@ pub fn prompt_project_confirmation(
     reader: &dyn InputReader,
     out: &mut dyn IoWrite,
 ) -> ConfirmAction {
-    let _ = write!(out, "{}", format_project_summary(analysis));
+    let summary = format_project_summary(analysis);
+    out.write_all(summary.as_bytes()).ok();
 
     loop {
         match reader.read_line() {
             Ok(input) => match parse_confirm_input(&input) {
                 Some(action) => return action,
                 None => {
-                    let _ = writeln!(out, "{}", invalid_input_hint());
+                    let hint = format!("{}\n", invalid_input_hint());
+                    out.write_all(hint.as_bytes()).ok();
                 }
             },
             Err(_) => return ConfirmAction::Reject,
