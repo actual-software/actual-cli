@@ -98,22 +98,23 @@ pub fn parse_confirm_input(input: &str) -> Option<ConfirmAction> {
     }
 }
 
-/// Display detected projects and prompt with an injectable reader.
+/// Display detected projects and prompt with an injectable reader and output.
 ///
-/// Prints the project summary to stderr, then loops reading input from `reader`
+/// Writes the project summary to `out`, then loops reading input from `reader`
 /// until the user enters a valid response (`a`/`accept` or `r`/`reject`/`q`/`quit`).
 pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
     reader: &dyn InputReader,
+    out: &mut dyn IoWrite,
 ) -> ConfirmAction {
-    let _ = write!(io::stderr(), "{}", format_project_summary(analysis));
+    let _ = write!(out, "{}", format_project_summary(analysis));
 
     loop {
         match reader.read_line() {
             Ok(input) => match parse_confirm_input(&input) {
                 Some(action) => return action,
                 None => {
-                    let _ = writeln!(io::stderr(), "{}", invalid_input_hint());
+                    let _ = writeln!(out, "{}", invalid_input_hint());
                 }
             },
             Err(_) => return ConfirmAction::Reject,
@@ -437,7 +438,8 @@ mod tests {
     fn prompt_accept_short() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("a");
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -445,7 +447,8 @@ mod tests {
     fn prompt_accept_full() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("accept");
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -453,7 +456,8 @@ mod tests {
     fn prompt_accept_case_insensitive() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("Accept");
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -461,7 +465,8 @@ mod tests {
     fn prompt_reject_short() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("r");
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -469,7 +474,8 @@ mod tests {
     fn prompt_reject_full() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("reject");
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -477,7 +483,8 @@ mod tests {
     fn prompt_quit_short() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("q");
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -485,7 +492,8 @@ mod tests {
     fn prompt_quit_full() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("quit");
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -493,15 +501,22 @@ mod tests {
     fn prompt_invalid_then_accept() {
         let analysis = make_single_project_analysis();
         let reader = SequenceReader::new(vec!["x", "invalid", "a"]);
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Accept);
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("Please enter"),
+            "expected hint in output: {output}"
+        );
     }
 
     #[test]
     fn prompt_invalid_then_reject() {
         let analysis = make_single_project_analysis();
         let reader = SequenceReader::new(vec!["", "nope", "r"]);
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -509,7 +524,8 @@ mod tests {
     fn prompt_io_error_returns_reject() {
         let analysis = make_single_project_analysis();
         let reader = ErrorReader;
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -517,7 +533,25 @@ mod tests {
     fn prompt_whitespace_trimmed() {
         let analysis = make_single_project_analysis();
         let reader = MockReader::new("  a  ");
-        let result = prompt_project_confirmation(&analysis, &reader);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Accept);
+    }
+
+    #[test]
+    fn prompt_writes_summary_to_output() {
+        let analysis = make_single_project_analysis();
+        let reader = MockReader::new("a");
+        let mut out = Vec::new();
+        prompt_project_confirmation(&analysis, &reader, &mut out);
+        let output = String::from_utf8(out).unwrap();
+        assert!(
+            output.contains("my-cli"),
+            "expected project name in output: {output}"
+        );
+        assert!(
+            output.contains("Single project detected"),
+            "expected header in output: {output}"
+        );
     }
 }
