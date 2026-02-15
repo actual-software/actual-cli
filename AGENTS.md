@@ -43,7 +43,7 @@ bd sync --pull          # Pull from beads-sync and import to local database
 
 ### Important Rules
 
-1. **ALWAYS run `bd sync` after closing or updating beads** - this pushes state to `beads-sync`
+1. **ALWAYS run `bd sync` after creating, closing, or updating beads** - this pushes state to `beads-sync`. CI needs beads in `beads-sync` to find parent bead IDs from PR titles.
 2. **The daemon auto-syncs** - it watches `beads-sync` and imports changes automatically
 3. **Never merge `beads-sync` into `main`** - they are parallel branches
 4. **`.beads/issues.jsonl` is gitignored on main** - it only exists in `beads-sync`
@@ -99,18 +99,21 @@ bd create "Subtask 1" -p 1 --parent <epic-id>
 bd create "Subtask 2" -p 1 --parent <epic-id>
 bd dep add <verification-task> <subtask-1>  # Set up blockers
 
-# 2. Pull latest main before creating worktrees
+# 2. Sync beads so CI can find them
+bd sync
+
+# 3. Pull latest main before creating worktrees
 git checkout main && git pull origin main
 
-# 3. Create worktrees for parallel work
+# 4. Create worktrees for parallel work
 git worktree add .worktrees/task1 -b feature/task1
 git worktree add .worktrees/task2 -b feature/task2
 
-# 4. Spawn sub-agents (each works in its own worktree)
+# 5. Spawn sub-agents (each works in its own worktree)
 # See "Sub-Agent Instructions" below
 # Sub-agents push their branch, open a PR, and wait for CI
 
-# 5. After sub-agents report PRs are CI-green, clean up worktrees
+# 6. After sub-agents report PRs are CI-green, clean up worktrees
 git worktree remove .worktrees/task1
 git worktree remove .worktrees/task2
 git branch -d feature/task1 feature/task2
