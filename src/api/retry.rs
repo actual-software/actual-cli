@@ -32,7 +32,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, ActualError>>,
 {
-    let mut last_error: Option<ActualError> = None;
+    let mut last_error = ActualError::ApiError("no attempts made".to_string());
 
     for attempt in 0..config.max_attempts {
         // Apply backoff delay before retries (not before the first attempt).
@@ -46,14 +46,13 @@ where
         match f().await {
             Ok(value) => return Ok(value),
             Err(ActualError::ApiError(msg)) => {
-                last_error = Some(ActualError::ApiError(msg));
-                // Continue to next attempt.
+                last_error = ActualError::ApiError(msg);
             }
             Err(e) => return Err(e),
         }
     }
 
-    Err(last_error.expect("max_attempts must be >= 1"))
+    Err(last_error)
 }
 
 #[cfg(test)]
@@ -131,6 +130,35 @@ mod tests {
 
         assert!(matches!(result, Err(ActualError::ApiError(_))));
         assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_default_config() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_attempts, 3);
+        assert_eq!(config.initial_delay, Duration::from_secs(1));
+        assert_eq!(config.backoff_factor, 2);
+    }
+
+    #[tokio::test]
+    async fn test_immediate_success() {
+        tokio::time::pause();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let config = RetryConfig::default();
+        let result = with_retry(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(99)
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), 99);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
