@@ -352,14 +352,10 @@ mod tests {
             results[0].error.is_some(),
             "expected error message on failure"
         );
+        let err_msg = results[0].error.as_ref().unwrap();
         assert!(
-            results[0]
-                .error
-                .as_ref()
-                .unwrap()
-                .contains("Failed to create directory"),
-            "expected directory creation error message, got: {:?}",
-            results[0].error
+            err_msg.contains("Failed to create directory"),
+            "expected directory creation error message"
         );
     }
 
@@ -390,14 +386,10 @@ mod tests {
             results[0].error.is_some(),
             "expected error message on write failure"
         );
+        let err_msg = results[0].error.as_ref().unwrap();
         assert!(
-            results[0]
-                .error
-                .as_ref()
-                .unwrap()
-                .contains("Failed to write file"),
-            "expected file write error message, got: {:?}",
-            results[0].error
+            err_msg.contains("Failed to write file"),
+            "expected file write error message"
         );
     }
 }
