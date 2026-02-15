@@ -89,22 +89,14 @@ pub fn save_to(config: &Config, path: &Path) -> Result<(), ActualError> {
             .map_err(|e| config_error(format!("Failed to create config directory: {e}")))?;
     }
 
-    let yaml = serialize_config(config);
-    write_config_file(path, &yaml)?;
+    // Config contains only Option<String>, Option<bool>, Option<usize>, etc.
+    // serde_yaml serialization is infallible for these types, so unwrap is safe.
+    let yaml = serde_yaml::to_string(config).unwrap();
+    std::fs::write(path, yaml)
+        .map_err(|e| config_error(format!("Failed to write config file: {e}")))?;
     set_config_permissions(path)?;
 
     Ok(())
-}
-
-fn serialize_config(config: &Config) -> String {
-    // Config only uses Option<String>, Option<bool>, Option<usize>, etc.
-    // serde_yaml::to_string never fails for these types.
-    serde_yaml::to_string(config).expect("Config serialization should never fail")
-}
-
-fn write_config_file(path: &Path, contents: &str) -> Result<(), ActualError> {
-    std::fs::write(path, contents)
-        .map_err(|e| config_error(format!("Failed to write config file: {e}")))
 }
 
 #[cfg(unix)]
@@ -139,16 +131,48 @@ mod tests {
         (saved_config, saved_config_dir)
     }
 
+    /// Helper: restore a single env var from a saved value.
+    fn restore_env_var(name: &str, value: Option<String>) {
+        match value {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+    }
+
     /// Helper: restore env vars from saved values.
     fn restore_env_vars(saved: (Option<String>, Option<String>)) {
-        match saved.0 {
-            Some(v) => std::env::set_var("ACTUAL_CONFIG", v),
-            None => std::env::remove_var("ACTUAL_CONFIG"),
-        }
-        match saved.1 {
-            Some(v) => std::env::set_var("ACTUAL_CONFIG_DIR", v),
-            None => std::env::remove_var("ACTUAL_CONFIG_DIR"),
-        }
+        restore_env_var("ACTUAL_CONFIG", saved.0);
+        restore_env_var("ACTUAL_CONFIG_DIR", saved.1);
+    }
+
+    #[test]
+    fn test_restore_env_vars_with_saved_values() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // Set both env vars so clear_env_vars saves Some(...) values
+        std::env::set_var("ACTUAL_CONFIG", "/tmp/saved_config.yaml");
+        std::env::set_var("ACTUAL_CONFIG_DIR", "/tmp/saved_dir");
+
+        let saved = clear_env_vars();
+        assert!(saved.0.is_some());
+        assert!(saved.1.is_some());
+        // Both env vars should be cleared
+        assert!(std::env::var("ACTUAL_CONFIG").is_err());
+        assert!(std::env::var("ACTUAL_CONFIG_DIR").is_err());
+
+        // Restore should set them back (exercises the Some branch)
+        restore_env_vars(saved);
+        assert_eq!(
+            std::env::var("ACTUAL_CONFIG").unwrap(),
+            "/tmp/saved_config.yaml"
+        );
+        assert_eq!(
+            std::env::var("ACTUAL_CONFIG_DIR").unwrap(),
+            "/tmp/saved_dir"
+        );
+
+        // Clean up
+        std::env::remove_var("ACTUAL_CONFIG");
+        std::env::remove_var("ACTUAL_CONFIG_DIR");
     }
 
     #[test]
@@ -184,11 +208,7 @@ mod tests {
         std::fs::write(&config_file, "{{{{not valid yaml").unwrap();
 
         let err = load_from(&config_file).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Failed to parse config YAML"),
-            "expected parse error, got: {msg}"
-        );
+        assert!(err.to_string().contains("Failed to parse config YAML"));
     }
 
     #[cfg(unix)]
@@ -231,10 +251,7 @@ mod tests {
         let saved = clear_env_vars();
 
         let dir = config_dir().unwrap();
-        assert!(
-            dir.ends_with(".actualai/actual"),
-            "expected path ending in .actualai/actual, got: {dir:?}"
-        );
+        assert!(dir.ends_with(".actualai/actual"));
 
         restore_env_vars(saved);
     }
@@ -274,10 +291,7 @@ mod tests {
         let saved = clear_env_vars();
 
         let path = config_path().unwrap();
-        assert!(
-            path.ends_with(".actualai/actual/config.yaml"),
-            "expected path ending in .actualai/actual/config.yaml, got: {path:?}"
-        );
+        assert!(path.ends_with(".actualai/actual/config.yaml"));
 
         restore_env_vars(saved);
     }
@@ -359,12 +373,8 @@ mod tests {
         std::fs::create_dir_all(&config_file).unwrap();
 
         let err = load_from(&config_file).unwrap_err();
-        let msg = err.to_string();
         // The read_to_string will fail because config_file is a directory
-        assert!(
-            msg.contains("Failed to read config file"),
-            "expected read error, got: {msg}"
-        );
+        assert!(err.to_string().contains("Failed to read config file"));
     }
 
     #[test]
@@ -374,11 +384,9 @@ mod tests {
         {
             let path = PathBuf::from("/dev/null/impossible/config.yaml");
             let err = save_to(&Config::default(), &path).unwrap_err();
-            let msg = err.to_string();
-            assert!(
-                msg.contains("Failed to create config directory"),
-                "expected dir creation error, got: {msg}"
-            );
+            assert!(err
+                .to_string()
+                .contains("Failed to create config directory"));
         }
     }
 
@@ -400,11 +408,7 @@ mod tests {
         std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let err = save_to(&Config::default(), &config_file).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Failed to write config file"),
-            "expected write error, got: {msg}"
-        );
+        assert!(err.to_string().contains("Failed to write config file"));
 
         // Restore permissions for cleanup
         std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -432,11 +436,9 @@ mod tests {
 
         std::env::set_var("ACTUAL_CONFIG", "");
         let err = config_dir().unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ACTUAL_CONFIG has no parent directory"),
-            "expected no-parent error, got: {msg}"
-        );
+        assert!(err
+            .to_string()
+            .contains("ACTUAL_CONFIG has no parent directory"));
 
         restore_env_vars(saved);
     }
@@ -478,11 +480,9 @@ mod tests {
         let saved = clear_env_vars();
 
         let err = config_dir_with_home(None).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Unable to determine home directory"),
-            "expected home dir error, got: {msg}"
-        );
+        assert!(err
+            .to_string()
+            .contains("Unable to determine home directory"));
 
         restore_env_vars(saved);
     }
@@ -500,34 +500,17 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_config_success() {
-        let yaml = serialize_config(&Config::default());
-        assert!(!yaml.is_empty());
-    }
-
-    #[test]
-    fn test_write_config_file_success() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("test.yaml");
-        write_config_file(&path, "test: value\n").unwrap();
-        assert!(path.exists());
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(contents, "test: value\n");
-    }
-
-    #[test]
-    fn test_write_config_file_error() {
-        // Write to an invalid path to trigger the error
-        #[cfg(unix)]
-        {
-            let path = PathBuf::from("/dev/null/impossible.yaml");
-            let err = write_config_file(&path, "test").unwrap_err();
-            assert!(
-                err.to_string().contains("Failed to write config file"),
-                "unexpected error: {}",
-                err
-            );
-        }
+    fn test_save_to_path_without_parent() {
+        // When path.parent() returns None (root path), save_to skips
+        // directory creation. On unix "/" has no writable location so
+        // the write itself will fail, but the important thing is we
+        // exercise the None branch of `if let Some(parent)`.
+        let path = Path::new("/");
+        let err = save_to(&Config::default(), path).unwrap_err();
+        // The error is from std::fs::write, not from create_dir_all
+        assert!(!err
+            .to_string()
+            .contains("Failed to create config directory"));
     }
 
     #[cfg(unix)]
@@ -552,11 +535,8 @@ mod tests {
         let path = dir.path().join("nonexistent.yaml");
 
         let err = set_config_permissions(&path).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Failed to set config file permissions"),
-            "unexpected error: {}",
-            err
-        );
+        assert!(err
+            .to_string()
+            .contains("Failed to set config file permissions"));
     }
 }
