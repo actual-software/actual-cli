@@ -39,7 +39,7 @@ Write the following JSON to `.check/commits.json`:
 
 ## Rules
 
-- Only extract IDs matching the `actual-cli-[a-z0-9]+` pattern.
+- Only extract IDs matching the `actual-cli-[a-z0-9]{3}` pattern.
 - Deduplicate: if multiple commits reference the same bead, group them under one entry.
 - Include the full commit message (one-line) for context.
 - Do NOT run `bd show` — that's Phase 3's job.
