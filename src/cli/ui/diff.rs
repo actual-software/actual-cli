@@ -97,7 +97,7 @@ pub fn format_diff_summary(diffs: &[FileDiff]) -> String {
     let mut output = String::new();
 
     for diff in diffs {
-        let _ = write!(output, "{}", format_file_diff(diff));
+        output.push_str(&format_file_diff(diff));
     }
 
     output
