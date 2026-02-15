@@ -34,14 +34,10 @@ pub fn print_banner(quiet: bool) {
             // Circuit node + speed lines in blue, logo part in cyan
             eprint!("{}", logo_style.apply_to(&line[..idx]));
             eprintln!("{}", lines_style.apply_to(&line[idx..]));
-        } else if line.contains("actual") {
-            // The "actual" label line
-            if let Some(idx) = line.find("actual") {
-                eprint!("{}", logo_style.apply_to(&line[..idx]));
-                eprintln!("{}", label_style.apply_to(&line[idx..]));
-            } else {
-                eprintln!("{}", logo_style.apply_to(line));
-            }
+        } else if let Some(idx) = line.find("actual") {
+            // The "actual" label line: logo part in cyan, label in bold white
+            eprint!("{}", logo_style.apply_to(&line[..idx]));
+            eprintln!("{}", label_style.apply_to(&line[idx..]));
         } else if let Some(idx) = line.find("━━━") {
             // Top speed line (no circuit node)
             eprint!("{}", logo_style.apply_to(&line[..idx]));
