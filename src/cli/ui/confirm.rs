@@ -1,8 +1,8 @@
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
 use console::style;
-use std::fmt::Write;
-use std::io;
+use std::fmt::Write as FmtWrite;
+use std::io::{self, Write as IoWrite};
 
 /// Trait for reading user input, enabling test injection.
 pub trait InputReader {
@@ -77,6 +77,27 @@ pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
     output
 }
 
+/// Build the "invalid input" hint shown when the user enters unrecognized text.
+pub fn invalid_input_hint() -> String {
+    format!(
+        "  {} Please enter {} or {}",
+        style("?").yellow(),
+        style("[a]").green().bold(),
+        style("[r]").red().bold()
+    )
+}
+
+/// Parse a single input string into a [`ConfirmAction`], if valid.
+///
+/// Returns `None` for unrecognized input.
+pub fn parse_confirm_input(input: &str) -> Option<ConfirmAction> {
+    match input.trim().to_lowercase().as_str() {
+        "a" | "accept" => Some(ConfirmAction::Accept),
+        "r" | "reject" | "q" | "quit" => Some(ConfirmAction::Reject),
+        _ => None,
+    }
+}
+
 /// Display detected projects and prompt with an injectable reader.
 ///
 /// Prints the project summary to stderr, then loops reading input from `reader`
@@ -85,20 +106,14 @@ pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
     reader: &dyn InputReader,
 ) -> ConfirmAction {
-    eprint!("{}", format_project_summary(analysis));
+    let _ = write!(io::stderr(), "{}", format_project_summary(analysis));
 
     loop {
         match reader.read_line() {
-            Ok(input) => match input.trim().to_lowercase().as_str() {
-                "a" | "accept" => return ConfirmAction::Accept,
-                "r" | "reject" | "q" | "quit" => return ConfirmAction::Reject,
-                _ => {
-                    eprintln!(
-                        "  {} Please enter {} or {}",
-                        style("?").yellow(),
-                        style("[a]").green().bold(),
-                        style("[r]").red().bold()
-                    );
+            Ok(input) => match parse_confirm_input(&input) {
+                Some(action) => return action,
+                None => {
+                    let _ = writeln!(io::stderr(), "{}", invalid_input_hint());
                 }
             },
             Err(_) => return ConfirmAction::Reject,
@@ -357,6 +372,63 @@ mod tests {
         let text = prompt_text();
         assert!(text.contains("accept"), "expected 'accept' in: {text}");
         assert!(text.contains("reject"), "expected 'reject' in: {text}");
+    }
+
+    // ── invalid_input_hint tests ──
+
+    #[test]
+    fn invalid_input_hint_contains_options() {
+        let hint = invalid_input_hint();
+        assert!(hint.contains("Please enter"), "expected prompt in: {hint}");
+    }
+
+    // ── parse_confirm_input tests ──
+
+    #[test]
+    fn parse_accept_short() {
+        assert_eq!(parse_confirm_input("a"), Some(ConfirmAction::Accept));
+    }
+
+    #[test]
+    fn parse_accept_full() {
+        assert_eq!(parse_confirm_input("accept"), Some(ConfirmAction::Accept));
+    }
+
+    #[test]
+    fn parse_accept_case_insensitive() {
+        assert_eq!(parse_confirm_input("Accept"), Some(ConfirmAction::Accept));
+    }
+
+    #[test]
+    fn parse_reject_short() {
+        assert_eq!(parse_confirm_input("r"), Some(ConfirmAction::Reject));
+    }
+
+    #[test]
+    fn parse_reject_full() {
+        assert_eq!(parse_confirm_input("reject"), Some(ConfirmAction::Reject));
+    }
+
+    #[test]
+    fn parse_quit_short() {
+        assert_eq!(parse_confirm_input("q"), Some(ConfirmAction::Reject));
+    }
+
+    #[test]
+    fn parse_quit_full() {
+        assert_eq!(parse_confirm_input("quit"), Some(ConfirmAction::Reject));
+    }
+
+    #[test]
+    fn parse_whitespace_trimmed() {
+        assert_eq!(parse_confirm_input("  a  "), Some(ConfirmAction::Accept));
+    }
+
+    #[test]
+    fn parse_invalid_returns_none() {
+        assert_eq!(parse_confirm_input("x"), None);
+        assert_eq!(parse_confirm_input(""), None);
+        assert_eq!(parse_confirm_input("yes"), None);
     }
 
     // ── prompt_project_confirmation tests ──
