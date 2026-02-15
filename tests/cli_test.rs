@@ -59,30 +59,54 @@ fn test_auth_not_implemented() {
 }
 
 #[test]
-fn test_config_show_not_implemented() {
+fn test_config_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
     cmd()
         .args(["config", "show"])
+        .env("ACTUAL_CONFIG", config_file.to_str().unwrap())
         .assert()
         .success()
-        .stderr(predicate::str::contains("not implemented yet"));
+        .stdout(
+            predicate::str::contains("---")
+                .not()
+                .or(predicate::str::is_empty().not()),
+        );
 }
 
 #[test]
-fn test_config_set_not_implemented() {
+fn test_config_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+
+    // Set a config value
     cmd()
-        .args(["config", "set", "foo", "bar"])
+        .args(["config", "set", "batch_size", "20"])
+        .env("ACTUAL_CONFIG", config_file.to_str().unwrap())
         .assert()
         .success()
-        .stderr(predicate::str::contains("not implemented yet"));
+        .stdout(predicate::str::contains("Set batch_size = 20"));
+
+    // Verify via config show
+    cmd()
+        .args(["config", "show"])
+        .env("ACTUAL_CONFIG", config_file.to_str().unwrap())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("batch_size: 20"));
 }
 
 #[test]
-fn test_config_path_not_implemented() {
+fn test_config_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+    let config_str = config_file.to_str().unwrap();
     cmd()
         .args(["config", "path"])
+        .env("ACTUAL_CONFIG", config_str)
         .assert()
         .success()
-        .stderr(predicate::str::contains("not implemented yet"));
+        .stdout(predicate::str::contains(config_str));
 }
 
 #[test]
