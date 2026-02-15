@@ -41,6 +41,9 @@ dirs = "5"
 # Crypto
 sha2 = "0.10"
 
+# Async utilities
+futures = "0.3"
+
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
