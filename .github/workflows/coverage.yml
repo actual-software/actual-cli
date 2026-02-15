@@ -1,0 +1,197 @@
+name: Coverage
+
+# BULLETPROOF COVERAGE ENFORCEMENT
+# This workflow ensures 100% test coverage using per-module measurement.
+# It runs on:
+#   1. PRs (before merge) - prevents uncovered code from entering
+#   2. Merge queue (during merge) - double-checks the merged result
+# Uses cargo-llvm-cov for precise source-based coverage measurement.
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+
+jobs:
+  sync-beads:
+    name: Sync Beads
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: sync
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  coverage:
+    name: Coverage Enforcement
+    needs: sync-beads
+    if: always() && (needs.sync-beads.result == 'success' || needs.sync-beads.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-coverage-
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run coverage
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
+          COV_EXIT=${PIPESTATUS[0]}
+          echo "cov_exit=$COV_EXIT" >> $GITHUB_ENV
+
+      - name: Generate text report
+        if: always()
+        run: |
+          cargo llvm-cov report 2>&1 | tee coverage-summary.txt || true
+
+      - name: Enforce 100% coverage
+        if: always()
+        run: |
+          echo "==> Enforcing 100% coverage..."
+          echo ""
+
+          FAILED=0
+
+          if [ -f coverage-summary.txt ]; then
+            # Parse the cargo-llvm-cov report for per-file coverage
+            # Lines look like: src/main.rs    ... 100.00%
+            while IFS= read -r line; do
+              # Skip header/separator lines
+              if echo "$line" | grep -qE '^\-|^Filename|^TOTAL'; then
+                continue
+              fi
+
+              # Extract filename and coverage percentage
+              FILE=$(echo "$line" | awk '{print $1}')
+              COVERAGE=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+%' | tail -1)
+
+              if [ -z "$FILE" ] || [ -z "$COVERAGE" ]; then
+                continue
+              fi
+
+              # Strip the % sign for comparison
+              COV_NUM=$(echo "$COVERAGE" | sed 's/%//')
+
+              if [ "$(echo "$COV_NUM < 100" | bc -l)" = "1" ]; then
+                echo "  ✗ FAIL: $FILE has $COVERAGE coverage"
+                FAILED=1
+              else
+                echo "  ✓ $FILE: $COVERAGE"
+              fi
+            done < coverage-summary.txt
+          fi
+
+          echo ""
+          if [ "$FAILED" -eq 1 ]; then
+            echo "✗ FAIL: Some files have < 100% coverage"
+            echo "Every source file must have 100% test coverage."
+            exit 1
+          else
+            echo "✓ SUCCESS: All files have 100% coverage!"
+          fi
+
+      - name: Create coverage summary
+        if: always()
+        run: |
+          echo "## Coverage Enforcement" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Enforcement Strategy:** Per-file 100% coverage via cargo-llvm-cov" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f coverage-summary.txt ]; then
+            TOTAL_COVERAGE=$(grep "^TOTAL" coverage-summary.txt | grep -oE '[0-9]+\.[0-9]+%' | tail -1 || echo "N/A")
+            echo "**Total Coverage:** $TOTAL_COVERAGE" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '<details>' >> $GITHUB_STEP_SUMMARY
+            echo '<summary>Per-file Coverage Report</summary>' >> $GITHUB_STEP_SUMMARY
+            echo '' >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat coverage-summary.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo '</details>' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Generate HTML report
+        if: always()
+        run: |
+          cargo llvm-cov report --html --output-dir coverage-html 2>/dev/null || true
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            lcov.info
+            coverage-summary.txt
+            coverage-html/
+
+  create-fix-bead:
+    name: Create Fix Bead
+    if: always() && needs.coverage.result == 'failure' && github.event_name == 'pull_request'
+    needs: [sync-beads, coverage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: create
+          failure-type: coverage_gap
+          failure-summary: "Coverage below 100%"
+          failure-details-file: coverage-summary.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup-fix-beads:
+    name: Cleanup Fix Beads
+    if: always() && needs.coverage.result == 'success' && github.event_name == 'pull_request'
+    needs: [sync-beads, coverage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: cleanup
+          failure-type: coverage_gap
+          github-token: ${{ secrets.GITHUB_TOKEN }}

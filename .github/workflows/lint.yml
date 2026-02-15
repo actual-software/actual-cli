@@ -1,0 +1,94 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+
+jobs:
+  sync-beads:
+    name: Sync Beads
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: sync
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  lint:
+    name: Lint
+    needs: sync-beads
+    if: always() && (needs.sync-beads.result == 'success' || needs.sync-beads.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-lint-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+  create-fix-bead:
+    name: Create Fix Bead
+    if: always() && needs.lint.result == 'failure' && github.event_name == 'pull_request'
+    needs: [sync-beads, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: create
+          failure-type: lint_error
+          failure-summary: "Lint violations found - check CI logs"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup-fix-beads:
+    name: Cleanup Fix Beads
+    if: always() && needs.lint.result == 'success' && github.event_name == 'pull_request'
+    needs: [sync-beads, lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: cleanup
+          failure-type: lint_error
+          github-token: ${{ secrets.GITHUB_TOKEN }}
