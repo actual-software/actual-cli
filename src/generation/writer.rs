@@ -72,16 +72,15 @@ fn write_single_file(root_dir: &Path, file: &FileOutput) -> WriteResult {
     // Merge content
     let result = merge::merge_content(existing_ref, &file.content, version, is_root, &file.adr_ids);
 
-    // Create parent directories
-    if let Some(parent) = full_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return WriteResult {
-                path: file.path.clone(),
-                action: WriteAction::Failed,
-                version: 0,
-                error: Some(format!("Failed to create directory: {e}")),
-            };
-        }
+    // Create parent directories (full_path always has a parent since it's root_dir.join(path))
+    let parent = full_path.parent().expect("joined path always has a parent");
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        return WriteResult {
+            path: file.path.clone(),
+            action: WriteAction::Failed,
+            version: 0,
+            error: Some(format!("Failed to create directory: {e}")),
+        };
     }
 
     // Write file
