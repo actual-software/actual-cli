@@ -26,32 +26,23 @@ pub fn prompt_text() -> String {
 pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
     let mut output = String::new();
 
+    let diamond = style("◆").cyan();
     if analysis.is_monorepo {
-        writeln!(
+        let _ = writeln!(
             output,
-            "\n  {} Monorepo detected with {} project(s):\n",
-            style("◆").cyan(),
+            "\n  {diamond} Monorepo detected with {} project(s):\n",
             analysis.projects.len()
-        )
-        .unwrap();
+        );
     } else {
-        writeln!(
-            output,
-            "\n  {} Single project detected:\n",
-            style("◆").cyan()
-        )
-        .unwrap();
+        let _ = writeln!(output, "\n  {diamond} Single project detected:\n");
     }
 
     for project in &analysis.projects {
-        writeln!(
-            output,
-            "  {} {}",
-            style("▸").bold(),
-            style(&project.name).bold()
-        )
-        .unwrap();
-        writeln!(output, "    Path: {}", style(&project.path).dim()).unwrap();
+        let bullet = style("▸").bold();
+        let name = style(&project.name).bold();
+        let path = style(&project.path).dim();
+        let _ = writeln!(output, "  {bullet} {name}");
+        let _ = writeln!(output, "    Path: {path}");
 
         if !project.languages.is_empty() {
             let langs: Vec<String> = project
@@ -59,19 +50,21 @@ pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
                 .iter()
                 .map(|l| format!("{l:?}").to_lowercase())
                 .collect();
-            writeln!(output, "    Languages: {}", langs.join(", ")).unwrap();
+            let joined = langs.join(", ");
+            let _ = writeln!(output, "    Languages: {joined}");
         }
 
         if !project.frameworks.is_empty() {
             let fws: Vec<String> = project.frameworks.iter().map(|f| f.name.clone()).collect();
-            writeln!(output, "    Frameworks: {}", fws.join(", ")).unwrap();
+            let joined = fws.join(", ");
+            let _ = writeln!(output, "    Frameworks: {joined}");
         }
 
         if let Some(pm) = &project.package_manager {
-            writeln!(output, "    Package manager: {pm}").unwrap();
+            let _ = writeln!(output, "    Package manager: {pm}");
         }
 
-        writeln!(output).unwrap();
+        let _ = writeln!(output);
     }
 
     output
