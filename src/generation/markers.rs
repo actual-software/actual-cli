@@ -81,8 +81,8 @@ mod tests {
         let start = output.find(prefix).unwrap() + prefix.len();
         let end = output[start..].find(" -->").unwrap() + start;
         let timestamp = &output[start..end];
-        chrono::DateTime::parse_from_rfc3339(timestamp)
-            .unwrap_or_else(|e| panic!("invalid ISO 8601 timestamp '{}': {}", timestamp, e));
+        // Validates that timestamp is valid ISO 8601 - panics if not
+        let _ = chrono::DateTime::parse_from_rfc3339(timestamp).unwrap();
     }
 
     #[test]
@@ -260,12 +260,7 @@ mod tests {
         let start = output.find(prefix).unwrap() + prefix.len();
         let end = output[start..].find(" -->").unwrap() + start;
         let timestamp = &output[start..end];
-        let parsed = chrono::DateTime::parse_from_rfc3339(timestamp);
-        assert!(
-            parsed.is_ok(),
-            "timestamp '{}' is not valid ISO 8601: {:?}",
-            timestamp,
-            parsed.err()
-        );
+        // Validates that timestamp is valid ISO 8601 - panics if not
+        let _ = chrono::DateTime::parse_from_rfc3339(timestamp).unwrap();
     }
 }
