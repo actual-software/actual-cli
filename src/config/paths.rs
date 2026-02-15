@@ -115,12 +115,8 @@ fn set_config_permissions(_path: &Path) -> Result<(), ActualError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::testutil::ENV_MUTEX;
     use tempfile::tempdir;
-
-    /// Mutex to serialize tests that manipulate env vars, since env vars are
-    /// process-global and tests run in parallel by default.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Helper: save and clear both config env vars, returning saved values.
     fn clear_env_vars() -> (Option<String>, Option<String>) {

@@ -254,12 +254,9 @@ fn walk_for_claude_md(dir: &Path, results: &mut Vec<PathBuf>) {
 mod tests {
     use super::*;
     use crate::config::types::{CachedAnalysis, TelemetryConfig};
+    use crate::testutil::ENV_MUTEX;
     use std::collections::HashMap;
-    use std::sync::Mutex;
     use tempfile::tempdir;
-
-    /// Mutex to serialize tests that manipulate env vars.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     fn restore_env(key: &str, saved: Option<String>) {
         match saved {
@@ -400,6 +397,21 @@ mod tests {
         let code = exec(&args);
         assert_ne!(code, 0);
         restore_env("ACTUAL_CONFIG", saved);
+    }
+
+    #[test]
+    fn test_restore_env_both_branches() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let key = "ACTUAL_TEST_STATUS_RESTORE";
+
+        // Exercise Some branch: restore a previously set value
+        std::env::set_var(key, "original");
+        restore_env(key, Some("restored".to_string()));
+        assert_eq!(std::env::var(key).unwrap(), "restored");
+
+        // Exercise None branch: remove the variable
+        restore_env(key, None);
+        assert!(std::env::var(key).is_err());
     }
 
     // ─── print_config_section ────────────────────────────────────

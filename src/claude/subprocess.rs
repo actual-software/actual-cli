@@ -123,6 +123,20 @@ mod tests {
     use super::*;
     use serde::Deserialize;
 
+    /// Extract `ClaudeSubprocessFailed` fields from an `ActualError`, panicking on mismatch.
+    #[rustfmt::skip]
+    fn subprocess_failed(e: ActualError) -> (String, String) {
+        let ActualError::ClaudeSubprocessFailed { message, stderr } = e else { unreachable!() };
+        (message, stderr)
+    }
+
+    /// Extract `ClaudeTimeout` seconds from an `ActualError`, panicking on mismatch.
+    #[rustfmt::skip]
+    fn timeout_seconds(e: ActualError) -> u64 {
+        let ActualError::ClaudeTimeout { seconds } = e else { unreachable!() };
+        seconds
+    }
+
     /// Mock implementation for testing trait mockability.
     struct MockClaudeRunner {
         json_response: String,
@@ -144,10 +158,7 @@ mod tests {
             json_response: "not valid json".to_string(),
         };
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
-        assert!(
-            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
-            "expected ClaudeOutputParse, got: {result:?}"
-        );
+        assert!(matches!(result, Err(ActualError::ClaudeOutputParse(_))));
     }
 
     #[tokio::test]
@@ -177,19 +188,9 @@ mod tests {
         let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
 
-        match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, stderr }) => {
-                assert!(
-                    message.contains("exited with code 1"),
-                    "expected exit code in message: {message}"
-                );
-                assert!(
-                    stderr.contains("something went wrong"),
-                    "expected stderr content: {stderr}"
-                );
-            }
-            other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
-        }
+        let (message, stderr) = subprocess_failed(result.unwrap_err());
+        assert!(message.contains("exited with code 1"));
+        assert!(stderr.contains("something went wrong"));
     }
 
     #[tokio::test]
@@ -204,10 +205,7 @@ mod tests {
         let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
 
-        assert!(
-            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
-            "expected ClaudeOutputParse, got: {result:?}"
-        );
+        assert!(matches!(result, Err(ActualError::ClaudeOutputParse(_))));
     }
 
     #[derive(Deserialize, PartialEq, Debug)]
@@ -248,12 +246,7 @@ mod tests {
         let runner = CliClaudeRunner::new(script, Duration::from_millis(100));
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
 
-        match result {
-            Err(ActualError::ClaudeTimeout { seconds }) => {
-                assert_eq!(seconds, 0, "100ms rounds down to 0 seconds");
-            }
-            other => panic!("expected ClaudeTimeout, got: {other:?}"),
-        }
+        assert_eq!(timeout_seconds(result.unwrap_err()), 0);
     }
 
     #[tokio::test]
@@ -264,16 +257,9 @@ mod tests {
         );
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
 
-        match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, stderr }) => {
-                assert!(
-                    message.contains("Failed to spawn Claude Code"),
-                    "expected spawn failure in message: {message}"
-                );
-                assert!(stderr.is_empty(), "expected empty stderr: {stderr}");
-            }
-            other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
-        }
+        let (message, stderr) = subprocess_failed(result.unwrap_err());
+        assert!(message.contains("Failed to spawn Claude Code"));
+        assert!(stderr.is_empty());
     }
 
     #[tokio::test]
@@ -291,15 +277,8 @@ mod tests {
         let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
 
-        match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
-                assert!(
-                    message.contains("unknown"),
-                    "expected 'unknown' exit code in message: {message}"
-                );
-            }
-            other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
-        }
+        let (message, _) = subprocess_failed(result.unwrap_err());
+        assert!(message.contains("unknown"));
     }
 
     #[tokio::test]
@@ -333,21 +312,10 @@ mod tests {
     #[test]
     fn test_io_err_produces_subprocess_failed() {
         let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke");
-        let result = io_err("Failed to wait for Claude Code", error);
-        match result {
-            ActualError::ClaudeSubprocessFailed { message, stderr } => {
-                assert!(
-                    message.contains("Failed to wait for Claude Code"),
-                    "expected context in message: {message}"
-                );
-                assert!(
-                    message.contains("pipe broke"),
-                    "expected error in message: {message}"
-                );
-                assert!(stderr.is_empty());
-            }
-            other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
-        }
+        let (message, stderr) = subprocess_failed(io_err("Failed to wait for Claude Code", error));
+        assert!(message.contains("Failed to wait for Claude Code"));
+        assert!(message.contains("pipe broke"));
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -358,32 +326,18 @@ mod tests {
             .output()
             .unwrap();
         let result = resolve_output(Ok(Ok(output)), Duration::from_secs(30));
-        assert!(result.is_ok());
         let output = result.unwrap();
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("hello"),
-            "expected stdout to contain 'hello'"
-        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
     }
 
     #[test]
     fn test_resolve_output_io_error() {
         let io_error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke");
         let result = resolve_output(Ok(Err(io_error)), Duration::from_secs(30));
-        match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, stderr }) => {
-                assert!(
-                    message.contains("Failed to wait for Claude Code"),
-                    "expected context in message: {message}"
-                );
-                assert!(
-                    message.contains("pipe broke"),
-                    "expected error in message: {message}"
-                );
-                assert!(stderr.is_empty());
-            }
-            other => panic!("expected ClaudeSubprocessFailed, got: {other:?}"),
-        }
+        let (message, stderr) = subprocess_failed(result.unwrap_err());
+        assert!(message.contains("Failed to wait for Claude Code"));
+        assert!(message.contains("pipe broke"));
+        assert!(stderr.is_empty());
     }
 
     #[tokio::test]
@@ -396,11 +350,6 @@ mod tests {
         .await
         .unwrap_err();
         let result = resolve_output(Err(elapsed), Duration::from_secs(30));
-        match result {
-            Err(ActualError::ClaudeTimeout { seconds }) => {
-                assert_eq!(seconds, 30);
-            }
-            other => panic!("expected ClaudeTimeout, got: {other:?}"),
-        }
+        assert_eq!(timeout_seconds(result.unwrap_err()), 30);
     }
 }
