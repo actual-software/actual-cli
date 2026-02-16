@@ -2,8 +2,7 @@
 ///
 /// The logo is a stylized "a" shaped like a bird with speed lines,
 /// representing AI-powered code management. Sourced from `docs/logo.txt`.
-pub const BANNER: &str = "\
-                 ..==++++++++=============
+pub const BANNER: &str = "                 ..==++++++++=============
               +*******************+++++++
            .************************++**
          =********:        :********+**
