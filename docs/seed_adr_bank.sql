@@ -1,20 +1,19 @@
 -- Seed adr_bank with 20 curated generic ADRs for TypeScript / Next.js 16+
 -- Run in Supabase SQL Editor (requires service_role or superuser)
+-- IDEMPOTENT: safe to run multiple times (skips rows where title already exists)
 --
 -- Category IDs reference scripts/adr_category_list.json taxonomy (staging branch)
 -- applies_to_languages / applies_to_frameworks use lowercase identifiers matching
 -- the CLI's languages.json / frameworks.json
-
-INSERT INTO public.adr_bank
-  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
-VALUES
 
 -- =============================================================================
 -- TIER 1: Must-Have (Prevent Common Mistakes)
 -- =============================================================================
 
 -- ADR-001
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Default to Server Components and Restrict ''use client'' to Leaf Interactive Components',
   'Next.js 15+ renders all components as Server Components by default. Adding ''use client'' to a file makes it AND all its imports part of the client bundle, increasing JS sent to the browser. Misplacing the directive on layouts or parent components unnecessarily bloats the client.',
   ARRAY[
@@ -29,10 +28,14 @@ VALUES
   ],
   '169', 'Rendering Model', 'UI/UX & Frontend Decisions > Rendering Model',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Default to Server Components and Restrict ''use client'' to Leaf Interactive Components'
+);
 
 -- ADR-002
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Return Error State from Server Actions Instead of Throwing',
   'Server Actions handle form submissions and mutations. For expected errors (validation failure, API error), throwing exceptions triggers error boundaries which replace the form UI. Returning error state preserves the form and lets the user correct their input.',
   ARRAY[
@@ -47,10 +50,14 @@ VALUES
   ],
   '71', 'Error handling style', 'Language & Paradigm > Coding Conventions > Error handling style',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Return Error State from Server Actions Instead of Throwing'
+);
 
 -- ADR-003
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Enable TypeScript Strict Mode and noUncheckedIndexedAccess',
   'TypeScript''s strict mode catches null/undefined issues and enforces stronger function parameter checks. noUncheckedIndexedAccess (not included in strict) adds T | undefined to array/object index access, catching a common class of runtime TypeError crashes.',
   ARRAY[
@@ -64,10 +71,14 @@ VALUES
   ],
   '167', 'Type systems', 'Build, Delivery & Tooling > Developer Tooling > Type systems',
   '{typescript}', '{}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Enable TypeScript Strict Mode and noUncheckedIndexedAccess'
+);
 
 -- ADR-004
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use server-only Package to Prevent Server Code Leaking to Client',
   'Files with server secrets (API keys, database queries) can be accidentally imported into Client Components. Without protection, server-only env vars are silently replaced with empty strings on the client, causing silent failures instead of build errors.',
   ARRAY[
@@ -80,10 +91,14 @@ VALUES
   ],
   '143', 'Storage', 'Security & Compliance > Secrets & Credentials > Storage',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use server-only Package to Prevent Server Code Leaking to Client'
+);
 
 -- ADR-005
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Prefix Client-Exposed Environment Variables with NEXT_PUBLIC_',
   'Next.js only inlines environment variables prefixed with NEXT_PUBLIC_ into the client JavaScript bundle at build time. Non-prefixed variables are replaced with empty strings on the client. NEXT_PUBLIC_ values are frozen at build time and visible to anyone inspecting the bundle.',
   ARRAY[
@@ -98,10 +113,14 @@ VALUES
   ],
   '127', 'Environment strategy', 'Runtime Environment & Execution Patterns > Configuration & Environment Management > Environment strategy',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Prefix Client-Exposed Environment Variables with NEXT_PUBLIC_'
+);
 
 -- ADR-006
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Call Revalidation Functions Before redirect() in Server Actions',
   'Next.js redirect() throws a framework-handled control-flow exception that stops all subsequent code execution. If revalidatePath() or revalidateTag() is called after redirect(), the cache will not be updated, leading to stale data on the destination page.',
   ARRAY[
@@ -114,10 +133,14 @@ VALUES
   ],
   '108', 'Caching strategy', 'Data Storage, Modeling & Access > Data Access Patterns > Caching strategy',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Call Revalidation Functions Before redirect() in Server Actions'
+);
 
 -- ADR-007
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use proxy.ts Instead of middleware.ts in Next.js 16+',
   'Next.js 16 deprecated middleware.ts and renamed it to proxy.ts to clarify its purpose as a network-boundary proxy, not Express-style middleware. The function export changed from middleware() to proxy().',
   ARRAY[
@@ -132,10 +155,14 @@ VALUES
   ],
   '73', 'Web frameworks', 'Frameworks & Libraries > Application Frameworks > Web frameworks',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use proxy.ts Instead of middleware.ts in Next.js 16+'
+);
 
 -- ADR-008
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Validate Server Action Inputs with Zod Schemas',
   'FormData values are all strings and can be tampered with by the client. Server Actions are publicly accessible endpoints. Without validation, malformed or malicious input can cause data corruption or security issues.',
   ARRAY[
@@ -150,10 +177,14 @@ VALUES
   ],
   '140', 'Input validation, output encoding', 'Security & Compliance > Secure Coding Practices > Input validation, output encoding',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Validate Server Action Inputs with Zod Schemas'
+);
 
 -- ADR-009
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use Children Prop Pattern to Compose Server Components Inside Client Components',
   'Importing a Server Component file inside a ''use client'' file makes it a Client Component (all imports in a client boundary become client code). To keep server-rendered content inside interactive client wrappers, pass Server Components as children props.',
   ARRAY[
@@ -167,10 +198,14 @@ VALUES
   ],
   '169', 'Rendering Model', 'UI/UX & Frontend Decisions > Rendering Model',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use Children Prop Pattern to Compose Server Components Inside Client Components'
+);
 
 -- ADR-010
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use React.cache() to Deduplicate Non-Fetch Data Access',
   'React automatically memoizes fetch() GET requests within a render pass, but ORM calls, database queries, and CMS client calls are not memoized. Without React.cache(), calling getUser() in both a layout and a page results in two separate database queries for the same data.',
   ARRAY[
@@ -184,14 +219,18 @@ VALUES
   ],
   '108', 'Caching strategy', 'Data Storage, Modeling & Access > Data Access Patterns > Caching strategy',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use React.cache() to Deduplicate Non-Fetch Data Access'
+);
 
 -- =============================================================================
 -- TIER 2: Important (Improves Architecture)
 -- =============================================================================
 
 -- ADR-011
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Fetch Data Directly in Server Components, Not Through Self-Referencing API Routes',
   'In the App Router, Server Components can directly query databases, call ORMs, and access APIs. Creating /api/ routes solely to fetch data for your own pages adds unnecessary network hops and complexity.',
   ARRAY[
@@ -205,10 +244,14 @@ VALUES
   ],
   '169', 'Rendering Model', 'UI/UX & Frontend Decisions > Rendering Model',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Fetch Data Directly in Server Components, Not Through Self-Referencing API Routes'
+);
 
 -- ADR-012
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use Promise.all() for Parallel Data Fetching in Server Components',
   'Sequential await statements in Server Components block each other. If getArtist() takes 200ms and getAlbums() takes 300ms, sequential fetching takes 500ms while parallel fetching takes 300ms.',
   ARRAY[
@@ -221,10 +264,14 @@ VALUES
   ],
   '125', 'Concurrency patterns', 'Runtime Environment & Execution Patterns > Process Model > Concurrency patterns',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use Promise.all() for Parallel Data Fetching in Server Components'
+);
 
 -- ADR-013
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use Suspense Boundaries with Skeleton Fallbacks for Streaming',
   'Without Suspense boundaries, slow data requests block the entire page from rendering. Suspense enables streaming: fast content renders immediately while slow content shows a fallback until ready.',
   ARRAY[
@@ -238,10 +285,14 @@ VALUES
   ],
   '169', 'Rendering Model', 'UI/UX & Frontend Decisions > Rendering Model',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use Suspense Boundaries with Skeleton Fallbacks for Streaming'
+);
 
 -- ADR-014
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use useActionState for Form State Management with Server Actions',
   'React 19 introduced useActionState to replace the pattern of useState + manual fetch + loading state for forms. It provides state, a form action function, and a pending boolean in one hook, with built-in progressive enhancement.',
   ARRAY[
@@ -257,10 +308,14 @@ VALUES
   ],
   '174', 'Form validation strategy', 'UI/UX & Frontend Decisions > Interaction Patterns > Form validation strategy',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use useActionState for Form State Management with Server Actions'
+);
 
 -- ADR-015
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Configure Proxy Matcher to Exclude Static Assets',
   'Proxy (formerly middleware) runs on every matched request. Without a matcher, it processes static files, images, and internal Next.js routes unnecessarily, adding latency to every asset load.',
   ARRAY[
@@ -273,10 +328,14 @@ VALUES
   ],
   '73', 'Web frameworks', 'Frameworks & Libraries > Application Frameworks > Web frameworks',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Configure Proxy Matcher to Exclude Static Assets'
+);
 
 -- ADR-016
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use Route Groups for Domain-Based Layout Segmentation',
   'Different sections of an app often need different layouts (marketing vs dashboard, public vs authenticated). Route groups (parenthesized folders) let you apply different layouts without affecting URL structure.',
   ARRAY[
@@ -291,10 +350,14 @@ VALUES
   ],
   '70', 'Code organization patterns', 'Language & Paradigm > Coding Conventions > Code organization patterns',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use Route Groups for Domain-Based Layout Segmentation'
+);
 
 -- ADR-017
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use module Preserve for Next.js and Bundled TypeScript Projects',
   'When using a bundler (Next.js, Vite, Webpack), TypeScript should not transform imports — the bundler handles module resolution. module: Preserve (implying moduleResolution: Bundler) tells TypeScript to leave imports as-is.',
   ARRAY[
@@ -308,10 +371,14 @@ VALUES
   ],
   '167', 'Type systems', 'Build, Delivery & Tooling > Developer Tooling > Type systems',
   '{typescript}', '{}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use module Preserve for Next.js and Bundled TypeScript Projects'
+);
 
 -- ADR-018
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Enable typedRoutes for Compile-Time Link Validation',
   'Broken internal links are only discovered at runtime or in manual testing. Next.js can generate type definitions for all routes, making <Link href=...> and router.push() type-checked at compile time.',
   ARRAY[
@@ -325,10 +392,14 @@ VALUES
   ],
   '167', 'Type systems', 'Build, Delivery & Tooling > Developer Tooling > Type systems',
   '{typescript}', '{nextjs}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Enable typedRoutes for Compile-Time Link Validation'
+);
 
 -- ADR-019
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Use import type for Type-Only Imports with verbatimModuleSyntax',
   'Regular import statements can include module side effects even when only types are used. Without import type, bundlers may not tree-shake type-only imports correctly, and module side effects execute unnecessarily.',
   ARRAY[
@@ -343,10 +414,14 @@ VALUES
   ],
   '167', 'Type systems', 'Build, Delivery & Tooling > Developer Tooling > Type systems',
   '{typescript}', '{}'
-),
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Use import type for Type-Only Imports with verbatimModuleSyntax'
+);
 
 -- ADR-020
-(
+INSERT INTO public.adr_bank
+  (title, context, policies, instructions, category_id, category_name, category_path, applies_to_languages, applies_to_frameworks)
+SELECT
   'Understand the Next.js 4-Layer Cache Model',
   'Next.js caches at four distinct layers with different lifetimes and locations. Adding custom caching without understanding these layers leads to stale data, over-caching, or redundant work.',
   ARRAY[
@@ -362,4 +437,6 @@ VALUES
   ],
   '108', 'Caching strategy', 'Data Storage, Modeling & Access > Data Access Patterns > Caching strategy',
   '{typescript}', '{nextjs}'
+WHERE NOT EXISTS (
+  SELECT 1 FROM public.adr_bank WHERE title = 'Understand the Next.js 4-Layer Cache Model'
 );
