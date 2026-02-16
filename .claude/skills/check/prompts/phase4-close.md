@@ -18,14 +18,16 @@ Read ALL files from `.check/bead-status/batch-*.json`.
       ```bash
       bd list --status open --type epic --json
       ```
-   b. For each epic, check if it has children:
+   b. For each epic, safely check if it has children:
       ```bash
-      bd show <epic-id> --children --json
+      # Get children count with fallback for missing field
+      CHILDREN_COUNT=$(bd show <epic-id> --children --json | jq '.children | length // -1')
       ```
-   c. If `children.length == 0`, close the epic:
+   c. If `CHILDREN_COUNT == 0`, close the epic:
       ```bash
       bd close <epic-id> -m "Closing empty epic with no child beads"
       ```
+   d. If `CHILDREN_COUNT == -1`, skip the epic (unexpected JSON structure or missing field)
 4. After closing all beads and empty epics, sync to beads-sync branch:
    ```bash
    bd sync --full
