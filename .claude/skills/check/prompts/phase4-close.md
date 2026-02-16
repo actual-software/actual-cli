@@ -13,7 +13,7 @@ Read ALL files from `.check/bead-status/batch-*.json`.
    ```bash
    bd close <bead-id> -m "<close_message>"
    ```
-3. Close empty epics:
+3. Close empty placeholder epics:
    a. Get all open epics:
       ```bash
       bd list --status open --type epic --json
@@ -23,11 +23,26 @@ Read ALL files from `.check/bead-status/batch-*.json`.
       # Get children count with fallback for missing field
       CHILDREN_COUNT=$(bd show <epic-id> --children --json | jq '.children | length // -1')
       ```
-   c. If `CHILDREN_COUNT == 0`, close the epic:
+   c. Check if the epic is long-lived by examining its description for keywords:
       ```bash
-      bd close <epic-id> -m "Closing empty epic with no child beads"
+      DESCRIPTION=$(bd show <epic-id> --json | jq -r '.description // ""')
+      IS_LONG_LIVED=false
+      if echo "$DESCRIPTION" | grep -qiE '(long.?lived|bug.?tracker|ongoing|maintenance|permanent)'; then
+        IS_LONG_LIVED=true
+      fi
       ```
-   d. If `CHILDREN_COUNT == -1`, skip the epic (unexpected JSON structure or missing field)
+   d. Only close the epic if ALL conditions are met:
+      - `CHILDREN_COUNT == 0` (no children)
+      - `IS_LONG_LIVED == false` (not a long-lived epic)
+      - Epic is NOT named/described as a tracker or maintenance epic
+   e. Close qualifying epics:
+      ```bash
+      bd close <epic-id> -m "Closing empty placeholder epic with no child beads"
+      ```
+   f. Skip if:
+      - `CHILDREN_COUNT == -1` (unexpected JSON structure)
+      - `IS_LONG_LIVED == true` (long-lived epic must stay open per AGENTS.md)
+      - Epic has children
 4. After closing all beads and empty epics, sync to beads-sync branch:
    ```bash
    bd sync --full
@@ -49,7 +64,11 @@ Write the following JSON to `.check/close-results.json`:
     {"id": "actual-cli-xyz", "success": true}
   ],
   "empty_epics_failed": [],
+  "empty_epics_skipped": [
+    {"id": "actual-cli-long-lived", "reason": "long-lived epic"}
+  ],
   "total_empty_epics_closed": 1,
+  "total_empty_epics_skipped": 1,
   "sync": {
     "success": true,
     "error": null
@@ -63,5 +82,7 @@ Write the following JSON to `.check/close-results.json`:
 - If `bd close` fails for an empty epic, record it in `empty_epics_failed` with the error message. Continue with the next epic.
 - If there are 0 beads to close, skip to empty epic closing and write `total_closed: 0`.
 - If there are 0 empty epics to close, write `total_empty_epics_closed: 0`.
-- Empty epics are automatically closed to prevent orphaned epics that were either never used or had work done outside the bead system.
+- Empty **placeholder** epics are automatically closed to prevent orphaned epics that were never used.
+- **CRITICAL**: Long-lived epics (bug trackers, maintenance epics) MUST stay open even with zero children, per AGENTS.md rules. Check epic description for keywords before closing.
+- Only close epics that are both empty AND not marked as long-lived.
 - If `bd sync --full` fails, record the error but don't retry.
