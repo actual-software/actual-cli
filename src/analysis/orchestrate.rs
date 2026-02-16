@@ -382,20 +382,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_analysis_normalizes_absolute_paths() {
-        let working_dir = Path::new("/home/user/project");
-        let json_with_absolute_path = r#"{
+        // Use a real temp directory so canonicalize() succeeds inside
+        // normalize_analysis, exercising the Ok path of canonicalize.
+        let dir = tempfile::tempdir().unwrap();
+        let working_dir = dir.path();
+        let abs_path = working_dir.to_string_lossy().to_string();
+        let json_with_absolute_path = format!(
+            r#"{{
             "is_monorepo": false,
-            "projects": [{
-                "path": "/home/user/project",
+            "projects": [{{
+                "path": "{}",
                 "name": "my-app",
                 "languages": ["rust"],
-                "frameworks": [{"name": "actix-web", "category": "web-backend"}],
+                "frameworks": [{{"name": "actix-web", "category": "web-backend"}}],
                 "package_manager": "cargo",
                 "description": "A web application"
-            }]
-        }"#;
+            }}]
+        }}"#,
+            abs_path
+        );
 
-        let runner = MockRunner::from_json(vec![json_with_absolute_path]);
+        let runner = MockRunner::from_json(vec![&json_with_absolute_path]);
         let result = run_analysis(&runner, None, working_dir).await.unwrap();
 
         assert_eq!(result.projects[0].path, ".");
