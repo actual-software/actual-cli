@@ -142,8 +142,8 @@ impl ActualApiClient {
 
 /// Serialize a [`Language`] enum variant to its serde string representation.
 ///
-/// Uses `serde_json::to_value` which, combined with `#[serde(rename_all = "lowercase")]`,
-/// produces lowercase strings like `"typescript"`, `"rust"`, etc.
+/// Uses `serde_json::to_value` which produces lowercase strings like
+/// `"typescript"`, `"rust"`, etc.
 fn serialize_language(lang: &Language) -> String {
     serde_json::to_value(lang)
         .expect("Language serialization cannot fail")
@@ -154,8 +154,8 @@ fn serialize_language(lang: &Language) -> String {
 
 /// Serialize a [`FrameworkCategory`] enum variant to its serde string representation.
 ///
-/// Uses `serde_json::to_value` which, combined with `#[serde(rename_all = "kebab-case")]`,
-/// produces kebab-case strings like `"web-frontend"`, `"web-backend"`, etc.
+/// Uses `serde_json::to_value` which produces kebab-case strings for known variants
+/// (e.g. `"web-frontend"`, `"web-backend"`) and the raw string for `Other`.
 fn serialize_framework_category(category: &FrameworkCategory) -> String {
     serde_json::to_value(category)
         .expect("FrameworkCategory serialization cannot fail")
