@@ -327,6 +327,18 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_canonical_some_but_no_match_falls_through() {
+        // When canonical is Some but the absolute path matches neither
+        // working_dir nor canonical_dir, the path passes through unchanged.
+        let working_dir = Path::new("/home/user/project");
+        let canonical = Path::new("/real/home/user/project");
+        assert_eq!(
+            normalize_project_path("/unrelated/path", working_dir, Some(canonical)),
+            "/unrelated/path"
+        );
+    }
+
+    #[test]
     fn test_normalize_strip_leading_dot_slash() {
         let working_dir = Path::new("/home/user/project");
         assert_eq!(
