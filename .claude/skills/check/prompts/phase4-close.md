@@ -71,7 +71,7 @@ Write the following JSON to `.check/close-results.json`:
     {"id": "actual-cli-def", "reason": "failed to parse children"}
   ],
   "total_empty_epics_closed": 1,
-  "total_empty_epics_skipped": 1,
+  "total_empty_epics_skipped": 3,
   "sync": {
     "success": true,
     "error": null
