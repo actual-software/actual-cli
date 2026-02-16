@@ -23,18 +23,19 @@ Read ALL files from `.check/bead-status/batch-*.json`.
       # Get children count with fallback for missing field
       CHILDREN_COUNT=$(bd show <epic-id> --children --json | jq '.children | length // -1')
       ```
-   c. Check if the epic is long-lived by examining its description for keywords:
+   c. Check if the epic is long-lived by examining its title and description for keywords:
       ```bash
-      DESCRIPTION=$(bd show <epic-id> --json | jq -r '.description // ""')
+      EPIC_INFO=$(bd show <epic-id> --json)
+      DESCRIPTION=$(echo "$EPIC_INFO" | jq -r '.description // ""')
+      TITLE=$(echo "$EPIC_INFO" | jq -r '.title // ""')
       IS_LONG_LIVED=false
-      if echo "$DESCRIPTION" | grep -qiE '(long.?lived|bug.?tracker|ongoing|maintenance|permanent)'; then
+      if echo "$DESCRIPTION $TITLE" | grep -qiE '(long.?lived|bug.?tracker|ongoing|maintenance|permanent)'; then
         IS_LONG_LIVED=true
       fi
       ```
    d. Only close the epic if ALL conditions are met:
       - `CHILDREN_COUNT == 0` (no children)
       - `IS_LONG_LIVED == false` (not a long-lived epic)
-      - Epic is NOT named/described as a tracker or maintenance epic
    e. Close qualifying epics:
       ```bash
       bd close <epic-id> -m "Closing empty placeholder epic with no child beads"
@@ -65,7 +66,9 @@ Write the following JSON to `.check/close-results.json`:
   ],
   "empty_epics_failed": [],
   "empty_epics_skipped": [
-    {"id": "actual-cli-long-lived", "reason": "long-lived epic"}
+    {"id": "actual-cli-xyz", "reason": "long-lived epic"},
+    {"id": "actual-cli-abc", "reason": "has children"},
+    {"id": "actual-cli-def", "reason": "failed to parse children"}
   ],
   "total_empty_epics_closed": 1,
   "total_empty_epics_skipped": 1,
