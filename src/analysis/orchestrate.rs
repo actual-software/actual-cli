@@ -13,13 +13,10 @@ use crate::error::ActualError;
 /// `/`, and normalizes empty strings to `"."`.  Also handles macOS's
 /// `/private/var` ↔ `/var` symlink by trying both the raw and canonicalized
 /// `working_dir` when stripping prefixes.
-pub fn normalize_project_path(path: &str, working_dir: &Path) -> String {
-    let canonical = working_dir.canonicalize().ok();
-    normalize_project_path_inner(path, working_dir, canonical.as_deref())
-}
-
-/// Inner implementation that accepts an optional canonical path for testability.
-fn normalize_project_path_inner(
+///
+/// `canonical_dir` should be `working_dir.canonicalize().ok()` — passed in
+/// so the caller can compute it once for all projects.
+pub fn normalize_project_path(
     path: &str,
     working_dir: &Path,
     canonical_dir: Option<&Path>,
@@ -66,8 +63,9 @@ fn relative_or_dot(relative: &Path) -> String {
 
 /// Normalize all project paths in an analysis result.
 fn normalize_analysis(analysis: &mut RepoAnalysis, working_dir: &Path) {
+    let canonical = working_dir.canonicalize().ok();
     for project in &mut analysis.projects {
-        project.path = normalize_project_path(&project.path, working_dir);
+        project.path = normalize_project_path(&project.path, working_dir, canonical.as_deref());
     }
 }
 
@@ -276,26 +274,16 @@ mod tests {
     fn test_normalize_absolute_path_matching_working_dir() {
         let working_dir = Path::new("/home/user/project");
         assert_eq!(
-            normalize_project_path("/home/user/project", working_dir),
+            normalize_project_path("/home/user/project", working_dir, None),
             "."
         );
-    }
-
-    #[test]
-    fn test_normalize_with_real_directory_exercises_canonicalize() {
-        // Uses a real temp directory so canonicalize() succeeds,
-        // exercising the public wrapper's canonicalize path.
-        let dir = tempfile::tempdir().unwrap();
-        let working_dir = dir.path();
-        let abs_path = working_dir.to_string_lossy().to_string();
-        assert_eq!(normalize_project_path(&abs_path, working_dir), ".");
     }
 
     #[test]
     fn test_normalize_absolute_path_subdir_of_working_dir() {
         let working_dir = Path::new("/home/user/project");
         assert_eq!(
-            normalize_project_path("/home/user/project/apps/web", working_dir),
+            normalize_project_path("/home/user/project/apps/web", working_dir, None),
             "apps/web"
         );
     }
@@ -308,7 +296,7 @@ mod tests {
         let working_dir = Path::new("/var/folders/X");
         let canonical = Path::new("/private/var/folders/X");
         assert_eq!(
-            normalize_project_path_inner("/private/var/folders/X", working_dir, Some(canonical)),
+            normalize_project_path("/private/var/folders/X", working_dir, Some(canonical)),
             "."
         );
     }
@@ -318,7 +306,7 @@ mod tests {
         let working_dir = Path::new("/var/folders/X");
         let canonical = Path::new("/private/var/folders/X");
         assert_eq!(
-            normalize_project_path_inner(
+            normalize_project_path(
                 "/private/var/folders/X/apps/web",
                 working_dir,
                 Some(canonical)
@@ -333,7 +321,7 @@ mod tests {
         // pass through unchanged.
         let working_dir = Path::new("/home/user/project");
         assert_eq!(
-            normalize_project_path_inner("/other/path", working_dir, None),
+            normalize_project_path("/other/path", working_dir, None),
             "/other/path"
         );
     }
@@ -342,7 +330,7 @@ mod tests {
     fn test_normalize_strip_leading_dot_slash() {
         let working_dir = Path::new("/home/user/project");
         assert_eq!(
-            normalize_project_path("./apps/web", working_dir),
+            normalize_project_path("./apps/web", working_dir, None),
             "apps/web"
         );
     }
@@ -350,32 +338,38 @@ mod tests {
     #[test]
     fn test_normalize_strip_trailing_slash() {
         let working_dir = Path::new("/home/user/project");
-        assert_eq!(normalize_project_path("apps/web/", working_dir), "apps/web");
+        assert_eq!(
+            normalize_project_path("apps/web/", working_dir, None),
+            "apps/web"
+        );
     }
 
     #[test]
     fn test_normalize_empty_to_dot() {
         let working_dir = Path::new("/home/user/project");
-        assert_eq!(normalize_project_path("", working_dir), ".");
+        assert_eq!(normalize_project_path("", working_dir, None), ".");
     }
 
     #[test]
     fn test_normalize_dot_unchanged() {
         let working_dir = Path::new("/home/user/project");
-        assert_eq!(normalize_project_path(".", working_dir), ".");
+        assert_eq!(normalize_project_path(".", working_dir, None), ".");
     }
 
     #[test]
     fn test_normalize_relative_path_unchanged() {
         let working_dir = Path::new("/home/user/project");
-        assert_eq!(normalize_project_path("apps/web", working_dir), "apps/web");
+        assert_eq!(
+            normalize_project_path("apps/web", working_dir, None),
+            "apps/web"
+        );
     }
 
     #[test]
     fn test_normalize_absolute_path_unrelated_to_working_dir() {
         let working_dir = Path::new("/home/user/project");
         assert_eq!(
-            normalize_project_path("/other/path/entirely", working_dir),
+            normalize_project_path("/other/path/entirely", working_dir, None),
             "/other/path/entirely"
         );
     }
@@ -383,7 +377,7 @@ mod tests {
     #[test]
     fn test_normalize_dot_slash_only() {
         let working_dir = Path::new("/home/user/project");
-        assert_eq!(normalize_project_path("./", working_dir), ".");
+        assert_eq!(normalize_project_path("./", working_dir, None), ".");
     }
 
     #[tokio::test]
