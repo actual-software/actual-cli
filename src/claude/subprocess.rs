@@ -2,9 +2,25 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::error::ActualError;
+
+/// Envelope returned by Claude Code when invoked with `--print --output-format json`.
+///
+/// The actual structured output (matching the `--json-schema`) is nested inside
+/// the `structured_output` field. The top-level JSON contains metadata such as
+/// `type`, `subtype`, `is_error`, `result`, etc.
+#[derive(Deserialize)]
+struct ClaudeEnvelope<T> {
+    #[serde(rename = "type")]
+    result_type: Option<String>,
+    subtype: Option<String>,
+    is_error: Option<bool>,
+    structured_output: Option<T>,
+    result: Option<String>,
+}
 
 /// Trait for running Claude Code and deserializing output.
 ///
@@ -46,6 +62,12 @@ fn io_err(context: &str, e: std::io::Error) -> ActualError {
 
 /// Parse the output of a completed subprocess, returning the deserialized result
 /// or an appropriate error.
+///
+/// Claude Code wraps structured output in an envelope JSON object when invoked
+/// with `--print --output-format json --json-schema <schema>`. This function
+/// first tries to parse as a `ClaudeEnvelope<T>` and extract `structured_output`,
+/// falling back to direct parsing as `T` for backwards compatibility (e.g., test
+/// fake binaries that emit raw JSON).
 fn parse_output<T: DeserializeOwned>(output: std::process::Output) -> Result<T, ActualError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -60,6 +82,32 @@ fn parse_output<T: DeserializeOwned>(output: std::process::Output) -> Result<T, 
         });
     }
 
+    // Try envelope parse first, then fall back to direct parse.
+    if let Ok(envelope) = serde_json::from_slice::<ClaudeEnvelope<T>>(&output.stdout) {
+        // Check for error states in the envelope.
+        if envelope.is_error == Some(true) || envelope.subtype.as_deref() == Some("error_max_turns")
+        {
+            let detail = envelope
+                .result
+                .unwrap_or_else(|| "unknown error".to_string());
+            return Err(ActualError::ClaudeSubprocessFailed {
+                message: format!("Claude Code returned an error: {detail}"),
+                stderr: String::new(),
+            });
+        }
+
+        // Only treat as an envelope if it looks like one (has `type` = "result").
+        if envelope.result_type.as_deref() == Some("result") {
+            return envelope
+                .structured_output
+                .ok_or_else(|| ActualError::ClaudeSubprocessFailed {
+                    message: "Claude Code envelope missing structured_output field".to_string(),
+                    stderr: String::new(),
+                });
+        }
+    }
+
+    // Fallback: direct parse as T (backwards compat with test fake binaries).
     let parsed: T = serde_json::from_slice(&output.stdout)?;
     Ok(parsed)
 }
@@ -351,5 +399,105 @@ mod tests {
         .unwrap_err();
         let result = resolve_output(Err(elapsed), Duration::from_secs(30));
         assert_eq!(timeout_seconds(result.unwrap_err()), 30);
+    }
+
+    /// Build a fake successful `std::process::Output` with the given stdout bytes.
+    ///
+    /// Uses `true` (unix) or `cmd /C exit 0` (windows) to obtain a real
+    /// `ExitStatus` with code 0, since `ExitStatus` has no public constructor.
+    fn success_output(stdout: &[u8]) -> std::process::Output {
+        #[cfg(unix)]
+        let status = std::process::Command::new("true").status().unwrap();
+        #[cfg(windows)]
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .status()
+            .unwrap();
+
+        std::process::Output {
+            status,
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    // ---- Envelope parsing tests ----
+
+    #[test]
+    fn test_parse_envelope_extracts_structured_output() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "duration_ms": 8130,
+            "result": "Done!",
+            "session_id": "abc-123",
+            "total_cost_usd": 0.023,
+            "structured_output": {
+                "name": "hello",
+                "count": 7
+            }
+        });
+        let output = success_output(json.to_string().as_bytes());
+        let parsed: TestOutput = parse_output(output).unwrap();
+        assert_eq!(parsed.name, "hello");
+        assert_eq!(parsed.count, 7);
+    }
+
+    #[test]
+    fn test_parse_envelope_is_error_true() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": "Something went terribly wrong",
+            "structured_output": null
+        });
+        let output = success_output(json.to_string().as_bytes());
+        let result: Result<TestOutput, _> = parse_output(output);
+        let (message, _) = subprocess_failed(result.unwrap_err());
+        assert!(message.contains("returned an error"));
+        assert!(message.contains("Something went terribly wrong"));
+    }
+
+    #[test]
+    fn test_parse_envelope_error_max_turns() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error_max_turns",
+            "is_error": false,
+            "result": "Hit the maximum number of turns",
+            "structured_output": null
+        });
+        let output = success_output(json.to_string().as_bytes());
+        let result: Result<TestOutput, _> = parse_output(output);
+        let (message, _) = subprocess_failed(result.unwrap_err());
+        assert!(message.contains("returned an error"));
+        assert!(message.contains("Hit the maximum number of turns"));
+    }
+
+    #[test]
+    fn test_parse_envelope_missing_structured_output() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "Completed, but no structured output",
+            "structured_output": null
+        });
+        let output = success_output(json.to_string().as_bytes());
+        let result: Result<TestOutput, _> = parse_output(output);
+        let (message, _) = subprocess_failed(result.unwrap_err());
+        assert!(message.contains("missing structured_output"));
+    }
+
+    #[test]
+    fn test_parse_fallback_direct_json() {
+        // Raw JSON without envelope — backwards compat with test fake binaries.
+        let json = r#"{"name":"direct","count":99}"#;
+        let output = success_output(json.as_bytes());
+        let parsed: TestOutput = parse_output(output).unwrap();
+        assert_eq!(parsed.name, "direct");
+        assert_eq!(parsed.count, 99);
     }
 }
