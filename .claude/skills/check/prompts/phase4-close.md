@@ -66,7 +66,7 @@ Write the following JSON to `.check/close-results.json`:
   ],
   "empty_epics_failed": [],
   "empty_epics_skipped": [
-    {"id": "actual-cli-xyz", "reason": "long-lived epic"},
+    {"id": "actual-cli-long-lived", "reason": "long-lived epic"},
     {"id": "actual-cli-abc", "reason": "has children"},
     {"id": "actual-cli-def", "reason": "failed to parse children"}
   ],
