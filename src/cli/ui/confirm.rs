@@ -103,6 +103,9 @@ pub fn prompt_project_confirmation(
     let summary = format_project_summary(analysis);
     out.write_all(summary.as_bytes()).ok();
 
+    let prompt = format!("{}\n", prompt_text());
+    out.write_all(prompt.as_bytes()).ok();
+
     loop {
         match reader.read_line() {
             Ok(input) => match parse_confirm_input(&input) {
@@ -110,6 +113,8 @@ pub fn prompt_project_confirmation(
                 None => {
                     let hint = format!("{}\n", invalid_input_hint());
                     out.write_all(hint.as_bytes()).ok();
+                    let prompt = format!("{}\n", prompt_text());
+                    out.write_all(prompt.as_bytes()).ok();
                 }
             },
             Err(_) => return ConfirmAction::Reject,
@@ -504,6 +509,15 @@ mod tests {
             output.contains("Please enter"),
             "expected hint in output: {output}"
         );
+        // Prompt text should be re-displayed after invalid input
+        assert!(
+            output.contains("accept"),
+            "expected prompt text in output: {output}"
+        );
+        assert!(
+            output.contains("reject"),
+            "expected prompt text in output: {output}"
+        );
     }
 
     #[test]
@@ -557,6 +571,15 @@ mod tests {
         assert!(
             output.contains("Single project detected"),
             "expected header in output: {output}"
+        );
+        // Prompt text should appear after the summary
+        assert!(
+            output.contains("accept"),
+            "expected prompt text in output: {output}"
+        );
+        assert!(
+            output.contains("reject"),
+            "expected prompt text in output: {output}"
         );
     }
 }
