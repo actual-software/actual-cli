@@ -282,6 +282,16 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_with_real_directory_exercises_canonicalize() {
+        // Uses a real temp directory so canonicalize() succeeds,
+        // exercising the public wrapper's canonicalize path.
+        let dir = tempfile::tempdir().unwrap();
+        let working_dir = dir.path();
+        let abs_path = working_dir.to_string_lossy().to_string();
+        assert_eq!(normalize_project_path(&abs_path, working_dir), ".");
+    }
+
+    #[test]
     fn test_normalize_absolute_path_subdir_of_working_dir() {
         let working_dir = Path::new("/home/user/project");
         assert_eq!(
