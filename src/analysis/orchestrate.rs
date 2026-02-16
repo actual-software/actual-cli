@@ -16,7 +16,7 @@ use crate::error::ActualError;
 ///
 /// `canonical_dir` should be `working_dir.canonicalize().ok()` — passed in
 /// so the caller can compute it once for all projects.
-pub fn normalize_project_path(
+pub(crate) fn normalize_project_path(
     path: &str,
     working_dir: &Path,
     canonical_dir: Option<&Path>,
@@ -62,6 +62,11 @@ fn relative_or_dot(relative: &Path) -> String {
 }
 
 /// Normalize all project paths in an analysis result.
+///
+/// Canonicalization of `working_dir` may fail if the directory doesn't exist
+/// or isn't accessible. In that case the canonical fallback is simply skipped
+/// and only the raw `working_dir` prefix is tried — absolute paths that only
+/// match via the canonical form will pass through unchanged.
 fn normalize_analysis(analysis: &mut RepoAnalysis, working_dir: &Path) {
     let canonical = working_dir.canonicalize().ok();
     for project in &mut analysis.projects {
