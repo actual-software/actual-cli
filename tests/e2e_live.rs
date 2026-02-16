@@ -57,6 +57,8 @@ fn init_git_repo(dir: &std::path::Path) {
         assert!(status.success(), "git {args:?} failed");
     };
     run(&["init"]);
+    run(&["config", "user.email", "test@example.com"]);
+    run(&["config", "user.name", "Test User"]);
     run(&["add", "."]);
     run(&["commit", "-m", "init"]);
 }
