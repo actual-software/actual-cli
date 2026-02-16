@@ -14,23 +14,27 @@ use crate::error::ActualError;
 /// `/private/var` ↔ `/var` symlink by trying both the raw and canonicalized
 /// `working_dir` when stripping prefixes.
 pub fn normalize_project_path(path: &str, working_dir: &Path) -> String {
+    let canonical = working_dir.canonicalize().ok();
+    normalize_project_path_inner(path, working_dir, canonical.as_deref())
+}
+
+/// Inner implementation that accepts an optional canonical path for testability.
+fn normalize_project_path_inner(
+    path: &str,
+    working_dir: &Path,
+    canonical_dir: Option<&Path>,
+) -> String {
     let p = Path::new(path);
 
     // If absolute, try to make relative to working_dir
     if p.is_absolute() {
         if let Ok(relative) = p.strip_prefix(working_dir) {
-            if relative == Path::new("") {
-                return ".".to_string();
-            }
-            return relative.to_string_lossy().to_string();
+            return relative_or_dot(relative);
         }
         // Also try with canonicalized working_dir (macOS /var -> /private/var)
-        if let Ok(canonical) = working_dir.canonicalize() {
-            if let Ok(relative) = p.strip_prefix(&canonical) {
-                if relative == Path::new("") {
-                    return ".".to_string();
-                }
-                return relative.to_string_lossy().to_string();
+        if let Some(canonical) = canonical_dir {
+            if let Ok(relative) = p.strip_prefix(canonical) {
+                return relative_or_dot(relative);
             }
         }
         // Can't make relative — leave as-is (edge case)
@@ -49,6 +53,15 @@ pub fn normalize_project_path(path: &str, working_dir: &Path) -> String {
     }
 
     path.to_string()
+}
+
+/// Convert a relative path to a string, using `"."` for the empty path.
+fn relative_or_dot(relative: &Path) -> String {
+    if relative == Path::new("") {
+        ".".to_string()
+    } else {
+        relative.to_string_lossy().to_string()
+    }
 }
 
 /// Normalize all project paths in an analysis result.
@@ -277,22 +290,42 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn test_normalize_private_var_prefix_resolution() {
-        // On macOS, /var is a symlink to /private/var.
-        // Use a real temp directory so canonicalize() works.
-        let dir = tempfile::tempdir().unwrap();
-        let working_dir = dir.path();
-        let canonical = working_dir.canonicalize().unwrap();
+    fn test_normalize_canonical_fallback_root_match() {
+        // Simulates macOS /var -> /private/var: working_dir is /var/folders/X
+        // but Claude returns /private/var/folders/X. The raw strip_prefix fails,
+        // but the canonical path matches.
+        let working_dir = Path::new("/var/folders/X");
+        let canonical = Path::new("/private/var/folders/X");
+        assert_eq!(
+            normalize_project_path_inner("/private/var/folders/X", working_dir, Some(canonical)),
+            "."
+        );
+    }
 
-        // Simulate Claude returning the canonical (potentially /private/...) path
-        let abs_path = canonical.to_string_lossy().to_string();
-        assert_eq!(normalize_project_path(&abs_path, working_dir), ".");
+    #[test]
+    fn test_normalize_canonical_fallback_subdir() {
+        let working_dir = Path::new("/var/folders/X");
+        let canonical = Path::new("/private/var/folders/X");
+        assert_eq!(
+            normalize_project_path_inner(
+                "/private/var/folders/X/apps/web",
+                working_dir,
+                Some(canonical)
+            ),
+            "apps/web"
+        );
+    }
 
-        // Also test a subdirectory
-        let sub_path = format!("{}/apps/web", canonical.to_string_lossy());
-        assert_eq!(normalize_project_path(&sub_path, working_dir), "apps/web");
+    #[test]
+    fn test_normalize_canonical_none_falls_through() {
+        // When canonical is None (canonicalize failed), unrelated absolute paths
+        // pass through unchanged.
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(
+            normalize_project_path_inner("/other/path", working_dir, None),
+            "/other/path"
+        );
     }
 
     #[test]
