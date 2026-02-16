@@ -180,7 +180,7 @@ impl FrameworkCategory {
             "devops" => FrameworkCategory::Devops,
             "testing" => FrameworkCategory::Testing,
             "build-system" | "buildsystem" => FrameworkCategory::BuildSystem,
-            _ => FrameworkCategory::Other(s.to_string()),
+            _ => FrameworkCategory::Other(normalized),
         }
     }
 }
@@ -432,23 +432,34 @@ mod tests {
 
     #[test]
     fn framework_category_unknown_maps_to_other() {
+        // Unknown inputs are normalized (lowercased, spaces/underscores to hyphens)
         let cat: FrameworkCategory = serde_json::from_str("\"Embedded\"").unwrap();
-        assert_eq!(cat, FrameworkCategory::Other("Embedded".to_string()));
+        assert_eq!(cat, FrameworkCategory::Other("embedded".to_string()));
 
         let cat: FrameworkCategory = serde_json::from_str("\"game-engine\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::Other("game-engine".to_string()));
+
+        let cat: FrameworkCategory = serde_json::from_str("\"Game Engine\"").unwrap();
         assert_eq!(cat, FrameworkCategory::Other("game-engine".to_string()));
     }
 
     #[test]
-    fn framework_category_other_serializes_raw() {
-        let cat = FrameworkCategory::Other("Embedded".to_string());
+    fn framework_category_other_serializes_normalized() {
+        let cat = FrameworkCategory::Other("embedded".to_string());
         let serialized = serde_json::to_string(&cat).unwrap();
-        assert_eq!(serialized, "\"Embedded\"");
+        assert_eq!(serialized, "\"embedded\"");
     }
 
     #[test]
     fn framework_category_other_round_trip() {
+        // Round-trips are stable: deserialize -> serialize -> deserialize = same value
         let cat = FrameworkCategory::Other("game-engine".to_string());
+        let json = serde_json::to_string(&cat).unwrap();
+        let deserialized: FrameworkCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, cat);
+
+        // Even non-normalized input stabilizes after one round-trip
+        let cat: FrameworkCategory = serde_json::from_str("\"Game Engine\"").unwrap();
         let json = serde_json::to_string(&cat).unwrap();
         let deserialized: FrameworkCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, cat);
