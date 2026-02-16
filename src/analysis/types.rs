@@ -1,3 +1,5 @@
+use serde::de::Deserializer;
+use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
 /// Top-level result of repository analysis.
@@ -19,8 +21,11 @@ pub struct Project {
 }
 
 /// Programming language detected in a project.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-#[serde(rename_all = "lowercase")]
+///
+/// Deserialization is case-insensitive: `"Rust"`, `"rust"`, and `"RUST"` all
+/// map to [`Language::Rust`]. Unknown strings map to [`Language::Other`].
+/// Serialization always produces lowercase (e.g. `"typescript"`).
+#[derive(Debug, Clone, PartialEq)]
 pub enum Language {
     TypeScript,
     JavaScript,
@@ -40,9 +45,10 @@ pub enum Language {
     Other,
 }
 
-impl std::fmt::Display for Language {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
+impl Language {
+    /// Lowercase string representation used for both serialization and display.
+    fn as_str(&self) -> &'static str {
+        match self {
             Language::TypeScript => "typescript",
             Language::JavaScript => "javascript",
             Language::Python => "python",
@@ -59,8 +65,48 @@ impl std::fmt::Display for Language {
             Language::Scala => "scala",
             Language::Elixir => "elixir",
             Language::Other => "other",
-        };
-        write!(f, "{s}")
+        }
+    }
+
+    /// Parse a string into a `Language` using case-insensitive matching.
+    fn from_str_insensitive(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "typescript" => Language::TypeScript,
+            "javascript" => Language::JavaScript,
+            "python" => Language::Python,
+            "rust" => Language::Rust,
+            "go" => Language::Go,
+            "java" => Language::Java,
+            "kotlin" => Language::Kotlin,
+            "swift" => Language::Swift,
+            "ruby" => Language::Ruby,
+            "php" => Language::Php,
+            "c" => Language::C,
+            "cpp" | "c++" => Language::Cpp,
+            "csharp" | "c#" => Language::CSharp,
+            "scala" => Language::Scala,
+            "elixir" => Language::Elixir,
+            _ => Language::Other,
+        }
+    }
+}
+
+impl Serialize for Language {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Language {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Language::from_str_insensitive(&s))
+    }
+}
+
+impl std::fmt::Display for Language {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -72,8 +118,13 @@ pub struct Framework {
 }
 
 /// Category classification for a framework.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+///
+/// Deserialization is case-insensitive and normalizes separators: `"web-frontend"`,
+/// `"Web Frontend"`, `"WEB_FRONTEND"` all map to [`FrameworkCategory::WebFrontend`].
+/// Unknown strings are preserved via [`FrameworkCategory::Other`].
+/// Serialization produces kebab-case for known variants (e.g. `"web-frontend"`)
+/// and the raw string for `Other`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum FrameworkCategory {
     WebFrontend,
     WebBackend,
@@ -85,6 +136,66 @@ pub enum FrameworkCategory {
     Ml,
     Devops,
     Testing,
+    BuildSystem,
+    Other(String),
+}
+
+impl FrameworkCategory {
+    /// Kebab-case string for known variants, used for serialization.
+    fn as_str(&self) -> &str {
+        match self {
+            FrameworkCategory::WebFrontend => "web-frontend",
+            FrameworkCategory::WebBackend => "web-backend",
+            FrameworkCategory::Mobile => "mobile",
+            FrameworkCategory::Desktop => "desktop",
+            FrameworkCategory::Cli => "cli",
+            FrameworkCategory::Library => "library",
+            FrameworkCategory::Data => "data",
+            FrameworkCategory::Ml => "ml",
+            FrameworkCategory::Devops => "devops",
+            FrameworkCategory::Testing => "testing",
+            FrameworkCategory::BuildSystem => "build-system",
+            FrameworkCategory::Other(s) => s.as_str(),
+        }
+    }
+
+    /// Normalize input (lowercase, replace spaces/underscores with hyphens)
+    /// and match against known variants. Falls back to `Other`.
+    fn from_str_insensitive(s: &str) -> Self {
+        let normalized: String = s
+            .to_lowercase()
+            .chars()
+            .map(|c| if c == ' ' || c == '_' { '-' } else { c })
+            .collect();
+
+        match normalized.as_str() {
+            "web-frontend" | "webfrontend" => FrameworkCategory::WebFrontend,
+            "web-backend" | "webbackend" => FrameworkCategory::WebBackend,
+            "mobile" => FrameworkCategory::Mobile,
+            "desktop" => FrameworkCategory::Desktop,
+            "cli" => FrameworkCategory::Cli,
+            "library" => FrameworkCategory::Library,
+            "data" => FrameworkCategory::Data,
+            "ml" => FrameworkCategory::Ml,
+            "devops" => FrameworkCategory::Devops,
+            "testing" => FrameworkCategory::Testing,
+            "build-system" | "buildsystem" => FrameworkCategory::BuildSystem,
+            _ => FrameworkCategory::Other(s.to_string()),
+        }
+    }
+}
+
+impl Serialize for FrameworkCategory {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FrameworkCategory {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(FrameworkCategory::from_str_insensitive(&s))
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +230,38 @@ mod tests {
         );
         assert!(project.package_manager.is_none());
         assert!(project.description.is_none());
+    }
+
+    #[test]
+    fn deserialize_title_case_from_claude() {
+        // Real Claude returns title-case languages and free-form category strings
+        let json = r#"{
+            "is_monorepo": false,
+            "projects": [{
+                "path": ".",
+                "name": "my-app",
+                "languages": ["Rust", "TypeScript"],
+                "frameworks": [
+                    {"name": "cargo", "category": "Build System"},
+                    {"name": "nextjs", "category": "Web Frontend"}
+                ]
+            }]
+        }"#;
+
+        let analysis: RepoAnalysis = serde_json::from_str(json).unwrap();
+        let project = &analysis.projects[0];
+        assert_eq!(
+            project.languages,
+            vec![Language::Rust, Language::TypeScript]
+        );
+        assert_eq!(
+            project.frameworks[0].category,
+            FrameworkCategory::BuildSystem
+        );
+        assert_eq!(
+            project.frameworks[1].category,
+            FrameworkCategory::WebFrontend
+        );
     }
 
     #[test]
@@ -209,8 +352,154 @@ mod tests {
     }
 
     #[test]
+    fn language_deserializes_case_insensitive() {
+        // Lowercase (existing behavior)
+        let lang: Language = serde_json::from_str("\"rust\"").unwrap();
+        assert_eq!(lang, Language::Rust);
+
+        // Title case (Claude's actual output)
+        let lang: Language = serde_json::from_str("\"Rust\"").unwrap();
+        assert_eq!(lang, Language::Rust);
+
+        let lang: Language = serde_json::from_str("\"TypeScript\"").unwrap();
+        assert_eq!(lang, Language::TypeScript);
+
+        // Uppercase
+        let lang: Language = serde_json::from_str("\"RUST\"").unwrap();
+        assert_eq!(lang, Language::Rust);
+
+        let lang: Language = serde_json::from_str("\"TYPESCRIPT\"").unwrap();
+        assert_eq!(lang, Language::TypeScript);
+
+        // Alternate representations
+        let lang: Language = serde_json::from_str("\"C++\"").unwrap();
+        assert_eq!(lang, Language::Cpp);
+
+        let lang: Language = serde_json::from_str("\"C#\"").unwrap();
+        assert_eq!(lang, Language::CSharp);
+    }
+
+    #[test]
+    fn language_unknown_maps_to_other() {
+        let lang: Language = serde_json::from_str("\"haskell\"").unwrap();
+        assert_eq!(lang, Language::Other);
+
+        let lang: Language = serde_json::from_str("\"Zig\"").unwrap();
+        assert_eq!(lang, Language::Other);
+    }
+
+    #[test]
     fn framework_category_serializes_as_kebab_case() {
         let serialized = serde_json::to_string(&FrameworkCategory::WebFrontend).unwrap();
         assert_eq!(serialized, "\"web-frontend\"");
+
+        let serialized = serde_json::to_string(&FrameworkCategory::BuildSystem).unwrap();
+        assert_eq!(serialized, "\"build-system\"");
+    }
+
+    #[test]
+    fn framework_category_deserializes_case_insensitive() {
+        // Kebab-case (existing behavior)
+        let cat: FrameworkCategory = serde_json::from_str("\"web-frontend\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::WebFrontend);
+
+        // Title case with space (Claude's actual output)
+        let cat: FrameworkCategory = serde_json::from_str("\"Web Frontend\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::WebFrontend);
+
+        // Uppercase
+        let cat: FrameworkCategory = serde_json::from_str("\"WEB-FRONTEND\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::WebFrontend);
+
+        // Underscore separator
+        let cat: FrameworkCategory = serde_json::from_str("\"web_frontend\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::WebFrontend);
+
+        // No separator (PascalCase normalized)
+        let cat: FrameworkCategory = serde_json::from_str("\"webfrontend\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::WebFrontend);
+
+        // Build System variants
+        let cat: FrameworkCategory = serde_json::from_str("\"Build System\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::BuildSystem);
+
+        let cat: FrameworkCategory = serde_json::from_str("\"build-system\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::BuildSystem);
+
+        let cat: FrameworkCategory = serde_json::from_str("\"buildsystem\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::BuildSystem);
+    }
+
+    #[test]
+    fn framework_category_unknown_maps_to_other() {
+        let cat: FrameworkCategory = serde_json::from_str("\"Embedded\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::Other("Embedded".to_string()));
+
+        let cat: FrameworkCategory = serde_json::from_str("\"game-engine\"").unwrap();
+        assert_eq!(cat, FrameworkCategory::Other("game-engine".to_string()));
+    }
+
+    #[test]
+    fn framework_category_other_serializes_raw() {
+        let cat = FrameworkCategory::Other("Embedded".to_string());
+        let serialized = serde_json::to_string(&cat).unwrap();
+        assert_eq!(serialized, "\"Embedded\"");
+    }
+
+    #[test]
+    fn framework_category_other_round_trip() {
+        let cat = FrameworkCategory::Other("game-engine".to_string());
+        let json = serde_json::to_string(&cat).unwrap();
+        let deserialized: FrameworkCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, cat);
+    }
+
+    #[test]
+    fn language_round_trip() {
+        let all_languages = vec![
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Python,
+            Language::Rust,
+            Language::Go,
+            Language::Java,
+            Language::Kotlin,
+            Language::Swift,
+            Language::Ruby,
+            Language::Php,
+            Language::C,
+            Language::Cpp,
+            Language::CSharp,
+            Language::Scala,
+            Language::Elixir,
+            Language::Other,
+        ];
+        for lang in &all_languages {
+            let json = serde_json::to_string(lang).unwrap();
+            let deserialized: Language = serde_json::from_str(&json).unwrap();
+            assert_eq!(&deserialized, lang, "Round-trip failed for {lang}");
+        }
+    }
+
+    #[test]
+    fn framework_category_round_trip() {
+        let all_categories = vec![
+            FrameworkCategory::WebFrontend,
+            FrameworkCategory::WebBackend,
+            FrameworkCategory::Mobile,
+            FrameworkCategory::Desktop,
+            FrameworkCategory::Cli,
+            FrameworkCategory::Library,
+            FrameworkCategory::Data,
+            FrameworkCategory::Ml,
+            FrameworkCategory::Devops,
+            FrameworkCategory::Testing,
+            FrameworkCategory::BuildSystem,
+        ];
+        for cat in &all_categories {
+            let json = serde_json::to_string(cat).unwrap();
+            let deserialized: FrameworkCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(&deserialized, cat, "Round-trip failed for {json}");
+        }
     }
 }
