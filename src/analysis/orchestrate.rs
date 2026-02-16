@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::analysis::types::RepoAnalysis;
 use crate::claude::options::InvocationOptions;
 use crate::claude::prompts::analysis_prompt;
@@ -5,13 +7,67 @@ use crate::claude::schemas::REPO_ANALYSIS_SCHEMA;
 use crate::claude::subprocess::ClaudeRunner;
 use crate::error::ActualError;
 
+/// Normalize a project path relative to a working directory.
+///
+/// Converts absolute paths to relative paths, strips leading `./` and trailing
+/// `/`, and normalizes empty strings to `"."`.  Also handles macOS's
+/// `/private/var` ↔ `/var` symlink by trying both the raw and canonicalized
+/// `working_dir` when stripping prefixes.
+pub fn normalize_project_path(path: &str, working_dir: &Path) -> String {
+    let p = Path::new(path);
+
+    // If absolute, try to make relative to working_dir
+    if p.is_absolute() {
+        if let Ok(relative) = p.strip_prefix(working_dir) {
+            if relative == Path::new("") {
+                return ".".to_string();
+            }
+            return relative.to_string_lossy().to_string();
+        }
+        // Also try with canonicalized working_dir (macOS /var -> /private/var)
+        if let Ok(canonical) = working_dir.canonicalize() {
+            if let Ok(relative) = p.strip_prefix(&canonical) {
+                if relative == Path::new("") {
+                    return ".".to_string();
+                }
+                return relative.to_string_lossy().to_string();
+            }
+        }
+        // Can't make relative — leave as-is (edge case)
+        return path.to_string();
+    }
+
+    // Strip leading "./"
+    let path = path.strip_prefix("./").unwrap_or(path);
+
+    // Strip trailing "/"
+    let path = path.strip_suffix('/').unwrap_or(path);
+
+    // Empty string -> "."
+    if path.is_empty() {
+        return ".".to_string();
+    }
+
+    path.to_string()
+}
+
+/// Normalize all project paths in an analysis result.
+fn normalize_analysis(analysis: &mut RepoAnalysis, working_dir: &Path) {
+    for project in &mut analysis.projects {
+        project.path = normalize_project_path(&project.path, working_dir);
+    }
+}
+
 /// Run repository analysis using Claude Code.
 ///
 /// Builds the analysis prompt + invocation options, calls the runner,
 /// and validates the result. Retries once on JSON parse failure.
+/// After successful parsing, normalizes project paths relative to
+/// `working_dir`.
 pub async fn run_analysis(
     runner: &impl ClaudeRunner,
     model_override: Option<&str>,
+    working_dir: &Path,
 ) -> Result<RepoAnalysis, ActualError> {
     let mut opts = InvocationOptions::for_analysis(model_override);
     opts.json_schema = Some(REPO_ANALYSIS_SCHEMA.to_string());
@@ -23,7 +79,7 @@ pub async fn run_analysis(
     // First attempt
     let result: Result<RepoAnalysis, ActualError> = runner.run(&args).await;
 
-    let analysis = match result {
+    let mut analysis = match result {
         Ok(a) => a,
         Err(ActualError::ClaudeOutputParse(_)) => {
             // Retry once on parse failure
@@ -35,6 +91,9 @@ pub async fn run_analysis(
     if analysis.projects.is_empty() {
         return Err(ActualError::AnalysisEmpty);
     }
+
+    // Normalize project paths (absolute -> relative, strip ./ and trailing /)
+    normalize_analysis(&mut analysis, working_dir);
 
     Ok(analysis)
 }
@@ -128,7 +187,8 @@ mod tests {
     #[tokio::test]
     async fn test_valid_analysis_returns_correct_result() {
         let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
-        let result = run_analysis(&runner, None).await.unwrap();
+        let working_dir = Path::new("/tmp/test-repo");
+        let result = run_analysis(&runner, None, working_dir).await.unwrap();
 
         assert!(!result.is_monorepo);
         assert_eq!(result.projects.len(), 1);
@@ -143,7 +203,8 @@ mod tests {
     #[tokio::test]
     async fn test_empty_projects_returns_error() {
         let runner = MockRunner::from_json(vec![EMPTY_PROJECTS_JSON]);
-        let err = run_analysis(&runner, None).await.unwrap_err();
+        let working_dir = Path::new("/tmp/test-repo");
+        let err = run_analysis(&runner, None, working_dir).await.unwrap_err();
 
         assert_eq!(err.to_string(), "Analysis returned no projects");
         assert_eq!(runner.calls(), 1);
@@ -152,7 +213,8 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_json_then_valid_retries_successfully() {
         let runner = MockRunner::from_json(vec!["not valid json", VALID_ANALYSIS_JSON]);
-        let result = run_analysis(&runner, None).await.unwrap();
+        let working_dir = Path::new("/tmp/test-repo");
+        let result = run_analysis(&runner, None, working_dir).await.unwrap();
 
         assert_eq!(result.projects.len(), 1);
         assert_eq!(result.projects[0].name, "my-app");
@@ -162,7 +224,8 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_json_both_times_returns_parse_error() {
         let runner = MockRunner::from_json(vec!["not valid json", "also not valid json"]);
-        let err = run_analysis(&runner, None).await.unwrap_err();
+        let working_dir = Path::new("/tmp/test-repo");
+        let err = run_analysis(&runner, None, working_dir).await.unwrap_err();
 
         let msg = err.to_string();
         assert!(msg.contains("Failed to parse"));
@@ -175,7 +238,8 @@ mod tests {
             message: "process crashed".to_string(),
             stderr: "segfault".to_string(),
         });
-        let err = run_analysis(&runner, None).await.unwrap_err();
+        let working_dir = Path::new("/tmp/test-repo");
+        let err = run_analysis(&runner, None, working_dir).await.unwrap_err();
 
         let msg = err.to_string();
         assert!(msg.contains("subprocess failed"));
@@ -184,9 +248,148 @@ mod tests {
     #[tokio::test]
     async fn test_model_override_passed_to_args() {
         let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
-        let result = run_analysis(&runner, Some("opus")).await.unwrap();
+        let working_dir = Path::new("/tmp/test-repo");
+        let result = run_analysis(&runner, Some("opus"), working_dir)
+            .await
+            .unwrap();
 
         assert_eq!(result.projects[0].name, "my-app");
         assert_eq!(runner.calls(), 1);
+    }
+
+    // -- normalize_project_path tests --
+
+    #[test]
+    fn test_normalize_absolute_path_matching_working_dir() {
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(
+            normalize_project_path("/home/user/project", working_dir),
+            "."
+        );
+    }
+
+    #[test]
+    fn test_normalize_absolute_path_subdir_of_working_dir() {
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(
+            normalize_project_path("/home/user/project/apps/web", working_dir),
+            "apps/web"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_normalize_private_var_prefix_resolution() {
+        // On macOS, /var is a symlink to /private/var.
+        // Use a real temp directory so canonicalize() works.
+        let dir = tempfile::tempdir().unwrap();
+        let working_dir = dir.path();
+        let canonical = working_dir.canonicalize().unwrap();
+
+        // Simulate Claude returning the canonical (potentially /private/...) path
+        let abs_path = canonical.to_string_lossy().to_string();
+        assert_eq!(normalize_project_path(&abs_path, working_dir), ".");
+
+        // Also test a subdirectory
+        let sub_path = format!("{}/apps/web", canonical.to_string_lossy());
+        assert_eq!(normalize_project_path(&sub_path, working_dir), "apps/web");
+    }
+
+    #[test]
+    fn test_normalize_strip_leading_dot_slash() {
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(
+            normalize_project_path("./apps/web", working_dir),
+            "apps/web"
+        );
+    }
+
+    #[test]
+    fn test_normalize_strip_trailing_slash() {
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(normalize_project_path("apps/web/", working_dir), "apps/web");
+    }
+
+    #[test]
+    fn test_normalize_empty_to_dot() {
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(normalize_project_path("", working_dir), ".");
+    }
+
+    #[test]
+    fn test_normalize_dot_unchanged() {
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(normalize_project_path(".", working_dir), ".");
+    }
+
+    #[test]
+    fn test_normalize_relative_path_unchanged() {
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(normalize_project_path("apps/web", working_dir), "apps/web");
+    }
+
+    #[test]
+    fn test_normalize_absolute_path_unrelated_to_working_dir() {
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(
+            normalize_project_path("/other/path/entirely", working_dir),
+            "/other/path/entirely"
+        );
+    }
+
+    #[test]
+    fn test_normalize_dot_slash_only() {
+        let working_dir = Path::new("/home/user/project");
+        assert_eq!(normalize_project_path("./", working_dir), ".");
+    }
+
+    #[tokio::test]
+    async fn test_run_analysis_normalizes_absolute_paths() {
+        let working_dir = Path::new("/home/user/project");
+        let json_with_absolute_path = r#"{
+            "is_monorepo": false,
+            "projects": [{
+                "path": "/home/user/project",
+                "name": "my-app",
+                "languages": ["rust"],
+                "frameworks": [{"name": "actix-web", "category": "web-backend"}],
+                "package_manager": "cargo",
+                "description": "A web application"
+            }]
+        }"#;
+
+        let runner = MockRunner::from_json(vec![json_with_absolute_path]);
+        let result = run_analysis(&runner, None, working_dir).await.unwrap();
+
+        assert_eq!(result.projects[0].path, ".");
+    }
+
+    #[tokio::test]
+    async fn test_run_analysis_normalizes_dot_slash_paths() {
+        let working_dir = Path::new("/home/user/project");
+        let json_with_dot_slash = r#"{
+            "is_monorepo": true,
+            "projects": [{
+                "path": "./apps/web",
+                "name": "web",
+                "languages": ["typescript"],
+                "frameworks": [],
+                "package_manager": "npm",
+                "description": "Web app"
+            }, {
+                "path": "./apps/api",
+                "name": "api",
+                "languages": ["typescript"],
+                "frameworks": [],
+                "package_manager": "npm",
+                "description": "API"
+            }]
+        }"#;
+
+        let runner = MockRunner::from_json(vec![json_with_dot_slash]);
+        let result = run_analysis(&runner, None, working_dir).await.unwrap();
+
+        assert_eq!(result.projects[0].path, "apps/web");
+        assert_eq!(result.projects[1].path, "apps/api");
     }
 }

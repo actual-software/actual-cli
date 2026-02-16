@@ -56,7 +56,7 @@ pub async fn run_analysis_cached(
     // Not a git repo — skip caching entirely
     let head_hash = match head_commit {
         Some(h) => h,
-        None => return run_analysis(runner, model_override).await,
+        None => return run_analysis(runner, model_override, repo_path).await,
     };
 
     let mut cfg = config::paths::load_from(config_path)?;
@@ -75,7 +75,7 @@ pub async fn run_analysis_cached(
     }
 
     // Cache miss: run fresh analysis
-    let analysis = run_analysis(runner, model_override).await?;
+    let analysis = run_analysis(runner, model_override, repo_path).await?;
 
     // Cache the result
     let cached_analysis = CachedAnalysis {
