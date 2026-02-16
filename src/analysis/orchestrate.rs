@@ -409,6 +409,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_analysis_normalizes_absolute_subdir_path() {
+        // Uses a real temp dir with a subdirectory absolute path to exercise
+        // the non-empty branch of relative_or_dot through normalize_analysis.
+        let dir = tempfile::tempdir().unwrap();
+        let working_dir = dir.path();
+        let sub_path = format!("{}/apps/web", working_dir.to_string_lossy());
+        let json = format!(
+            r#"{{
+            "is_monorepo": true,
+            "projects": [{{
+                "path": "{}",
+                "name": "web",
+                "languages": ["typescript"],
+                "frameworks": [],
+                "package_manager": "npm",
+                "description": "Web app"
+            }}]
+        }}"#,
+            sub_path
+        );
+
+        let runner = MockRunner::from_json(vec![&json]);
+        let result = run_analysis(&runner, None, working_dir).await.unwrap();
+
+        assert_eq!(result.projects[0].path, "apps/web");
+    }
+
+    #[tokio::test]
     async fn test_run_analysis_normalizes_dot_slash_paths() {
         let working_dir = Path::new("/home/user/project");
         let json_with_dot_slash = r#"{
