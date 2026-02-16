@@ -51,6 +51,7 @@ which = "7"
 
 [features]
 integration = []
+live-e2e = []
 
 [dev-dependencies]
 assert_cmd = "2"
