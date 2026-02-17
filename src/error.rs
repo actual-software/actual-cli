@@ -54,7 +54,7 @@ impl ActualError {
     pub fn hint(&self) -> Option<&str> {
         match self {
             Self::ClaudeNotFound => Some("npm install -g @anthropic-ai/claude-code"),
-            Self::ClaudeNotAuthenticated => Some("Run: claude auth login"),
+            Self::ClaudeNotAuthenticated => Some("claude auth login"),
             Self::ConfigError(_) => Some("Check ~/.config/actual/config.yaml"),
             Self::ClaudeTimeout { .. } => {
                 Some("Try increasing the timeout or check Claude Code status")
@@ -186,7 +186,7 @@ mod tests {
     fn test_hint_claude_not_authenticated() {
         assert_eq!(
             ActualError::ClaudeNotAuthenticated.hint(),
-            Some("Run: claude auth login")
+            Some("claude auth login")
         );
     }
 
