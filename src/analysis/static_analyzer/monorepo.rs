@@ -94,6 +94,9 @@ fn detect_pnpm(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
     }
 
     let projects = expand_glob_patterns(root, &patterns);
+    if projects.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
         projects,
@@ -121,6 +124,9 @@ fn detect_npm_workspaces(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
     }
 
     let projects = expand_glob_patterns(root, &patterns);
+    if projects.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
         projects,
@@ -178,6 +184,9 @@ fn detect_lerna(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
     }
 
     let projects = expand_glob_patterns(root, &patterns);
+    if projects.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
         projects,
@@ -203,10 +212,12 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
         Some(serde_json::Value::Object(obj)) => obj
             .iter()
             .filter_map(|(name, val)| {
-                val.as_str().map(|p| ProjectInfo {
-                    path: p.to_string(),
-                    name: name.clone(),
-                })
+                val.as_str()
+                    .filter(|p| root.join(p).is_dir())
+                    .map(|p| ProjectInfo {
+                        path: p.to_string(),
+                        name: name.clone(),
+                    })
             })
             .collect(),
         _ => return Ok(None),
@@ -250,6 +261,9 @@ fn detect_cargo_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::
     }
 
     let projects = expand_glob_patterns(root, &members);
+    if projects.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
         projects,
@@ -292,7 +306,7 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 
         if let Some(rest) = trimmed.strip_prefix("use ") {
             let dir = rest.split("//").next().unwrap_or("").trim();
-            if !dir.is_empty() && !dir.starts_with("//") && dir != "(" {
+            if !dir.is_empty() && dir != "(" {
                 dirs.push(dir.to_string());
             }
         }
@@ -917,6 +931,8 @@ mod tests {
             r#"{"projects": {"app-one": "apps/one", "lib-two": "libs/two"}}"#,
         )
         .unwrap();
+        fs::create_dir_all(root.join("apps/one")).unwrap();
+        fs::create_dir_all(root.join("libs/two")).unwrap();
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
