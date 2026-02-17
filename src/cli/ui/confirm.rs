@@ -11,7 +11,7 @@ use super::theme;
 pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
     let mut output = String::new();
 
-    let diamond = theme::hint(&theme::DIAMOND);
+    let diamond = theme::hint(&theme::DIAMOND).for_stderr();
     if analysis.is_monorepo {
         let _ = writeln!(
             output,
@@ -23,9 +23,9 @@ pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
     }
 
     for project in &analysis.projects {
-        let bullet = theme::heading(&theme::BULLET);
-        let name = theme::heading(&project.name);
-        let path = theme::muted(&project.path);
+        let bullet = theme::heading(&theme::BULLET).for_stderr();
+        let name = theme::heading(&project.name).for_stderr();
+        let path = theme::muted(&project.path).for_stderr();
         let _ = writeln!(output, "  {bullet} {name}");
         let _ = writeln!(output, "    Path: {path}");
 

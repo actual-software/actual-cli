@@ -12,7 +12,7 @@ pub fn exec(args: &StatusArgs) -> i32 {
     match load_and_run(args) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", theme::error_prefix(), e);
+            eprintln!("{} {}", theme::error_prefix().for_stderr(), e);
             e.exit_code()
         }
     }

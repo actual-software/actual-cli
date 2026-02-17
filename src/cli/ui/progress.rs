@@ -96,7 +96,10 @@ impl SyncPipeline {
     pub fn success(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", theme::success(&theme::SUCCESS)));
+            bar.finish_with_message(format!(
+                "{} {message}",
+                theme::success(&theme::SUCCESS).for_stderr()
+            ));
         }
     }
 
@@ -107,7 +110,7 @@ impl SyncPipeline {
     pub fn skip(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", style("─").dim()));
+            bar.finish_with_message(format!("{} {message}", style("─").dim().for_stderr()));
         }
     }
 
@@ -118,7 +121,10 @@ impl SyncPipeline {
     pub fn error(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", theme::error(&theme::ERROR)));
+            bar.finish_with_message(format!(
+                "{} {message}",
+                theme::error(&theme::ERROR).for_stderr()
+            ));
         }
     }
 
@@ -129,7 +135,10 @@ impl SyncPipeline {
     pub fn warn(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", theme::warning(&theme::WARN)));
+            bar.finish_with_message(format!(
+                "{} {message}",
+                theme::warning(&theme::WARN).for_stderr()
+            ));
         }
     }
 
@@ -141,7 +150,7 @@ impl SyncPipeline {
         for bar in self.bars.iter().flatten() {
             if !bar.is_finished() {
                 bar.set_style(FINISHED_STYLE.clone());
-                bar.finish_with_message(format!("{} skipped", style("─").dim()));
+                bar.finish_with_message(format!("{} skipped", style("─").dim().for_stderr()));
             }
         }
     }

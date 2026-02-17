@@ -9,7 +9,7 @@ pub fn exec() -> i32 {
     match run_auth() {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", theme::error_prefix(), e);
+            eprintln!("{} {}", theme::error_prefix().for_stderr(), e);
             e.exit_code()
         }
     }
@@ -77,12 +77,12 @@ fn print_auth_status(status: &ClaudeAuthStatus) {
     } else {
         eprintln!(
             "{} Claude Code: {}",
-            theme::error(&theme::ERROR),
-            theme::error("not authenticated")
+            theme::error(&theme::ERROR).for_stderr(),
+            theme::error("not authenticated").for_stderr()
         );
         eprintln!(
             "  Run {} to authenticate.",
-            theme::hint("`claude auth login`")
+            theme::hint("`claude auth login`").for_stderr()
         );
     }
 }

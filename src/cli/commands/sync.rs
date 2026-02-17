@@ -48,7 +48,7 @@ pub(crate) fn handle_result(result: Result<(), ActualError>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", theme::error_prefix(), e);
+            eprintln!("{} {}", theme::error_prefix().for_stderr(), e);
             e.exit_code()
         }
     }
@@ -136,7 +136,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         pipeline.suspend(|| {
             eprintln!(
                 "{} Cleared ADR rejection memory for this repository",
-                theme::success(&theme::SUCCESS)
+                theme::success(&theme::SUCCESS).for_stderr()
             );
         });
     }

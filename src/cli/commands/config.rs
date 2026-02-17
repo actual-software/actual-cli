@@ -9,7 +9,7 @@ pub fn exec(args: &ConfigArgs) -> i32 {
     match run(args) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", theme::error_prefix(), e);
+            eprintln!("{} {}", theme::error_prefix().for_stderr(), e);
             e.exit_code()
         }
     }
