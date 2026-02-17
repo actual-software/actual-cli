@@ -275,8 +275,28 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
     for line in content.lines() {
         let line = line.trim();
 
-        if line.starts_with("require (") || line == "require(" {
+        if let Some(after) = line
+            .strip_prefix("require (")
+            .or_else(|| line.strip_prefix("require("))
+        {
             in_require_block = true;
+            // Process any dependency on the remainder of this line
+            let remainder = after.trim();
+            if remainder == ")" {
+                in_require_block = false;
+            } else if !remainder.is_empty() && !remainder.starts_with("//") {
+                let remainder = if let Some(stripped) = remainder.strip_suffix(')') {
+                    in_require_block = false;
+                    stripped.trim()
+                } else {
+                    remainder
+                };
+                if let Some(module) = remainder.split_whitespace().next() {
+                    if !module.starts_with("//") {
+                        deps.insert(module.to_string());
+                    }
+                }
+            }
             continue;
         }
 
@@ -1145,6 +1165,52 @@ dependencies {
         .unwrap();
         let info = parse_dependencies(dir.path());
         assert!(info.dependencies.contains(&"swift-nio".to_string()));
+    }
+
+    #[test]
+    fn test_go_mod_require_entry_on_same_line() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.21\n\nrequire (github.com/bar/baz v1.0.0\n\tgithub.com/qux/quux v2.0.0\n)\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"github.com/bar/baz".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"github.com/qux/quux".to_string()));
+    }
+
+    #[test]
+    fn test_go_mod_require_single_entry_with_closing_paren() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.21\n\nrequire (github.com/bar/baz v1.0.0)\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"github.com/bar/baz".to_string()));
+    }
+
+    #[test]
+    fn test_go_mod_require_empty_parens() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.21\n\nrequire ()\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
     }
 
     #[test]
