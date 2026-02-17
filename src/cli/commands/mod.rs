@@ -18,7 +18,7 @@ pub(crate) fn handle_result(result: Result<(), ActualError>) -> i32 {
                 .unwrap_or(80)
                 .min(90);
 
-            let error_line = format!("{} {}", theme::ERROR, e);
+            let error_line = format!("{} {}", theme::error_prefix().for_stderr(), e);
             let mut panel = Panel::titled("Error").line("").line(&error_line);
 
             if let Some(hint_text) = e.hint() {
