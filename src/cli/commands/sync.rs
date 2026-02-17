@@ -668,6 +668,13 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_mock_runner_returns_ok_on_valid_json() {
+        let runner = MockRunner::new(r#"{"key": "value"}"#);
+        let result: Result<serde_json::Value, _> = runner.run(&[]).await;
+        assert!(result.is_ok());
+    }
+
     fn make_output(files: Vec<FileOutput>) -> TailoringOutput {
         let file_count = files.len();
         TailoringOutput {
