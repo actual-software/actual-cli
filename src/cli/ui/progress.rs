@@ -22,6 +22,10 @@ const PHASE_COUNT: usize = SyncPhase::Tailor as usize + 1;
 /// Display labels for each phase, indexed by `SyncPhase` discriminant.
 const PHASE_LABELS: [&str; PHASE_COUNT] = ["Environment", "Analysis", "Fetch ADRs", "Tailoring"];
 
+// Compile-time check: if a variant is added/reordered and PHASE_COUNT drifts
+// from the actual label array length, this fails at compile time.
+const _: () = assert!(PHASE_LABELS.len() == PHASE_COUNT);
+
 /// A multi-phase progress display for the sync command.
 ///
 /// All 4 phases are shown simultaneously: waiting → active → completed.
@@ -116,22 +120,20 @@ impl SyncPipeline {
         }
     }
 
-    /// Style used when a phase has completed (success, error, or warn).
+    /// Style used when a phase has completed (success, error, warn, or skip).
     fn finished_style() -> ProgressStyle {
         ProgressStyle::with_template("  {msg}").expect("invalid finished template")
     }
 
-    /// Style used when a phase was skipped.
-    fn skipped_style() -> ProgressStyle {
-        ProgressStyle::with_template("  ─ {msg}").expect("invalid skipped template")
-    }
-
     /// Mark all unfinished phases as skipped.
+    ///
+    /// Uses the same visual treatment as [`skip()`]: a dim dash prefix
+    /// rendered via `finished_style()` with the symbol embedded in the message.
     pub fn finish_remaining(&self) {
         for bar in self.bars.iter().flatten() {
             if !bar.is_finished() {
-                bar.set_style(Self::skipped_style());
-                bar.finish_with_message("skipped".to_string());
+                bar.set_style(Self::finished_style());
+                bar.finish_with_message(format!("{} skipped", style("─").dim()));
             }
         }
     }
