@@ -380,6 +380,10 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
                 Ok(rel) => rel.to_string_lossy().to_string(),
                 Err(_) => continue, // skip entries that escape the repo root
             };
+            // Skip entries that traverse outside the repo root via `..`
+            if rel_path.starts_with("..") {
+                continue;
+            }
 
             let name = extract_project_name(&entry);
             projects.push(ProjectInfo {
@@ -1495,6 +1499,26 @@ mod tests {
         let patterns = vec!["packages/[invalid".to_string()];
         let projects = expand_glob_patterns(root, &patterns);
         assert!(projects.is_empty());
+    }
+
+    #[test]
+    fn test_glob_expansion_skips_out_of_root_entries() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Create a directory inside root and a sibling outside
+        fs::create_dir_all(root.join("inside")).unwrap();
+
+        // Use a pattern with `..` that resolves outside the root
+        let patterns = vec!["../*".to_string()];
+        let projects = expand_glob_patterns(root, &patterns);
+
+        // All entries resolved via `../*` escape the repo root and should be skipped
+        assert!(
+            projects.iter().all(|p| !p.path.starts_with("..")),
+            "entries outside repo root should be skipped, but got: {:?}",
+            projects.iter().map(|p| &p.path).collect::<Vec<_>>()
+        );
     }
 
     #[test]
