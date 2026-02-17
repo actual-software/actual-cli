@@ -5,25 +5,28 @@ use tokei::{Config, LanguageType, Languages};
 
 use crate::analysis::types::Language;
 
-/// Set of tokei `LanguageType` variants considered data/markup (not programming languages).
+/// Returns true if a `LanguageType` is data/markup rather than a programming language.
 /// These are filtered out of detection results.
-const DATA_MARKUP_LANGUAGES: &[LanguageType] = &[
-    LanguageType::Json,
-    LanguageType::Yaml,
-    LanguageType::Html,
-    LanguageType::Css,
-    LanguageType::Markdown,
-    LanguageType::Toml,
-    LanguageType::Xml,
-    LanguageType::Svg,
-    LanguageType::Sass,
-    LanguageType::Less,
-    LanguageType::IntelHex,
-    LanguageType::Ini,
-    LanguageType::Protobuf,
-    LanguageType::Dockerfile,
-    LanguageType::MsBuild,
-];
+fn is_data_or_markup(lang_type: LanguageType) -> bool {
+    matches!(
+        lang_type,
+        LanguageType::Json
+            | LanguageType::Yaml
+            | LanguageType::Html
+            | LanguageType::Css
+            | LanguageType::Markdown
+            | LanguageType::Toml
+            | LanguageType::Xml
+            | LanguageType::Svg
+            | LanguageType::Sass
+            | LanguageType::Less
+            | LanguageType::IntelHex
+            | LanguageType::Ini
+            | LanguageType::Protobuf
+            | LanguageType::Dockerfile
+            | LanguageType::MsBuild
+    )
+}
 
 /// Maps a tokei `LanguageType` to the project's `Language` enum.
 fn map_language_type(lang_type: LanguageType) -> Language {
@@ -45,11 +48,6 @@ fn map_language_type(lang_type: LanguageType) -> Language {
         LanguageType::Elixir => Language::Elixir,
         _ => Language::Other,
     }
-}
-
-/// Returns true if a `LanguageType` is data/markup rather than a programming language.
-fn is_data_or_markup(lang_type: LanguageType) -> bool {
-    DATA_MARKUP_LANGUAGES.contains(&lang_type)
 }
 
 /// Detect programming languages in the given directory, sorted by lines of code descending.
