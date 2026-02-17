@@ -378,6 +378,7 @@ fn find_existing_claude_md(root_dir: &Path) -> String {
                 walk(&path, root, results);
             } else if entry.file_name() == "CLAUDE.md" {
                 if let Ok(content) = std::fs::read_to_string(&path) {
+                    let content = crate::generation::markers::strip_managed_metadata(&content);
                     let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
                     results.push(format!("=== {rel} ===\n{content}"));
                 }

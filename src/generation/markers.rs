@@ -127,6 +127,51 @@ pub fn extract_last_synced(content: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
+/// Strips managed-section metadata comments from CLAUDE.md content.
+///
+/// Removes lines containing `<!-- adr-ids: ... -->`, `<!-- last-synced: ... -->`,
+/// `<!-- version: ... -->`, and the managed section markers themselves. Collapses
+/// any resulting runs of 3+ blank lines down to a single blank line.
+///
+/// This is used to sanitize existing CLAUDE.md content before passing it to the
+/// tailoring LLM, so the LLM doesn't hallucinate old ADR IDs from metadata comments.
+pub fn strip_managed_metadata(content: &str) -> String {
+    let filtered: Vec<&str> = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("<!-- adr-ids:")
+                && !trimmed.starts_with("<!-- last-synced:")
+                && !trimmed.starts_with("<!-- version:")
+                && trimmed != START_MARKER
+                && trimmed != END_MARKER
+        })
+        .collect();
+
+    // Collapse runs of 3+ blank lines down to a single blank line
+    let mut result = String::with_capacity(content.len());
+    let mut consecutive_blanks = 0u32;
+    for line in &filtered {
+        if line.trim().is_empty() {
+            consecutive_blanks += 1;
+            if consecutive_blanks <= 2 {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(line);
+            }
+        } else {
+            consecutive_blanks = 0;
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line);
+        }
+    }
+
+    result
+}
+
 /// Returns the content between the START and END markers, or None if markers are absent.
 pub fn extract_managed_content(content: &str) -> Option<&str> {
     let start_idx = content.find(START_MARKER)?;
@@ -571,5 +616,84 @@ mod tests {
     fn test_next_version_no_version_in_content() {
         // Content exists but has no version comment
         assert_eq!(next_version(Some("no version here")), 1);
+    }
+
+    // --- strip_managed_metadata tests ---
+
+    #[test]
+    fn test_strip_managed_metadata_removes_all_metadata() {
+        let content = wrap_in_markers(
+            "Actual rules here",
+            3,
+            &["adr-001".into(), "adr-002".into()],
+        );
+        let full = format!("# My Header\n\nUser content\n\n{content}\n\nUser footer");
+        let stripped = strip_managed_metadata(&full);
+
+        assert!(
+            !stripped.contains("<!-- adr-ids:"),
+            "adr-ids should be removed"
+        );
+        assert!(
+            !stripped.contains("<!-- last-synced:"),
+            "last-synced should be removed"
+        );
+        assert!(
+            !stripped.contains("<!-- version:"),
+            "version should be removed"
+        );
+        assert!(
+            !stripped.contains(START_MARKER),
+            "start marker should be removed"
+        );
+        assert!(
+            !stripped.contains(END_MARKER),
+            "end marker should be removed"
+        );
+        assert!(
+            stripped.contains("# My Header"),
+            "user header should remain"
+        );
+        assert!(
+            stripped.contains("User content"),
+            "user content should remain"
+        );
+        assert!(
+            stripped.contains("Actual rules here"),
+            "managed body should remain"
+        );
+        assert!(
+            stripped.contains("User footer"),
+            "user footer should remain"
+        );
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_preserves_non_metadata() {
+        let content = "# Rules\n\n- Follow coding standards\n- Write tests";
+        let stripped = strip_managed_metadata(content);
+        assert_eq!(stripped, content);
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_collapses_blank_lines() {
+        // Stripping metadata from a managed section leaves many blank lines;
+        // verify they collapse to at most one blank line between content.
+        let input = format!(
+            "Header\n\n{}\n<!-- last-synced: 2025-01-01T00:00:00Z -->\n<!-- version: 1 -->\n<!-- adr-ids: a,b -->\n\nBody\n\n{}\n\nFooter",
+            START_MARKER, END_MARKER
+        );
+        let stripped = strip_managed_metadata(&input);
+        // Should not contain 3+ consecutive blank lines
+        assert!(
+            !stripped.contains("\n\n\n\n"),
+            "should not have 4+ consecutive newlines in: {:?}",
+            stripped
+        );
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_empty_input() {
+        assert_eq!(strip_managed_metadata(""), "");
     }
 }

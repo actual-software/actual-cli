@@ -68,6 +68,10 @@ understand the current state, but only generate content for the managed section)
 5. **Preserve intent**: Don't change the fundamental decision -- only make it more
    specific and actionable for this codebase.
 
+6. **ADR ID tracking**: The `adr_ids` field in your response must ONLY contain IDs from
+   the ADRs provided in the \"ADRs to Tailor\" section above. Do NOT copy or reference
+   ADR IDs from existing CLAUDE.md metadata comments (like `<!-- adr-ids: ... -->`).
+
 Return your response as a JSON object matching the provided schema."
     )
 }
@@ -167,6 +171,19 @@ mod tests {
         assert!(
             !prompt.is_empty(),
             "tailoring prompt with empty inputs must not be empty"
+        );
+    }
+
+    #[test]
+    fn tailoring_prompt_contains_adr_id_tracking_instruction() {
+        let prompt = tailoring_prompt("", "", "");
+        assert!(
+            prompt.contains("ADR ID tracking"),
+            "tailoring prompt must contain 'ADR ID tracking' instruction"
+        );
+        assert!(
+            prompt.contains("adr_ids"),
+            "tailoring prompt must reference 'adr_ids' field"
         );
     }
 }
