@@ -217,10 +217,11 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
                         .and_then(|r| r.as_str())
                         .map(|s| s.to_string())
                 })?;
-                if !root.join(&path_str).is_dir() {
+                let resolved = root.join(&path_str);
+                if !resolved.starts_with(root) || !resolved.is_dir() {
                     return None;
                 }
-                let name = extract_project_name(&root.join(&path_str));
+                let name = extract_project_name(&resolved);
                 Some(ProjectInfo {
                     path: path_str,
                     name,
@@ -375,10 +376,10 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
                 continue;
             }
 
-            let rel_path = entry
-                .strip_prefix(root)
-                .map(|rel| rel.to_string_lossy().to_string())
-                .unwrap_or_else(|_| entry.to_string_lossy().to_string());
+            let rel_path = match entry.strip_prefix(root) {
+                Ok(rel) => rel.to_string_lossy().to_string(),
+                Err(_) => continue, // skip entries that escape the repo root
+            };
 
             let name = extract_project_name(&entry);
             projects.push(ProjectInfo {
