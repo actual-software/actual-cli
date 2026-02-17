@@ -521,38 +521,25 @@ mod tests {
         let projects = vec![make_project("a"), make_project("b"), make_project("c")];
         let adrs = vec![make_adr("adr-001")];
 
-        let call_count = Arc::new(AtomicU32::new(0));
-        let call_count_inner = call_count.clone();
+        // First response is an error; the rest are valid but should never be reached.
+        let responses = vec![
+            MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+                message: "boom".to_string(),
+                stderr: String::new(),
+            }),
+            MockResponse::Json(make_output_json(
+                "apps/b/CLAUDE.md",
+                "Rules for B",
+                &["adr-001"],
+            )),
+            MockResponse::Json(make_output_json(
+                "apps/c/CLAUDE.md",
+                "Rules for C",
+                &["adr-001"],
+            )),
+        ];
 
-        // A custom runner that increments a shared counter and fails on the first call.
-        struct EarlyCancelRunner {
-            call_count: Arc<AtomicU32>,
-        }
-
-        impl ClaudeRunner for EarlyCancelRunner {
-            async fn run<T: serde::de::DeserializeOwned + Send>(
-                &self,
-                _args: &[String],
-            ) -> Result<T, ActualError> {
-                let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
-                if idx == 0 {
-                    // First call: wait briefly so the future is clearly in-flight,
-                    // then return an error.
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    return Err(ActualError::ClaudeSubprocessFailed {
-                        message: "boom".to_string(),
-                        stderr: String::new(),
-                    });
-                }
-                // Subsequent calls: succeed (but should never be reached).
-                let json = make_output_json("dummy.md", "should not appear", &["adr-001"]);
-                serde_json::from_str(&json).map_err(Into::into)
-            }
-        }
-
-        let runner = EarlyCancelRunner {
-            call_count: call_count_inner,
-        };
+        let runner = ConcurrentMockRunner::with_responses(responses, Duration::from_millis(10));
 
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
@@ -565,7 +552,7 @@ mod tests {
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
         assert!(result.is_err(), "expected an error from the first project");
 
-        let calls = call_count.load(Ordering::SeqCst);
+        let calls = runner.call_count.load(Ordering::SeqCst);
         assert!(
             calls < 3,
             "expected fewer than 3 calls due to early cancellation, got {calls}"
