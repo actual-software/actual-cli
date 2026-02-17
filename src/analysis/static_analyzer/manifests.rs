@@ -316,8 +316,11 @@ fn parse_gemfile(project_dir: &Path, deps: &mut HashSet<String>) {
 }
 
 /// Regex for matching `gem "name"` or `gem 'name'` in Gemfiles.
-fn regex_gem_name() -> regex::Regex {
-    regex::Regex::new(r#"gem\s+"([^"]+)"|gem\s+'([^']+)'"#).unwrap()
+fn regex_gem_name() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"gem\s+"([^"]+)"|gem\s+'([^']+)'"#).unwrap()
+    });
+    &RE
 }
 
 // ── pom.xml ──────────────────────────────────────────────────────────
@@ -354,16 +357,25 @@ fn parse_pom_xml(project_dir: &Path, deps: &mut HashSet<String>) {
     }
 }
 
-fn regex_pom_dependency() -> regex::Regex {
-    regex::Regex::new(r"(?s)<dependency>.*?</dependency>").unwrap()
+fn regex_pom_dependency() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?s)<dependency>.*?</dependency>").unwrap()
+    });
+    &RE
 }
 
-fn regex_pom_group_id() -> regex::Regex {
-    regex::Regex::new(r"<groupId>\s*([^<\s]+)\s*</groupId>").unwrap()
+fn regex_pom_group_id() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"<groupId>\s*([^<\s]+)\s*</groupId>").unwrap()
+    });
+    &RE
 }
 
-fn regex_pom_artifact_id() -> regex::Regex {
-    regex::Regex::new(r"<artifactId>\s*([^<\s]+)\s*</artifactId>").unwrap()
+fn regex_pom_artifact_id() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"<artifactId>\s*([^<\s]+)\s*</artifactId>").unwrap()
+    });
+    &RE
 }
 
 // ── build.gradle / build.gradle.kts ──────────────────────────────────
@@ -396,13 +408,16 @@ fn parse_build_gradle(project_dir: &Path, deps: &mut HashSet<String>) {
     }
 }
 
-fn regex_gradle_dependency() -> regex::Regex {
+fn regex_gradle_dependency() -> &'static regex::Regex {
     // Matches: implementation("group:artifact:version") or implementation 'group:artifact:version'
     // Also matches other configurations like api, compileOnly, runtimeOnly, testImplementation, etc.
-    regex::Regex::new(
-        r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|kapt|annotationProcessor)\s*(?:\(\s*"([^"]+)"\s*\)|'([^']+)'|\(\s*'([^']+)'\s*\))"#,
-    )
-    .unwrap()
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|kapt|annotationProcessor)\s*(?:\(\s*"([^"]+)"\s*\)|'([^']+)'|\(\s*'([^']+)'\s*\))"#,
+        )
+        .unwrap()
+    });
+    &RE
 }
 
 // ── Package.swift ────────────────────────────────────────────────────
@@ -439,12 +454,18 @@ fn parse_package_swift(project_dir: &Path, deps: &mut HashSet<String>) {
     }
 }
 
-fn regex_swift_package_name() -> regex::Regex {
-    regex::Regex::new(r#"\.package\s*\(\s*name\s*:\s*"([^"]+)""#).unwrap()
+fn regex_swift_package_name() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"\.package\s*\(\s*name\s*:\s*"([^"]+)""#).unwrap()
+    });
+    &RE
 }
 
-fn regex_swift_package_url() -> regex::Regex {
-    regex::Regex::new(r#"\.package\s*\(\s*url\s*:\s*"([^"]+)""#).unwrap()
+fn regex_swift_package_url() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"\.package\s*\(\s*url\s*:\s*"([^"]+)""#).unwrap()
+    });
+    &RE
 }
 
 #[cfg(test)]
