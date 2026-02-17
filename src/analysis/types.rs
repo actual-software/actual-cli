@@ -25,7 +25,7 @@ pub struct Project {
 /// Deserialization is case-insensitive: `"Rust"`, `"rust"`, and `"RUST"` all
 /// map to [`Language::Rust`]. Unknown strings map to [`Language::Other`].
 /// Serialization always produces lowercase (e.g. `"typescript"`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Language {
     TypeScript,
     JavaScript,
