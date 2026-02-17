@@ -376,13 +376,13 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
                 continue;
             }
 
-            // Compute relative path from root; skip entries that escape it
-            // via `..` (e.g. patterns like `../*`).
+            // Compute relative path from root; skip entries that resolve to
+            // root itself or escape it via `..` components.
             let rel = entry
                 .strip_prefix(root)
                 .map(|r| r.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "..".to_string());
-            if rel.starts_with("..") {
+                .unwrap_or_default();
+            if rel.is_empty() || rel.contains("..") {
                 continue;
             }
 
