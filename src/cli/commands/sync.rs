@@ -572,65 +572,11 @@ fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usiz
 mod tests {
     use super::*;
     use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
-    use crate::cli::ui::file_confirm::TerminalIO;
+    use crate::cli::ui::test_utils::MockTerminal;
     use crate::error::ActualError;
     use crate::generation::markers;
     use crate::tailoring::types::{FileOutput, TailoringSummary};
     use serde::de::DeserializeOwned;
-    use std::sync::Mutex;
-
-    struct MockTerminal {
-        inputs: Mutex<Vec<String>>,
-        select_result: Mutex<Option<Option<Vec<usize>>>>,
-        output: Mutex<Vec<String>>,
-    }
-
-    impl MockTerminal {
-        fn new(inputs: Vec<&str>) -> Self {
-            Self {
-                inputs: Mutex::new(inputs.into_iter().map(|s| s.to_string()).collect()),
-                select_result: Mutex::new(None),
-                output: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn with_selection(mut self, result: Option<Vec<usize>>) -> Self {
-            self.select_result = Mutex::new(Some(result));
-            self
-        }
-
-        fn output_text(&self) -> String {
-            self.output.lock().unwrap().join("\n")
-        }
-    }
-
-    impl TerminalIO for MockTerminal {
-        fn read_line(&self, _prompt: &str) -> Result<String, ActualError> {
-            let mut inputs = self.inputs.lock().unwrap();
-            if inputs.is_empty() {
-                return Err(ActualError::UserCancelled);
-            }
-            Ok(inputs.remove(0))
-        }
-
-        fn write_line(&self, text: &str) {
-            self.output.lock().unwrap().push(text.to_string());
-        }
-
-        fn select_files(
-            &self,
-            _prompt: &str,
-            _items: &[String],
-            _defaults: &[bool],
-        ) -> Result<Option<Vec<usize>>, ActualError> {
-            Ok(self
-                .select_result
-                .lock()
-                .unwrap()
-                .take()
-                .expect("select_files called but no select_result set; use .with_selection()"))
-        }
-    }
 
     /// Valid fixture JSON matching the RepoAnalysis schema.
     const VALID_ANALYSIS_JSON: &str = r#"{
