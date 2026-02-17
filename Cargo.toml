@@ -58,6 +58,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 which = "7"
 
+# Static analysis
+tokei = { version = "12", default-features = false }
+
 [features]
 integration = []
 live-e2e = []
