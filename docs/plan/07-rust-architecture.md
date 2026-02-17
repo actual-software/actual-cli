@@ -113,7 +113,6 @@ dialoguer = "0.11"         # Interactive prompts
 indicatif = "0.17"         # Progress bars/spinners
 console = "0.15"           # Colors, styling
 similar = "2"              # Diff generation
-comfy-table = "7"          # Table rendering
 
 # File system
 dirs = "5"                 # Platform-specific directories
