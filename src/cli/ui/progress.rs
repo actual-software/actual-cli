@@ -16,6 +16,9 @@ pub enum SyncPhase {
     Tailor = 3,
 }
 
+/// Number of phases in the sync pipeline.
+const PHASE_COUNT: usize = SyncPhase::Tailor as usize + 1;
+
 /// A multi-phase progress display for the sync command.
 ///
 /// All 4 phases are shown simultaneously: waiting → active → completed.
@@ -37,7 +40,7 @@ impl SyncPipeline {
         }
 
         let mp = MultiProgress::new();
-        let labels = ["Environment", "Analysis", "Fetch ADRs", "Tailoring"];
+        let labels: [&str; PHASE_COUNT] = ["Environment", "Analysis", "Fetch ADRs", "Tailoring"];
         let waiting_style =
             ProgressStyle::with_template("  ○ {msg}").expect("invalid waiting template");
 
