@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use crate::analysis::orchestrate::run_analysis;
+use crate::analysis::orchestrate::run_static_analysis;
 use crate::analysis::types::RepoAnalysis;
-use crate::claude::subprocess::ClaudeRunner;
 use crate::config;
 use crate::config::types::CachedAnalysis;
 use crate::error::ActualError;
@@ -41,13 +40,11 @@ pub fn get_git_head(repo_path: &Path) -> Option<String> {
 /// Run repository analysis with caching based on git HEAD.
 ///
 /// If the repository has a git HEAD that matches the cached analysis,
-/// the cached result is returned without calling the runner. Otherwise,
-/// a fresh analysis is run and the result is cached.
+/// the cached result is returned without running analysis. Otherwise,
+/// a fresh static analysis is run and the result is cached.
 ///
 /// Non-git repositories always run fresh analysis (no caching attempted).
-pub async fn run_analysis_cached(
-    runner: &impl ClaudeRunner,
-    model_override: Option<&str>,
+pub fn run_analysis_cached(
     repo_path: &Path,
     config_path: &Path,
 ) -> Result<RepoAnalysis, ActualError> {
@@ -56,7 +53,7 @@ pub async fn run_analysis_cached(
     // Not a git repo — skip caching entirely
     let head_hash = match head_commit {
         Some(h) => h,
-        None => return run_analysis(runner, model_override, repo_path).await,
+        None => return run_static_analysis(repo_path),
     };
 
     let mut cfg = config::paths::load_from(config_path)?;
@@ -75,7 +72,7 @@ pub async fn run_analysis_cached(
     }
 
     // Cache miss: run fresh analysis
-    let analysis = run_analysis(runner, model_override, repo_path).await?;
+    let analysis = run_static_analysis(repo_path)?;
 
     // Cache the result
     let cached_analysis = CachedAnalysis {
@@ -93,80 +90,7 @@ pub async fn run_analysis_cached(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::ActualError;
-    use serde::de::DeserializeOwned;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Mutex;
     use tempfile::tempdir;
-
-    const VALID_ANALYSIS_JSON: &str = r#"{
-        "is_monorepo": false,
-        "projects": [{
-            "path": ".",
-            "name": "my-app",
-            "languages": ["rust"],
-            "frameworks": [{"name": "actix-web", "category": "web-backend"}],
-            "package_manager": "cargo",
-            "description": "A web application"
-        }]
-    }"#;
-
-    // -- MockRunner (copied from orchestrate.rs, since it's cfg(test)-only there) --
-
-    enum MockResponse {
-        Json(String),
-        Error(ActualError),
-    }
-
-    struct MockRunner {
-        responses: Mutex<Vec<MockResponse>>,
-        call_count: AtomicU32,
-    }
-
-    impl MockRunner {
-        fn from_json(responses: Vec<&str>) -> Self {
-            Self {
-                responses: Mutex::new(
-                    responses
-                        .into_iter()
-                        .map(|s| MockResponse::Json(s.to_string()))
-                        .collect(),
-                ),
-                call_count: AtomicU32::new(0),
-            }
-        }
-
-        fn from_error(error: ActualError) -> Self {
-            Self {
-                responses: Mutex::new(vec![MockResponse::Error(error)]),
-                call_count: AtomicU32::new(0),
-            }
-        }
-
-        fn calls(&self) -> u32 {
-            self.call_count.load(Ordering::SeqCst)
-        }
-    }
-
-    impl ClaudeRunner for MockRunner {
-        async fn run<T: DeserializeOwned + Send>(
-            &self,
-            _args: &[String],
-        ) -> Result<T, ActualError> {
-            self.call_count.fetch_add(1, Ordering::SeqCst);
-            let response = {
-                let mut responses = self.responses.lock().unwrap();
-                responses.remove(0)
-            };
-            match response {
-                MockResponse::Json(json) => {
-                    let parsed: T = serde_json::from_str(&json)?;
-                    Ok(parsed)
-                }
-                MockResponse::Error(e) => Err(e),
-            }
-        }
-    }
 
     // -- Helpers --
 
@@ -206,9 +130,19 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
-    /// Build a valid RepoAnalysis from the test fixture JSON.
+    /// Build a valid RepoAnalysis for use in cache tests.
     fn valid_analysis() -> RepoAnalysis {
-        serde_json::from_str(VALID_ANALYSIS_JSON).unwrap()
+        RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![crate::analysis::types::Project {
+                path: ".".to_string(),
+                name: "test-project".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+            }],
+        }
     }
 
     /// Write a config with a pre-populated CachedAnalysis to disk.
@@ -298,8 +232,8 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    #[tokio::test]
-    async fn test_cache_hit_returns_cached_without_calling_runner() {
+    #[test]
+    fn test_cache_hit_returns_cached_without_running_analysis() {
         let repo_dir = tempdir().unwrap();
         let head_hash = create_git_repo(repo_dir.path());
 
@@ -316,21 +250,15 @@ mod tests {
             analysis_value,
         );
 
-        // MockRunner has a valid response but we expect 0 calls
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
+        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
 
-        let result = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
-            .await
-            .unwrap();
-
-        assert_eq!(runner.calls(), 0);
         assert!(!result.is_monorepo);
         assert_eq!(result.projects.len(), 1);
-        assert_eq!(result.projects[0].name, "my-app");
+        assert_eq!(result.projects[0].name, "test-project");
     }
 
-    #[tokio::test]
-    async fn test_cache_miss_head_differs_calls_runner_and_caches() {
+    #[test]
+    fn test_cache_miss_head_differs_runs_analysis_and_caches() {
         let repo_dir = tempdir().unwrap();
         let head_hash = create_git_repo(repo_dir.path());
 
@@ -347,14 +275,10 @@ mod tests {
             analysis_value,
         );
 
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
+        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
 
-        let result = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
-            .await
-            .unwrap();
-
-        assert_eq!(runner.calls(), 1);
-        assert_eq!(result.projects[0].name, "my-app");
+        // Static analysis on the git repo dir succeeds
+        assert_eq!(result.projects.len(), 1);
 
         // Verify the config was updated with the new HEAD
         let cfg = config::paths::load_from(&config_path).unwrap();
@@ -363,29 +287,25 @@ mod tests {
         assert_eq!(cached.repo_path, repo_dir.path().to_string_lossy().as_ref());
     }
 
-    #[tokio::test]
-    async fn test_no_git_repo_always_calls_runner() {
+    #[test]
+    fn test_no_git_repo_always_runs_analysis() {
         let repo_dir = tempdir().unwrap();
         // No git init — not a git repo
 
         let config_dir = tempdir().unwrap();
         let config_path = config_dir.path().join("config.yaml");
 
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
+        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
 
-        let result = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
-            .await
-            .unwrap();
-
-        assert_eq!(runner.calls(), 1);
-        assert_eq!(result.projects[0].name, "my-app");
+        // Static analysis on empty dir returns one project
+        assert_eq!(result.projects.len(), 1);
 
         // Config should not have been written (no caching for non-git repos)
         assert!(!config_path.exists());
     }
 
-    #[tokio::test]
-    async fn test_cache_miss_no_previous_cache() {
+    #[test]
+    fn test_cache_miss_no_previous_cache() {
         let repo_dir = tempdir().unwrap();
         let head_hash = create_git_repo(repo_dir.path());
 
@@ -396,14 +316,9 @@ mod tests {
         let cfg = config::Config::default();
         config::paths::save_to(&cfg, &config_path).unwrap();
 
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
+        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
 
-        let result = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
-            .await
-            .unwrap();
-
-        assert_eq!(runner.calls(), 1);
-        assert_eq!(result.projects[0].name, "my-app");
+        assert_eq!(result.projects.len(), 1);
 
         // Verify result was cached
         let cfg = config::paths::load_from(&config_path).unwrap();
@@ -411,8 +326,8 @@ mod tests {
         assert_eq!(cached.head_commit, Some(head_hash));
     }
 
-    #[tokio::test]
-    async fn test_cache_miss_repo_path_differs() {
+    #[test]
+    fn test_cache_miss_repo_path_differs() {
         let repo_dir = tempdir().unwrap();
         create_git_repo(repo_dir.path());
 
@@ -430,14 +345,9 @@ mod tests {
             analysis_value,
         );
 
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
+        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
 
-        let result = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
-            .await
-            .unwrap();
-
-        assert_eq!(runner.calls(), 1);
-        assert_eq!(result.projects[0].name, "my-app");
+        assert_eq!(result.projects.len(), 1);
 
         // Verify config now has the correct repo_path
         let cfg = config::paths::load_from(&config_path).unwrap();
@@ -445,8 +355,8 @@ mod tests {
         assert_eq!(cached.repo_path, repo_dir.path().to_string_lossy().as_ref());
     }
 
-    #[tokio::test]
-    async fn test_corrupted_cache_reruns_analysis() {
+    #[test]
+    fn test_corrupted_cache_reruns_analysis() {
         let repo_dir = tempdir().unwrap();
         let head_hash = create_git_repo(repo_dir.path());
 
@@ -462,14 +372,9 @@ mod tests {
             corrupted_value,
         );
 
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
+        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
 
-        let result = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
-            .await
-            .unwrap();
-
-        assert_eq!(runner.calls(), 1);
-        assert_eq!(result.projects[0].name, "my-app");
+        assert_eq!(result.projects.len(), 1);
 
         // Verify config was updated with valid cached data
         let cfg = config::paths::load_from(&config_path).unwrap();
@@ -483,8 +388,8 @@ mod tests {
         assert_eq!(result, None);
     }
 
-    #[tokio::test]
-    async fn test_cache_miss_config_load_error_propagates() {
+    #[test]
+    fn test_cache_miss_config_load_error_propagates() {
         let repo_dir = tempdir().unwrap();
         create_git_repo(repo_dir.path());
 
@@ -494,40 +399,38 @@ mod tests {
         // Write invalid YAML to the config file
         std::fs::write(&config_path, "{{{{invalid yaml").unwrap();
 
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
-
-        let err = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
-            .await
-            .unwrap_err();
+        let err = run_analysis_cached(repo_dir.path(), &config_path).unwrap_err();
 
         assert!(err.to_string().contains("Failed to parse config YAML"));
-        assert_eq!(runner.calls(), 0);
     }
 
-    #[tokio::test]
-    async fn test_cache_miss_runner_error_propagates() {
+    #[test]
+    fn test_cache_miss_analysis_error_propagates() {
         let repo_dir = tempdir().unwrap();
         create_git_repo(repo_dir.path());
 
         let config_dir = tempdir().unwrap();
         let config_path = config_dir.path().join("config.yaml");
 
-        let runner = MockRunner::from_error(ActualError::ClaudeSubprocessFailed {
-            message: "process crashed".to_string(),
-            stderr: "segfault".to_string(),
-        });
+        // Create a pnpm-workspace.yaml with invalid YAML to trigger an analysis error
+        std::fs::write(
+            repo_dir.path().join("pnpm-workspace.yaml"),
+            "{{invalid yaml",
+        )
+        .unwrap();
 
-        let err = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
-            .await
-            .unwrap_err();
+        let err = run_analysis_cached(repo_dir.path(), &config_path).unwrap_err();
 
-        assert!(err.to_string().contains("subprocess failed"));
-        assert_eq!(runner.calls(), 1);
+        assert!(
+            err.to_string().contains("Monorepo detection failed"),
+            "expected monorepo error, got: {}",
+            err
+        );
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn test_cache_miss_save_error_propagates() {
+    #[test]
+    fn test_cache_miss_save_error_propagates() {
         use std::os::unix::fs::PermissionsExt;
 
         let repo_dir = tempdir().unwrap();
@@ -542,14 +445,9 @@ mod tests {
         std::fs::set_permissions(config_dir.path(), std::fs::Permissions::from_mode(0o555))
             .unwrap();
 
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
-
-        let err = run_analysis_cached(&runner, None, repo_dir.path(), &config_path)
-            .await
-            .unwrap_err();
+        let err = run_analysis_cached(repo_dir.path(), &config_path).unwrap_err();
 
         assert!(err.to_string().contains("Failed to write config file"));
-        assert_eq!(runner.calls(), 1);
 
         // Restore permissions for cleanup
         std::fs::set_permissions(config_dir.path(), std::fs::Permissions::from_mode(0o755))

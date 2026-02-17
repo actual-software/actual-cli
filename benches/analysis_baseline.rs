@@ -1,10 +1,10 @@
-//! Baseline benchmark for Stage 2 repository analysis (LLM-based).
+//! Baseline benchmark for repository analysis (static analyzer).
 //!
-//! Runs `run_analysis` with the real `CliClaudeRunner` against a set of local
-//! repositories and records wall-clock time + full output for each.
+//! Runs `run_static_analysis` against a set of local repositories and records
+//! wall-clock time + full output for each.
 //!
 //! Results are written to `benches/analysis_baseline_results.json` for later
-//! comparison with the static analyzer replacement.
+//! comparison.
 //!
 //! # Usage
 //!
@@ -12,28 +12,21 @@
 //! # Benchmark the current repo:
 //! cargo run --release --bin analysis_baseline
 //!
-//! # Or with a specific model:
-//! MODEL=haiku cargo run --release --bin analysis_baseline
-//!
 //! # Or target specific repos:
 //! BENCH_REPOS=/path/to/repo1,/path/to/repo2 cargo run --release --bin analysis_baseline
 //! ```
 //!
 //! # Environment Variables
 //!
-//! - `MODEL`: Claude model to use (default: "haiku")
 //! - `BENCH_REPOS`: Comma-separated list of absolute repo paths to benchmark.
 //!   If not set, benchmarks the current working directory only.
 //! - `BENCH_RUNS`: Number of runs per repo (default: 3)
-//! - `CLAUDE_BINARY`: Override Claude binary path
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use actual_cli::analysis::orchestrate::run_analysis;
+use actual_cli::analysis::orchestrate::run_static_analysis;
 use actual_cli::analysis::types::RepoAnalysis;
-use actual_cli::claude::subprocess::CliClaudeRunner;
-use actual_cli::error::ActualError;
 
 use serde::Serialize;
 
@@ -77,7 +70,6 @@ struct FrameworkSnapshot {
 #[derive(Serialize)]
 struct BenchmarkReport {
     timestamp: String,
-    model: String,
     runs_per_repo: usize,
     results: Vec<RunResult>,
     summary: Vec<RepoSummary>,
@@ -122,13 +114,6 @@ fn snapshot_analysis(analysis: &RepoAnalysis) -> AnalysisSnapshot {
     }
 }
 
-fn resolve_claude_binary() -> PathBuf {
-    if let Ok(path) = std::env::var("CLAUDE_BINARY") {
-        return PathBuf::from(path);
-    }
-    which::which("claude").expect("Claude binary not found. Install or set CLAUDE_BINARY env var.")
-}
-
 /// Resolve the repos to benchmark.
 ///
 /// If `BENCH_REPOS` is set, split it by comma. Otherwise default to the
@@ -152,42 +137,20 @@ fn repo_name(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
-/// Run a single benchmark iteration by spawning `run_analysis` in a child
-/// process whose CWD is set to the target repo.
-///
-/// We use `set_current_dir` because `run_subprocess` (inside `CliClaudeRunner`)
-/// inherits the parent's CWD. This is safe because the tokio runtime is
-/// single-threaded (`current_thread` flavor — see `main`).
-async fn run_single_benchmark(
-    runner: &CliClaudeRunner,
-    model: &str,
-    repo_path: &Path,
-    run_index: usize,
-    original_cwd: &Path,
-) -> RunResult {
+/// Run a single benchmark iteration of static analysis.
+fn run_single_benchmark(repo_path: &Path, run_index: usize) -> RunResult {
     let name = repo_name(repo_path);
     eprintln!("  Run {}: {} ...", run_index + 1, repo_path.display());
 
-    // Claude Code subprocess inherits CWD from the parent process.
-    // We must chdir to the target repo so Claude analyzes the right codebase.
-    // This is safe because we use a single-threaded tokio runtime.
-    std::env::set_current_dir(repo_path).unwrap_or_else(|e| {
-        panic!("Failed to chdir to {}: {}", repo_path.display(), e);
-    });
-
     let start = Instant::now();
-    let result: Result<RepoAnalysis, ActualError> =
-        run_analysis(runner, Some(model), repo_path).await;
+    let result = run_static_analysis(repo_path);
     let elapsed = start.elapsed();
-
-    // Restore original CWD
-    let _ = std::env::set_current_dir(original_cwd);
 
     match result {
         Ok(analysis) => {
             eprintln!(
-                "    OK in {:.1}s — {} project(s), {} language(s)",
-                elapsed.as_secs_f64(),
+                "    OK in {:.1}ms — {} project(s), {} language(s)",
+                elapsed.as_millis(),
                 analysis.projects.len(),
                 analysis.projects.iter().flat_map(|p| &p.languages).count(),
             );
@@ -201,7 +164,7 @@ async fn run_single_benchmark(
             }
         }
         Err(e) => {
-            eprintln!("    FAILED in {:.1}s — {e}", elapsed.as_secs_f64());
+            eprintln!("    FAILED in {:.1}ms — {e}", elapsed.as_millis());
             RunResult {
                 repo_name: name,
                 run_index,
@@ -265,11 +228,10 @@ fn compute_summary(repo_name: &str, results: &[&RunResult]) -> RepoSummary {
 fn print_summary_table(report: &BenchmarkReport) {
     eprintln!();
     eprintln!("╔══════════════════════════════════════════════════════════════════════╗");
-    eprintln!("║                   ANALYSIS BENCHMARK RESULTS                        ║");
+    eprintln!("║                STATIC ANALYSIS BENCHMARK RESULTS                    ║");
     eprintln!("╠══════════════════════════════════════════════════════════════════════╣");
     eprintln!(
-        "║ Model: {:<15}  Runs per repo: {:<4}  Time: {} ║",
-        report.model,
+        "║ Runs per repo: {:<4}  Time: {} ║",
         report.runs_per_repo,
         &report.timestamp[..19],
     );
@@ -339,11 +301,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Use `current_thread` flavor to make `set_current_dir` safe — there is only
-/// one thread, so no other tokio worker can observe a stale CWD.
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    let model = std::env::var("MODEL").unwrap_or_else(|_| "haiku".to_string());
+fn main() {
     let runs_per_repo: usize = std::env::var("BENCH_RUNS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -358,15 +316,11 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let binary = resolve_claude_binary();
-    let runner = CliClaudeRunner::new(binary.clone(), Duration::from_secs(120));
     let original_cwd = std::env::current_dir().expect("Failed to get current directory");
 
-    eprintln!("Analysis Baseline Benchmark");
-    eprintln!("===========================");
-    eprintln!("Model: {model}");
+    eprintln!("Static Analysis Benchmark");
+    eprintln!("=========================");
     eprintln!("Runs per repo: {runs_per_repo}");
-    eprintln!("Claude binary: {}", binary.display());
     eprintln!("Repos: {}", repos.len());
     for r in &repos {
         eprintln!("  - {}", r.display());
@@ -378,8 +332,7 @@ async fn main() {
     for repo_path in &repos {
         eprintln!("Benchmarking: {}", repo_path.display());
         for run_idx in 0..runs_per_repo {
-            let result =
-                run_single_benchmark(&runner, &model, repo_path, run_idx, &original_cwd).await;
+            let result = run_single_benchmark(repo_path, run_idx);
             all_results.push(result);
         }
         eprintln!();
@@ -398,14 +351,10 @@ async fn main() {
 
     let report = BenchmarkReport {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        model: model.clone(),
         runs_per_repo,
         results: all_results,
         summary: summaries,
     };
-
-    // Restore CWD before writing results
-    let _ = std::env::set_current_dir(&original_cwd);
 
     // Print summary table
     print_summary_table(&report);

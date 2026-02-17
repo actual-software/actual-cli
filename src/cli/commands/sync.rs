@@ -93,13 +93,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
 
     // 3. Run analysis (cached if in a git repo)
     pipeline.start(SyncPhase::Analysis, "Analyzing repository...");
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create async runtime");
-    let analysis = match rt.block_on(run_analysis_cached(
-        runner,
-        args.model.as_deref(),
-        root_dir,
-        cfg_path,
-    )) {
+    let analysis = match run_analysis_cached(root_dir, cfg_path) {
         Ok(a) => {
             pipeline.success(SyncPhase::Analysis, "Analysis complete");
             a
@@ -175,6 +169,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     }
 
     pipeline.start(SyncPhase::Fetch, "Fetching ADRs...");
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create async runtime");
     let response = rt.block_on(async {
         with_retry(&RetryConfig::default(), || client.post_match(&request)).await
     });
@@ -723,26 +718,6 @@ mod tests {
         }
     }
 
-    const MONOREPO_ANALYSIS_JSON: &str = r#"{
-        "is_monorepo": true,
-        "projects": [
-            {
-                "path": "apps/web",
-                "name": "Web App",
-                "languages": ["typescript"],
-                "frameworks": [{"name": "nextjs", "category": "web-frontend"}],
-                "package_manager": "npm"
-            },
-            {
-                "path": "services/api",
-                "name": "API Service",
-                "languages": ["rust"],
-                "frameworks": [],
-                "package_manager": "cargo"
-            }
-        ]
-    }"#;
-
     // ── test_confirm_and_write_force_mode ──
 
     #[test]
@@ -1269,8 +1244,21 @@ mod tests {
     fn test_run_sync_project_filter_matches() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
+        // Create a monorepo structure with pnpm-workspace.yaml
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - apps/*\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{"name": "monorepo"}"#).unwrap();
+        std::fs::create_dir_all(dir.path().join("apps/web")).unwrap();
+        std::fs::write(
+            dir.path().join("apps/web/package.json"),
+            r#"{"name": "web-app"}"#,
+        )
+        .unwrap();
         let term = MockTerminal::new(vec![]);
-        let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let args = make_sync_args_with_projects(true, vec!["apps/web"], &server.url());
         let result = run_sync(
             &args,
@@ -1289,7 +1277,7 @@ mod tests {
     fn test_run_sync_project_filter_no_match() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
-        let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         // No server needed — fails before API call
         let args = make_sync_args_with_projects(true, vec!["nonexistent/path"], "http://unused");
         let result = run_sync(
@@ -1413,8 +1401,13 @@ mod tests {
     fn test_run_sync_analysis_error() {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
-        // Invalid JSON causes parse error in run_analysis_cached — before API call
-        let runner = MockRunner::new("not valid json");
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        // Create invalid pnpm-workspace.yaml to trigger analysis error
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "{{invalid yaml content",
+        )
+        .unwrap();
         let args = make_sync_args(false, false, true, false, "http://unused");
         let result = run_sync(
             &args,
@@ -1424,8 +1417,8 @@ mod tests {
             &runner,
         );
         assert!(
-            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
-            "expected ClaudeOutputParse error, got: {result:?}"
+            matches!(result, Err(ActualError::ConfigError(_))),
+            "expected ConfigError from analysis, got: {result:?}"
         );
     }
 

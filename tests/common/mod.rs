@@ -312,4 +312,20 @@ impl TestEnv {
         }
         std::fs::write(full_path, content).unwrap();
     }
+
+    /// Create a pnpm monorepo directory structure that the static analyzer
+    /// will detect as a monorepo with projects at apps/web, apps/api, and
+    /// libs/shared — matching the layout expected by ANALYSIS_MONOREPO.
+    pub fn setup_monorepo(&self) {
+        self.write_file(
+            "pnpm-workspace.yaml",
+            "packages:\n  - \"apps/*\"\n  - \"libs/*\"\n",
+        );
+        self.write_file("apps/web/package.json", r#"{"name": "web-app"}"#);
+        self.write_file(
+            "apps/api/Cargo.toml",
+            "[package]\nname = \"api-server\"\nversion = \"0.1.0\"\n",
+        );
+        self.write_file("libs/shared/package.json", r#"{"name": "shared-lib"}"#);
+    }
 }

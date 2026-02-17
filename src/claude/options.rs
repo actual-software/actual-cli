@@ -1,9 +1,8 @@
 /// Options for a Claude Code subprocess invocation.
 ///
 /// Encapsulates the CLI flags passed to `claude --print`. Use the
-/// factory methods [`InvocationOptions::for_analysis`] and
-/// [`InvocationOptions::for_tailoring`] to create pre-configured
-/// instances for the two invocation profiles.
+/// factory method [`InvocationOptions::for_tailoring`] to create a
+/// pre-configured instance for the tailoring invocation profile.
 #[derive(Debug, Clone)]
 pub struct InvocationOptions {
     /// Model name (e.g., "sonnet", "opus").
@@ -23,27 +22,6 @@ pub struct InvocationOptions {
 const DEFAULT_MODEL: &str = "sonnet";
 
 impl InvocationOptions {
-    /// Create options for repository analysis.
-    ///
-    /// Analysis gets Bash access (for git/ls commands), 10 max turns,
-    /// and the read-only tool set plus Bash.
-    pub fn for_analysis(model_override: Option<&str>) -> Self {
-        Self {
-            model: model_override.unwrap_or(DEFAULT_MODEL).to_string(),
-            max_turns: 10,
-            tools: "Read,Glob,Grep,Bash".to_string(),
-            allowed_tools: vec![
-                "Read".to_string(),
-                "Glob(*)".to_string(),
-                "Grep(*)".to_string(),
-                "Bash(git:*)".to_string(),
-                "Bash(ls:*)".to_string(),
-            ],
-            json_schema: None,
-            max_budget_usd: None,
-        }
-    }
-
     /// Create options for ADR tailoring.
     ///
     /// Tailoring is restricted to read-only tools (no Bash), 15 max turns.
@@ -104,25 +82,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_for_analysis_default_args() {
-        let opts = InvocationOptions::for_analysis(None);
-        let args = opts.to_args();
-
-        // Default model is sonnet
-        assert_arg_value(&args, "--model", "sonnet");
-
-        // Max turns is 10
-        assert_arg_value(&args, "--max-turns", "10");
-
-        // Tools include Bash
-        assert_arg_value(&args, "--tools", "Read,Glob,Grep,Bash");
-
-        // allowedTools includes Bash patterns
-        assert!(has_allowed_tool(&args, "Bash(git:*)"));
-        assert!(has_allowed_tool(&args, "Bash(ls:*)"));
-    }
-
-    #[test]
     fn test_for_tailoring_no_bash() {
         let opts = InvocationOptions::for_tailoring(None);
         let args = opts.to_args();
@@ -136,19 +95,11 @@ mod tests {
 
     #[test]
     fn test_to_args_omits_none_fields() {
-        let opts = InvocationOptions::for_analysis(None);
+        let opts = InvocationOptions::for_tailoring(None);
         let args = opts.to_args();
 
         assert!(!args.contains(&"--json-schema".to_string()));
         assert!(!args.contains(&"--max-budget-usd".to_string()));
-    }
-
-    #[test]
-    fn test_for_analysis_model_override() {
-        let opts = InvocationOptions::for_analysis(Some("opus"));
-        let args = opts.to_args();
-
-        assert_arg_value(&args, "--model", "opus");
     }
 
     #[test]
@@ -160,8 +111,16 @@ mod tests {
     }
 
     #[test]
+    fn test_for_tailoring_default_model() {
+        let opts = InvocationOptions::for_tailoring(None);
+        let args = opts.to_args();
+
+        assert_arg_value(&args, "--model", "sonnet");
+    }
+
+    #[test]
     fn test_to_args_includes_json_schema_when_set() {
-        let mut opts = InvocationOptions::for_analysis(None);
+        let mut opts = InvocationOptions::for_tailoring(None);
         opts.json_schema = Some(r#"{"type":"object"}"#.to_string());
         let args = opts.to_args();
 
@@ -170,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_to_args_includes_max_budget_when_set() {
-        let mut opts = InvocationOptions::for_analysis(None);
+        let mut opts = InvocationOptions::for_tailoring(None);
         opts.max_budget_usd = Some(0.5);
         let args = opts.to_args();
 
@@ -179,7 +138,7 @@ mod tests {
 
     #[test]
     fn test_to_args_always_includes_common_flags() {
-        let opts = InvocationOptions::for_analysis(None);
+        let opts = InvocationOptions::for_tailoring(None);
         let args = opts.to_args();
 
         assert_arg_value(&args, "--output-format", "json");
@@ -189,16 +148,14 @@ mod tests {
 
     #[test]
     fn test_to_args_does_not_include_print() {
-        let analysis_args = InvocationOptions::for_analysis(None).to_args();
         let tailoring_args = InvocationOptions::for_tailoring(None).to_args();
 
-        assert!(!analysis_args.contains(&"--print".to_string()));
         assert!(!tailoring_args.contains(&"--print".to_string()));
     }
 
     #[test]
     fn test_clone_produces_independent_copy() {
-        let mut opts = InvocationOptions::for_analysis(None);
+        let mut opts = InvocationOptions::for_tailoring(None);
         opts.json_schema = Some("schema".to_string());
         opts.max_budget_usd = Some(1.0);
         let cloned = opts.clone();
@@ -213,16 +170,10 @@ mod tests {
 
     #[test]
     fn test_debug_output() {
-        let opts = InvocationOptions::for_analysis(None);
+        let opts = InvocationOptions::for_tailoring(None);
         let debug = format!("{opts:?}");
         assert!(debug.contains("InvocationOptions"));
         assert!(debug.contains("sonnet"));
-    }
-
-    /// Returns true when `--allowedTools <tool>` appears as consecutive args.
-    fn has_allowed_tool(args: &[String], tool: &str) -> bool {
-        args.windows(2)
-            .any(|w| w[0] == "--allowedTools" && w[1] == tool)
     }
 
     /// Assert that `--flag value` appears as consecutive elements.
