@@ -107,6 +107,29 @@ fn parse_cargo_toml(
 
 // ── pyproject.toml ───────────────────────────────────────────────────
 
+/// Group names in `[project.optional-dependencies]` that are considered dev-only.
+/// Any group whose name is NOT in this list is treated as a production extra.
+const DEV_GROUP_NAMES: &[&str] = &[
+    "dev",
+    "develop",
+    "development",
+    "test",
+    "testing",
+    "tests",
+    "lint",
+    "linting",
+    "docs",
+    "doc",
+    "documentation",
+    "typing",
+    "type-checking",
+    "types",
+    "ci",
+    "style",
+    "format",
+    "formatting",
+];
+
 fn parse_pyproject_toml(
     project_dir: &Path,
     deps: &mut HashSet<String>,
@@ -140,18 +163,23 @@ fn parse_pyproject_toml(
         }
     }
 
-    // PEP 631 optional/dev dependencies
+    // PEP 631 optional-dependencies (heuristic: dev-like group names → dev_deps, others → deps)
     if let Some(table) = parsed
         .get("project")
         .and_then(|p| p.get("optional-dependencies"))
         .and_then(|d| d.as_table())
     {
-        for (_group, arr) in table {
+        for (group, arr) in table {
             if let Some(arr) = arr.as_array() {
+                let target = if DEV_GROUP_NAMES.contains(&group.as_str()) {
+                    &mut *dev_deps
+                } else {
+                    &mut *deps
+                };
                 for item in arr {
                     if let Some(s) = item.as_str() {
                         if let Some(name) = strip_python_version_specifier(s) {
-                            dev_deps.insert(name);
+                            target.insert(name);
                         }
                     }
                 }
@@ -1126,6 +1154,40 @@ dependencies {
         .unwrap();
         let info = parse_dependencies(dir.path());
         assert!(info.dev_dependencies.contains(&"pytest".to_string()));
+    }
+
+    #[test]
+    fn test_pyproject_optional_deps_classification() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            r#"
+[project]
+name = "my-app"
+dependencies = ["django>=4.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+test = ["coverage>=7.0"]
+lint = ["ruff>=0.1"]
+postgres = ["psycopg2>=2.9"]
+redis = ["redis>=4.0"]
+all = ["uvicorn>=0.24"]
+"#,
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        // Dev-like groups
+        assert!(info.dev_dependencies.contains(&"pytest".to_string()));
+        assert!(info.dev_dependencies.contains(&"coverage".to_string()));
+        assert!(info.dev_dependencies.contains(&"ruff".to_string()));
+        // Production extras
+        assert!(info.dependencies.contains(&"psycopg2".to_string()));
+        assert!(info.dependencies.contains(&"redis".to_string()));
+        assert!(info.dependencies.contains(&"uvicorn".to_string()));
+        // Base deps
+        assert!(info.dependencies.contains(&"django".to_string()));
     }
 
     #[test]
