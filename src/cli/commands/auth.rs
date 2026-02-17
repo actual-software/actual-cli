@@ -6,13 +6,7 @@ use crate::cli::ui::theme;
 use crate::error::ActualError;
 
 pub fn exec() -> i32 {
-    match run_auth() {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("{} {}", theme::error_prefix(), e);
-            e.exit_code()
-        }
-    }
+    super::handle_result(run_auth())
 }
 
 fn run_auth() -> Result<(), ActualError> {
