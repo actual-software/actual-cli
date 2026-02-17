@@ -14,6 +14,7 @@ use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::confirm_files;
+use crate::cli::ui::header::{render_header_bar, AuthDisplay};
 use crate::cli::ui::progress::{SyncPhase, SyncPipeline};
 use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
@@ -63,11 +64,22 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     cfg_path: &Path,
     term: &dyn TerminalIO,
     runner: &R,
+    auth: Option<AuthDisplay>,
 ) -> Result<(), ActualError> {
     // ── Phase 1: env check + analysis ──
 
-    // 1. Show banner
+    // 1. Show banner + header bar
     print_banner(false);
+
+    let width = console::Term::stderr()
+        .size_checked()
+        .map(|(_, cols)| cols as usize)
+        .unwrap_or(80)
+        .min(90);
+    eprint!(
+        "{}",
+        render_header_bar(width, env!("CARGO_PKG_VERSION"), auth.as_ref())
+    );
 
     // 2. Create pipeline and check environment (git status)
     let pipeline = SyncPipeline::new(false);
@@ -1046,6 +1058,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(result.is_ok(), "run_sync with --force should succeed");
         // With empty API response + force, terminal should show "No files to write."
@@ -1069,6 +1082,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1090,6 +1104,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1111,6 +1126,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1131,6 +1147,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
@@ -1152,6 +1169,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1173,6 +1191,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         )
         .unwrap();
         // Verify no CLAUDE.md was created
@@ -1210,6 +1229,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1230,6 +1250,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::ConfigError(_))),
@@ -1342,6 +1363,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(matches!(result, Err(ActualError::ConfigError(_))));
     }
@@ -1396,6 +1418,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
 
         assert!(
@@ -1779,6 +1802,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::ApiError(_))),
@@ -1831,6 +1855,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
@@ -1872,6 +1897,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
@@ -1906,7 +1932,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
         };
-        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
         // Verify rejections were cleared
@@ -1968,7 +1994,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
         };
-        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None);
         // adr-001 is rejected, so no ADRs remain → "No files to write."
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
@@ -1999,6 +2025,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(result.is_err(), "expected tailoring to fail");
     }
