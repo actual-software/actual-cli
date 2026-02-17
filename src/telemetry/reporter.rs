@@ -8,8 +8,8 @@ const SERVICE_KEY: &str = "ak_telemetry_prod_actual_cli";
 /// Send collected sync metrics to the telemetry endpoint.
 ///
 /// This function is fire-and-forget: all errors are silently swallowed.
-/// Telemetry is opt-out — it can be disabled via the `ACTUAL_NO_TELEMETRY=1`
-/// environment variable or by setting `telemetry.enabled: false` in config.
+/// Telemetry is opt-out — it can be disabled via the `ACTUAL_NO_TELEMETRY`
+/// environment variable (any non-empty value) or by setting `telemetry.enabled: false` in config.
 pub async fn report_metrics(metrics: &SyncMetrics, config: &Config, api_url: &str) {
     let _ = try_report_metrics(metrics, config, api_url).await;
 }
@@ -24,7 +24,11 @@ async fn try_report_metrics(
     api_url: &str,
 ) -> Result<(), ActualError> {
     // Opt-out via env var
-    if std::env::var("ACTUAL_NO_TELEMETRY").ok().as_deref() == Some("1") {
+    if std::env::var("ACTUAL_NO_TELEMETRY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_some()
+    {
         return Ok(());
     }
 
@@ -182,6 +186,78 @@ mod tests {
         mock.assert_async().await;
 
         // Restore: remove the var we set, then restore any previous value
+        std::env::remove_var("ACTUAL_NO_TELEMETRY");
+        restore_env(saved);
+    }
+
+    #[tokio::test]
+    async fn test_report_opt_out_via_env_var_true() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_env();
+
+        std::env::set_var("ACTUAL_NO_TELEMETRY", "true");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/counter/record")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let metrics = sample_metrics();
+        let config = Config::default();
+
+        report_metrics(&metrics, &config, &server.url()).await;
+        mock.assert_async().await;
+
+        std::env::remove_var("ACTUAL_NO_TELEMETRY");
+        restore_env(saved);
+    }
+
+    #[tokio::test]
+    async fn test_report_opt_out_via_env_var_yes() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_env();
+
+        std::env::set_var("ACTUAL_NO_TELEMETRY", "yes");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/counter/record")
+            .expect(0)
+            .create_async()
+            .await;
+
+        let metrics = sample_metrics();
+        let config = Config::default();
+
+        report_metrics(&metrics, &config, &server.url()).await;
+        mock.assert_async().await;
+
+        std::env::remove_var("ACTUAL_NO_TELEMETRY");
+        restore_env(saved);
+    }
+
+    #[tokio::test]
+    async fn test_report_not_opted_out_via_empty_env_var() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_env();
+
+        std::env::set_var("ACTUAL_NO_TELEMETRY", "");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/counter/record")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let metrics = sample_metrics();
+        let config = Config::default();
+
+        report_metrics(&metrics, &config, &server.url()).await;
+        mock.assert_async().await;
+
         std::env::remove_var("ACTUAL_NO_TELEMETRY");
         restore_env(saved);
     }
