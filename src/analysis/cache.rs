@@ -43,10 +43,14 @@ pub fn get_git_head(repo_path: &Path) -> Option<String> {
 /// the cached result is returned without running analysis. Otherwise,
 /// a fresh static analysis is run and the result is cached.
 ///
+/// When `force` is true, any cached result is ignored and a fresh analysis
+/// is always run (the cache is still updated afterward).
+///
 /// Non-git repositories always run fresh analysis (no caching attempted).
 pub fn run_analysis_cached(
     repo_path: &Path,
     config_path: &Path,
+    force: bool,
 ) -> Result<RepoAnalysis, ActualError> {
     let head_commit = get_git_head(repo_path);
 
@@ -58,16 +62,20 @@ pub fn run_analysis_cached(
 
     let mut cfg = config::paths::load_from(config_path)?;
 
-    // Check for cache hit
-    if let Some(ref cached) = cfg.cached_analysis {
-        if cached.repo_path == repo_path.to_string_lossy().as_ref()
-            && cached.head_commit.as_deref() == Some(&head_hash)
-        {
-            // Try to deserialize the cached analysis
-            if let Ok(analysis) = serde_yaml::from_value::<RepoAnalysis>(cached.analysis.clone()) {
-                return Ok(analysis);
+    // Check for cache hit (skip when force=true)
+    if !force {
+        if let Some(ref cached) = cfg.cached_analysis {
+            if cached.repo_path == repo_path.to_string_lossy().as_ref()
+                && cached.head_commit.as_deref() == Some(&head_hash)
+            {
+                // Try to deserialize the cached analysis
+                if let Ok(analysis) =
+                    serde_yaml::from_value::<RepoAnalysis>(cached.analysis.clone())
+                {
+                    return Ok(analysis);
+                }
+                // Deserialization failed — fall through to cache miss
             }
-            // Deserialization failed — fall through to cache miss
         }
     }
 
@@ -250,7 +258,7 @@ mod tests {
             analysis_value,
         );
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
         assert!(!result.is_monorepo);
         assert_eq!(result.projects.len(), 1);
@@ -275,7 +283,7 @@ mod tests {
             analysis_value,
         );
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
         // Static analysis on the git repo dir succeeds
         assert_eq!(result.projects.len(), 1);
@@ -295,7 +303,7 @@ mod tests {
         let config_dir = tempdir().unwrap();
         let config_path = config_dir.path().join("config.yaml");
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
         // Static analysis on empty dir returns one project
         assert_eq!(result.projects.len(), 1);
@@ -316,7 +324,7 @@ mod tests {
         let cfg = config::Config::default();
         config::paths::save_to(&cfg, &config_path).unwrap();
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
         assert_eq!(result.projects.len(), 1);
 
@@ -345,7 +353,7 @@ mod tests {
             analysis_value,
         );
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
         assert_eq!(result.projects.len(), 1);
 
@@ -372,7 +380,7 @@ mod tests {
             corrupted_value,
         );
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path).unwrap();
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
         assert_eq!(result.projects.len(), 1);
 
@@ -399,7 +407,7 @@ mod tests {
         // Write invalid YAML to the config file
         std::fs::write(&config_path, "{{{{invalid yaml").unwrap();
 
-        let err = run_analysis_cached(repo_dir.path(), &config_path).unwrap_err();
+        let err = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap_err();
 
         assert!(err.to_string().contains("Failed to parse config YAML"));
     }
@@ -419,7 +427,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = run_analysis_cached(repo_dir.path(), &config_path).unwrap_err();
+        let err = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap_err();
 
         assert!(
             err.to_string().contains("Monorepo detection failed"),
@@ -445,7 +453,7 @@ mod tests {
         std::fs::set_permissions(config_dir.path(), std::fs::Permissions::from_mode(0o555))
             .unwrap();
 
-        let err = run_analysis_cached(repo_dir.path(), &config_path).unwrap_err();
+        let err = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap_err();
 
         assert!(err.to_string().contains("Failed to write config file"));
 
@@ -453,5 +461,77 @@ mod tests {
         std::fs::set_permissions(config_dir.path(), std::fs::Permissions::from_mode(0o755))
             .unwrap();
         std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
+    fn test_force_bypasses_valid_cache() {
+        let repo_dir = tempdir().unwrap();
+        let head_hash = create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Write config with cached analysis matching current HEAD (would be a cache hit)
+        let analysis = valid_analysis();
+        let analysis_value = serde_yaml::to_value(&analysis).unwrap();
+        write_config_with_cache(
+            &config_path,
+            &repo_dir.path().to_string_lossy(),
+            Some(&head_hash),
+            analysis_value,
+        );
+
+        // With force=false, this returns the cached "test-project" name
+        let cached_result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(cached_result.projects[0].name, "test-project");
+
+        // With force=true, this bypasses the cache and runs fresh analysis
+        let forced_result = run_analysis_cached(repo_dir.path(), &config_path, true).unwrap();
+        assert_ne!(
+            forced_result.projects[0].name, "test-project",
+            "force=true should bypass cached analysis and return fresh result"
+        );
+
+        // Verify the cache was updated afterward
+        let cfg = config::paths::load_from(&config_path).unwrap();
+        let cached = cfg.cached_analysis.unwrap();
+        assert_eq!(cached.head_commit, Some(head_hash));
+        assert_eq!(cached.repo_path, repo_dir.path().to_string_lossy().as_ref());
+    }
+
+    #[test]
+    fn test_force_updates_cache_after_fresh_analysis() {
+        let repo_dir = tempdir().unwrap();
+        let head_hash = create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Write config with cached analysis using an old timestamp
+        let old_time = chrono::Utc::now() - chrono::Duration::hours(1);
+        let analysis = valid_analysis();
+        let cfg = config::Config {
+            cached_analysis: Some(CachedAnalysis {
+                repo_path: repo_dir.path().to_string_lossy().to_string(),
+                head_commit: Some(head_hash.clone()),
+                analysis: serde_yaml::to_value(&analysis).unwrap(),
+                analyzed_at: old_time,
+            }),
+            ..config::Config::default()
+        };
+        config::paths::save_to(&cfg, &config_path).unwrap();
+
+        // Call with force=true
+        let result = run_analysis_cached(repo_dir.path(), &config_path, true).unwrap();
+        assert_eq!(result.projects.len(), 1);
+
+        // Verify the cache was updated with a fresh timestamp
+        let updated_cfg = config::paths::load_from(&config_path).unwrap();
+        let updated_cached = updated_cfg.cached_analysis.unwrap();
+        assert_eq!(updated_cached.head_commit, Some(head_hash));
+        assert!(
+            updated_cached.analyzed_at > old_time,
+            "force=true should update the cache with a newer analyzed_at timestamp"
+        );
     }
 }
