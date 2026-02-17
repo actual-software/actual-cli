@@ -27,6 +27,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_general: Option<bool>,
 
+    /// Maximum number of ADRs to return per framework.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_framework: Option<u32>,
+
     /// Maximum budget per tailoring invocation (USD).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_budget_usd: Option<f64>,
@@ -96,6 +100,7 @@ mod tests {
             include_categories: Some(vec!["testing".to_string(), "security".to_string()]),
             exclude_categories: Some(vec!["deprecated".to_string()]),
             include_general: Some(true),
+            max_per_framework: Some(10),
             max_budget_usd: Some(0.50),
             batch_size: Some(20),
             concurrency: Some(5),
