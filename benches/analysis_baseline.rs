@@ -9,9 +9,12 @@
 //! # Usage
 //!
 //! ```sh
+//! # Benchmark the current repo:
 //! cargo run --release --bin analysis_baseline
+//!
 //! # Or with a specific model:
 //! MODEL=haiku cargo run --release --bin analysis_baseline
+//!
 //! # Or target specific repos:
 //! BENCH_REPOS=/path/to/repo1,/path/to/repo2 cargo run --release --bin analysis_baseline
 //! ```
@@ -19,7 +22,8 @@
 //! # Environment Variables
 //!
 //! - `MODEL`: Claude model to use (default: "haiku")
-//! - `BENCH_REPOS`: Comma-separated list of repo paths to benchmark
+//! - `BENCH_REPOS`: Comma-separated list of absolute repo paths to benchmark.
+//!   If not set, benchmarks the current working directory only.
 //! - `BENCH_RUNS`: Number of runs per repo (default: 3)
 //! - `CLAUDE_BINARY`: Override Claude binary path
 
@@ -36,7 +40,7 @@ use serde::Serialize;
 /// A single benchmark run result.
 #[derive(Serialize)]
 struct RunResult {
-    repo_path: String,
+    /// Short name derived from the directory (e.g. "actual-cli").
     repo_name: String,
     run_index: usize,
     duration_ms: u128,
@@ -82,7 +86,6 @@ struct BenchmarkReport {
 #[derive(Serialize)]
 struct RepoSummary {
     repo_name: String,
-    repo_path: String,
     total_runs: usize,
     successful_runs: usize,
     min_ms: u128,
@@ -126,22 +129,21 @@ fn resolve_claude_binary() -> PathBuf {
     which::which("claude").expect("Claude binary not found. Install or set CLAUDE_BINARY env var.")
 }
 
-fn default_repos() -> Vec<PathBuf> {
-    let candidates = [
-        // This repo itself (Rust CLI)
-        "/Users/poile/repos/actualai/actual-cli",
-        // Go projects
-        "/Users/poile/repos/wizard",
-        "/Users/poile/repos/gastown",
-        // Kubernetes/Helm repo
-        "/Users/poile/repos/rinzler",
-    ];
-
-    candidates
-        .iter()
-        .filter(|p| Path::new(p).exists())
-        .map(PathBuf::from)
-        .collect()
+/// Resolve the repos to benchmark.
+///
+/// If `BENCH_REPOS` is set, split it by comma. Otherwise default to the
+/// current working directory — the most portable default since you can
+/// `cd` into any repo before running the benchmark.
+fn resolve_repos() -> Vec<PathBuf> {
+    if let Ok(paths) = std::env::var("BENCH_REPOS") {
+        paths
+            .split(',')
+            .map(|s| PathBuf::from(s.trim()))
+            .filter(|p| p.exists())
+            .collect()
+    } else {
+        vec![std::env::current_dir().expect("Failed to get current directory")]
+    }
 }
 
 fn repo_name(path: &Path) -> String {
@@ -150,6 +152,12 @@ fn repo_name(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
+/// Run a single benchmark iteration by spawning `run_analysis` in a child
+/// process whose CWD is set to the target repo.
+///
+/// We use `set_current_dir` because `run_subprocess` (inside `CliClaudeRunner`)
+/// inherits the parent's CWD. This is safe because the tokio runtime is
+/// single-threaded (`current_thread` flavor — see `main`).
 async fn run_single_benchmark(
     runner: &CliClaudeRunner,
     model: &str,
@@ -162,6 +170,7 @@ async fn run_single_benchmark(
 
     // Claude Code subprocess inherits CWD from the parent process.
     // We must chdir to the target repo so Claude analyzes the right codebase.
+    // This is safe because we use a single-threaded tokio runtime.
     std::env::set_current_dir(repo_path).unwrap_or_else(|e| {
         panic!("Failed to chdir to {}: {}", repo_path.display(), e);
     });
@@ -183,7 +192,6 @@ async fn run_single_benchmark(
                 analysis.projects.iter().flat_map(|p| &p.languages).count(),
             );
             RunResult {
-                repo_path: repo_path.to_string_lossy().to_string(),
                 repo_name: name,
                 run_index,
                 duration_ms: elapsed.as_millis(),
@@ -193,9 +201,8 @@ async fn run_single_benchmark(
             }
         }
         Err(e) => {
-            eprintln!("    FAILED in {:.1}s — {}", elapsed.as_secs_f64(), e);
+            eprintln!("    FAILED in {:.1}s — {e}", elapsed.as_secs_f64());
             RunResult {
-                repo_path: repo_path.to_string_lossy().to_string(),
                 repo_name: name,
                 run_index,
                 duration_ms: elapsed.as_millis(),
@@ -207,7 +214,7 @@ async fn run_single_benchmark(
     }
 }
 
-fn compute_summary(repo_path: &Path, results: &[&RunResult]) -> RepoSummary {
+fn compute_summary(repo_name: &str, results: &[&RunResult]) -> RepoSummary {
     let successful: Vec<u128> = results
         .iter()
         .filter(|r| r.success)
@@ -244,8 +251,7 @@ fn compute_summary(repo_path: &Path, results: &[&RunResult]) -> RepoSummary {
     };
 
     RepoSummary {
-        repo_name: repo_name(repo_path),
-        repo_path: repo_path.to_string_lossy().to_string(),
+        repo_name: repo_name.to_string(),
         total_runs: results.len(),
         successful_runs: successful.len(),
         min_ms,
@@ -293,7 +299,7 @@ fn print_summary_table(report: &BenchmarkReport) {
         if let Some(result) = report
             .results
             .iter()
-            .find(|r| r.repo_path == s.repo_path && r.success)
+            .find(|r| r.repo_name == s.repo_name && r.success)
         {
             if let Some(analysis) = &result.analysis {
                 eprintln!();
@@ -318,15 +324,24 @@ fn print_summary_table(report: &BenchmarkReport) {
     }
 }
 
+/// Truncate a string to `max` characters, appending "…" if truncated.
+/// Uses char boundaries to avoid panicking on multi-byte UTF-8 strings.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max - 1])
+        let end = s
+            .char_indices()
+            .nth(max - 1)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
+        format!("{}…", &s[..end])
     }
 }
 
-#[tokio::main]
+/// Use `current_thread` flavor to make `set_current_dir` safe — there is only
+/// one thread, so no other tokio worker can observe a stale CWD.
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let model = std::env::var("MODEL").unwrap_or_else(|_| "haiku".to_string());
     let runs_per_repo: usize = std::env::var("BENCH_RUNS")
@@ -334,14 +349,12 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
 
-    let repos: Vec<PathBuf> = if let Ok(paths) = std::env::var("BENCH_REPOS") {
-        paths.split(',').map(PathBuf::from).collect()
-    } else {
-        default_repos()
-    };
+    let repos = resolve_repos();
 
     if repos.is_empty() {
-        eprintln!("No repos found to benchmark. Set BENCH_REPOS or use default paths.");
+        eprintln!(
+            "No repos found to benchmark. Set BENCH_REPOS to a comma-separated list of repo paths."
+        );
         std::process::exit(1);
     }
 
@@ -372,15 +385,14 @@ async fn main() {
         eprintln!();
     }
 
-    // Compute summaries
+    // Compute summaries keyed by repo_name (portable, no absolute paths)
     let summaries: Vec<RepoSummary> = repos
         .iter()
         .map(|repo_path| {
-            let repo_results: Vec<&RunResult> = all_results
-                .iter()
-                .filter(|r| r.repo_path == repo_path.to_string_lossy().as_ref())
-                .collect();
-            compute_summary(repo_path, &repo_results)
+            let name = repo_name(repo_path);
+            let repo_results: Vec<&RunResult> =
+                all_results.iter().filter(|r| r.repo_name == name).collect();
+            compute_summary(&name, &repo_results)
         })
         .collect();
 
