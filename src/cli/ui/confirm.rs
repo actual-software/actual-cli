@@ -105,6 +105,7 @@ pub fn prompt_project_confirmation(
 
     let prompt = format!("{}\n", prompt_text());
     out.write_all(prompt.as_bytes()).ok();
+    out.flush().ok();
 
     loop {
         match reader.read_line() {
@@ -115,6 +116,7 @@ pub fn prompt_project_confirmation(
                     out.write_all(hint.as_bytes()).ok();
                     let prompt = format!("{}\n", prompt_text());
                     out.write_all(prompt.as_bytes()).ok();
+                    out.flush().ok();
                 }
             },
             Err(_) => return ConfirmAction::Reject,
