@@ -285,11 +285,14 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
             if remainder == ")" {
                 in_require_block = false;
             } else if !remainder.is_empty() && !remainder.starts_with("//") {
-                let remainder = if let Some(stripped) = remainder.strip_suffix(')') {
+                // Strip inline comments before checking for closing paren,
+                // matching the approach used in monorepo.rs parse_go_work.
+                let remainder_no_comment = remainder.split("//").next().unwrap_or("").trim();
+                let remainder = if let Some(stripped) = remainder_no_comment.strip_suffix(')') {
                     in_require_block = false;
                     stripped.trim()
                 } else {
-                    remainder
+                    remainder_no_comment
                 };
                 for module in remainder.split_whitespace().take(1) {
                     if !module.starts_with("//") {
@@ -1250,9 +1253,9 @@ dependencies {
 
     #[test]
     fn test_go_mod_require_whitespace_before_closing_paren() {
-        // Covers the branch where strip_suffix(')') succeeds but the
-        // remaining content is only whitespace, so split_whitespace().next()
-        // returns None (line 298 / the implicit else of `if let Some(module)`).
+        // Covers the branch where the remainder after `require (` trims to ")",
+        // triggering the early `remainder == ")"` check and not entering the
+        // `else if` branch at all.
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("go.mod"),
