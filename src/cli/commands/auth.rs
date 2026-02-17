@@ -1,17 +1,15 @@
 use std::path::Path;
 
-use console::style;
-
 use crate::claude::auth::ClaudeAuthStatus;
 use crate::claude::binary::find_claude_binary;
-use crate::cli::ui::progress::{ERROR_SYMBOL, SUCCESS_SYMBOL};
+use crate::cli::ui::theme;
 use crate::error::ActualError;
 
 pub fn exec() -> i32 {
     match run_auth() {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", style("Error:").red().bold(), e);
+            eprintln!("{} {}", theme::error_prefix(), e);
             e.exit_code()
         }
     }
@@ -66,8 +64,8 @@ fn print_auth_status(status: &ClaudeAuthStatus) {
     if status.is_usable() {
         println!(
             "{} Claude Code: {}",
-            style(SUCCESS_SYMBOL).green(),
-            style("authenticated").green()
+            theme::success(&theme::SUCCESS),
+            theme::success("authenticated")
         );
         println!("  {:<14} {}", "Method:", status.display_method());
         if let Some(ref email) = status.email {
@@ -79,12 +77,12 @@ fn print_auth_status(status: &ClaudeAuthStatus) {
     } else {
         eprintln!(
             "{} Claude Code: {}",
-            style(ERROR_SYMBOL).red(),
-            style("not authenticated").red()
+            theme::error(&theme::ERROR),
+            theme::error("not authenticated")
         );
         eprintln!(
             "  Run {} to authenticate.",
-            style("`claude auth login`").cyan()
+            theme::hint("`claude auth login`")
         );
     }
 }

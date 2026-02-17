@@ -1,8 +1,7 @@
 use std::path::Path;
 
-use console::style;
-
 use crate::cli::args::{ConfigAction, ConfigArgs};
+use crate::cli::ui::theme;
 use crate::config;
 use crate::error::ActualError;
 
@@ -10,7 +9,7 @@ pub fn exec(args: &ConfigArgs) -> i32 {
     match run(args) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", style("Error:").red().bold(), e);
+            eprintln!("{} {}", theme::error_prefix(), e);
             e.exit_code()
         }
     }

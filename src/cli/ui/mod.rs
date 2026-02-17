@@ -4,3 +4,4 @@ pub mod file_confirm;
 pub mod progress;
 pub mod real_terminal;
 pub mod table;
+pub mod theme;

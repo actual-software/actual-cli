@@ -1,8 +1,9 @@
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
 use crate::cli::ui::file_confirm::TerminalIO;
-use console::style;
 use std::fmt::Write as FmtWrite;
+
+use super::theme;
 
 /// Format the project summary for display.
 ///
@@ -10,7 +11,7 @@ use std::fmt::Write as FmtWrite;
 pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
     let mut output = String::new();
 
-    let diamond = style("◆").cyan();
+    let diamond = theme::hint(&theme::DIAMOND);
     if analysis.is_monorepo {
         let _ = writeln!(
             output,
@@ -22,9 +23,9 @@ pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
     }
 
     for project in &analysis.projects {
-        let bullet = style("▸").bold();
-        let name = style(&project.name).bold();
-        let path = style(&project.path).dim();
+        let bullet = theme::heading(&theme::BULLET);
+        let name = theme::heading(&project.name);
+        let path = theme::muted(&project.path);
         let _ = writeln!(output, "  {bullet} {name}");
         let _ = writeln!(output, "    Path: {path}");
 
