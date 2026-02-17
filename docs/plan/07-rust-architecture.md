@@ -320,8 +320,8 @@ pub enum ActualError {
     #[error("API returned error: {code}: {message}")]
     ApiResponseError { code: String, message: String },
 
-    #[error("Failed to write CLAUDE.md: {0}")]
-    FileWriteError(#[from] std::io::Error),
+    #[error("I/O error: {0}")]
+    IoError(#[from] std::io::Error),
 
     #[error("Config error: {0}")]
     ConfigError(String),
@@ -336,7 +336,7 @@ impl ActualError {
             Self::UserCancelled => 4,
             Self::ClaudeNotFound | Self::ClaudeNotAuthenticated => 2,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
-            Self::FileWriteError(_) => 5,
+            Self::IoError(_) => 5,
             _ => 1,
         }
     }
