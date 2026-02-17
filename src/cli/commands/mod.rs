@@ -9,7 +9,11 @@ pub mod config;
 pub mod status;
 pub mod sync;
 
-/// Directory names to skip when walking the file tree for CLAUDE.md files.
+/// Non-hidden directory names to skip when walking the file tree for
+/// CLAUDE.md files.
+///
+/// All hidden directories (names starting with `.`) are unconditionally
+/// skipped by the walker, so they do not need to appear here.
 ///
 /// Shared between the `status` and `sync` walkers so both use the same set
 /// of ignored directories.
@@ -17,19 +21,15 @@ pub(crate) const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "target",
     "vendor",
-    ".git",
-    ".hg",
-    ".svn",
     "__pycache__",
     "dist",
     "build",
-    ".worktrees",
 ];
 
 /// Recursively find all files named `CLAUDE.md` under the given root directory.
 ///
-/// Skips hidden directories (starting with `.`) and directories listed in
-/// [`SKIP_DIRS`].
+/// Skips all hidden directories (names starting with `.`) and the non-hidden
+/// directories listed in [`SKIP_DIRS`].
 pub(crate) fn find_claude_md_files(root: &Path) -> Vec<PathBuf> {
     let mut results = Vec::new();
     walk_for_claude_md(root, &mut results);
@@ -48,7 +48,7 @@ fn walk_for_claude_md(dir: &Path, results: &mut Vec<PathBuf>) {
         let name_str = name.to_string_lossy();
         let path = entry.path();
         if path.is_dir() {
-            // Skip hidden directories and common ignore dirs
+            // Skip all hidden directories and known non-project directories
             if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
                 continue;
             }
