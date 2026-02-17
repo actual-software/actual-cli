@@ -49,7 +49,6 @@ impl ActualError {
             Self::ClaudeNotFound | Self::ClaudeNotAuthenticated => 2,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
             Self::FileWriteError(_) => 5,
-            Self::InternalError(_) => 1,
             _ => 1,
         }
     }
@@ -63,7 +62,6 @@ impl ActualError {
             Self::ClaudeTimeout { .. } => {
                 Some("Try increasing the timeout or check Claude Code status")
             }
-            Self::InternalError(_) => None,
             _ => None,
         }
     }
