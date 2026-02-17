@@ -139,10 +139,12 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     if args.reset_rejections {
         clear_rejections(&mut config, &repo_key);
         save_to(&config, cfg_path)?;
-        eprintln!(
-            "{} Cleared ADR rejection memory for this repository",
-            style(SUCCESS_SYMBOL).green()
-        );
+        pipeline.suspend(|| {
+            eprintln!(
+                "{} Cleared ADR rejection memory for this repository",
+                style(SUCCESS_SYMBOL).green()
+            );
+        });
     }
 
     let rejected_ids = get_rejections(&config, &repo_key);
@@ -158,16 +160,18 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     let client = ActualApiClient::new(api_url);
 
     if args.verbose {
-        eprintln!("API request to: {api_url}/adrs/match");
-        eprintln!(
-            "  projects: {}",
-            request
-                .projects
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        pipeline.suspend(|| {
+            eprintln!("API request to: {api_url}/adrs/match");
+            eprintln!(
+                "  projects: {}",
+                request
+                    .projects
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        });
     }
 
     pipeline.start(SyncPhase::Fetch, "Fetching ADRs...");
@@ -191,18 +195,22 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     };
 
     if args.verbose {
-        eprintln!(
-            "  matched: {}, by_framework: {:?}",
-            response.metadata.total_matched, response.metadata.by_framework
-        );
+        pipeline.suspend(|| {
+            eprintln!(
+                "  matched: {}, by_framework: {:?}",
+                response.metadata.total_matched, response.metadata.by_framework
+            );
+        });
     }
 
     // 2c. Filter by rejections
     let filtered_adrs = pre_filter_rejected(&response.matched_adrs, &rejected_ids);
 
     if !rejected_ids.is_empty() && args.verbose {
-        let removed = response.matched_adrs.len() - filtered_adrs.len();
-        eprintln!("  filtered out {removed} previously rejected ADRs");
+        pipeline.suspend(|| {
+            let removed = response.matched_adrs.len() - filtered_adrs.len();
+            eprintln!("  filtered out {removed} previously rejected ADRs");
+        });
     }
 
     // 2d. Tailor or skip (--no-tailor)
