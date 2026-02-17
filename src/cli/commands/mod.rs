@@ -1,3 +1,4 @@
+use crate::cli::ui::panel::Panel;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
 
@@ -11,7 +12,23 @@ pub(crate) fn handle_result(result: Result<(), ActualError>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", theme::error_prefix(), e);
+            let width = console::Term::stderr()
+                .size_checked()
+                .map(|(_, cols)| cols as usize)
+                .unwrap_or(80)
+                .min(90);
+
+            let error_line = format!("{} {}", theme::ERROR, e);
+            let mut panel = Panel::titled("Error").line("").line(&error_line);
+
+            if let Some(hint_text) = e.hint() {
+                let hint_styled = theme::hint(hint_text).for_stderr();
+                panel = panel.line("").line(&format!("Fix: {hint_styled}"));
+            }
+
+            panel = panel.line("");
+
+            eprintln!("{}", panel.render(width));
             e.exit_code()
         }
     }

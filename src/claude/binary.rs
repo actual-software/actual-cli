@@ -38,12 +38,22 @@ mod tests {
     use std::env;
 
     #[test]
-    fn test_error_message_contains_install_instructions() {
+    fn test_error_message_contains_not_installed() {
         let err = ActualError::ClaudeNotFound;
         let msg = err.to_string();
         assert!(
-            msg.contains("npm install -g @anthropic-ai/claude-code"),
-            "Error message should contain install instructions, got: {msg}"
+            msg.contains("not installed"),
+            "Error message should contain 'not installed', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_hint_contains_install_instructions() {
+        let err = ActualError::ClaudeNotFound;
+        assert_eq!(
+            err.hint(),
+            Some("npm install -g @anthropic-ai/claude-code"),
+            "Hint should contain install instructions"
         );
     }
 
