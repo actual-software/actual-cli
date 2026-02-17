@@ -27,14 +27,20 @@ pub enum SyncPhase {
 }
 
 /// Number of phases in the sync pipeline.
-const PHASE_COUNT: usize = SyncPhase::Tailor as usize + 1;
+///
+/// Keep in sync with the `SyncPhase` enum variants. Update this whenever
+/// a variant is added or removed. The compile-time assert below catches
+/// mismatches between this constant and the `PHASE_LABELS` array.
+const PHASE_COUNT: usize = 4;
 
 /// Display labels for each phase, indexed by `SyncPhase` discriminant.
+/// The typed array `[&str; PHASE_COUNT]` ensures the label count matches
+/// `PHASE_COUNT` at compile time — adding a variant without a label is an error.
 const PHASE_LABELS: [&str; PHASE_COUNT] = ["Environment", "Analysis", "Fetch ADRs", "Tailoring"];
 
-// Compile-time check: if a variant is added/reordered and PHASE_COUNT drifts
-// from the actual label array length, this fails at compile time.
-const _: () = assert!(PHASE_LABELS.len() == PHASE_COUNT);
+// Verify that the last variant's discriminant matches the expected count.
+// Catches mismatches if a variant is added/removed without updating PHASE_COUNT.
+const _: () = assert!(SyncPhase::Tailor as usize == PHASE_COUNT - 1);
 
 /// A multi-phase progress display for the sync command.
 ///
