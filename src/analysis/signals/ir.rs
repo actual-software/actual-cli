@@ -685,6 +685,24 @@ mod tests {
     }
 
     #[test]
+    fn test_non_numeric_before_numeric_sorts_after() {
+        // Explicitly exercise the (None, Some(_)) => Greater branch in the
+        // leaf_id comparator by providing exactly one non-numeric and one
+        // numeric leaf_id.
+        let matches = vec![
+            make_match("r1", "s", "zzz", serde_json::json!("a"), 0.9),
+            make_match("r2", "s", "1", serde_json::json!("b"), 0.9),
+        ];
+        let ir = build_canonical_ir("f.rs", "rust", &matches);
+        let pos_1 = ir.ir_text.find("LEAF[1]").unwrap();
+        let pos_zzz = ir.ir_text.find("LEAF[zzz]").unwrap();
+        assert!(
+            pos_1 < pos_zzz,
+            "numeric 1 should sort before non-numeric zzz"
+        );
+    }
+
+    #[test]
     fn test_span_summary_serialization_roundtrip() {
         let summary = SpanSummary {
             file_path: "test.rs".to_string(),
