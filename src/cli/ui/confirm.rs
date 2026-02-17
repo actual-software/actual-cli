@@ -108,15 +108,21 @@ pub fn prompt_project_confirmation(
 
     loop {
         match reader.read_line() {
-            Ok(input) => match parse_confirm_input(&input) {
-                Some(action) => return action,
-                None => {
-                    let hint = format!("{}\n", invalid_input_hint());
-                    out.write_all(hint.as_bytes()).ok();
-                    let prompt = format!("{}\n", prompt_text());
-                    out.write_all(prompt.as_bytes()).ok();
+            Ok(input) => {
+                // EOF: stdin closed (non-TTY, pipe, etc.) — treat as reject
+                if input.is_empty() {
+                    return ConfirmAction::Reject;
                 }
-            },
+                match parse_confirm_input(&input) {
+                    Some(action) => return action,
+                    None => {
+                        let hint = format!("{}\n", invalid_input_hint());
+                        out.write_all(hint.as_bytes()).ok();
+                        let prompt = format!("{}\n", prompt_text());
+                        out.write_all(prompt.as_bytes()).ok();
+                    }
+                }
+            }
             Err(_) => return ConfirmAction::Reject,
         }
     }
@@ -523,7 +529,16 @@ mod tests {
     #[test]
     fn prompt_invalid_then_reject() {
         let analysis = make_single_project_analysis();
-        let reader = SequenceReader::new(vec!["", "nope", "r"]);
+        let reader = SequenceReader::new(vec!["\n", "nope", "r"]);
+        let mut out = Vec::new();
+        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        assert_eq!(result, ConfirmAction::Reject);
+    }
+
+    #[test]
+    fn prompt_eof_returns_reject() {
+        let analysis = make_single_project_analysis();
+        let reader = MockReader::new("");
         let mut out = Vec::new();
         let result = prompt_project_confirmation(&analysis, &reader, &mut out);
         assert_eq!(result, ConfirmAction::Reject);
