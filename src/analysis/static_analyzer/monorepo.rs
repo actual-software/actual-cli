@@ -313,8 +313,25 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
             continue;
         }
 
-        if trimmed.starts_with("use (") {
+        if let Some(after_use) = trimmed.strip_prefix("use (") {
             in_use_block = true;
+            // Process any entry on the remainder of this line after "use ("
+            let remainder = after_use.trim();
+            if remainder == ")" {
+                in_use_block = false;
+            } else if !remainder.is_empty() && !remainder.starts_with("//") {
+                let dir_str = remainder.split("//").next().unwrap_or("").trim();
+                let dir_str = if let Some(stripped) = dir_str.strip_suffix(')') {
+                    in_use_block = false;
+                    stripped.trim()
+                } else {
+                    dir_str
+                };
+                let cleaned = dir_str.strip_prefix("./").unwrap_or(dir_str);
+                if !cleaned.is_empty() && !cleaned.split('/').any(|c| c == "..") {
+                    dirs.push(cleaned.to_string());
+                }
+            }
             continue;
         }
 
@@ -1889,5 +1906,81 @@ mod tests {
         assert!(!info.is_monorepo);
         assert_eq!(info.projects.len(), 1);
         assert_eq!(info.projects[0].path, ".");
+    }
+
+    #[test]
+    fn test_go_work_entry_on_same_line_as_paren() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("mod1")).unwrap();
+        fs::create_dir_all(root.join("mod2")).unwrap();
+
+        // First entry on same line as "use ("
+        fs::write(
+            root.join("go.work"),
+            "go 1.21\n\nuse (./mod1\n\t./mod2\n)\n",
+        )
+        .unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 2);
+
+        let paths: Vec<&str> = info.projects.iter().map(|p| p.path.as_str()).collect();
+        assert!(paths.contains(&"mod1"));
+        assert!(paths.contains(&"mod2"));
+    }
+
+    #[test]
+    fn test_go_work_single_entry_with_closing_paren() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("mod1")).unwrap();
+
+        // Single entry with closing paren on same line as "use ("
+        fs::write(root.join("go.work"), "go 1.21\n\nuse (./mod1)\n").unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, "mod1");
+    }
+
+    #[test]
+    fn test_go_work_entry_on_same_line_with_comment() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("mod1")).unwrap();
+        fs::create_dir_all(root.join("mod2")).unwrap();
+
+        // Entry on same line with inline comment
+        fs::write(
+            root.join("go.work"),
+            "go 1.21\n\nuse (./mod1 // main module\n\t./mod2\n)\n",
+        )
+        .unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 2);
+
+        let paths: Vec<&str> = info.projects.iter().map(|p| p.path.as_str()).collect();
+        assert!(paths.contains(&"mod1"));
+        assert!(paths.contains(&"mod2"));
+    }
+
+    #[test]
+    fn test_go_work_empty_paren_on_same_line() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // "use ()" on same line — empty, no modules
+        fs::write(root.join("go.work"), "go 1.21\n\nuse ()\n").unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
     }
 }
