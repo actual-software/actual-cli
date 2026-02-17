@@ -151,7 +151,13 @@ fn format_claude_md_section(cwd: &Path, width: usize) -> String {
             managed_count += 1;
             let version = markers::extract_version(&content);
             let version_str = match version {
-                Some(v) => format!("v{v}"),
+                Some(v) => {
+                    let ts = markers::extract_last_synced(&content);
+                    match ts {
+                        Some(t) => format!("v{v} · synced {t}"),
+                        None => format!("v{v}"),
+                    }
+                }
                 None => String::new(),
             };
             let label = format!("{} {display_path}", theme::SUCCESS);
