@@ -30,7 +30,7 @@ pub fn detect_monorepo(root: &Path) -> Result<MonorepoInfo, std::io::Error> {
         return Ok(info);
     }
 
-    // npm/yarn workspaces
+    // npm/yarn workspaces (also covers Nx and Turborepo which use package.json workspaces)
     if let Some(info) = detect_npm_workspaces(root)? {
         return Ok(info);
     }
@@ -40,19 +40,9 @@ pub fn detect_monorepo(root: &Path) -> Result<MonorepoInfo, std::io::Error> {
         return Ok(info);
     }
 
-    // Nx (uses package.json workspaces or workspace.json for project discovery)
+    // Nx with workspace.json (only reached if no package.json workspaces)
     if root.join("nx.json").exists() {
-        if let Some(info) = detect_npm_workspaces(root)? {
-            return Ok(info);
-        }
         if let Some(info) = detect_workspace_json(root)? {
-            return Ok(info);
-        }
-    }
-
-    // Turborepo (uses package.json workspaces for project discovery)
-    if root.join("turbo.json").exists() {
-        if let Some(info) = detect_npm_workspaces(root)? {
             return Ok(info);
         }
     }
@@ -344,9 +334,8 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
 
             let rel_path = entry
                 .strip_prefix(root)
-                .unwrap_or(&entry)
-                .to_string_lossy()
-                .to_string();
+                .map(|rel| rel.to_string_lossy().to_string())
+                .unwrap_or_else(|_| entry.to_string_lossy().to_string());
 
             let name = extract_project_name(&entry);
             projects.push(ProjectInfo {
@@ -433,7 +422,11 @@ fn name_from_go_mod(dir: &Path) -> Option<String> {
         if let Some(rest) = trimmed.strip_prefix("module ") {
             let module = rest.trim();
             // Take the last segment after '/'
-            return Some(module.rsplit('/').next().unwrap_or(module).to_string());
+            let name = match module.rsplit_once('/') {
+                Some((_, last)) => last,
+                None => module,
+            };
+            return Some(name.to_string());
         }
     }
 
