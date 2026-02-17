@@ -411,8 +411,7 @@ mod tests {
         let lines: Vec<&str> = p.lines().collect();
         assert!(
             lines[0].starts_with("┌─ Config "),
-            "top border should start with '┌─ Config ': got '{}'",
-            lines[0]
+            "top border should start with '┌─ Config '"
         );
         assert!(lines[0].ends_with('┐'), "top border should end with ┐");
         assert_eq!(lines[0].chars().count(), 80);
@@ -608,8 +607,7 @@ mod tests {
         assert_eq!(
             lines[1].chars().count(),
             80,
-            "styled content line should be 80 chars after stripping ANSI: '{}'",
-            lines[1]
+            "styled content line should be 80 chars after stripping ANSI"
         );
         assert!(lines[1].contains("OK"), "content should contain 'OK'");
     }
@@ -728,8 +726,7 @@ mod tests {
         // Should not have extra spaces from annotation
         assert!(
             rendered.trim_end().ends_with("key: val"),
-            "should end with just key: val: '{}'",
-            rendered.trim_end()
+            "should end with just key: val"
         );
     }
 
@@ -784,12 +781,7 @@ mod tests {
         let lines: Vec<&str> = p.lines().collect();
 
         // Expected: top + line + sep + 3 kvs + sep + footer + bottom = 9 lines
-        assert_eq!(
-            lines.len(),
-            9,
-            "expected 9 lines, got {}:\n{p}",
-            lines.len()
-        );
+        assert_eq!(lines.len(), 9, "expected 9 lines");
 
         // All lines should be exactly 60 chars
         for (i, line) in lines.iter().enumerate() {
