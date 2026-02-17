@@ -69,6 +69,7 @@ struct LeafBucket {
     values: Vec<serde_json::Value>,
     confidence: f64,
     rule_ids: Vec<String>,
+    seen_rule_ids: HashSet<String>,
     evidence_count: usize,
     spans: Vec<SpanSummary>,
 }
@@ -76,7 +77,6 @@ struct LeafBucket {
 /// Aggregate matches by leaf_id into buckets.
 fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucket> {
     let mut buckets: HashMap<String, LeafBucket> = HashMap::new();
-    let mut seen_rule_ids: HashMap<String, HashSet<String>> = HashMap::new();
 
     for m in matches {
         let bucket = buckets
@@ -86,6 +86,7 @@ fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucke
                 values: Vec::new(),
                 confidence: 0.0,
                 rule_ids: Vec::new(),
+                seen_rule_ids: HashSet::new(),
                 evidence_count: 0,
                 spans: Vec::new(),
             });
@@ -96,8 +97,7 @@ fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucke
         }
 
         // Collect unique rule_ids (HashSet for O(1) dedup, Vec for insertion order).
-        let rule_set = seen_rule_ids.entry(m.leaf_id.clone()).or_default();
-        if rule_set.insert(m.rule_id.clone()) {
+        if bucket.seen_rule_ids.insert(m.rule_id.clone()) {
             bucket.rule_ids.push(m.rule_id.clone());
         }
 
