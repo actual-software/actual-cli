@@ -106,13 +106,16 @@ impl SyncPipeline {
         ProgressStyle::with_template("  {msg}").expect("invalid finished template")
     }
 
+    /// Style used when a phase was skipped.
+    fn skipped_style() -> ProgressStyle {
+        ProgressStyle::with_template("  ─ {msg}").expect("invalid skipped template")
+    }
+
     /// Mark all unfinished phases as skipped.
     pub fn finish_remaining(&self) {
         for bar in &self.bars {
             if !bar.is_finished() {
-                let skipped_style =
-                    ProgressStyle::with_template("  ─ {msg}").expect("invalid skipped template");
-                bar.set_style(skipped_style);
+                bar.set_style(Self::skipped_style());
                 bar.finish_with_message("skipped".to_string());
             }
         }
