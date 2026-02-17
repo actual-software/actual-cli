@@ -26,7 +26,10 @@ pub async fn report_metrics(metrics: &SyncMetrics, config: &Config, api_url: &st
     }
 
     let request = metrics.to_counter_request();
-    let client = ActualApiClient::new(api_url);
+    let client = match ActualApiClient::new(api_url) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
     let _ = client.post_telemetry(&request, SERVICE_KEY).await;
 }
 
