@@ -26,7 +26,7 @@ pub async fn invoke_tailoring<R: ClaudeRunner>(
         existing_claude_md_paths,
         model_override,
         max_budget_usd,
-    );
+    )?;
     let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
 
     // First attempt
@@ -48,18 +48,19 @@ fn build_args(
     existing_claude_md_paths: &str,
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
-) -> Vec<String> {
+) -> Result<Vec<String>, ActualError> {
     let mut opts = InvocationOptions::for_tailoring(model_override);
     opts.json_schema = Some(TAILORING_OUTPUT_SCHEMA.to_string());
     opts.max_budget_usd = max_budget_usd;
 
-    let adr_json = serde_json::to_string(adrs).expect("ADR serialization should not fail");
+    let adr_json = serde_json::to_string(adrs)
+        .map_err(|e| ActualError::ConfigError(format!("Failed to serialize ADRs: {e}")))?;
     let prompt = tailoring_prompt(projects_json, existing_claude_md_paths, &adr_json);
 
     let mut args = opts.to_args();
     args.push("-p".to_string());
     args.push(prompt);
-    args
+    Ok(args)
 }
 
 /// Validate the tailoring output against the input ADR set.
@@ -344,6 +345,30 @@ mod tests {
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "CLAUDE.md");
         assert_eq!(runner.call_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_build_args_returns_ok_on_valid_input() {
+        let adrs = vec![make_adr("adr-001"), make_adr("adr-002")];
+        let result = build_args(&adrs, "{}", "", None, None);
+        assert!(result.is_ok(), "build_args should succeed with valid ADRs");
+
+        let args = result.unwrap();
+        // Should contain at least the "-p" flag and a prompt
+        assert!(
+            args.contains(&"-p".to_string()),
+            "args should contain -p flag"
+        );
+        // The last argument should be the prompt which contains the serialized ADR JSON
+        let prompt = args.last().expect("args should not be empty");
+        assert!(
+            prompt.contains("adr-001"),
+            "prompt should contain ADR ID adr-001"
+        );
+        assert!(
+            prompt.contains("adr-002"),
+            "prompt should contain ADR ID adr-002"
+        );
     }
 
     #[tokio::test]
