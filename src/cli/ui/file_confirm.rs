@@ -279,4 +279,13 @@ mod tests {
             "expected UserCancelled on I/O error"
         );
     }
+
+    // ── MockTerminal trait coverage ──
+
+    #[test]
+    fn mock_terminal_read_line_returns_error() {
+        let term = MockTerminal::with_selection(Some(vec![]));
+        let result = term.read_line("prompt");
+        assert!(matches!(result, Err(ActualError::UserCancelled)));
+    }
 }
