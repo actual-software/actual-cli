@@ -76,55 +76,7 @@ pub fn prompt_project_confirmation(
 mod tests {
     use super::*;
     use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
-    use crate::error::ActualError;
-    use std::sync::Mutex;
-
-    /// A mock terminal for testing that records output and returns
-    /// predetermined inputs in sequence.
-    ///
-    /// Uses the default `confirm()` implementation from `TerminalIO`,
-    /// which reads from `read_line` and parses y/n.
-    struct MockTerminal {
-        inputs: Mutex<Vec<String>>,
-        output: Mutex<Vec<String>>,
-    }
-
-    impl MockTerminal {
-        fn new(inputs: Vec<&str>) -> Self {
-            Self {
-                inputs: Mutex::new(inputs.into_iter().map(|s| s.to_string()).collect()),
-                output: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn output_text(&self) -> String {
-            self.output.lock().unwrap().join("\n")
-        }
-    }
-
-    impl TerminalIO for MockTerminal {
-        fn read_line(&self, prompt: &str) -> Result<String, ActualError> {
-            self.output.lock().unwrap().push(prompt.to_string());
-            let mut inputs = self.inputs.lock().unwrap();
-            if inputs.is_empty() {
-                return Err(ActualError::UserCancelled);
-            }
-            Ok(inputs.remove(0))
-        }
-
-        fn write_line(&self, text: &str) {
-            self.output.lock().unwrap().push(text.to_string());
-        }
-
-        fn select_files(
-            &self,
-            _prompt: &str,
-            _items: &[String],
-            _defaults: &[bool],
-        ) -> Result<Option<Vec<usize>>, ActualError> {
-            Ok(None)
-        }
-    }
+    use crate::cli::ui::test_utils::MockTerminal;
 
     fn make_monorepo_analysis() -> RepoAnalysis {
         RepoAnalysis {
@@ -382,7 +334,7 @@ mod tests {
 
     #[test]
     fn mock_terminal_select_files_returns_none() {
-        let term = MockTerminal::new(vec![]);
+        let term = MockTerminal::new(vec![]).with_selection(None);
         let result = term.select_files("prompt", &["a".to_string()], &[true]);
         assert_eq!(result.unwrap(), None);
     }
