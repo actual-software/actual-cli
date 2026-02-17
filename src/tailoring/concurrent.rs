@@ -64,8 +64,8 @@ async fn tailor_single_project<R: ClaudeRunner>(
     adrs: &[Adr],
     config: &ConcurrentTailoringConfig<'_>,
 ) -> Result<TailoringOutput, ActualError> {
-    let project_json =
-        serde_json::to_string(project).expect("Project serialization should not fail");
+    let project_json = serde_json::to_string(project)
+        .map_err(|e| ActualError::ConfigError(format!("Failed to serialize project: {e}")))?;
     let batches = create_batches(adrs, config.batch_size);
 
     let mut previous_outputs: Vec<TailoringOutput> = Vec::new();
