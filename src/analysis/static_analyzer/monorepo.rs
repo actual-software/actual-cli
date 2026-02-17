@@ -386,15 +386,15 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
                 continue;
             }
 
-            // Compute relative path from root; skip entries that resolve to
-            // root itself or escape it via `..` components.
-            let rel = match entry.strip_prefix(root) {
-                Ok(r) => r.to_string_lossy().to_string(),
-                Err(_) => continue, // skip entries outside repo root
+            // Compute relative path; skip entries outside repo root or at root.
+            let rel = entry
+                .strip_prefix(root)
+                .ok()
+                .map(|r| r.to_string_lossy().to_string());
+            let rel = match rel {
+                Some(r) if !r.is_empty() && !r.contains("..") => r,
+                _ => continue,
             };
-            if rel.is_empty() || rel.contains("..") {
-                continue;
-            }
 
             let name = extract_project_name(&entry);
             projects.push(ProjectInfo { path: rel, name });
@@ -1605,22 +1605,24 @@ mod tests {
     #[test]
     fn test_glob_expansion_skips_out_of_root_entries() {
         let dir = tempdir().unwrap();
-        let root = dir.path();
+        // Use a subdirectory as root so `../*` reliably produces entries
+        // (the sibling directory) that fail strip_prefix.
+        let root = dir.path().join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(dir.path().join("sibling")).unwrap();
 
-        // Create a directory inside root and a sibling outside
-        fs::create_dir_all(root.join("inside")).unwrap();
-
-        // Use a pattern with `..` that resolves outside the root
+        // `../*` from workspace/ resolves to workspace/ and sibling/ inside the
+        // tempdir. sibling/ fails strip_prefix(workspace/) and must be skipped.
         let patterns = vec!["../*".to_string()];
-        let projects = expand_glob_patterns(root, &patterns);
+        let projects = expand_glob_patterns(&root, &patterns);
 
-        // All entries resolved via `../*` escape the repo root and should be skipped
-        let escaped: Vec<_> = projects
-            .iter()
-            .filter(|p| p.path.starts_with(".."))
-            .map(|p| &p.path)
-            .collect();
-        assert_eq!(escaped, Vec::<&String>::new());
+        // No entries should escape the root; the only in-root glob result is
+        // workspace/ itself, but that resolves to an empty relative path and is
+        // also skipped.
+        assert!(
+            projects.is_empty(),
+            "expected no projects but got: {projects:?}"
+        );
     }
 
     #[test]
