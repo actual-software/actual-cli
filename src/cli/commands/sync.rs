@@ -149,7 +149,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         .unwrap_or(DEFAULT_API_URL);
 
     let request = build_match_request(&analysis, &config);
-    let client = ActualApiClient::new(api_url);
+    let client = ActualApiClient::new(api_url)?;
 
     if args.verbose {
         pipeline.suspend(|| {

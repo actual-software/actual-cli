@@ -18,19 +18,19 @@ pub struct ActualApiClient {
 }
 
 impl ActualApiClient {
-    pub fn new(base_url: &str) -> Self {
+    pub fn new(base_url: &str) -> Result<Self, ActualError> {
         let mut default_headers = HeaderMap::new();
         default_headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
 
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
             .build()
-            .expect("failed to build HTTP client");
+            .map_err(|e| ActualError::ApiError(format!("Failed to build HTTP client: {e}")))?;
 
-        Self {
+        Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
-        }
+        })
     }
 
     pub async fn post_match(&self, request: &MatchRequest) -> Result<MatchResponse, ActualError> {
@@ -336,7 +336,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_match_request()).await;
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -366,7 +366,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_match_request()).await;
         assert!(result.is_err());
         assert!(
@@ -386,7 +386,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_match_request()).await;
         assert!(result.is_err());
         assert!(
@@ -412,7 +412,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_match_request()).await;
         assert!(result.is_ok());
         mock.assert_async().await;
@@ -429,7 +429,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_match_request()).await;
         assert!(result.is_err());
         assert!(
@@ -450,7 +450,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.post_match(&sample_match_request()).await;
         assert!(result.is_err());
         assert!(
@@ -461,7 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_match_network_error() {
-        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let client = ActualApiClient::new("http://127.0.0.1:1").unwrap();
         let result = client.post_match(&sample_match_request()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
@@ -469,13 +469,14 @@ mod tests {
 
     #[test]
     fn test_new_trims_trailing_slash() {
-        let client = ActualApiClient::new("http://example.com/");
+        let client = ActualApiClient::new("http://example.com/").unwrap();
         assert_eq!(client.base_url, "http://example.com");
     }
 
     #[test]
     fn test_new_returns_valid_client() {
-        let _client = ActualApiClient::new("http://localhost");
+        let client = ActualApiClient::new("http://localhost");
+        assert!(client.is_ok());
     }
 
     #[test]
@@ -508,7 +509,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_languages().await;
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -536,7 +537,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_languages().await;
         assert!(result.is_err());
         assert!(
@@ -556,7 +557,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_languages().await;
         assert!(result.is_err());
         assert!(
@@ -595,7 +596,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_frameworks().await;
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -628,7 +629,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_frameworks().await;
         assert!(result.is_err());
         assert!(
@@ -648,7 +649,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_frameworks().await;
         assert!(result.is_err());
         assert!(
@@ -705,7 +706,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_categories().await;
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -757,7 +758,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_categories().await;
         assert!(result.is_err());
         assert!(
@@ -777,7 +778,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_categories().await;
         assert!(result.is_err());
         assert!(
@@ -801,7 +802,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_health().await;
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -824,7 +825,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_health().await;
         assert!(result.is_err());
         assert!(
@@ -844,7 +845,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let result = client.get_health().await;
         assert!(result.is_err());
         assert!(
@@ -857,7 +858,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_languages_network_error() {
-        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let client = ActualApiClient::new("http://127.0.0.1:1").unwrap();
         let result = client.get_languages().await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
@@ -865,7 +866,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_frameworks_network_error() {
-        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let client = ActualApiClient::new("http://127.0.0.1:1").unwrap();
         let result = client.get_frameworks().await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
@@ -873,7 +874,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_categories_network_error() {
-        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let client = ActualApiClient::new("http://127.0.0.1:1").unwrap();
         let result = client.get_categories().await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
@@ -881,7 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_health_network_error() {
-        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let client = ActualApiClient::new("http://127.0.0.1:1").unwrap();
         let result = client.get_health().await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
@@ -900,7 +901,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let request = TelemetryRequest { metrics: vec![] };
         let result = client.post_telemetry(&request, "test-key").await;
         assert!(result.is_ok());
@@ -917,7 +918,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = ActualApiClient::new(&server.url());
+        let client = ActualApiClient::new(&server.url()).unwrap();
         let request = TelemetryRequest { metrics: vec![] };
         let result = client.post_telemetry(&request, "test-key").await;
         assert!(result.is_err());
@@ -929,7 +930,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_telemetry_network_error() {
-        let client = ActualApiClient::new("http://127.0.0.1:1");
+        let client = ActualApiClient::new("http://127.0.0.1:1").unwrap();
         let request = TelemetryRequest { metrics: vec![] };
         let result = client.post_telemetry(&request, "test-key").await;
         assert!(result.is_err());
