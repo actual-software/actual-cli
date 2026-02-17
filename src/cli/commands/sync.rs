@@ -167,7 +167,8 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     }
 
     pipeline.start(SyncPhase::Fetch, "Fetching ADRs...");
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create async runtime");
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| ActualError::InternalError(format!("Failed to create async runtime: {e}")))?;
     let response = rt.block_on(async {
         with_retry(&RetryConfig::default(), || client.post_match(&request)).await
     });
