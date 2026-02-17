@@ -84,7 +84,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
 
     // 3. Run analysis (cached if in a git repo)
     pipeline.start(SyncPhase::Analysis, "Analyzing repository...");
-    let analysis = match run_analysis_cached(root_dir, cfg_path) {
+    let analysis = match run_analysis_cached(root_dir, cfg_path, args.force) {
         Ok(a) => {
             pipeline.success(SyncPhase::Analysis, "Analysis complete");
             a
