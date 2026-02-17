@@ -51,6 +51,29 @@ fn gradient_rgb(line_idx: usize, total_lines: usize) -> (u8, u8, u8) {
     )
 }
 
+/// Render the banner into a `Vec<String>`, one entry per line.
+///
+/// When `use_color` is true each line is wrapped with 24-bit ANSI
+/// foreground-color escapes for the gradient. When false the lines
+/// are returned plain.
+fn render_banner(use_color: bool) -> Vec<String> {
+    let lines: Vec<&str> = BANNER.lines().collect();
+    let total = lines.len();
+
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            if use_color {
+                let (r, g, b) = gradient_rgb(i, total);
+                format!("\x1b[38;2;{r};{g};{b}m{line}\x1b[0m")
+            } else {
+                (*line).to_string()
+            }
+        })
+        .collect()
+}
+
 /// Print the ASCII banner to stderr with a vertical gradient.
 ///
 /// If `quiet` is true, the banner is suppressed entirely.
@@ -64,18 +87,9 @@ pub fn print_banner(quiet: bool) {
         return;
     }
 
-    let lines: Vec<&str> = BANNER.lines().collect();
-    let total = lines.len();
     let use_color = console::colors_enabled_stderr();
-
-    for (i, line) in lines.iter().enumerate() {
-        if use_color {
-            let (r, g, b) = gradient_rgb(i, total);
-            // \x1b[38;2;R;G;Bm sets 24-bit foreground color, \x1b[0m resets
-            eprintln!("\x1b[38;2;{r};{g};{b}m{line}\x1b[0m");
-        } else {
-            eprintln!("{line}");
-        }
+    for line in render_banner(use_color) {
+        eprintln!("{line}");
     }
 }
 
@@ -146,5 +160,41 @@ mod tests {
         let count = BANNER.lines().count();
         // The logo from docs/logo.txt has 21 non-empty lines
         assert_eq!(count, 21, "BANNER should have 21 lines");
+    }
+
+    #[test]
+    fn render_banner_with_color_has_ansi_escapes() {
+        let lines = render_banner(true);
+        assert_eq!(lines.len(), 21);
+        // Each line should start with ANSI escape and end with reset
+        for line in &lines {
+            assert!(
+                line.starts_with("\x1b[38;2;"),
+                "expected ANSI color prefix in: {line}"
+            );
+            assert!(
+                line.ends_with("\x1b[0m"),
+                "expected ANSI reset suffix in: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_banner_without_color_has_no_escapes() {
+        let lines = render_banner(false);
+        assert_eq!(lines.len(), 21);
+        // No line should contain ANSI escape sequences
+        for line in &lines {
+            assert!(
+                !line.contains("\x1b["),
+                "expected no ANSI escapes in: {line}"
+            );
+        }
+        // First line should match the first line of BANNER
+        assert_eq!(
+            lines[0],
+            BANNER.lines().next().unwrap(),
+            "plain lines should match BANNER content"
+        );
     }
 }
