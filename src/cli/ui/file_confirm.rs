@@ -45,16 +45,17 @@ pub fn confirm_files(
     }
 
     let files = &output.files;
-    if files.is_empty() {
-        return Ok(vec![]);
-    }
 
-    // Show skipped ADRs count
+    // Show skipped ADRs count before the empty check so users always see it
     if !output.skipped_adrs.is_empty() {
         term.write_line(&format!(
             "{} ADR(s) skipped (not applicable)",
             output.skipped_adrs.len()
         ));
+    }
+
+    if files.is_empty() {
+        return Ok(vec![]);
     }
 
     // Build display items
@@ -263,6 +264,23 @@ mod tests {
         let term = MockTerminal::with_selection(Some(vec![]));
         let result = confirm_files(&output, false, &term).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_confirm_files_skipped_adrs_shown_with_empty_files() {
+        let mut output = make_test_output(0);
+        output.skipped_adrs = vec![SkippedAdr {
+            id: "adr-skip-1".to_string(),
+            reason: "not applicable".to_string(),
+        }];
+        let term = MockTerminal::with_selection(Some(vec![]));
+        let result = confirm_files(&output, false, &term).unwrap();
+        assert!(result.is_empty());
+        let text = term.output_text();
+        assert!(
+            text.contains("1 ADR(s) skipped (not applicable)"),
+            "expected skipped ADRs message even with empty files, got: {text}"
+        );
     }
 
     #[test]
