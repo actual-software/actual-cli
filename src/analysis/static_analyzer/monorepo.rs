@@ -328,7 +328,7 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 
     let projects: Vec<ProjectInfo> = dirs
         .into_iter()
-        .filter(|d| root.join(d).is_dir())
+        .filter(|d| !d.contains("..") && root.join(d).is_dir())
         .map(|d| {
             let name = extract_project_name(&root.join(&d));
             ProjectInfo { path: d, name }
@@ -475,8 +475,15 @@ fn name_from_go_mod(dir: &Path) -> Option<String> {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("module ") {
             let module = rest.trim();
-            // Take the last segment after '/'
+            // Take the last segment after '/', skipping Go major-version suffixes
+            // (e.g., "github.com/user/myapp/v2" → "myapp", not "v2")
             let name = match module.rsplit_once('/') {
+                Some((prefix, last))
+                    if last.starts_with('v') && last[1..].parse::<u64>().is_ok() =>
+                {
+                    // Major version suffix — use the segment before it
+                    prefix.rsplit_once('/').map(|(_, n)| n).unwrap_or(prefix)
+                }
                 Some((_, last)) => last,
                 None => module,
             };
@@ -848,6 +855,30 @@ mod tests {
         assert!(info.is_monorepo);
         assert_eq!(info.projects.len(), 1);
         assert_eq!(info.projects[0].path, "exists");
+    }
+
+    #[test]
+    fn test_go_work_path_traversal_rejected() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Create a sibling directory outside root that would match ../sibling
+        let sibling = dir.path().join("inside");
+        fs::create_dir_all(&sibling).unwrap();
+
+        // go.work references a path with `..` to escape the repo root
+        fs::write(
+            root.join("go.work"),
+            "go 1.21\n\nuse (\n\t../sibling\n\t./inside\n)\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("inside")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        // Only "inside" should be included; "../sibling" should be rejected
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, "inside");
     }
 
     #[test]
@@ -1349,6 +1380,49 @@ mod tests {
         fs::write(root.join("go.mod"), "module myapp\n\ngo 1.21\n").unwrap();
 
         assert_eq!(name_from_go_mod(root), Some("myapp".to_string()));
+    }
+
+    #[test]
+    fn test_name_from_go_mod_v2_suffix_skipped() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("go.mod"),
+            "module github.com/user/myapp/v2\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        assert_eq!(name_from_go_mod(root), Some("myapp".to_string()));
+    }
+
+    #[test]
+    fn test_name_from_go_mod_v3_suffix_skipped() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("go.mod"),
+            "module github.com/org/lib/v3\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        assert_eq!(name_from_go_mod(root), Some("lib".to_string()));
+    }
+
+    #[test]
+    fn test_name_from_go_mod_v_not_version_kept() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // "validator" starts with 'v' but isn't a version suffix
+        fs::write(
+            root.join("go.mod"),
+            "module github.com/go-playground/validator\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        assert_eq!(name_from_go_mod(root), Some("validator".to_string()));
     }
 
     #[test]
