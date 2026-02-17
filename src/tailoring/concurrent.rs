@@ -51,12 +51,9 @@ pub async fn tailor_all_projects<R: ClaudeRunner>(
         })
         .collect();
 
-    let results = futures::future::join_all(futures).await;
+    let outputs = futures::future::try_join_all(futures).await?;
 
-    // Collect results, returning the first error encountered.
-    let outputs: Result<Vec<TailoringOutput>, ActualError> = results.into_iter().collect();
-
-    Ok(merge_outputs(outputs?))
+    Ok(merge_outputs(outputs))
 }
 
 /// Process a single project: batch its ADRs, invoke tailoring for each batch,
@@ -514,7 +511,68 @@ mod tests {
         );
     }
 
-    // --- Test 6: multi-batch per project passes context to later batches ---
+    // --- Test 6: try_join_all cancels remaining futures on first error ---
+
+    #[tokio::test]
+    async fn test_early_cancellation_on_error() {
+        // 3 projects, concurrency=1 so they run sequentially.
+        // The first project errors; with try_join_all the remaining futures
+        // should be cancelled and never invoke the runner.
+        let projects = vec![make_project("a"), make_project("b"), make_project("c")];
+        let adrs = vec![make_adr("adr-001")];
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_inner = call_count.clone();
+
+        // A custom runner that increments a shared counter and fails on the first call.
+        struct EarlyCancelRunner {
+            call_count: Arc<AtomicU32>,
+        }
+
+        impl ClaudeRunner for EarlyCancelRunner {
+            async fn run<T: serde::de::DeserializeOwned + Send>(
+                &self,
+                _args: &[String],
+            ) -> Result<T, ActualError> {
+                let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+                if idx == 0 {
+                    // First call: wait briefly so the future is clearly in-flight,
+                    // then return an error.
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    return Err(ActualError::ClaudeSubprocessFailed {
+                        message: "boom".to_string(),
+                        stderr: String::new(),
+                    });
+                }
+                // Subsequent calls: succeed (but should never be reached).
+                let json = make_output_json("dummy.md", "should not appear", &["adr-001"]);
+                serde_json::from_str(&json).map_err(Into::into)
+            }
+        }
+
+        let runner = EarlyCancelRunner {
+            call_count: call_count_inner,
+        };
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+        };
+
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        assert!(result.is_err(), "expected an error from the first project");
+
+        let calls = call_count.load(Ordering::SeqCst);
+        assert!(
+            calls < 3,
+            "expected fewer than 3 calls due to early cancellation, got {calls}"
+        );
+    }
+
+    // --- Test 7: multi-batch per project passes context to later batches ---
 
     #[tokio::test]
     async fn test_multi_batch_passes_context() {
