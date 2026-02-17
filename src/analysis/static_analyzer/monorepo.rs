@@ -376,20 +376,17 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
                 continue;
             }
 
-            let rel_path = match entry.strip_prefix(root) {
-                Ok(rel) => rel.to_string_lossy().to_string(),
-                Err(_) => continue, // skip entries that escape the repo root
-            };
-            // Skip entries that traverse outside the repo root via `..`
-            if rel_path.starts_with("..") {
+            // Compute relative path from root; skip entries that escape it.
+            let rel = entry
+                .strip_prefix(root)
+                .map(|r| r.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if rel.is_empty() || rel.starts_with("..") {
                 continue;
             }
 
             let name = extract_project_name(&entry);
-            projects.push(ProjectInfo {
-                path: rel_path,
-                name,
-            });
+            projects.push(ProjectInfo { path: rel, name });
         }
     }
 
@@ -1477,6 +1474,25 @@ mod tests {
         .unwrap();
 
         let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_workspace_json_path_traversal_rejected() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "root"}"#).unwrap();
+        // Path with `..` that escapes the repo root — should be rejected
+        fs::write(
+            root.join("workspace.json"),
+            r#"{"projects": {"evil": "../../escape"}}"#,
+        )
+        .unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        // Path traversal rejected, falls through to single-project mode
         assert!(!info.is_monorepo);
     }
 
