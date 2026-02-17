@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -246,7 +246,6 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     };
 
     // ── Phase 3: confirm + write (fully implemented) ──
-    let elapsed = pipeline.total_elapsed();
     confirm_and_write(
         &output,
         root_dir,
@@ -254,7 +253,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         args.dry_run,
         args.full,
         term,
-        elapsed,
+        pipeline.start_time(),
     )?;
     Ok(())
 }
@@ -442,7 +441,7 @@ pub fn confirm_and_write(
     dry_run: bool,
     full: bool,
     term: &dyn TerminalIO,
-    elapsed: Duration,
+    started_at: Instant,
 ) -> Result<SyncResult, ActualError> {
     // Step 1: Compute diffs
     let diffs: Vec<FileDiff> = output
@@ -526,7 +525,7 @@ pub fn confirm_and_write(
         .unwrap_or(80)
         .min(90);
     let (files_created, files_updated, files_failed) =
-        report_write_results(&results, files_rejected, elapsed, term, width);
+        report_write_results(&results, files_rejected, started_at.elapsed(), term, width);
 
     Ok(SyncResult {
         files_created,
@@ -717,7 +716,7 @@ mod tests {
             false,
             false,
             &term,
-            Duration::from_secs(1),
+            Instant::now(),
         )
         .unwrap();
 
@@ -751,7 +750,7 @@ mod tests {
             true,
             false,
             &term,
-            Duration::from_secs(0),
+            Instant::now(),
         )
         .unwrap();
 
@@ -791,7 +790,7 @@ mod tests {
             true,
             true,
             &term,
-            Duration::from_secs(0),
+            Instant::now(),
         )
         .unwrap();
 
@@ -832,7 +831,7 @@ mod tests {
             false,
             false,
             &term,
-            Duration::from_secs(1),
+            Instant::now(),
         )
         .unwrap();
 
@@ -860,7 +859,7 @@ mod tests {
             false,
             false,
             &term,
-            Duration::from_secs(0),
+            Instant::now(),
         );
 
         assert!(
@@ -894,7 +893,7 @@ mod tests {
             false,
             false,
             &term,
-            Duration::from_secs(1),
+            Instant::now(),
         )
         .unwrap();
 
@@ -933,7 +932,7 @@ mod tests {
             false,
             false,
             &term,
-            Duration::from_secs(1),
+            Instant::now(),
         )
         .unwrap();
 
@@ -979,7 +978,7 @@ mod tests {
             false,
             false,
             &term,
-            Duration::from_secs(1),
+            Instant::now(),
         )
         .unwrap();
 
@@ -1008,7 +1007,7 @@ mod tests {
             false,
             false,
             &term,
-            Duration::from_secs(0),
+            Instant::now(),
         )
         .unwrap();
 
@@ -1037,7 +1036,7 @@ mod tests {
             false,
             false,
             &term,
-            Duration::from_secs(0),
+            Instant::now(),
         )
         .unwrap();
 
@@ -1087,7 +1086,7 @@ mod tests {
             false,
             false,
             &term,
-            Duration::from_secs(5),
+            Instant::now(),
         )
         .unwrap();
 

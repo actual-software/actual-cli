@@ -108,6 +108,15 @@ impl SyncPipeline {
         self.created_at.elapsed()
     }
 
+    /// Return the instant this pipeline was created.
+    ///
+    /// Useful for deferring elapsed-time computation to the point where
+    /// the result is actually rendered, so that confirmation prompts and
+    /// disk writes are included in the total.
+    pub fn start_time(&self) -> Instant {
+        self.created_at
+    }
+
     /// Transition a phase to the active (spinning) state.
     pub fn start(&self, phase: SyncPhase, message: &str) {
         self.starts[phase as usize].set(Some(Instant::now()));
