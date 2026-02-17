@@ -35,7 +35,7 @@ fn test_sync_without_claude_binary() {
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("Claude Code not found"));
+        .stderr(predicate::str::contains("Claude Code is not installed"));
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn test_auth_binary_not_found() {
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("Claude Code not found"));
+        .stderr(predicate::str::contains("Claude Code is not installed"));
 }
 
 #[cfg(unix)]
@@ -180,7 +180,7 @@ fn test_sync_with_flags_without_claude() {
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("Claude Code not found"));
+        .stderr(predicate::str::contains("Claude Code is not installed"));
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn test_sync_dry_run_without_claude() {
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("Claude Code not found"));
+        .stderr(predicate::str::contains("Claude Code is not installed"));
 
     // No CLAUDE.md files should be written
     assert!(!dir.path().join("CLAUDE.md").exists());
@@ -207,7 +207,7 @@ fn test_sync_force_without_claude() {
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("Claude Code not found"));
+        .stderr(predicate::str::contains("Claude Code is not installed"));
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn test_sync_no_tailor_without_claude() {
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("Claude Code not found"));
+        .stderr(predicate::str::contains("Claude Code is not installed"));
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn test_sync_force_dry_run_without_claude() {
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("Claude Code not found"));
+        .stderr(predicate::str::contains("Claude Code is not installed"));
 
     // No CLAUDE.md files should be written
     assert!(!dir.path().join("CLAUDE.md").exists());
