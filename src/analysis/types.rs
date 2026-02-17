@@ -145,7 +145,7 @@ pub enum FrameworkCategory {
 
 impl FrameworkCategory {
     /// Kebab-case string for known variants, used for serialization.
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             FrameworkCategory::WebFrontend => "web-frontend",
             FrameworkCategory::WebBackend => "web-backend",
@@ -164,7 +164,7 @@ impl FrameworkCategory {
 
     /// Normalize input (lowercase, replace spaces/underscores with hyphens)
     /// and match against known variants. Falls back to `Other`.
-    fn from_str_insensitive(s: &str) -> Self {
+    pub fn from_str_insensitive(s: &str) -> Self {
         let normalized: String = s
             .to_lowercase()
             .chars()

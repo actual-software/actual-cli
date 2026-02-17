@@ -19,6 +19,7 @@ dependencies = [
  "indicatif",
  "mockito",
  "predicates",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
