@@ -1,7 +1,8 @@
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use std::cell::Cell;
 use std::sync::LazyLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::theme;
 
@@ -50,6 +51,8 @@ const _: () = assert!(SyncPhase::Tailor as usize == PHASE_COUNT - 1);
 pub struct SyncPipeline {
     mp: Option<MultiProgress>,
     bars: [Option<ProgressBar>; PHASE_COUNT],
+    starts: [Cell<Option<Instant>>; PHASE_COUNT],
+    created_at: Instant,
 }
 
 impl SyncPipeline {
@@ -60,6 +63,8 @@ impl SyncPipeline {
             return Self {
                 mp: None,
                 bars: [const { None }; PHASE_COUNT],
+                starts: [const { Cell::new(None) }; PHASE_COUNT],
+                created_at: Instant::now(),
             };
         }
 
@@ -68,11 +73,16 @@ impl SyncPipeline {
         let bars = std::array::from_fn(|i| {
             let bar = mp.add(ProgressBar::new_spinner());
             bar.set_style(WAITING_STYLE.clone());
-            bar.set_message(format!("{}...", PHASE_LABELS[i]));
+            bar.set_message(format!("{:<18}...", PHASE_LABELS[i]));
             Some(bar)
         });
 
-        Self { mp: Some(mp), bars }
+        Self {
+            mp: Some(mp),
+            bars,
+            starts: [const { Cell::new(None) }; PHASE_COUNT],
+            created_at: Instant::now(),
+        }
     }
 
     /// Get the bar for a phase, if present.
@@ -80,8 +90,27 @@ impl SyncPipeline {
         self.bars[phase as usize].as_ref()
     }
 
+    /// Compute the elapsed-time suffix for a phase (e.g. ` [0.3s]`).
+    ///
+    /// Returns an empty string if the phase was never started.
+    fn elapsed_suffix(&self, phase: SyncPhase) -> String {
+        match self.starts[phase as usize].get() {
+            Some(start) => {
+                let secs = start.elapsed().as_secs_f64();
+                format!(" {}", theme::muted(format!("[{secs:.1}s]")))
+            }
+            None => String::new(),
+        }
+    }
+
+    /// Return the wall-clock time since this pipeline was created.
+    pub fn total_elapsed(&self) -> Duration {
+        self.created_at.elapsed()
+    }
+
     /// Transition a phase to the active (spinning) state.
     pub fn start(&self, phase: SyncPhase, message: &str) {
+        self.starts[phase as usize].set(Some(Instant::now()));
         if let Some(bar) = self.bar(phase) {
             bar.set_style(SPINNING_STYLE.clone());
             bar.set_message(message.to_string());
@@ -95,8 +124,12 @@ impl SyncPipeline {
     /// output is consistent regardless of whether `start()` was called first.
     pub fn success(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
+            let suffix = self.elapsed_suffix(phase);
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", theme::success(&theme::SUCCESS)));
+            bar.finish_with_message(format!(
+                "{} {message}{suffix}",
+                theme::success(&theme::SUCCESS)
+            ));
         }
     }
 
@@ -117,8 +150,9 @@ impl SyncPipeline {
     /// output is consistent regardless of whether `start()` was called first.
     pub fn error(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
+            let suffix = self.elapsed_suffix(phase);
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", theme::error(&theme::ERROR)));
+            bar.finish_with_message(format!("{} {message}{suffix}", theme::error(&theme::ERROR)));
         }
     }
 
@@ -128,8 +162,12 @@ impl SyncPipeline {
     /// output is consistent regardless of whether `start()` was called first.
     pub fn warn(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
+            let suffix = self.elapsed_suffix(phase);
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", theme::warning(&theme::WARN)));
+            bar.finish_with_message(format!(
+                "{} {message}{suffix}",
+                theme::warning(&theme::WARN)
+            ));
         }
     }
 
@@ -206,6 +244,7 @@ mod tests {
             msg.contains("Environment OK"),
             "expected success msg in: {msg}"
         );
+        assert!(msg.contains('['), "expected timing bracket in: {msg}");
         assert!(bar(&pipeline, SyncPhase::Environment).is_finished());
 
         pipeline.start(SyncPhase::Analysis, "Analyzing...");
@@ -231,6 +270,7 @@ mod tests {
             msg.contains("API request failed"),
             "expected error msg in: {msg}"
         );
+        assert!(msg.contains('['), "expected timing bracket in: {msg}");
         assert!(bar(&pipeline, SyncPhase::Fetch).is_finished());
     }
 
@@ -244,6 +284,7 @@ mod tests {
             msg.contains("Not a git repo"),
             "expected warn msg in: {msg}"
         );
+        assert!(msg.contains('['), "expected timing bracket in: {msg}");
         assert!(bar(&pipeline, SyncPhase::Environment).is_finished());
     }
 
@@ -257,6 +298,7 @@ mod tests {
             msg.contains("Tailoring skipped"),
             "expected skip msg in: {msg}"
         );
+        assert!(!msg.contains('['), "skip should have no timing in: {msg}");
         assert!(bar(&pipeline, SyncPhase::Tailor).is_finished());
     }
 
@@ -298,5 +340,74 @@ mod tests {
             result, "hello",
             "expected suspend to return closure value in quiet mode"
         );
+    }
+
+    #[test]
+    fn test_phase_label_alignment() {
+        let pipeline = SyncPipeline::new(false);
+        // Start all 4 phases — initial messages should have consistent width
+        for (i, phase) in [
+            SyncPhase::Environment,
+            SyncPhase::Analysis,
+            SyncPhase::Fetch,
+            SyncPhase::Tailor,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let msg = bar(&pipeline, *phase).message().to_string();
+            // Each initial message is "{:<18}...", so the label is padded
+            assert!(
+                msg.contains("..."),
+                "expected '...' in initial message {i}: {msg}"
+            );
+            // The label part (before "...") should be 18 chars (padded)
+            let label_end = msg.find("...").unwrap();
+            assert_eq!(
+                label_end, 18,
+                "expected 18-char padded label in phase {i}, got {label_end}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_total_elapsed() {
+        let pipeline = SyncPipeline::new(false);
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            pipeline.total_elapsed() > Duration::ZERO,
+            "expected total_elapsed > 0"
+        );
+    }
+
+    #[test]
+    fn test_total_elapsed_quiet() {
+        let pipeline = SyncPipeline::new(true);
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            pipeline.total_elapsed() > Duration::ZERO,
+            "expected total_elapsed > 0 in quiet mode"
+        );
+    }
+
+    #[test]
+    fn test_timing_format() {
+        let pipeline = SyncPipeline::new(false);
+        pipeline.start(SyncPhase::Environment, "Checking...");
+        pipeline.success(SyncPhase::Environment, "OK");
+        let msg = bar(&pipeline, SyncPhase::Environment).message().to_string();
+        // Should contain "[X.Xs]" pattern
+        assert!(msg.contains('['), "expected '[' in: {msg}");
+        assert!(msg.contains("s]"), "expected 's]' in: {msg}");
+    }
+
+    #[test]
+    fn test_skip_no_timing() {
+        let pipeline = SyncPipeline::new(false);
+        // Skip without start — should have no timing bracket
+        pipeline.skip(SyncPhase::Analysis, "Skipped");
+        let msg = bar(&pipeline, SyncPhase::Analysis).message().to_string();
+        assert!(msg.contains("Skipped"), "expected skip msg in: {msg}");
+        assert!(!msg.contains('['), "skip should have no timing in: {msg}");
     }
 }
