@@ -521,6 +521,7 @@ User footer";
             .create();
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_MONOREPO);
+        env.setup_monorepo();
         env.cmd()
             .args([
                 "sync",

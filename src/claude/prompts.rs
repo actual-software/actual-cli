@@ -1,27 +1,3 @@
-/// Returns a static analysis prompt that instructs Claude Code to analyze
-/// a repository's structure, languages, and frameworks.
-pub fn analysis_prompt() -> String {
-    "\
-Analyze this repository's structure, programming languages, and frameworks.
-
-Instructions:
-- First, check the root directory for monorepo indicators (workspace files, lerna.json, \
-nx.json, turbo.json, pnpm-workspace.yaml, go.work, Cargo workspace).
-- If this is a monorepo, identify each sub-project by looking in common directories \
-(apps/, packages/, services/, libs/, modules/).
-- For each project (or the root if it's a single project), identify:
-  - The primary programming language(s) by examining package manifests and source files
-  - Major frameworks by looking at dependencies and configuration files
-  - The package manager used
-- Use the exact enum values specified in the JSON schema for languages, framework \
-categories, etc.
-- For framework names, use lowercase with hyphens (e.g., \"nextjs\", \"fastapi\", \
-\"ruby-on-rails\", \"express\", \"react\", \"vue\", \"angular\", \"django\", \"flask\", \
-\"spring-boot\", \"gin\", \"actix-web\").
-- Be thorough but focus on major/primary frameworks, not every utility library."
-        .to_string()
-}
-
 /// Returns a tailoring prompt with the given repository context, existing CLAUDE.md
 /// paths, and ADR JSON array interpolated into the template.
 pub fn tailoring_prompt(
@@ -75,33 +51,6 @@ Return your response as a JSON object matching the provided schema."
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn analysis_prompt_contains_monorepo_indicators() {
-        let prompt = analysis_prompt();
-        assert!(
-            prompt.contains("monorepo indicators"),
-            "analysis prompt must contain 'monorepo indicators'"
-        );
-    }
-
-    #[test]
-    fn analysis_prompt_contains_workspace_files() {
-        let prompt = analysis_prompt();
-        assert!(
-            prompt.contains("workspace files"),
-            "analysis prompt must contain 'workspace files'"
-        );
-    }
-
-    #[test]
-    fn analysis_prompt_contains_json_schema() {
-        let prompt = analysis_prompt();
-        assert!(
-            prompt.contains("JSON schema"),
-            "analysis prompt must contain 'JSON schema'"
-        );
-    }
 
     #[test]
     fn tailoring_prompt_interpolates_all_sections() {
