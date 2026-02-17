@@ -68,7 +68,6 @@ struct LeafBucket {
     facet_slot: String,
     values: Vec<serde_json::Value>,
     confidence: f64,
-    rule_ids_set: HashSet<String>,
     rule_ids: Vec<String>,
     evidence_count: usize,
     spans: Vec<SpanSummary>,
@@ -77,6 +76,7 @@ struct LeafBucket {
 /// Aggregate matches by leaf_id into buckets.
 fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucket> {
     let mut buckets: HashMap<String, LeafBucket> = HashMap::new();
+    let mut seen_rule_ids: HashMap<String, HashSet<String>> = HashMap::new();
 
     for m in matches {
         let bucket = buckets
@@ -85,7 +85,6 @@ fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucke
                 facet_slot: m.facet_slot.clone(),
                 values: Vec::new(),
                 confidence: 0.0,
-                rule_ids_set: HashSet::new(),
                 rule_ids: Vec::new(),
                 evidence_count: 0,
                 spans: Vec::new(),
@@ -97,12 +96,14 @@ fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucke
         }
 
         // Collect unique rule_ids (HashSet for O(1) dedup, Vec for insertion order).
-        if bucket.rule_ids_set.insert(m.rule_id.clone()) {
+        let rule_set = seen_rule_ids.entry(m.leaf_id.clone()).or_default();
+        if rule_set.insert(m.rule_id.clone()) {
             bucket.rule_ids.push(m.rule_id.clone());
         }
 
-        // Collect values: dedup strings, always append objects.
-        // Only add if under the limit.
+        // Collect values, capped at MAX_VALUES_PER_LEAF.
+        // Strings are deduped; non-null non-string values (objects, arrays, etc.)
+        // are appended without dedup but still subject to the cap.
         if bucket.values.len() < MAX_VALUES_PER_LEAF {
             if m.value.is_string() {
                 if !bucket.values.contains(&m.value) {
@@ -401,7 +402,7 @@ mod tests {
         ];
         let ir = build_canonical_ir("f.rs", "rust", &matches);
         let facet = &ir.facets_by_leaf_id["1"];
-        // Object values are always appended, never deduped.
+        // Object values are not deduped (but still subject to MAX_VALUES_PER_LEAF cap).
         assert_eq!(facet.values.len(), 2);
     }
 
