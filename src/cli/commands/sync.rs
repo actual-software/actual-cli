@@ -1416,10 +1416,7 @@ mod tests {
             &term,
             &runner,
         );
-        assert!(
-            matches!(result, Err(ActualError::ConfigError(_))),
-            "expected ConfigError from analysis, got: {result:?}"
-        );
+        assert!(matches!(result, Err(ActualError::ConfigError(_))));
     }
 
     // ── run_sync confirm_and_write error test ──
