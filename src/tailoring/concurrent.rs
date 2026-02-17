@@ -553,9 +553,9 @@ mod tests {
         assert!(result.is_err(), "expected an error from the first project");
 
         let calls = runner.call_count.load(Ordering::SeqCst);
-        assert!(
-            calls < 3,
-            "expected fewer than 3 calls due to early cancellation, got {calls}"
+        assert_eq!(
+            calls, 1,
+            "expected exactly 1 call: try_join_all should have dropped remaining futures on first error, got {calls}"
         );
     }
 
