@@ -1531,11 +1531,12 @@ mod tests {
         let projects = expand_glob_patterns(root, &patterns);
 
         // All entries resolved via `../*` escape the repo root and should be skipped
-        assert!(
-            projects.iter().all(|p| !p.path.starts_with("..")),
-            "entries outside repo root should be skipped, but got: {:?}",
-            projects.iter().map(|p| &p.path).collect::<Vec<_>>()
-        );
+        let escaped: Vec<_> = projects
+            .iter()
+            .filter(|p| p.path.starts_with(".."))
+            .map(|p| &p.path)
+            .collect();
+        assert_eq!(escaped, Vec::<&String>::new());
     }
 
     #[test]
