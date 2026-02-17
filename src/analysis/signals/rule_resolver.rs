@@ -226,16 +226,65 @@ mod tests {
     }
 
     #[test]
-    fn test_supported_languages_count() {
-        // 14 supported languages
-        assert_eq!(SUPPORTED_LANGUAGES.len(), 14);
-    }
-
-    #[test]
     fn test_supported_languages_sorted() {
         let mut sorted = SUPPORTED_LANGUAGES.to_vec();
         sorted.sort();
         assert_eq!(sorted, SUPPORTED_LANGUAGES);
+    }
+
+    #[test]
+    fn test_supported_languages_normalize_roundtrip() {
+        // Every entry in SUPPORTED_LANGUAGES must be accepted by normalize_language
+        // and must normalize to itself (it's the canonical form).
+        for &lang in SUPPORTED_LANGUAGES {
+            let normalized = RuleResolver::normalize_language(lang);
+            assert_eq!(
+                normalized,
+                Some(lang),
+                "SUPPORTED_LANGUAGES entry {lang:?} is not accepted by normalize_language"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_language_output_in_supported() {
+        // Every canonical value returned by normalize_language must be in SUPPORTED_LANGUAGES.
+        let aliases = [
+            "ts",
+            "typescript",
+            "js",
+            "javascript",
+            "py",
+            "python",
+            "golang",
+            "go",
+            "c++",
+            "cxx",
+            "cpp",
+            "c#",
+            "cs",
+            "csharp",
+            "c_sharp",
+            "c-sharp",
+            "kt",
+            "kotlin",
+            "rb",
+            "ruby",
+            "java",
+            "rust",
+            "php",
+            "swift",
+            "c",
+            "scala",
+        ];
+        for alias in &aliases {
+            if let Some(canonical) = RuleResolver::normalize_language(alias) {
+                assert!(
+                    SUPPORTED_LANGUAGES.contains(&canonical),
+                    "normalize_language({alias:?}) returned {canonical:?} which is not in SUPPORTED_LANGUAGES"
+                );
+            }
+        }
     }
 
     #[test]
