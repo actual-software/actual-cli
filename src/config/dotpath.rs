@@ -30,6 +30,10 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .include_general
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        "max_per_framework" => config
+            .max_per_framework
+            .map(|v| v.to_string())
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         "include_categories" => config
             .include_categories
             .as_ref()
@@ -91,6 +95,13 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             config.include_general = Some(value.parse::<bool>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected bool, got \"{value}\""
+                ))
+            })?);
+        }
+        "max_per_framework" => {
+            config.max_per_framework = Some(value.parse::<u32>().map_err(|_| {
+                ActualError::ConfigError(format!(
+                    "invalid value for {path}: expected u32, got \"{value}\""
                 ))
             })?);
         }
@@ -391,6 +402,29 @@ mod tests {
         let err = get(&config, "include_general").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_and_get_max_per_framework() {
+        let mut config = Config::default();
+        set(&mut config, "max_per_framework", "10").unwrap();
+        assert_eq!(get(&config, "max_per_framework").unwrap(), "10");
+    }
+
+    #[test]
+    fn test_get_unset_max_per_framework() {
+        let config = Config::default();
+        let err = get(&config, "max_per_framework").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_invalid_max_per_framework() {
+        let mut config = Config::default();
+        let err = set(&mut config, "max_per_framework", "abc").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid value"), "got: {msg}");
     }
 
     #[test]
