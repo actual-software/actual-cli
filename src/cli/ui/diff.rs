@@ -1,7 +1,8 @@
 use crate::generation::markers::ChangeDetection;
-use console::style;
 use similar::{ChangeTag, TextDiff};
 use std::fmt::Write;
+
+use super::theme;
 
 /// Per-file change summary for display formatting.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,12 +107,12 @@ pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<Strin
         match change.tag() {
             ChangeTag::Delete => {
                 let line = change.value().trim_end_matches('\n');
-                let _ = writeln!(output, "    {}", style(format!("- {line}")).red());
+                let _ = writeln!(output, "    {}", theme::error(format!("- {line}")));
                 shown += 1;
             }
             ChangeTag::Insert => {
                 let line = change.value().trim_end_matches('\n');
-                let _ = writeln!(output, "    {}", style(format!("+ {line}")).green());
+                let _ = writeln!(output, "    {}", theme::success(format!("+ {line}")));
                 shown += 1;
             }
             ChangeTag::Equal => {}
