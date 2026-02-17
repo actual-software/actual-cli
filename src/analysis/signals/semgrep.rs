@@ -5,6 +5,14 @@ use tokio::process::Command;
 
 use super::{EvidenceSpan, SignalSource, ToolMatch};
 
+/// Output from running the semgrep command.
+#[derive(Debug)]
+struct CommandOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    success: bool,
+}
+
 /// Async scanner that invokes the semgrep CLI on batches of files.
 pub struct SemgrepScanner {
     semgrep_bin: PathBuf,
@@ -21,13 +29,75 @@ impl SemgrepScanner {
         })
     }
 
-    /// Create a scanner with a specific binary path (useful for testing).
-    #[cfg(test)]
-    fn with_binary(bin: PathBuf, timeout: std::time::Duration) -> Self {
-        Self {
-            semgrep_bin: bin,
-            timeout,
+    /// Prepare temp directory with files and return (temp_dir, file_map).
+    fn prepare_temp_files(
+        files: &[(PathBuf, String)],
+    ) -> Result<(tempfile::TempDir, HashMap<PathBuf, PathBuf>)> {
+        let temp_dir = tempfile::tempdir().context("failed to create temp directory")?;
+        let mut file_map: HashMap<PathBuf, PathBuf> = HashMap::new();
+
+        for (i, (rel_path, content)) in files.iter().enumerate() {
+            let subdir = temp_dir.path().join(format!("f{i}"));
+            std::fs::create_dir_all(&subdir).with_context(|| {
+                format!("failed to create subdir for file {}", rel_path.display())
+            })?;
+
+            let file_name = rel_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("file.txt"));
+            let temp_path = subdir.join(file_name);
+
+            std::fs::write(&temp_path, content)
+                .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
+
+            file_map.insert(temp_path, rel_path.clone());
         }
+
+        Ok((temp_dir, file_map))
+    }
+
+    /// Build the argument list for semgrep.
+    fn build_args(rule_files: &[PathBuf], scan_dir: &std::path::Path) -> Vec<String> {
+        let mut args = vec![
+            "scan".to_string(),
+            "--json".to_string(),
+            "--no-git-ignore".to_string(),
+            "--metrics=off".to_string(),
+        ];
+        for rule_file in rule_files {
+            args.push("--config".to_string());
+            args.push(rule_file.display().to_string());
+        }
+        args.push(scan_dir.display().to_string());
+        args
+    }
+
+    /// Process raw command output into tool matches.
+    fn process_output(
+        output: &CommandOutput,
+        file_map: &HashMap<PathBuf, PathBuf>,
+    ) -> Result<Vec<ToolMatch>> {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        if stdout.trim().is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("login") || stderr.contains("Login") {
+                bail!(
+                    "semgrep requires login (v1.100+). \
+                     Try running `semgrep login` or use an older version. \
+                     stderr: {stderr}"
+                );
+            }
+            if !output.success {
+                bail!("semgrep failed with no JSON output. stderr: {stderr}",);
+            }
+            return Ok(vec![]);
+        }
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).context("failed to parse semgrep JSON output")?;
+
+        Self::parse_findings(&parsed, file_map)
     }
 
     /// Scan a batch of files against the given semgrep rule files.
@@ -43,80 +113,27 @@ impl SemgrepScanner {
             return Ok(vec![]);
         }
 
-        // Create temp directory and write files into it
-        let temp_dir = tempfile::tempdir().context("failed to create temp directory")?;
-        let mut file_map: HashMap<PathBuf, PathBuf> = HashMap::new();
+        let (temp_dir, file_map) = Self::prepare_temp_files(files)?;
+        let args = Self::build_args(rule_files, temp_dir.path());
 
-        for (i, (rel_path, content)) in files.iter().enumerate() {
-            // Use indexed subdirs to avoid name collisions
-            let subdir = temp_dir.path().join(format!("f{i}"));
-            std::fs::create_dir_all(&subdir).with_context(|| {
-                format!("failed to create subdir for file {}", rel_path.display())
-            })?;
-
-            // Preserve the file name (semgrep uses extension for language detection)
-            let file_name = rel_path
-                .file_name()
-                .unwrap_or_else(|| std::ffi::OsStr::new("file.txt"));
-            let temp_path = subdir.join(file_name);
-
-            std::fs::write(&temp_path, content)
-                .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
-
-            file_map.insert(temp_path, rel_path.clone());
-        }
-
-        // Build semgrep command
+        // Build and run the command
         let mut cmd = Command::new(&self.semgrep_bin);
-        cmd.arg("scan")
-            .arg("--json")
-            .arg("--no-git-ignore")
-            .arg("--metrics=off");
-
-        for rule_file in rule_files {
-            cmd.arg("--config").arg(rule_file);
+        for arg in &args {
+            cmd.arg(arg);
         }
 
-        cmd.arg(temp_dir.path());
-
-        // Run with timeout
-        let output = tokio::time::timeout(self.timeout, cmd.output())
+        let raw_output = tokio::time::timeout(self.timeout, cmd.output())
             .await
             .context("semgrep scan timed out")?
             .context("failed to execute semgrep")?;
 
-        // Parse JSON output regardless of exit code.
-        // semgrep exit codes: 0 = no findings, 1 = findings found (in some modes),
-        // 2+ = errors. We parse stdout JSON in all cases.
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let output = CommandOutput {
+            stdout: raw_output.stdout,
+            stderr: raw_output.stderr,
+            success: raw_output.status.success(),
+        };
 
-        if stdout.trim().is_empty() {
-            // If no JSON output, check stderr for login errors
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("login") || stderr.contains("Login") {
-                bail!(
-                    "semgrep requires login (v1.100+). \
-                     Try running `semgrep login` or use an older version. \
-                     stderr: {stderr}"
-                );
-            }
-            if !output.status.success() {
-                bail!(
-                    "semgrep exited with status {} and no JSON output. stderr: {stderr}",
-                    output.status
-                );
-            }
-            return Ok(vec![]);
-        }
-
-        let parsed: serde_json::Value = serde_json::from_str(&stdout).with_context(|| {
-            format!(
-                "failed to parse semgrep JSON output (exit code: {})",
-                output.status
-            )
-        })?;
-
-        Self::parse_findings(&parsed, &file_map)
+        Self::process_output(&output, &file_map)
     }
 
     /// Parse semgrep JSON output into a list of `ToolMatch` values.
@@ -268,6 +285,8 @@ mod tests {
         })
     }
 
+    // ---- parse_findings tests ----
+
     #[test]
     fn test_parse_findings_basic() {
         let output = sample_semgrep_output();
@@ -320,6 +339,15 @@ mod tests {
         let file_map = HashMap::new();
         let matches = SemgrepScanner::parse_findings(&output, &file_map).unwrap();
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_parse_findings_results_not_array() {
+        let output = serde_json::json!({"results": "not_an_array"});
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::parse_findings(&output, &file_map);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not an array"));
     }
 
     #[test]
@@ -388,7 +416,6 @@ mod tests {
         });
         let file_map = HashMap::new();
         let matches = SemgrepScanner::parse_findings(&output, &file_map).unwrap();
-        // Falls back to the raw path string
         assert_eq!(matches[0].spans[0].file_path, "/some/unknown/path.js");
     }
 
@@ -397,7 +424,6 @@ mod tests {
         let output = sample_semgrep_output();
         let file_map = HashMap::new();
         let matches = SemgrepScanner::parse_findings(&output, &file_map).unwrap();
-        // raw should contain the full finding JSON
         for m in &matches {
             assert!(m.raw.is_some());
             let raw = m.raw.as_ref().unwrap();
@@ -406,32 +432,301 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_findings_no_extra() {
+        let output = serde_json::json!({
+            "results": [
+                {
+                    "check_id": "rule",
+                    "path": "/tmp/f0/test.js",
+                    "start": {"line": 1, "col": 1, "offset": 0},
+                    "end": {"line": 1, "col": 5, "offset": 4}
+                }
+            ]
+        });
+        let file_map = HashMap::new();
+        let matches = SemgrepScanner::parse_findings(&output, &file_map).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].facet_slot, "");
+        assert_eq!(matches[0].leaf_id, "");
+        assert!(matches[0].value.is_null());
+    }
+
+    #[test]
+    fn test_parse_findings_no_start_end() {
+        let output = serde_json::json!({
+            "results": [
+                {
+                    "check_id": "rule",
+                    "path": "/tmp/f0/test.js"
+                }
+            ]
+        });
+        let file_map = HashMap::new();
+        let matches = SemgrepScanner::parse_findings(&output, &file_map).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].spans[0].start_byte, 0);
+        assert_eq!(matches[0].spans[0].end_byte, 0);
+        assert_eq!(matches[0].spans[0].start_line, None);
+        assert_eq!(matches[0].spans[0].end_line, None);
+    }
+
+    #[test]
+    fn test_parse_findings_missing_check_id() {
+        let output = serde_json::json!({
+            "results": [
+                {
+                    "path": "/tmp/f0/test.js",
+                    "start": {"line": 1, "col": 1, "offset": 0},
+                    "end": {"line": 1, "col": 5, "offset": 4}
+                }
+            ]
+        });
+        let file_map = HashMap::new();
+        let matches = SemgrepScanner::parse_findings(&output, &file_map).unwrap();
+        assert_eq!(matches[0].rule_id, "");
+    }
+
+    // ---- prepare_temp_files tests ----
+
+    #[test]
+    fn test_prepare_temp_files_creates_structure() {
+        let files = vec![
+            (PathBuf::from("src/app.js"), "const x = 1;".to_string()),
+            (PathBuf::from("src/server.py"), "print('hi')".to_string()),
+        ];
+        let (temp_dir, file_map) = SemgrepScanner::prepare_temp_files(&files).unwrap();
+        assert_eq!(file_map.len(), 2);
+
+        for (temp_path, original_path) in &file_map {
+            assert!(temp_path.exists(), "temp file should exist: {temp_path:?}");
+            let expected_name = original_path.file_name().unwrap();
+            assert_eq!(temp_path.file_name().unwrap(), expected_name);
+        }
+
+        assert!(temp_dir.path().join("f0").is_dir());
+        assert!(temp_dir.path().join("f1").is_dir());
+    }
+
+    #[test]
+    fn test_prepare_temp_files_path_without_filename() {
+        let files = vec![(PathBuf::from(""), "content".to_string())];
+        let (_temp_dir, file_map) = SemgrepScanner::prepare_temp_files(&files).unwrap();
+        assert_eq!(file_map.len(), 1);
+        for (temp_path, _) in &file_map {
+            assert_eq!(temp_path.file_name().unwrap(), "file.txt");
+        }
+    }
+
+    #[test]
+    fn test_prepare_temp_files_empty() {
+        let files: Vec<(PathBuf, String)> = vec![];
+        let (_temp_dir, file_map) = SemgrepScanner::prepare_temp_files(&files).unwrap();
+        assert!(file_map.is_empty());
+    }
+
+    #[test]
+    fn test_prepare_temp_files_content_preserved() {
+        let content = "function hello() { return 42; }";
+        let files = vec![(PathBuf::from("test.js"), content.to_string())];
+        let (_temp_dir, file_map) = SemgrepScanner::prepare_temp_files(&files).unwrap();
+        for (temp_path, _) in &file_map {
+            let read_back = std::fs::read_to_string(temp_path).unwrap();
+            assert_eq!(read_back, content);
+        }
+    }
+
+    // ---- build_args tests ----
+
+    #[test]
+    fn test_build_args() {
+        let rule_files = vec![
+            PathBuf::from("/rules/api.yml"),
+            PathBuf::from("/rules/security.yml"),
+        ];
+        let scan_dir = std::path::Path::new("/tmp/scan");
+        let args = SemgrepScanner::build_args(&rule_files, scan_dir);
+        assert_eq!(args[0], "scan");
+        assert_eq!(args[1], "--json");
+        assert_eq!(args[2], "--no-git-ignore");
+        assert_eq!(args[3], "--metrics=off");
+        assert_eq!(args[4], "--config");
+        assert_eq!(args[5], "/rules/api.yml");
+        assert_eq!(args[6], "--config");
+        assert_eq!(args[7], "/rules/security.yml");
+        assert_eq!(args[8], "/tmp/scan");
+    }
+
+    #[test]
+    fn test_build_args_empty_rules() {
+        let scan_dir = std::path::Path::new("/tmp/scan");
+        let args = SemgrepScanner::build_args(&[], scan_dir);
+        assert_eq!(args.len(), 5);
+        assert_eq!(args[4], "/tmp/scan");
+    }
+
+    // ---- process_output tests ----
+
+    #[test]
+    fn test_process_output_with_valid_json() {
+        let json = serde_json::json!({
+            "results": [
+                {
+                    "check_id": "rule1",
+                    "path": "/tmp/f0/test.js",
+                    "start": {"line": 1, "col": 1, "offset": 0},
+                    "end": {"line": 1, "col": 5, "offset": 4},
+                    "extra": {
+                        "metadata": {"facet_slot": "s", "leaf_id": "1", "confidence": "0.5"}
+                    }
+                }
+            ]
+        });
+        let output = CommandOutput {
+            stdout: json.to_string().into_bytes(),
+            stderr: Vec::new(),
+            success: true,
+        };
+        let mut file_map = HashMap::new();
+        file_map.insert(
+            PathBuf::from("/tmp/f0/test.js"),
+            PathBuf::from("src/test.js"),
+        );
+        let result = SemgrepScanner::process_output(&output, &file_map).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].spans[0].file_path, "src/test.js");
+    }
+
+    #[test]
+    fn test_process_output_empty_success() {
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            success: true,
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_process_output_whitespace_only_success() {
+        let output = CommandOutput {
+            stdout: b"   \n  ".to_vec(),
+            stderr: Vec::new(),
+            success: true,
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_process_output_empty_failure() {
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: b"error occurred".to_vec(),
+            success: false,
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no JSON output"));
+    }
+
+    #[test]
+    fn test_process_output_login_error_lowercase() {
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: b"Please login to use semgrep".to_vec(),
+            success: false,
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("login"));
+    }
+
+    #[test]
+    fn test_process_output_login_error_capitalized() {
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: b"Login required for this operation".to_vec(),
+            success: false,
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Login"));
+    }
+
+    #[test]
+    fn test_process_output_login_on_success_still_errors() {
+        // Even if exit code is success, empty stdout with login in stderr
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: b"login required".to_vec(),
+            success: true,
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("login"));
+    }
+
+    #[test]
+    fn test_process_output_invalid_json() {
+        let output = CommandOutput {
+            stdout: b"not json".to_vec(),
+            stderr: Vec::new(),
+            success: true,
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed to parse"));
+    }
+
+    #[test]
+    fn test_process_output_non_zero_with_valid_json() {
+        // semgrep can exit non-zero but still produce valid JSON
+        let json = serde_json::json!({"results": [], "errors": [{"message": "some warning"}]});
+        let output = CommandOutput {
+            stdout: json.to_string().into_bytes(),
+            stderr: b"warning: something".to_vec(),
+            success: false,
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ---- scanner creation tests ----
+
+    #[test]
     fn test_scanner_creation_fails_without_semgrep() {
-        // Temporarily modify PATH to ensure semgrep isn't found
-        // This test verifies the error message is helpful
         let result = SemgrepScanner::new(std::time::Duration::from_secs(30));
-        // We can't guarantee semgrep is or isn't installed, so just verify
-        // the function returns a Result and doesn't panic
         match result {
             Ok(scanner) => {
-                // semgrep is installed — verify the binary path is populated
                 assert!(!scanner.semgrep_bin.as_os_str().is_empty());
             }
             Err(e) => {
-                // semgrep is not installed — verify the error message
                 let msg = format!("{e}");
                 assert!(msg.contains("semgrep"));
             }
         }
     }
 
+    // ---- scan_batch early-return tests ----
+
     #[tokio::test]
     async fn test_scan_batch_empty_files() {
-        // Create scanner with a dummy binary (won't be invoked)
-        let scanner = SemgrepScanner::with_binary(
-            PathBuf::from("semgrep"),
-            std::time::Duration::from_secs(5),
-        );
+        // scan_batch returns early when files is empty, never runs the binary
+        let scanner = SemgrepScanner {
+            semgrep_bin: PathBuf::from("/nonexistent/semgrep"),
+            timeout: std::time::Duration::from_secs(5),
+        };
         let result = scanner.scan_batch(&[], &[PathBuf::from("rule.yml")]).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
@@ -439,13 +734,225 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_batch_empty_rules() {
-        let scanner = SemgrepScanner::with_binary(
-            PathBuf::from("semgrep"),
-            std::time::Duration::from_secs(5),
-        );
+        let scanner = SemgrepScanner {
+            semgrep_bin: PathBuf::from("/nonexistent/semgrep"),
+            timeout: std::time::Duration::from_secs(5),
+        };
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner.scan_batch(&files, &[]).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_both_empty() {
+        let scanner = SemgrepScanner {
+            semgrep_bin: PathBuf::from("/nonexistent/semgrep"),
+            timeout: std::time::Duration::from_secs(5),
+        };
+        let result = scanner.scan_batch(&[], &[]).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_nonexistent_binary() {
+        let scanner = SemgrepScanner {
+            semgrep_bin: PathBuf::from("/nonexistent/binary/semgrep"),
+            timeout: std::time::Duration::from_secs(5),
+        };
+        let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("failed to execute semgrep"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_with_echo_script() {
+        // Create a fake "semgrep" script that outputs valid JSON
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("fake_semgrep.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho '{\"results\": [], \"errors\": []}'",
+        )
+        .unwrap();
+
+        // Make executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let scanner = SemgrepScanner {
+            semgrep_bin: script_path,
+            timeout: std::time::Duration::from_secs(5),
+        };
+        let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_script_with_findings() {
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("fake_semgrep_findings.sh");
+        let json_output = serde_json::json!({
+            "results": [
+                {
+                    "check_id": "test.rule",
+                    "path": "/tmp/placeholder/f0/test.js",
+                    "start": {"line": 1, "col": 1, "offset": 0},
+                    "end": {"line": 1, "col": 10, "offset": 9},
+                    "extra": {
+                        "metadata": {
+                            "facet_slot": "boundaries.api",
+                            "leaf_id": "99",
+                            "confidence": "0.8"
+                        },
+                        "lines": "const x = 1;"
+                    }
+                }
+            ]
+        });
+        let script_content = format!(
+            "#!/bin/sh\necho '{}'",
+            json_output.to_string().replace('\'', "'\"'\"'")
+        );
+        std::fs::write(&script_path, script_content).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let scanner = SemgrepScanner {
+            semgrep_bin: script_path,
+            timeout: std::time::Duration::from_secs(5),
+        };
+        let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_ok());
+        let matches = result.unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_id, "test.rule");
+        assert_eq!(matches[0].facet_slot, "boundaries.api");
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_script_login_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("fake_semgrep_login.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho 'Please login to continue' >&2\nexit 1",
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let scanner = SemgrepScanner {
+            semgrep_bin: script_path,
+            timeout: std::time::Duration::from_secs(5),
+        };
+        let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("login"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_script_empty_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("fake_semgrep_fail.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho 'something went wrong' >&2\nexit 2",
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let scanner = SemgrepScanner {
+            semgrep_bin: script_path,
+            timeout: std::time::Duration::from_secs(5),
+        };
+        let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no JSON output"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_script_invalid_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("fake_semgrep_badjson.sh");
+        std::fs::write(&script_path, "#!/bin/sh\necho 'not valid json'").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let scanner = SemgrepScanner {
+            semgrep_bin: script_path,
+            timeout: std::time::Duration::from_secs(5),
+        };
+        let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed to parse"));
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("fake_semgrep_slow.sh");
+        std::fs::write(&script_path, "#!/bin/sh\nsleep 10").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let scanner = SemgrepScanner {
+            semgrep_bin: script_path,
+            // Very short timeout to trigger quickly
+            timeout: std::time::Duration::from_millis(100),
+        };
+        let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
     }
 }
