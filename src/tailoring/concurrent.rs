@@ -8,7 +8,7 @@ use crate::claude::ClaudeRunner;
 use crate::error::ActualError;
 use crate::generation::merge::merge_outputs;
 use crate::tailoring::batch::{batch_context_summary, create_batches};
-use crate::tailoring::invoke::invoke_tailoring;
+use crate::tailoring::invoke::{invoke_tailoring, serialize_json};
 use crate::tailoring::types::TailoringOutput;
 
 /// Configuration for concurrent project tailoring.
@@ -64,8 +64,7 @@ async fn tailor_single_project<R: ClaudeRunner>(
     adrs: &[Adr],
     config: &ConcurrentTailoringConfig<'_>,
 ) -> Result<TailoringOutput, ActualError> {
-    let project_json = serde_json::to_string(project)
-        .map_err(|e| ActualError::ConfigError(format!("Failed to serialize project: {e}")))?;
+    let project_json = serialize_json(project, "project")?;
     let batches = create_batches(adrs, config.batch_size);
 
     let mut previous_outputs: Vec<TailoringOutput> = Vec::new();
