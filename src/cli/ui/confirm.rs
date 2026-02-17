@@ -121,7 +121,7 @@ mod tests {
             _items: &[String],
             _defaults: &[bool],
         ) -> Result<Option<Vec<usize>>, ActualError> {
-            unimplemented!("select_files not used in project confirmation tests")
+            Ok(None)
         }
     }
 

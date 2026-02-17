@@ -593,14 +593,15 @@ mod tests {
         fn select_files(
             &self,
             _prompt: &str,
-            items: &[String],
+            _items: &[String],
             _defaults: &[bool],
         ) -> Result<Option<Vec<usize>>, ActualError> {
-            match self.select_result.lock().unwrap().take() {
-                Some(result) => Ok(result),
-                // Default: accept all files
-                None => Ok(Some((0..items.len()).collect())),
-            }
+            Ok(self
+                .select_result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("select_files called but no select_result set; use .with_selection()"))
         }
     }
 
