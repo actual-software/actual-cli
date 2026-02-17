@@ -37,6 +37,9 @@ pub enum ActualError {
 
     #[error("Tailoring output validation failed: {0}")]
     TailoringValidationError(String),
+
+    #[error("Internal error: {0}")]
+    InternalError(String),
 }
 
 impl ActualError {
@@ -46,6 +49,7 @@ impl ActualError {
             Self::ClaudeNotFound | Self::ClaudeNotAuthenticated => 2,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
             Self::FileWriteError(_) => 5,
+            Self::InternalError(_) => 1,
             _ => 1,
         }
     }
@@ -59,6 +63,7 @@ impl ActualError {
             Self::ClaudeTimeout { .. } => {
                 Some("Try increasing the timeout or check Claude Code status")
             }
+            Self::InternalError(_) => None,
             _ => None,
         }
     }
@@ -108,6 +113,10 @@ mod tests {
         assert_eq!(ActualError::UserCancelled.exit_code(), 4);
         assert_eq!(
             ActualError::TailoringValidationError("test".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
+            ActualError::InternalError("test".to_string()).exit_code(),
             1
         );
     }
@@ -172,6 +181,16 @@ mod tests {
             msg.contains("empty content"),
             "expected 'empty content' in: {msg}"
         );
+
+        let msg = ActualError::InternalError("runtime failed".to_string()).to_string();
+        assert!(
+            msg.contains("Internal error"),
+            "expected 'Internal error' in: {msg}"
+        );
+        assert!(
+            msg.contains("runtime failed"),
+            "expected 'runtime failed' in: {msg}"
+        );
     }
 
     #[test]
@@ -214,5 +233,10 @@ mod tests {
     #[test]
     fn test_hint_none_for_api_error() {
         assert_eq!(ActualError::ApiError("test".to_string()).hint(), None);
+    }
+
+    #[test]
+    fn test_hint_none_for_internal_error() {
+        assert_eq!(ActualError::InternalError("test".to_string()).hint(), None);
     }
 }
