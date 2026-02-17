@@ -74,47 +74,47 @@ impl TreeSitterAnalyzer {
         let content_bytes = content.as_bytes();
         let mut matches = Vec::new();
 
-        let definitions = self.query_packs.get(&language).cloned().unwrap_or_default();
+        if let Some(definitions) = self.query_packs.get(&language) {
+            for def in definitions {
+                let query = match tree_sitter::Query::new(&ts_lang, &def.query_text) {
+                    Ok(q) => q,
+                    Err(_) => continue, // skip queries that fail to compile
+                };
 
-        for def in &definitions {
-            let query = match tree_sitter::Query::new(&ts_lang, &def.query_text) {
-                Ok(q) => q,
-                Err(_) => continue, // skip queries that fail to compile
-            };
+                let mut cursor = tree_sitter::QueryCursor::new();
+                let mut query_matches = cursor.matches(&query, tree.root_node(), content_bytes);
 
-            let mut cursor = tree_sitter::QueryCursor::new();
-            let mut query_matches = cursor.matches(&query, tree.root_node(), content_bytes);
-
-            while let Some(m) = query_matches.next() {
-                for capture in m.captures {
-                    // If the definition specifies a specific capture name, filter.
-                    if let Some(ref expected) = def.capture_name {
-                        let capture_name = query.capture_names()[capture.index as usize];
-                        if capture_name != expected {
-                            continue;
+                while let Some(m) = query_matches.next() {
+                    for capture in m.captures {
+                        // If the definition specifies a specific capture name, filter.
+                        if let Some(ref expected) = def.capture_name {
+                            let capture_name = query.capture_names()[capture.index as usize];
+                            if capture_name != expected {
+                                continue;
+                            }
                         }
+
+                        let node = capture.node;
+                        let value = &content[node.byte_range()];
+                        let span = EvidenceSpan {
+                            file_path: file_path.to_string(),
+                            start_byte: node.start_byte(),
+                            end_byte: node.end_byte(),
+                            start_line: Some(node.start_position().row + 1), // 1-indexed
+                            end_line: Some(node.end_position().row + 1),
+                            source: SignalSource::TreeSitter,
+                        };
+
+                        matches.push(ToolMatch {
+                            rule_id: def.rule_id.clone(),
+                            facet_slot: def.facet_slot.clone(),
+                            leaf_id: def.leaf_id.clone(),
+                            value: serde_json::Value::String(value.to_string()),
+                            confidence: def.confidence,
+                            spans: vec![span],
+                            raw: None,
+                        });
                     }
-
-                    let node = capture.node;
-                    let value = &content[node.byte_range()];
-                    let span = EvidenceSpan {
-                        file_path: file_path.to_string(),
-                        start_byte: node.start_byte(),
-                        end_byte: node.end_byte(),
-                        start_line: Some(node.start_position().row + 1), // 1-indexed
-                        end_line: Some(node.end_position().row + 1),
-                        source: SignalSource::TreeSitter,
-                    };
-
-                    matches.push(ToolMatch {
-                        rule_id: def.rule_id.clone(),
-                        facet_slot: def.facet_slot.clone(),
-                        leaf_id: def.leaf_id.clone(),
-                        value: serde_json::Value::String(value.to_string()),
-                        confidence: def.confidence,
-                        spans: vec![span],
-                        raw: None,
-                    });
                 }
             }
         }
@@ -128,18 +128,21 @@ impl TreeSitterAnalyzer {
         &mut self,
         language: TreeSitterLanguage,
     ) -> Result<&mut tree_sitter::Parser> {
-        if let std::collections::hash_map::Entry::Vacant(e) = self.parser_cache.entry(language) {
-            let ts_lang = language
-                .tree_sitter_language()
-                .with_context(|| format!("no grammar for {language:?}"))?;
-            let mut parser = tree_sitter::Parser::new();
-            let lang_str = language.as_str();
-            parser
-                .set_language(&ts_lang)
-                .with_context(|| format!("failed to set tree-sitter language for {lang_str:?}"))?;
-            e.insert(parser);
+        use std::collections::hash_map::Entry;
+        match self.parser_cache.entry(language) {
+            Entry::Occupied(e) => Ok(e.into_mut()),
+            Entry::Vacant(e) => {
+                let ts_lang = language
+                    .tree_sitter_language()
+                    .with_context(|| format!("no grammar for {language:?}"))?;
+                let mut parser = tree_sitter::Parser::new();
+                let lang_str = language.as_str();
+                parser.set_language(&ts_lang).with_context(|| {
+                    format!("failed to set tree-sitter language for {lang_str:?}")
+                })?;
+                Ok(e.insert(parser))
+            }
         }
-        Ok(self.parser_cache.get_mut(&language).unwrap())
     }
 
     /// Load all `<lang>.scm` files from a directory.
