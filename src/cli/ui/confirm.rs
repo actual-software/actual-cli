@@ -4,17 +4,6 @@ use crate::cli::ui::file_confirm::TerminalIO;
 use console::style;
 use std::fmt::Write as FmtWrite;
 
-/// Build the styled prompt string shown to the user.
-pub fn prompt_text() -> String {
-    format!(
-        "  Confirm project configuration — {} {} {} {} ",
-        style("[a]").green().bold(),
-        "accept",
-        style("[r]").red().bold(),
-        "reject"
-    )
-}
-
 /// Format the project summary for display.
 ///
 /// This is separate from the prompt so it can be tested independently.
@@ -65,32 +54,10 @@ pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
     output
 }
 
-/// Build the "invalid input" hint shown when the user enters unrecognized text.
-pub fn invalid_input_hint() -> String {
-    format!(
-        "  {} Please enter {} or {}",
-        style("?").yellow(),
-        style("[a]").green().bold(),
-        style("[r]").red().bold()
-    )
-}
-
-/// Parse a single input string into a [`ConfirmAction`], if valid.
+/// Display detected projects and prompt for confirmation using the given terminal.
 ///
-/// Returns `None` for unrecognized input.
-pub fn parse_confirm_input(input: &str) -> Option<ConfirmAction> {
-    match input.trim().to_lowercase().as_str() {
-        "a" | "accept" => Some(ConfirmAction::Accept),
-        "r" | "reject" | "q" | "quit" => Some(ConfirmAction::Reject),
-        _ => None,
-    }
-}
-
-/// Display detected projects and prompt using the given terminal.
-///
-/// Writes the project summary via `term.write_line`, then loops reading
-/// input via `term.read_line` until the user enters a valid response
-/// (`a`/`accept` or `r`/`reject`/`q`/`quit`).
+/// Writes the project summary via `term.write_line`, then uses `term.confirm`
+/// (backed by `dialoguer::Confirm` in production) for a yes/no prompt.
 pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
     term: &dyn TerminalIO,
@@ -98,19 +65,9 @@ pub fn prompt_project_confirmation(
     let summary = format_project_summary(analysis);
     term.write_line(&summary);
 
-    let prompt = prompt_text();
-
-    loop {
-        match term.read_line(&prompt) {
-            Ok(input) => match parse_confirm_input(&input) {
-                Some(action) => return action,
-                None => {
-                    let hint = format!("\n{}\n", invalid_input_hint());
-                    term.write_line(&hint);
-                }
-            },
-            Err(_) => return ConfirmAction::Reject,
-        }
+    match term.confirm("Accept project configuration?") {
+        Ok(true) => ConfirmAction::Accept,
+        Ok(false) | Err(_) => ConfirmAction::Reject,
     }
 }
 
@@ -123,6 +80,9 @@ mod tests {
 
     /// A mock terminal for testing that records output and returns
     /// predetermined inputs in sequence.
+    ///
+    /// Uses the default `confirm()` implementation from `TerminalIO`,
+    /// which reads from `read_line` and parses y/n.
     struct MockTerminal {
         inputs: Mutex<Vec<String>>,
         output: Mutex<Vec<String>>,
@@ -337,160 +297,48 @@ mod tests {
         );
     }
 
-    // ── prompt_text tests ──
-
-    #[test]
-    fn prompt_text_contains_accept_and_reject() {
-        let text = prompt_text();
-        assert!(
-            text.contains("Confirm project configuration"),
-            "expected label in: {text}"
-        );
-        assert!(text.contains("accept"), "expected 'accept' in: {text}");
-        assert!(text.contains("reject"), "expected 'reject' in: {text}");
-    }
-
-    // ── invalid_input_hint tests ──
-
-    #[test]
-    fn invalid_input_hint_contains_options() {
-        let hint = invalid_input_hint();
-        assert!(hint.contains("Please enter"), "expected prompt in: {hint}");
-    }
-
-    // ── parse_confirm_input tests ──
-
-    #[test]
-    fn parse_accept_short() {
-        assert_eq!(parse_confirm_input("a"), Some(ConfirmAction::Accept));
-    }
-
-    #[test]
-    fn parse_accept_full() {
-        assert_eq!(parse_confirm_input("accept"), Some(ConfirmAction::Accept));
-    }
-
-    #[test]
-    fn parse_accept_case_insensitive() {
-        assert_eq!(parse_confirm_input("Accept"), Some(ConfirmAction::Accept));
-    }
-
-    #[test]
-    fn parse_reject_short() {
-        assert_eq!(parse_confirm_input("r"), Some(ConfirmAction::Reject));
-    }
-
-    #[test]
-    fn parse_reject_full() {
-        assert_eq!(parse_confirm_input("reject"), Some(ConfirmAction::Reject));
-    }
-
-    #[test]
-    fn parse_quit_short() {
-        assert_eq!(parse_confirm_input("q"), Some(ConfirmAction::Reject));
-    }
-
-    #[test]
-    fn parse_quit_full() {
-        assert_eq!(parse_confirm_input("quit"), Some(ConfirmAction::Reject));
-    }
-
-    #[test]
-    fn parse_whitespace_trimmed() {
-        assert_eq!(parse_confirm_input("  a  "), Some(ConfirmAction::Accept));
-    }
-
-    #[test]
-    fn parse_invalid_returns_none() {
-        assert_eq!(parse_confirm_input("x"), None);
-        assert_eq!(parse_confirm_input(""), None);
-        assert_eq!(parse_confirm_input("yes"), None);
-    }
-
     // ── prompt_project_confirmation tests ──
+    //
+    // MockTerminal uses the default `confirm()` impl which reads from
+    // `read_line` and parses y/yes → true, anything else → false.
 
     #[test]
-    fn prompt_accept_short() {
+    fn prompt_accept() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["a"]);
+        let term = MockTerminal::new(vec!["y"]);
         let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
     #[test]
-    fn prompt_accept_full() {
+    fn prompt_accept_yes() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["accept"]);
+        let term = MockTerminal::new(vec!["yes"]);
         let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
     #[test]
-    fn prompt_accept_case_insensitive() {
+    fn prompt_reject() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["Accept"]);
-        let result = prompt_project_confirmation(&analysis, &term);
-        assert_eq!(result, ConfirmAction::Accept);
-    }
-
-    #[test]
-    fn prompt_reject_short() {
-        let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["r"]);
+        let term = MockTerminal::new(vec!["n"]);
         let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
-    fn prompt_reject_full() {
+    fn prompt_reject_no() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["reject"]);
+        let term = MockTerminal::new(vec!["no"]);
         let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
-    fn prompt_quit_short() {
+    fn prompt_invalid_defaults_to_reject() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["q"]);
-        let result = prompt_project_confirmation(&analysis, &term);
-        assert_eq!(result, ConfirmAction::Reject);
-    }
-
-    #[test]
-    fn prompt_quit_full() {
-        let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["quit"]);
-        let result = prompt_project_confirmation(&analysis, &term);
-        assert_eq!(result, ConfirmAction::Reject);
-    }
-
-    #[test]
-    fn prompt_invalid_then_accept() {
-        let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["x", "invalid", "a"]);
-        let result = prompt_project_confirmation(&analysis, &term);
-        assert_eq!(result, ConfirmAction::Accept);
-        let output = term.output_text();
-        assert!(
-            output.contains("Please enter"),
-            "expected hint in output: {output}"
-        );
-        // Prompt text should be re-displayed after invalid input
-        assert!(
-            output.contains("accept"),
-            "expected prompt text in output: {output}"
-        );
-        assert!(
-            output.contains("reject"),
-            "expected prompt text in output: {output}"
-        );
-    }
-
-    #[test]
-    fn prompt_invalid_then_reject() {
-        let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["", "nope", "r"]);
+        // Unrecognized input defaults to false → Reject
+        let term = MockTerminal::new(vec!["x"]);
         let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
@@ -505,26 +353,9 @@ mod tests {
     }
 
     #[test]
-    fn prompt_whitespace_trimmed() {
-        let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["  a  "]);
-        let result = prompt_project_confirmation(&analysis, &term);
-        assert_eq!(result, ConfirmAction::Accept);
-    }
-
-    #[test]
-    fn prompt_sequence_exhausted_returns_reject() {
-        let analysis = make_single_project_analysis();
-        // First response is invalid, then inputs exhausted → Err → Reject
-        let term = MockTerminal::new(vec!["x"]);
-        let result = prompt_project_confirmation(&analysis, &term);
-        assert_eq!(result, ConfirmAction::Reject);
-    }
-
-    #[test]
     fn prompt_writes_summary_to_output() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["a"]);
+        let term = MockTerminal::new(vec!["y"]);
         prompt_project_confirmation(&analysis, &term);
         let output = term.output_text();
         assert!(
@@ -534,15 +365,6 @@ mod tests {
         assert!(
             output.contains("Single project detected"),
             "expected header in output: {output}"
-        );
-        // Prompt text should appear after the summary
-        assert!(
-            output.contains("accept"),
-            "expected prompt text in output: {output}"
-        );
-        assert!(
-            output.contains("reject"),
-            "expected prompt text in output: {output}"
         );
     }
 }

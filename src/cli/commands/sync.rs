@@ -1128,8 +1128,8 @@ mod tests {
     fn test_run_sync_no_flags_prompts_user() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
-        // First "a" for project confirm, second "a" for file confirm
-        let term = MockTerminal::new(vec!["a", "a"]);
+        // First "y" for project confirm (dialoguer y/n), second "a" for file confirm
+        let term = MockTerminal::new(vec!["y", "a"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let args = make_sync_args(false, false, false, false, &server.url());
         let result = run_sync(
@@ -1148,8 +1148,8 @@ mod tests {
     #[test]
     fn test_run_sync_user_rejects_returns_cancelled() {
         let dir = tempfile::tempdir().unwrap();
-        // "r" for project confirm — rejected before API call
-        let term = MockTerminal::new(vec!["r"]);
+        // "n" for project confirm — rejected before API call
+        let term = MockTerminal::new(vec!["n"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let args = make_sync_args(false, false, false, false, "http://unused");
         let result = run_sync(
@@ -1190,8 +1190,8 @@ mod tests {
     fn test_run_sync_dry_run_writes_no_files() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
-        // "a" for project confirm (dry_run, force=false)
-        let term = MockTerminal::new(vec!["a"]);
+        // "y" for project confirm (dry_run, force=false)
+        let term = MockTerminal::new(vec!["y"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let args = make_sync_args(true, false, false, false, &server.url());
         run_sync(
@@ -1403,8 +1403,8 @@ mod tests {
             .create();
 
         let dir = tempfile::tempdir().unwrap();
-        // "a" for project confirm, "q" for file confirm (user quits)
-        let term = MockTerminal::new(vec!["a", "q"]);
+        // "y" for project confirm, "q" for file confirm (user quits)
+        let term = MockTerminal::new(vec!["y", "q"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         // force=false, no_tailor=true so we get raw output and enter confirmation flow
         let args = SyncArgs {

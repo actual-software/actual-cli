@@ -7,6 +7,19 @@ pub trait TerminalIO: Send + Sync {
     fn read_line(&self, prompt: &str) -> Result<String, ActualError>;
     /// Write a line of text to the terminal.
     fn write_line(&self, text: &str);
+
+    /// Prompt the user for a yes/no confirmation.
+    ///
+    /// Default implementation uses `read_line` as fallback.
+    /// `RealTerminal` overrides this with `dialoguer::Confirm`.
+    fn confirm(&self, prompt: &str) -> Result<bool, ActualError> {
+        let input = self.read_line(prompt)?;
+        match input.trim().to_lowercase().as_str() {
+            "y" | "yes" => Ok(true),
+            "n" | "no" => Ok(false),
+            _ => Ok(false), // Default to rejection for safety
+        }
+    }
 }
 
 /// Parsed user action from the per-file confirmation prompt.
