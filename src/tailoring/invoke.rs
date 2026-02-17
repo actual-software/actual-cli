@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use serde::Serialize;
+
 use crate::api::types::Adr;
 use crate::claude::prompts::tailoring_prompt;
 use crate::claude::schemas::TAILORING_OUTPUT_SCHEMA;
@@ -20,13 +22,14 @@ pub async fn invoke_tailoring<R: ClaudeRunner>(
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
 ) -> Result<TailoringOutput, ActualError> {
+    let adr_json = serialize_json(adrs, "ADRs")?;
     let args = build_args(
-        adrs,
+        &adr_json,
         projects_json,
         existing_claude_md_paths,
         model_override,
         max_budget_usd,
-    )?;
+    );
     let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
 
     // First attempt
@@ -41,26 +44,33 @@ pub async fn invoke_tailoring<R: ClaudeRunner>(
     }
 }
 
+/// Serialize a value to JSON, mapping errors to `ActualError::ConfigError`.
+pub(crate) fn serialize_json<T: Serialize + ?Sized>(
+    value: &T,
+    label: &str,
+) -> Result<String, ActualError> {
+    serde_json::to_string(value)
+        .map_err(|e| ActualError::ConfigError(format!("Failed to serialize {label}: {e}")))
+}
+
 /// Build the CLI argument list for the tailoring invocation.
 fn build_args(
-    adrs: &[Adr],
+    adr_json: &str,
     projects_json: &str,
     existing_claude_md_paths: &str,
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
-) -> Result<Vec<String>, ActualError> {
+) -> Vec<String> {
     let mut opts = InvocationOptions::for_tailoring(model_override);
     opts.json_schema = Some(TAILORING_OUTPUT_SCHEMA.to_string());
     opts.max_budget_usd = max_budget_usd;
 
-    let adr_json = serde_json::to_string(adrs)
-        .map_err(|e| ActualError::ConfigError(format!("Failed to serialize ADRs: {e}")))?;
-    let prompt = tailoring_prompt(projects_json, existing_claude_md_paths, &adr_json);
+    let prompt = tailoring_prompt(projects_json, existing_claude_md_paths, adr_json);
 
     let mut args = opts.to_args();
     args.push("-p".to_string());
     args.push(prompt);
-    Ok(args)
+    args
 }
 
 /// Validate the tailoring output against the input ADR set.
@@ -348,18 +358,47 @@ mod tests {
     }
 
     #[test]
-    fn test_build_args_returns_ok_on_valid_input() {
-        let adrs = vec![make_adr("adr-001"), make_adr("adr-002")];
-        let result = build_args(&adrs, "{}", "", None, None);
-        assert!(result.is_ok(), "build_args should succeed with valid ADRs");
+    fn test_serialize_json_success() {
+        let adrs = vec![make_adr("adr-001")];
+        let result = serialize_json(&adrs, "ADRs");
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert!(json.contains("adr-001"));
+    }
 
-        let args = result.unwrap();
+    #[test]
+    fn test_serialize_json_error() {
+        use serde::ser::{self, Serializer};
+
+        // A type whose Serialize impl always fails.
+        struct AlwaysFails;
+        impl Serialize for AlwaysFails {
+            fn serialize<S: Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+                Err(ser::Error::custom("deliberate failure"))
+            }
+        }
+
+        let result = serialize_json(&AlwaysFails, "test");
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Failed to serialize test"),
+            "expected 'Failed to serialize test' in: {msg}"
+        );
+        assert!(matches!(err, ActualError::ConfigError(_)));
+    }
+
+    #[test]
+    fn test_build_args_with_valid_input() {
+        let adr_json = r#"[{"id":"adr-001"},{"id":"adr-002"}]"#;
+        let args = build_args(adr_json, "{}", "", None, None);
+
         // Should contain at least the "-p" flag and a prompt
         assert!(
             args.contains(&"-p".to_string()),
             "args should contain -p flag"
         );
-        // The last argument should be the prompt which contains the serialized ADR JSON
+        // The last argument should be the prompt which contains the ADR JSON
         let prompt = args.last().expect("args should not be empty");
         assert!(
             prompt.contains("adr-001"),
