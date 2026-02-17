@@ -657,6 +657,116 @@ mod tests {
         );
     }
 
+    // ── Additional coverage tests ──
+
+    #[test]
+    fn default_creates_empty_panel() {
+        let panel = Panel::default();
+        let rendered = panel.render(80);
+        let p = plain(&rendered);
+        let lines: Vec<&str> = p.lines().collect();
+        assert_eq!(lines.len(), 2, "default panel should have 2 lines");
+    }
+
+    #[test]
+    fn kv_annotated_overflow_drops_annotation() {
+        // Use a very long key+value so annotation doesn't fit at width 40
+        let long_value = "A".repeat(40);
+        let rendered = Panel::new()
+            .kv_annotated("Key", &long_value, "(annotation)")
+            .render(40);
+        let p = plain(&rendered);
+        let content_line = p.lines().nth(1).expect("should have content line");
+
+        // Line should be exactly 40 chars
+        assert_eq!(
+            content_line.chars().count(),
+            40,
+            "content line should be 40 chars: '{content_line}'"
+        );
+        // Annotation should not appear (dropped because it doesn't fit)
+        assert!(
+            !content_line.contains("(annotation)"),
+            "annotation should be dropped when it doesn't fit: '{content_line}'"
+        );
+        // Content should be truncated
+        assert!(
+            content_line.contains('…'),
+            "overflowing kv should be truncated: '{content_line}'"
+        );
+    }
+
+    #[test]
+    fn plain_text_without_title() {
+        let rendered = Panel::new().line("hello").kv("key", "val").render(30);
+        // Should not start with a title line
+        assert!(
+            rendered.starts_with("hello"),
+            "plain text without title should start with first content line"
+        );
+        assert!(rendered.contains("key: val"), "should contain kv");
+    }
+
+    #[test]
+    fn plain_text_kv_annotated() {
+        let rendered = Panel::new()
+            .kv_annotated("Status", "ok", "(fast)")
+            .render(30);
+        assert!(
+            rendered.contains("Status: ok  (fast)"),
+            "plain text kv_annotated should show annotation: '{rendered}'"
+        );
+    }
+
+    #[test]
+    fn plain_text_kv_without_annotation() {
+        let rendered = Panel::new().kv("key", "val").render(30);
+        assert!(
+            rendered.contains("key: val"),
+            "plain text kv should show key: val"
+        );
+        // Should not have extra spaces from annotation
+        assert!(
+            rendered.trim_end().ends_with("key: val"),
+            "should end with just key: val: '{}'",
+            rendered.trim_end()
+        );
+    }
+
+    #[test]
+    fn long_footer_is_truncated() {
+        let long_footer = "F".repeat(200);
+        let rendered = Panel::new().footer(&long_footer).render(50);
+        let p = plain(&rendered);
+        let footer_line = p.lines().nth(1).expect("should have footer line");
+        assert_eq!(
+            footer_line.chars().count(),
+            50,
+            "footer line should be 50 chars: '{footer_line}'"
+        );
+        assert!(
+            footer_line.contains('…'),
+            "long footer should be truncated: '{footer_line}'"
+        );
+    }
+
+    #[test]
+    fn kv_long_value_is_truncated() {
+        let long_val = "V".repeat(200);
+        let rendered = Panel::new().kv("Key", &long_val).render(50);
+        let p = plain(&rendered);
+        let content_line = p.lines().nth(1).expect("should have content line");
+        assert_eq!(
+            content_line.chars().count(),
+            50,
+            "kv line should be 50 chars: '{content_line}'"
+        );
+        assert!(
+            content_line.contains('…'),
+            "long kv should be truncated: '{content_line}'"
+        );
+    }
+
     // ── 13. Multiple mixed rows ──
 
     #[test]
