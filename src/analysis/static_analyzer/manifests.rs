@@ -295,9 +295,7 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
                     remainder_no_comment
                 };
                 for module in remainder.split_whitespace().take(1) {
-                    if !module.starts_with("//") {
-                        deps.insert(module.to_string());
-                    }
+                    deps.insert(module.to_string());
                 }
             }
             continue;
