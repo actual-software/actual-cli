@@ -48,7 +48,7 @@ fn test_status_shows_config() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Config"))
-        .stdout(predicate::str::contains("CLAUDE.md files"));
+        .stdout(predicate::str::contains("CLAUDE.md Files"));
 }
 
 #[test]
