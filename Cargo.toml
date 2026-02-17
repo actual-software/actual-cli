@@ -59,7 +59,7 @@ chrono = { version = "0.4", features = ["serde"] }
 which = "7"
 
 # Static analysis
-tokei = { version = "12", default-features = false }
+tokei = "12"
 
 [features]
 integration = []
