@@ -40,11 +40,9 @@ pub fn detect_monorepo(root: &Path) -> Result<MonorepoInfo, std::io::Error> {
         return Ok(info);
     }
 
-    // Nx with workspace.json (only reached if no package.json workspaces)
-    if root.join("nx.json").exists() {
-        if let Some(info) = detect_workspace_json(root)? {
-            return Ok(info);
-        }
+    // Nx / legacy workspace.json (can exist with or without nx.json)
+    if let Some(info) = detect_workspace_json(root)? {
+        return Ok(info);
     }
 
     // Cargo workspace
@@ -212,12 +210,20 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
         Some(serde_json::Value::Object(obj)) => obj
             .iter()
             .filter_map(|(_, val)| {
-                val.as_str().filter(|p| root.join(p).is_dir()).map(|p| {
-                    let name = extract_project_name(&root.join(p));
-                    ProjectInfo {
-                        path: p.to_string(),
-                        name,
-                    }
+                // Handle both string format ("apps/one") and object format ({"root": "apps/one"})
+                let path_str = val.as_str().map(|s| s.to_string()).or_else(|| {
+                    val.as_object()
+                        .and_then(|o| o.get("root"))
+                        .and_then(|r| r.as_str())
+                        .map(|s| s.to_string())
+                })?;
+                if !root.join(&path_str).is_dir() {
+                    return None;
+                }
+                let name = extract_project_name(&root.join(&path_str));
+                Some(ProjectInfo {
+                    path: path_str,
+                    name,
                 })
             })
             .collect(),
@@ -339,12 +345,20 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 }
 
 /// Expand glob patterns relative to root and build project info for each match.
+///
+/// Supports negation patterns (prefixed with `!`) which exclude matching directories
+/// from the result set.
 fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
     let mut projects = Vec::new();
 
+    // Separate inclusion and exclusion patterns
+    let mut exclusion_globs = Vec::new();
     for pattern in patterns {
-        // Skip negation patterns (exclusions); the `glob` crate does not support them.
-        if pattern.starts_with('!') {
+        if let Some(negated) = pattern.strip_prefix('!') {
+            let full = root.join(negated);
+            if let Ok(pat) = glob::Pattern::new(&full.to_string_lossy()) {
+                exclusion_globs.push(pat);
+            }
             continue;
         }
 
@@ -372,6 +386,14 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
                 name,
             });
         }
+    }
+
+    // Apply exclusion patterns as a post-filter
+    if !exclusion_globs.is_empty() {
+        projects.retain(|p| {
+            let full_path = root.join(&p.path).to_string_lossy().to_string();
+            !exclusion_globs.iter().any(|g| g.matches(&full_path))
+        });
     }
 
     projects
@@ -918,6 +940,88 @@ mod tests {
     }
 
     #[test]
+    fn test_workspace_json_without_nx_json() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // workspace.json exists but no nx.json — should still be detected
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "version": "1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("workspace.json"),
+            r#"{"projects": {"app": "apps/one"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("apps/one")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, "apps/one");
+    }
+
+    #[test]
+    fn test_workspace_json_object_format_projects() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Modern Nx workspace.json with object-valued project entries
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "version": "1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("workspace.json"),
+            r#"{"projects": {"my-app": {"root": "apps/my-app", "projectType": "application"}, "my-lib": {"root": "libs/my-lib"}}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("apps/my-app")).unwrap();
+        fs::create_dir_all(root.join("libs/my-lib")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 2);
+
+        let mut paths: Vec<&str> = info.projects.iter().map(|p| p.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["apps/my-app", "libs/my-lib"]);
+    }
+
+    #[test]
+    fn test_workspace_json_mixed_string_and_object_format() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Mix of string paths and object-valued project entries
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "version": "1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("workspace.json"),
+            r#"{"projects": {"legacy-app": "apps/legacy", "modern-app": {"root": "apps/modern"}}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("apps/legacy")).unwrap();
+        fs::create_dir_all(root.join("apps/modern")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 2);
+
+        let mut paths: Vec<&str> = info.projects.iter().map(|p| p.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["apps/legacy", "apps/modern"]);
+    }
+
+    #[test]
     fn test_nx_with_workspace_json() {
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -1339,16 +1443,35 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_json_projects_value_not_string() {
+    fn test_workspace_json_projects_value_not_string_or_object() {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
         fs::write(root.join("nx.json"), "{}").unwrap();
         fs::write(root.join("package.json"), r#"{"name": "root"}"#).unwrap();
+        // Value is a number — neither string path nor object with "root" key
         fs::write(root.join("workspace.json"), r#"{"projects": {"app": 42}}"#).unwrap();
 
         let info = detect_monorepo(root).unwrap();
-        // Project value is not a string, gets filtered out, so empty projects → falls through
+        // Project value is not a string or valid object, gets filtered out
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_workspace_json_object_without_root_key() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "root"}"#).unwrap();
+        // Object without "root" key — should be filtered out
+        fs::write(
+            root.join("workspace.json"),
+            r#"{"projects": {"app": {"sourceRoot": "apps/app/src"}}}"#,
+        )
+        .unwrap();
+
+        let info = detect_monorepo(root).unwrap();
         assert!(!info.is_monorepo);
     }
 
@@ -1374,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glob_expansion_negation_pattern_skipped() {
+    fn test_glob_expansion_negation_pattern_excludes() {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
@@ -1384,9 +1507,9 @@ mod tests {
         let patterns = vec!["packages/*".to_string(), "!packages/excluded".to_string()];
         let projects = expand_glob_patterns(root, &patterns);
 
-        // Negation patterns are skipped; both directories are returned
-        // since we don't yet apply exclusions as a post-filter
-        assert_eq!(projects.len(), 2);
+        // Negation pattern excludes the matching directory
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].path, "packages/included");
     }
 
     #[test]
@@ -1496,6 +1619,44 @@ mod tests {
         assert!(!info.is_monorepo);
         assert_eq!(info.projects.len(), 1);
         assert_eq!(info.projects[0].path, ".");
+    }
+
+    #[test]
+    fn test_pnpm_negation_pattern_excludes_directory() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - \"packages/*\"\n  - \"!packages/internal\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("packages/public")).unwrap();
+        fs::create_dir_all(root.join("packages/internal")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, "packages/public");
+    }
+
+    #[test]
+    fn test_npm_negation_pattern_excludes_directory() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "workspaces": ["packages/*", "!packages/template"]}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("packages/app")).unwrap();
+        fs::create_dir_all(root.join("packages/template")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, "packages/app");
     }
 
     #[test]
