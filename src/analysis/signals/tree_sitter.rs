@@ -178,7 +178,7 @@ impl TreeSitterAnalyzer {
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading query pack {}", path.display()))?;
             let definitions = parse_query_pack(&content, stem);
-            if !definitions.is_empty() {
+            if !definitions.is_empty() && language.tree_sitter_language().is_some() {
                 packs.insert(language, definitions);
             }
         }
@@ -300,10 +300,14 @@ pub fn parse_query_pack(content: &str, language_id: &str) -> Vec<QueryDefinition
 fn count_parens(s: &str) -> i32 {
     let mut depth: i32 = 0;
     let mut in_string = false;
-    let mut prev_char = '\0';
+    let mut in_escape = false;
 
     for ch in s.chars() {
-        if ch == '"' && prev_char != '\\' {
+        if in_escape {
+            in_escape = false;
+        } else if ch == '\\' && in_string {
+            in_escape = true;
+        } else if ch == '"' {
             in_string = !in_string;
         } else if !in_string {
             match ch {
@@ -312,7 +316,6 @@ fn count_parens(s: &str) -> i32 {
                 _ => {}
             }
         }
-        prev_char = ch;
     }
     depth
 }
@@ -463,6 +466,18 @@ mod tests {
     #[test]
     fn count_parens_empty() {
         assert_eq!(count_parens(""), 0);
+    }
+
+    #[test]
+    fn count_parens_escaped_backslash_before_quote() {
+        // Double-escaped backslash followed by closing quote: \\"  ->  the quote closes the string.
+        assert_eq!(count_parens(r#"("\\") (foo)"#), 0);
+    }
+
+    #[test]
+    fn count_parens_escaped_quote_in_string() {
+        // Escaped quote inside string: \" -> the quote doesn't close the string.
+        assert_eq!(count_parens(r#"("he said \"hi\"") (foo)"#), 0);
     }
 
     // ---- TreeSitterAnalyzer::parse ----
@@ -768,6 +783,23 @@ mod tests {
         assert!(!analyzer
             .query_packs
             .contains_key(&TreeSitterLanguage::Kotlin));
+    }
+
+    #[test]
+    fn load_query_packs_skips_unsupported_languages() {
+        // Kotlin has a .scm file but no compatible grammar crate, so
+        // its query pack should be skipped at load time.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("kotlin.scm"),
+            "; @rule_id: ts.kotlin.class\n; @facet_slot: test\n; @leaf_id: 1\n; @confidence: 0.8\n(class_declaration name: (type_identifier) @name)\n",
+        )
+        .unwrap();
+
+        let analyzer = TreeSitterAnalyzer::new(tmp.path()).expect("should load");
+        assert!(!analyzer
+            .query_packs
+            .contains_key(&TreeSitterLanguage::Kotlin),);
     }
 
     #[test]
