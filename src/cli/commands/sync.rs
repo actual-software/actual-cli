@@ -209,7 +209,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     let existing_paths = find_existing_claude_md(root_dir);
 
     let output = if args.no_tailor {
-        pipeline.success(SyncPhase::Tailor, "Tailoring skipped (--no-tailor)");
+        pipeline.skip(SyncPhase::Tailor, "Tailoring skipped (--no-tailor)");
         raw_adrs_to_output(&filtered_adrs)
     } else {
         pipeline.start(SyncPhase::Tailor, "Tailoring ADRs...");
