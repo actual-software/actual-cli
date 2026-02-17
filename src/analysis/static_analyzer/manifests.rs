@@ -291,7 +291,7 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
                 } else {
                     remainder
                 };
-                if let Some(module) = remainder.split_whitespace().next() {
+                for module in remainder.split_whitespace().take(1) {
                     if !module.starts_with("//") {
                         deps.insert(module.to_string());
                     }
