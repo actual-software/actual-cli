@@ -1,6 +1,6 @@
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
-use crate::cli::ui::file_confirm::TerminalIO;
+use crate::cli::ui::terminal::TerminalIO;
 use std::fmt::Write as FmtWrite;
 
 use super::theme;

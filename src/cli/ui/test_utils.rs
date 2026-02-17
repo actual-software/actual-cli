@@ -4,7 +4,7 @@
 //! copies that previously lived in `confirm.rs`, `file_confirm.rs`, and
 //! `commands/sync.rs`.
 
-use crate::cli::ui::file_confirm::TerminalIO;
+use crate::cli::ui::terminal::TerminalIO;
 use crate::error::ActualError;
 use std::sync::Mutex;
 
