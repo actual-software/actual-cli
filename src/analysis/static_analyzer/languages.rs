@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::Result;
 use tokei::{Config, LanguageType, Languages};
 
 use crate::analysis::types::Language;
@@ -60,7 +59,7 @@ fn is_data_or_markup(lang_type: LanguageType) -> bool {
 /// Languages not in the `Language` enum are aggregated into a single `Language::Other` entry.
 ///
 /// Returns a list of `(Language, usize)` tuples where `usize` is lines of code.
-pub fn detect_languages(path: &Path) -> Result<Vec<(Language, usize)>> {
+pub fn detect_languages(path: &Path) -> Vec<(Language, usize)> {
     let config = Config::default();
     let mut languages = Languages::new();
     languages.get_statistics(&[path], &[], &config);
@@ -102,22 +101,27 @@ pub fn detect_languages(path: &Path) -> Result<Vec<(Language, usize)>> {
         results.push((Language::Other, other_loc));
     }
 
-    Ok(results)
+    results
 }
 
 /// Normalize a language name/alias to its canonical lowercase form.
 ///
-/// Handles common aliases and alternate names. Returns `None` if the input
-/// is already canonical or not recognized as an alias.
+/// Handles common aliases and alternate names. Returns `Some(canonical)` only
+/// when the input is a known alias that differs from its canonical form.
+///
+/// Returns `None` when the input is already canonical (e.g. `"rust"`) **or**
+/// when the input is not recognized at all (e.g. `"haskell"`). In both cases
+/// callers should use the original value as-is.
 ///
 /// # Examples
 ///
 /// ```
 /// use actual_cli::analysis::static_analyzer::languages::normalize_language;
 ///
-/// assert_eq!(normalize_language("ts"), Some("typescript"));
-/// assert_eq!(normalize_language("py"), Some("python"));
-/// assert_eq!(normalize_language("rust"), None); // canonical — not an alias for something else
+/// assert_eq!(normalize_language("ts"), Some("typescript")); // alias → canonical
+/// assert_eq!(normalize_language("py"), Some("python"));     // alias → canonical
+/// assert_eq!(normalize_language("rust"), None);   // already canonical
+/// assert_eq!(normalize_language("haskell"), None); // unrecognized — pass through
 /// ```
 pub fn normalize_language(value: &str) -> Option<&'static str> {
     match value.to_lowercase().as_str() {
@@ -303,7 +307,7 @@ mod tests {
     #[test]
     fn test_detect_languages_empty_directory() {
         let dir = tempdir().unwrap();
-        let result = detect_languages(dir.path()).unwrap();
+        let result = detect_languages(dir.path());
         assert!(result.is_empty());
     }
 
@@ -316,7 +320,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect_languages(dir.path()).unwrap();
+        let result = detect_languages(dir.path());
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, Language::Rust);
         assert!(result[0].1 > 0);
@@ -335,7 +339,7 @@ mod tests {
 
         fs::write(dir.path().join("script.py"), "print(\"hello\")\n").unwrap();
 
-        let result = detect_languages(dir.path()).unwrap();
+        let result = detect_languages(dir.path());
         assert!(result.len() >= 2);
 
         // Rust should come first (more code)
@@ -362,7 +366,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect_languages(dir.path()).unwrap();
+        let result = detect_languages(dir.path());
         assert!(result.len() >= 2);
 
         // Python should come first (more LOC)
@@ -386,7 +390,7 @@ mod tests {
 
         fs::write(dir.path().join("readme.md"), "# Title\n\nSome text.\n").unwrap();
 
-        let result = detect_languages(dir.path()).unwrap();
+        let result = detect_languages(dir.path());
         // Only Rust should appear, not JSON/CSS/Markdown
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, Language::Rust);
@@ -409,7 +413,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect_languages(dir.path()).unwrap();
+        let result = detect_languages(dir.path());
 
         // Both should be aggregated into a single Other entry
         let other_entries: Vec<_> = result
@@ -443,7 +447,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect_languages(dir.path()).unwrap();
+        let result = detect_languages(dir.path());
         // Only Rust should appear (Python had 0 code lines)
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, Language::Rust);
@@ -467,7 +471,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = detect_languages(dir.path()).unwrap();
+        let result = detect_languages(dir.path());
         assert!(result.len() >= 2);
 
         // Other should be the last entry regardless of LOC
