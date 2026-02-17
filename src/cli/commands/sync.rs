@@ -12,7 +12,7 @@ use crate::api::retry::{with_retry, RetryConfig};
 use crate::branding::banner::print_banner;
 use crate::claude::subprocess::ClaudeRunner;
 use crate::cli::args::SyncArgs;
-use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation, InputReader};
+use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::{confirm_files, TerminalIO};
 use crate::cli::ui::progress::{Spinner, ERROR_SYMBOL, SUCCESS_SYMBOL};
@@ -36,8 +36,8 @@ pub struct SyncResult {
 
 /// Entry point for `actual sync`.
 ///
-/// Production wiring (`CliClaudeRunner`, `RealTerminal`, `StdinReader`) lives
-/// in `real_terminal.rs` (which is excluded from coverage) so that the only
+/// Production wiring (`CliClaudeRunner`, `RealTerminal`) lives in
+/// `real_terminal.rs` (which is excluded from coverage) so that the only
 /// generic instantiation of `run_sync` in `sync.rs` is `MockRunner` from
 /// unit tests.
 pub fn exec(args: &SyncArgs) -> i32 {
@@ -63,16 +63,15 @@ pub(crate) fn resolve_cwd() -> std::path::PathBuf {
 
 /// Core sync logic.
 ///
-/// Accepts injected `root_dir`, `term`, `runner`, and `reader` so unit tests
-/// can avoid `RealTerminal` (which blocks on stdin) and control the working
-/// directory, Claude runner, and user input.
+/// Accepts injected `root_dir`, `term`, and `runner` so unit tests can avoid
+/// `RealTerminal` (which blocks on stdin) and control the working directory,
+/// Claude runner, and user input.
 pub(crate) fn run_sync<R: ClaudeRunner>(
     args: &SyncArgs,
     root_dir: &Path,
     cfg_path: &Path,
     term: &dyn TerminalIO,
     runner: &R,
-    reader: &dyn InputReader,
 ) -> Result<(), ActualError> {
     // ── Phase 1: env check + analysis ──
 
@@ -109,7 +108,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         eprintln!("{summary}");
     } else {
         // prompt_project_confirmation displays the project summary itself
-        let action = prompt_project_confirmation(&analysis, reader, &mut std::io::stderr());
+        let action = prompt_project_confirmation(&analysis, term);
         if matches!(action, ConfirmAction::Reject) {
             return Err(ActualError::UserCancelled);
         }
@@ -538,7 +537,6 @@ mod tests {
     use crate::generation::markers;
     use crate::tailoring::types::{FileOutput, TailoringSummary};
     use serde::de::DeserializeOwned;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     struct MockTerminal {
@@ -606,45 +604,6 @@ mod tests {
         ) -> Result<T, ActualError> {
             let parsed: T = serde_json::from_str(&self.json_response)?;
             Ok(parsed)
-        }
-    }
-
-    /// Mock reader that returns a fixed sequence of responses.
-    struct MockInputReader {
-        responses: Vec<String>,
-        index: AtomicUsize,
-    }
-
-    impl MockInputReader {
-        fn new(responses: Vec<&str>) -> Self {
-            Self {
-                responses: responses.into_iter().map(String::from).collect(),
-                index: AtomicUsize::new(0),
-            }
-        }
-
-        /// A reader that immediately accepts.
-        fn accept() -> Self {
-            Self::new(vec!["a"])
-        }
-
-        /// A reader that immediately rejects.
-        fn reject() -> Self {
-            Self::new(vec!["r"])
-        }
-    }
-
-    impl InputReader for MockInputReader {
-        fn read_line(&self) -> std::io::Result<String> {
-            let i = self.index.fetch_add(1, Ordering::SeqCst);
-            if i < self.responses.len() {
-                Ok(self.responses[i].clone())
-            } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "no more input",
-                ))
-            }
         }
     }
 
@@ -1094,7 +1053,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, true, false, &server.url());
         let result = run_sync(
             &args,
@@ -1102,7 +1060,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(result.is_ok(), "run_sync with --force should succeed");
         // With empty API response + force, terminal should show "No files to write."
@@ -1119,7 +1076,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, true, true, &server.url());
         let result = run_sync(
             &args,
@@ -1127,7 +1083,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(
             result.is_ok(),
@@ -1141,7 +1096,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = make_sync_args(true, false, true, false, &server.url());
         // dry-run takes precedence over force
         let result = run_sync(
@@ -1150,7 +1104,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(
             result.is_ok(),
@@ -1162,10 +1115,9 @@ mod tests {
     fn test_run_sync_no_flags_prompts_user() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
-        let term = MockTerminal::new(vec!["a"]);
+        // First "a" for project confirm, second "a" for file confirm
+        let term = MockTerminal::new(vec!["a", "a"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        // Accept project confirmation prompt
-        let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, false, false, &server.url());
         let result = run_sync(
             &args,
@@ -1173,7 +1125,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(
             result.is_ok(),
@@ -1184,10 +1135,9 @@ mod tests {
     #[test]
     fn test_run_sync_user_rejects_returns_cancelled() {
         let dir = tempfile::tempdir().unwrap();
-        let term = MockTerminal::new(vec![]);
+        // "r" for project confirm — rejected before API call
+        let term = MockTerminal::new(vec!["r"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        // Reject project confirmation prompt — this happens before API call
-        let reader = MockInputReader::reject();
         let args = make_sync_args(false, false, false, false, "http://unused");
         let result = run_sync(
             &args,
@@ -1195,7 +1145,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
@@ -1207,10 +1156,9 @@ mod tests {
     fn test_run_sync_force_skips_confirmation() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
+        // No inputs needed — force skips both confirmations
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        // Reader would reject, but --force should skip it
-        let reader = MockInputReader::reject();
         let args = make_sync_args(false, false, true, false, &server.url());
         let result = run_sync(
             &args,
@@ -1218,7 +1166,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(
             result.is_ok(),
@@ -1230,9 +1177,9 @@ mod tests {
     fn test_run_sync_dry_run_writes_no_files() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
-        let term = MockTerminal::new(vec![]);
+        // "a" for project confirm (dry_run, force=false)
+        let term = MockTerminal::new(vec!["a"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = make_sync_args(true, false, false, false, &server.url());
         run_sync(
             &args,
@@ -1240,7 +1187,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         )
         .unwrap();
         // Verify no CLAUDE.md was created
@@ -1258,7 +1204,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = make_sync_args_with_projects(true, vec!["apps/web"], &server.url());
         let result = run_sync(
             &args,
@@ -1266,7 +1211,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(
             result.is_ok(),
@@ -1279,7 +1223,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(MONOREPO_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         // No server needed — fails before API call
         let args = make_sync_args_with_projects(true, vec!["nonexistent/path"], "http://unused");
         let result = run_sync(
@@ -1288,7 +1231,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(
             matches!(result, Err(ActualError::ConfigError(_))),
@@ -1398,18 +1340,6 @@ mod tests {
         );
     }
 
-    // ── MockInputReader edge case tests ──
-
-    #[test]
-    fn test_mock_input_reader_exhausted() {
-        let reader = MockInputReader::new(vec!["one"]);
-        // First call succeeds
-        assert_eq!(reader.read_line().unwrap(), "one");
-        // Second call returns an error because responses are exhausted
-        let err = reader.read_line().unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
-    }
-
     // ── run_sync analysis error test ──
 
     #[test]
@@ -1418,7 +1348,6 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         // Invalid JSON causes parse error in run_analysis_cached — before API call
         let runner = MockRunner::new("not valid json");
-        let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, true, false, "http://unused");
         let result = run_sync(
             &args,
@@ -1426,7 +1355,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(
             matches!(result, Err(ActualError::ClaudeOutputParse(_))),
@@ -1462,10 +1390,9 @@ mod tests {
             .create();
 
         let dir = tempfile::tempdir().unwrap();
-        // MockTerminal: user quits the confirmation flow
-        let term = MockTerminal::new(vec!["q"]);
+        // "a" for project confirm, "q" for file confirm (user quits)
+        let term = MockTerminal::new(vec!["a", "q"]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         // force=false, no_tailor=true so we get raw output and enter confirmation flow
         let args = SyncArgs {
             dry_run: false,
@@ -1485,7 +1412,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
 
         assert!(
@@ -1862,7 +1788,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = make_sync_args(false, false, true, false, &server.url());
         let result = run_sync(
             &args,
@@ -1870,7 +1795,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(
             matches!(result, Err(ActualError::ApiError(_))),
@@ -1905,7 +1829,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = SyncArgs {
             dry_run: false,
             full: false,
@@ -1924,7 +1847,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
@@ -1947,7 +1869,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = SyncArgs {
             dry_run: false,
             full: false,
@@ -1967,7 +1888,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
@@ -1990,7 +1910,6 @@ mod tests {
         let server = mock_api_server();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = SyncArgs {
             dry_run: false,
             full: false,
@@ -2003,7 +1922,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
         };
-        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, &reader);
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
         // Verify rejections were cleared
@@ -2053,7 +1972,6 @@ mod tests {
         let server = mock_api_server_with_adrs();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = SyncArgs {
             dry_run: false,
             full: false,
@@ -2066,7 +1984,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
         };
-        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, &reader);
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
         // adr-001 is rejected, so no ADRs remain → "No files to write."
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
@@ -2079,7 +1997,6 @@ mod tests {
         // MockRunner returns analysis JSON which is not valid tailoring output.
         // Phase 1 (analysis) parses it fine, but Phase 2 (tailoring) will fail.
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let reader = MockInputReader::accept();
         let args = SyncArgs {
             dry_run: false,
             full: false,
@@ -2098,7 +2015,6 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
-            &reader,
         );
         assert!(result.is_err(), "expected tailoring to fail");
     }
