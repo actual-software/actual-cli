@@ -388,7 +388,9 @@ fn raw_adrs_to_output(adrs: &[crate::api::types::Adr]) -> TailoringOutput {
 /// contents concatenated as a string, for use as context during tailoring.
 fn find_existing_claude_md(root_dir: &Path) -> String {
     let files = super::find_claude_md_files(root_dir);
-    let mut results: Vec<String> = files
+    // `find_claude_md_files` returns paths in sorted order, and `filter_map`
+    // preserves that order, so no additional sort is needed here.
+    let results: Vec<String> = files
         .iter()
         .filter_map(|path| {
             let content = std::fs::read_to_string(path).ok()?;
@@ -400,7 +402,6 @@ fn find_existing_claude_md(root_dir: &Path) -> String {
             Some(format!("=== {rel} ===\n{cleaned}"))
         })
         .collect();
-    results.sort();
     results.join("\n\n")
 }
 
