@@ -69,21 +69,24 @@ impl Language {
     }
 
     /// Parse a string into a `Language` using case-insensitive matching.
+    ///
+    /// Handles the same aliases as [`normalize_language`](crate::analysis::static_analyzer::languages::normalize_language)
+    /// to ensure consistent behavior across deserialization and normalization.
     fn from_str_insensitive(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "typescript" => Language::TypeScript,
-            "javascript" => Language::JavaScript,
-            "python" => Language::Python,
+            "typescript" | "ts" | "tsx" => Language::TypeScript,
+            "javascript" | "js" | "jsx" => Language::JavaScript,
+            "python" | "py" => Language::Python,
             "rust" => Language::Rust,
-            "go" => Language::Go,
+            "go" | "golang" => Language::Go,
             "java" => Language::Java,
             "kotlin" => Language::Kotlin,
             "swift" => Language::Swift,
             "ruby" => Language::Ruby,
             "php" => Language::Php,
             "c" => Language::C,
-            "cpp" | "c++" => Language::Cpp,
-            "csharp" | "c#" => Language::CSharp,
+            "cpp" | "c++" | "cxx" => Language::Cpp,
+            "csharp" | "c#" | "c_sharp" | "c-sharp" | "cs" => Language::CSharp,
             "scala" => Language::Scala,
             "elixir" => Language::Elixir,
             _ => Language::Other,
@@ -376,6 +379,31 @@ mod tests {
         assert_eq!(lang, Language::Cpp);
 
         let lang: Language = serde_json::from_str("\"C#\"").unwrap();
+        assert_eq!(lang, Language::CSharp);
+    }
+
+    #[test]
+    fn language_deserializes_common_aliases() {
+        // These aliases match normalize_language in languages.rs
+        let lang: Language = serde_json::from_str("\"ts\"").unwrap();
+        assert_eq!(lang, Language::TypeScript);
+        let lang: Language = serde_json::from_str("\"tsx\"").unwrap();
+        assert_eq!(lang, Language::TypeScript);
+        let lang: Language = serde_json::from_str("\"js\"").unwrap();
+        assert_eq!(lang, Language::JavaScript);
+        let lang: Language = serde_json::from_str("\"jsx\"").unwrap();
+        assert_eq!(lang, Language::JavaScript);
+        let lang: Language = serde_json::from_str("\"py\"").unwrap();
+        assert_eq!(lang, Language::Python);
+        let lang: Language = serde_json::from_str("\"golang\"").unwrap();
+        assert_eq!(lang, Language::Go);
+        let lang: Language = serde_json::from_str("\"cxx\"").unwrap();
+        assert_eq!(lang, Language::Cpp);
+        let lang: Language = serde_json::from_str("\"cs\"").unwrap();
+        assert_eq!(lang, Language::CSharp);
+        let lang: Language = serde_json::from_str("\"c_sharp\"").unwrap();
+        assert_eq!(lang, Language::CSharp);
+        let lang: Language = serde_json::from_str("\"c-sharp\"").unwrap();
         assert_eq!(lang, Language::CSharp);
     }
 
