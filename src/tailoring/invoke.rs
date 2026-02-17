@@ -83,23 +83,20 @@ fn validate_and_filter_output(
                 file.path
             )));
         }
-        let original_count = file.adr_ids.len();
-        file.adr_ids.retain(|id| {
-            let valid = valid_ids.contains(id.as_str());
-            if !valid {
-                eprintln!(
-                    "  warning: filtered unknown ADR ID '{}' from file '{}' (likely LLM hallucination)",
-                    id, file.path
-                );
-            }
-            valid
-        });
-        if file.adr_ids.len() < original_count {
-            let filtered = original_count - file.adr_ids.len();
+        let invalid_ids: Vec<String> = file
+            .adr_ids
+            .iter()
+            .filter(|id| !valid_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        if !invalid_ids.is_empty() {
             eprintln!(
-                "  filtered {filtered} hallucinated ADR ID(s) from '{}'",
-                file.path
+                "  warning: filtered {} hallucinated ADR ID(s) from '{}': {}",
+                invalid_ids.len(),
+                file.path,
+                invalid_ids.join(", ")
             );
+            file.adr_ids.retain(|id| valid_ids.contains(id.as_str()));
         }
     }
     Ok(output)
