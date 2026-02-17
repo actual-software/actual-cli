@@ -2,10 +2,10 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ActualError {
-    #[error("Claude Code not found. Install with: npm install -g @anthropic-ai/claude-code")]
+    #[error("Claude Code is not installed")]
     ClaudeNotFound,
 
-    #[error("Claude Code not authenticated. Run: claude auth login")]
+    #[error("Claude Code is not authenticated")]
     ClaudeNotAuthenticated,
 
     #[error("Claude Code subprocess failed: {message}")]
@@ -47,6 +47,19 @@ impl ActualError {
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
             Self::FileWriteError(_) => 5,
             _ => 1,
+        }
+    }
+
+    /// Returns a human-friendly fix suggestion for this error, if available.
+    pub fn hint(&self) -> Option<&str> {
+        match self {
+            Self::ClaudeNotFound => Some("npm install -g @anthropic-ai/claude-code"),
+            Self::ClaudeNotAuthenticated => Some("Run: claude auth login"),
+            Self::ConfigError(_) => Some("Check ~/.config/actual/config.yaml"),
+            Self::ClaudeTimeout { .. } => {
+                Some("Try increasing the timeout or check Claude Code status")
+            }
+            _ => None,
         }
     }
 }
@@ -103,18 +116,14 @@ mod tests {
     fn test_display_messages() {
         let msg = ActualError::ClaudeNotFound.to_string();
         assert!(
-            msg.contains("npm install"),
-            "expected 'npm install' in: {msg}"
-        );
-        assert!(
-            msg.contains("@anthropic-ai/claude-code"),
-            "expected '@anthropic-ai/claude-code' in: {msg}"
+            msg.contains("not installed"),
+            "expected 'not installed' in: {msg}"
         );
 
         let msg = ActualError::ClaudeNotAuthenticated.to_string();
         assert!(
-            msg.contains("claude auth login"),
-            "expected 'claude auth login' in: {msg}"
+            msg.contains("not authenticated"),
+            "expected 'not authenticated' in: {msg}"
         );
 
         let msg = ActualError::ClaudeSubprocessFailed {
@@ -163,5 +172,47 @@ mod tests {
             msg.contains("empty content"),
             "expected 'empty content' in: {msg}"
         );
+    }
+
+    #[test]
+    fn test_hint_claude_not_found() {
+        assert_eq!(
+            ActualError::ClaudeNotFound.hint(),
+            Some("npm install -g @anthropic-ai/claude-code")
+        );
+    }
+
+    #[test]
+    fn test_hint_claude_not_authenticated() {
+        assert_eq!(
+            ActualError::ClaudeNotAuthenticated.hint(),
+            Some("Run: claude auth login")
+        );
+    }
+
+    #[test]
+    fn test_hint_config_error() {
+        assert_eq!(
+            ActualError::ConfigError("test".to_string()).hint(),
+            Some("Check ~/.config/actual/config.yaml")
+        );
+    }
+
+    #[test]
+    fn test_hint_claude_timeout() {
+        assert_eq!(
+            ActualError::ClaudeTimeout { seconds: 30 }.hint(),
+            Some("Try increasing the timeout or check Claude Code status")
+        );
+    }
+
+    #[test]
+    fn test_hint_none_for_user_cancelled() {
+        assert_eq!(ActualError::UserCancelled.hint(), None);
+    }
+
+    #[test]
+    fn test_hint_none_for_api_error() {
+        assert_eq!(ActualError::ApiError("test".to_string()).hint(), None);
     }
 }
