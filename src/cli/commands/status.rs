@@ -136,7 +136,7 @@ fn format_config_section(
 }
 
 fn format_claude_md_section(cwd: &Path, width: usize) -> String {
-    let files = find_claude_md_files(cwd);
+    let files = super::find_claude_md_files(cwd);
 
     if files.is_empty() {
         let panel = Panel::titled("CLAUDE.md Files").line(&format!(
@@ -243,59 +243,17 @@ fn format_verbose_section(cfg: &Config, width: usize) -> String {
     panel.render(width)
 }
 
-/// Recursively find all files named `CLAUDE.md` under the given root directory.
-///
-/// Skips hidden directories (starting with `.`) and common ignore directories
-/// (`node_modules`, `target`, `vendor`, `.git`).
-pub fn find_claude_md_files(root: &Path) -> Vec<PathBuf> {
-    let mut results = Vec::new();
-    walk_for_claude_md(root, &mut results);
-    results.sort();
-    results
-}
-
-const SKIP_DIRS: &[&str] = &[
-    "node_modules",
-    "target",
-    "vendor",
-    ".git",
-    ".hg",
-    ".svn",
-    "__pycache__",
-    "dist",
-    "build",
-    ".worktrees",
-];
-
-fn walk_for_claude_md(dir: &Path, results: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let path = entry.path();
-        if path.is_dir() {
-            // Skip hidden directories and common ignore dirs
-            if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
-                continue;
-            }
-            walk_for_claude_md(&path, results);
-        } else if name_str == "CLAUDE.md" {
-            results.push(path);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::types::{CachedAnalysis, TelemetryConfig};
     use crate::testutil::ENV_MUTEX;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use tempfile::tempdir;
+
+    // Re-import shared utilities from the parent commands module for tests.
+    use super::super::{find_claude_md_files, SKIP_DIRS};
 
     fn restore_env(key: &str, saved: Option<String>) {
         match saved {
