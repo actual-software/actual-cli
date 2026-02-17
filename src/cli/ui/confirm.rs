@@ -114,6 +114,15 @@ mod tests {
         fn write_line(&self, text: &str) {
             self.output.lock().unwrap().push(text.to_string());
         }
+
+        fn select_files(
+            &self,
+            _prompt: &str,
+            _items: &[String],
+            _defaults: &[bool],
+        ) -> Result<Option<Vec<usize>>, ActualError> {
+            unimplemented!("select_files not used in project confirmation tests")
+        }
     }
 
     fn make_monorepo_analysis() -> RepoAnalysis {
