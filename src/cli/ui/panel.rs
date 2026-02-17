@@ -126,7 +126,7 @@ impl Panel {
         let inner = width.saturating_sub(4);
 
         // ── Top border ──
-        out.push_str(&self.render_top_border(width, inner));
+        out.push_str(&self.render_top_border(width));
         out.push('\n');
 
         // ── Content rows ──
@@ -139,7 +139,7 @@ impl Panel {
                         "{} {}{} {}",
                         theme::border("│"),
                         line,
-                        Self::padding(inner, &Self::visual_width(text).min(inner)),
+                        Self::padding(inner, Self::visual_width(text).min(inner)),
                         theme::border("│"),
                     );
                 }
@@ -148,7 +148,7 @@ impl Panel {
                     value,
                     annotation,
                 } => {
-                    self.render_kv(&mut out, key, value, annotation.as_deref(), inner);
+                    Self::render_kv(&mut out, key, value, annotation.as_deref(), inner);
                 }
                 PanelRow::Separator => {
                     let fill: String = "─".repeat(inner + 2);
@@ -167,7 +167,7 @@ impl Panel {
                         "{} {}{} {}",
                         theme::border("│"),
                         line,
-                        Self::padding(inner, &Self::visual_width(text).min(inner)),
+                        Self::padding(inner, Self::visual_width(text).min(inner)),
                         theme::border("│"),
                     );
                 }
@@ -188,7 +188,7 @@ impl Panel {
     }
 
     /// Render the top border, embedding the title if present.
-    fn render_top_border(&self, width: usize, _inner: usize) -> String {
+    fn render_top_border(&self, width: usize) -> String {
         match &self.title {
             Some(title) => {
                 // Format: ┌─ Title ─...─┐
@@ -241,14 +241,7 @@ impl Panel {
     }
 
     /// Render a key-value row, with optional right-aligned annotation.
-    fn render_kv(
-        &self,
-        out: &mut String,
-        key: &str,
-        value: &str,
-        annotation: Option<&str>,
-        inner: usize,
-    ) {
+    fn render_kv(out: &mut String, key: &str, value: &str, annotation: Option<&str>, inner: usize) {
         // Format: "key: value" or "key: value    annotation"
         let kv_text = format!("{key}: {value}");
         let kv_width = console::measure_text_width(&kv_text);
@@ -281,7 +274,7 @@ impl Panel {
                         "{} {}{} {}",
                         theme::border("│"),
                         line,
-                        Self::padding(inner, &vis),
+                        Self::padding(inner, vis),
                         theme::border("│"),
                     );
                 }
@@ -294,7 +287,7 @@ impl Panel {
                     "{} {}{} {}",
                     theme::border("│"),
                     line,
-                    Self::padding(inner, &vis),
+                    Self::padding(inner, vis),
                     theme::border("│"),
                 );
             }
@@ -312,8 +305,8 @@ impl Panel {
     }
 
     /// Right-pad to fill the remaining inner width.
-    fn padding(inner: usize, used: &usize) -> String {
-        let remaining = inner.saturating_sub(*used);
+    fn padding(inner: usize, used: usize) -> String {
+        let remaining = inner.saturating_sub(used);
         " ".repeat(remaining)
     }
 
