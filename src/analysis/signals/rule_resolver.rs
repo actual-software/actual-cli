@@ -329,4 +329,78 @@ mod tests {
         let resolver = RuleResolver::new(temp.path()).unwrap();
         assert_eq!(resolver.rule_count(), 2);
     }
+
+    #[test]
+    fn test_scan_rules_ignores_files_without_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let cat_dir = temp.path().join("cat");
+        std::fs::create_dir(&cat_dir).unwrap();
+        std::fs::write(cat_dir.join("Makefile"), "all:").unwrap();
+        std::fs::write(cat_dir.join("LICENSE"), "MIT").unwrap();
+        std::fs::write(cat_dir.join("rule.yml"), "rules: []").unwrap();
+
+        let resolver = RuleResolver::new(temp.path()).unwrap();
+        assert_eq!(resolver.rule_count(), 1);
+    }
+
+    #[test]
+    fn test_scan_rules_nested_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let deep = temp.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("deep.yml"), "rules: []").unwrap();
+        std::fs::write(temp.path().join("a").join("shallow.yaml"), "rules: []").unwrap();
+
+        let resolver = RuleResolver::new(temp.path()).unwrap();
+        assert_eq!(resolver.rule_count(), 2);
+    }
+
+    #[test]
+    fn test_list_categories_multiple_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        for cat in &["api", "security", "data"] {
+            let cat_dir = temp.path().join(cat);
+            std::fs::create_dir(&cat_dir).unwrap();
+            std::fs::write(cat_dir.join("rules.yml"), "rules: []").unwrap();
+        }
+
+        let resolver = RuleResolver::new(temp.path()).unwrap();
+        let categories = resolver.list_categories();
+        assert_eq!(categories.len(), 3);
+        assert!(categories.contains(&"api".to_string()));
+        assert!(categories.contains(&"security".to_string()));
+        assert!(categories.contains(&"data".to_string()));
+    }
+
+    #[test]
+    fn test_list_categories_sorted() {
+        let temp = tempfile::tempdir().unwrap();
+        for cat in &["zz", "aa", "mm"] {
+            let cat_dir = temp.path().join(cat);
+            std::fs::create_dir(&cat_dir).unwrap();
+            std::fs::write(cat_dir.join("r.yml"), "rules: []").unwrap();
+        }
+
+        let resolver = RuleResolver::new(temp.path()).unwrap();
+        let categories = resolver.list_categories();
+        assert_eq!(categories, vec!["aa", "mm", "zz"]);
+    }
+
+    #[test]
+    fn test_rule_files_sorted() {
+        let temp = tempfile::tempdir().unwrap();
+        let cat = temp.path().join("cat");
+        std::fs::create_dir(&cat).unwrap();
+        std::fs::write(cat.join("z.yml"), "rules: []").unwrap();
+        std::fs::write(cat.join("a.yml"), "rules: []").unwrap();
+        std::fs::write(cat.join("m.yml"), "rules: []").unwrap();
+
+        let resolver = RuleResolver::new(temp.path()).unwrap();
+        let files = resolver.resolve("any");
+        let names: Vec<&str> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["a.yml", "m.yml", "z.yml"]);
+    }
 }
