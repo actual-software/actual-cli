@@ -426,6 +426,30 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_languages_skips_zero_code_files() {
+        let dir = tempdir().unwrap();
+
+        // A Python file with only comments (0 code lines)
+        fs::write(
+            dir.path().join("empty.py"),
+            "# just a comment\n# another comment\n",
+        )
+        .unwrap();
+
+        // A Rust file with actual code
+        fs::write(
+            dir.path().join("main.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
+
+        let result = detect_languages(dir.path()).unwrap();
+        // Only Rust should appear (Python had 0 code lines)
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, Language::Rust);
+    }
+
+    #[test]
     fn test_detect_languages_other_is_last() {
         let dir = tempdir().unwrap();
 
