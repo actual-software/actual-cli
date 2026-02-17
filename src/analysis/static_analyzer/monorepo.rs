@@ -224,11 +224,13 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
                     Ok(c) if c.starts_with(&canonical_root) && c.is_dir() => c,
                     _ => return None,
                 };
+                let rel = canonical
+                    .strip_prefix(&canonical_root)
+                    .expect("starts_with already verified")
+                    .to_string_lossy()
+                    .to_string();
                 let name = extract_project_name(&canonical);
-                Some(ProjectInfo {
-                    path: path_str,
-                    name,
-                })
+                Some(ProjectInfo { path: rel, name })
             })
             .collect(),
         _ => return Ok(None),
@@ -332,16 +334,19 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
     let canonical_root = fs::canonicalize(root)?;
     let projects: Vec<ProjectInfo> = dirs
         .into_iter()
-        .filter(|d| {
-            let resolved = root.join(d);
-            match fs::canonicalize(&resolved) {
-                Ok(cp) => cp.starts_with(&canonical_root) && cp.is_dir(),
-                Err(_) => false,
-            }
-        })
-        .map(|d| {
-            let name = extract_project_name(&root.join(&d));
-            ProjectInfo { path: d, name }
+        .filter_map(|d| {
+            let resolved = root.join(&d);
+            let canonical = match fs::canonicalize(&resolved) {
+                Ok(cp) if cp.starts_with(&canonical_root) && cp.is_dir() => cp,
+                _ => return None,
+            };
+            let rel = canonical
+                .strip_prefix(&canonical_root)
+                .expect("starts_with already verified")
+                .to_string_lossy()
+                .to_string();
+            let name = extract_project_name(&canonical);
+            Some(ProjectInfo { path: rel, name })
         })
         .collect();
 
