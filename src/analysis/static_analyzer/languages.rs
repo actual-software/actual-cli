@@ -122,7 +122,7 @@ pub fn detect_languages(path: &Path) -> Result<Vec<(Language, usize)>> {
 /// ```
 pub fn normalize_language(value: &str) -> Option<&'static str> {
     match value.to_lowercase().as_str() {
-        "c#" | "c_sharp" | "c-sharp" | "cs" | "csharp" => Some("csharp"),
+        "c#" | "c_sharp" | "c-sharp" | "cs" => Some("csharp"),
         "js" | "jsx" => Some("javascript"),
         "ts" | "tsx" => Some("typescript"),
         "py" => Some("python"),
@@ -241,8 +241,9 @@ mod tests {
         assert_eq!(normalize_language("c_sharp"), Some("csharp"));
         assert_eq!(normalize_language("c-sharp"), Some("csharp"));
         assert_eq!(normalize_language("cs"), Some("csharp"));
-        assert_eq!(normalize_language("csharp"), Some("csharp"));
-        assert_eq!(normalize_language("CSharp"), Some("csharp"));
+        // Canonical form returns None (already normalized)
+        assert_eq!(normalize_language("csharp"), None);
+        assert_eq!(normalize_language("CSharp"), None);
     }
 
     #[test]
