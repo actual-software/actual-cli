@@ -277,18 +277,21 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 
         if in_use_block {
             if !trimmed.is_empty() && !trimmed.starts_with("//") {
-                dirs.push(trimmed.to_string());
+                let path = trimmed.split("//").next().unwrap_or("").trim();
+                if !path.is_empty() {
+                    dirs.push(path.to_string());
+                }
             }
             continue;
         }
 
-        if trimmed.starts_with("use (") || trimmed == "use (" {
+        if trimmed.starts_with("use (") {
             in_use_block = true;
             continue;
         }
 
         if let Some(rest) = trimmed.strip_prefix("use ") {
-            let dir = rest.trim();
+            let dir = rest.split("//").next().unwrap_or("").trim();
             if !dir.is_empty() && !dir.starts_with("//") && dir != "(" {
                 dirs.push(dir.to_string());
             }
@@ -299,7 +302,7 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
         return Ok(None);
     }
 
-    let projects = dirs
+    let projects: Vec<ProjectInfo> = dirs
         .into_iter()
         .filter(|d| root.join(d).is_dir())
         .map(|d| {
@@ -307,6 +310,10 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
             ProjectInfo { path: d, name }
         })
         .collect();
+
+    if projects.is_empty() {
+        return Ok(None);
+    }
 
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
@@ -319,6 +326,11 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
     let mut projects = Vec::new();
 
     for pattern in patterns {
+        // Skip negation patterns (exclusions); the `glob` crate does not support them.
+        if pattern.starts_with('!') {
+            continue;
+        }
+
         let full_pattern = root.join(pattern);
         let pattern_str = full_pattern.to_string_lossy().to_string();
 
@@ -1033,9 +1045,10 @@ mod tests {
         .unwrap();
 
         let info = detect_monorepo(root).unwrap();
-        // All dirs nonexistent, but still detected as monorepo (has use directives)
-        assert!(info.is_monorepo);
-        assert_eq!(info.projects.len(), 0);
+        // All dirs nonexistent, falls through to single-project mode
+        assert!(!info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, ".");
     }
 
     #[test]
@@ -1338,5 +1351,61 @@ mod tests {
         let patterns = vec!["packages/[invalid".to_string()];
         let projects = expand_glob_patterns(root, &patterns);
         assert!(projects.is_empty());
+    }
+
+    #[test]
+    fn test_glob_expansion_negation_pattern_skipped() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("packages/included")).unwrap();
+        fs::create_dir_all(root.join("packages/excluded")).unwrap();
+
+        let patterns = vec!["packages/*".to_string(), "!packages/excluded".to_string()];
+        let projects = expand_glob_patterns(root, &patterns);
+
+        // Negation patterns are skipped; both directories are returned
+        // since we don't yet apply exclusions as a post-filter
+        assert_eq!(projects.len(), 2);
+    }
+
+    #[test]
+    fn test_go_work_inline_comments_in_use_block() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("go.work"),
+            "go 1.21\n\nuse (\n\t./cmd/server // legacy\n\t./pkg/lib\n)\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("cmd/server")).unwrap();
+        fs::create_dir_all(root.join("pkg/lib")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 2);
+
+        let paths: Vec<&str> = info.projects.iter().map(|p| p.path.as_str()).collect();
+        assert!(paths.contains(&"./cmd/server"));
+        assert!(paths.contains(&"./pkg/lib"));
+    }
+
+    #[test]
+    fn test_go_work_inline_comment_single_use() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("go.work"),
+            "go 1.21\n\nuse ./mymod // inline comment\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("mymod")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, "./mymod");
     }
 }
