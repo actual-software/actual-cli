@@ -586,10 +586,30 @@ mod tests {
         let p = plain(&output);
         assert!(p.contains("managed"), "should show 'managed': {p}");
         assert!(p.contains("v2"), "should show version: {p}");
+        assert!(p.contains("synced"), "should show synced timestamp: {p}");
         assert!(p.contains("1 managed"), "should show 1 managed count: {p}");
         assert!(
             p.contains("0 unmanaged"),
             "should show 0 unmanaged count: {p}"
+        );
+    }
+
+    #[test]
+    fn test_format_claude_md_section_managed_version_without_last_synced() {
+        let dir = tempdir().unwrap();
+        // Managed section with version but without last-synced metadata
+        let content = format!(
+            "{}\n<!-- version: 3 -->\ncontent\n{}",
+            markers::START_MARKER,
+            markers::END_MARKER
+        );
+        std::fs::write(dir.path().join("CLAUDE.md"), &content).unwrap();
+        let output = format_claude_md_section(dir.path(), 80);
+        let p = plain(&output);
+        assert!(p.contains("v3"), "should show version: {p}");
+        assert!(
+            !p.contains("synced"),
+            "should not show synced without timestamp: {p}"
         );
     }
 
