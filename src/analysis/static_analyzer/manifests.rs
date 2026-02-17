@@ -1214,6 +1214,41 @@ dependencies {
     }
 
     #[test]
+    fn test_go_mod_require_inline_comment_after_paren() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.21\n\nrequire (// indirect deps\n\tgithub.com/bar/baz v1.0.0\n)\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        // The comment on the same line as "require (" should be skipped,
+        // but the next line should still be parsed
+        assert!(info
+            .dependencies
+            .contains(&"github.com/bar/baz".to_string()));
+    }
+
+    #[test]
+    fn test_go_mod_require_no_space_inline_entry() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.21\n\nrequire(github.com/bar/baz v1.0.0\n\tgithub.com/qux/quux v2.0.0\n)\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"github.com/bar/baz".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"github.com/qux/quux".to_string()));
+    }
+
+    #[test]
     fn test_strip_python_version_specifier() {
         assert_eq!(
             strip_python_version_specifier("flask>=2.0"),
