@@ -278,12 +278,12 @@ mod tests {
             "scala",
         ];
         for alias in &aliases {
-            if let Some(canonical) = RuleResolver::normalize_language(alias) {
-                assert!(
-                    SUPPORTED_LANGUAGES.contains(&canonical),
-                    "normalize_language({alias:?}) returned {canonical:?} which is not in SUPPORTED_LANGUAGES"
-                );
-            }
+            let canonical = RuleResolver::normalize_language(alias)
+                .unwrap_or_else(|| panic!("normalize_language({alias:?}) returned None"));
+            assert!(
+                SUPPORTED_LANGUAGES.contains(&canonical),
+                "normalize_language({alias:?}) returned {canonical:?} which is not in SUPPORTED_LANGUAGES"
+            );
         }
     }
 
