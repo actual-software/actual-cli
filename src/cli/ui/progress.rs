@@ -3,6 +3,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use super::theme;
+
 /// Style for phases in "waiting" state (not yet started).
 static WAITING_STYLE: LazyLock<ProgressStyle> =
     LazyLock::new(|| ProgressStyle::with_template("  ○ {msg}").expect("invalid waiting template"));
@@ -15,11 +17,6 @@ static SPINNING_STYLE: LazyLock<ProgressStyle> = LazyLock::new(|| {
 /// Style for completed phases (success, error, warn, skip).
 static FINISHED_STYLE: LazyLock<ProgressStyle> =
     LazyLock::new(|| ProgressStyle::with_template("  {msg}").expect("invalid finished template"));
-
-/// Symbols for terminal status output
-pub const SUCCESS_SYMBOL: &str = "✔";
-pub const ERROR_SYMBOL: &str = "✖";
-pub const WARN_SYMBOL: &str = "⚠";
 
 /// Identifies a phase in the sync pipeline.
 #[derive(Debug, Clone, Copy)]
@@ -99,7 +96,7 @@ impl SyncPipeline {
     pub fn success(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", style(SUCCESS_SYMBOL).green()));
+            bar.finish_with_message(format!("{} {message}", theme::success(&theme::SUCCESS)));
         }
     }
 
@@ -121,7 +118,7 @@ impl SyncPipeline {
     pub fn error(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", style(ERROR_SYMBOL).red()));
+            bar.finish_with_message(format!("{} {message}", theme::error(&theme::ERROR)));
         }
     }
 
@@ -132,7 +129,7 @@ impl SyncPipeline {
     pub fn warn(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
             bar.set_style(FINISHED_STYLE.clone());
-            bar.finish_with_message(format!("{} {message}", style(WARN_SYMBOL).yellow()));
+            bar.finish_with_message(format!("{} {message}", theme::warning(&theme::WARN)));
         }
     }
 
@@ -161,13 +158,6 @@ impl SyncPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_symbol_constants() {
-        assert_eq!(SUCCESS_SYMBOL, "✔", "expected green checkmark symbol");
-        assert_eq!(ERROR_SYMBOL, "✖", "expected red X symbol");
-        assert_eq!(WARN_SYMBOL, "⚠", "expected yellow triangle symbol");
-    }
 
     // ── SyncPipeline tests ──
 

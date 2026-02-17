@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use console::style;
-
 use crate::api::DEFAULT_API_URL;
 use crate::cli::args::StatusArgs;
-use crate::cli::ui::progress::{SUCCESS_SYMBOL, WARN_SYMBOL};
+use crate::cli::ui::theme;
 use crate::config;
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -14,7 +12,7 @@ pub fn exec(args: &StatusArgs) -> i32 {
     match load_and_run(args) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", style("Error:").red().bold(), e);
+            eprintln!("{} {}", theme::error_prefix(), e);
             e.exit_code()
         }
     }
@@ -59,12 +57,12 @@ fn run_status(
 }
 
 fn print_config_section(cfg: &Config, config_path: &Path, config_exists: bool, verbose: bool) {
-    println!("{}:", style("Config").bold());
+    println!("{}:", theme::heading("Config"));
 
     let exists_label = if config_exists {
-        format!("({})", style("exists").green())
+        format!("({})", theme::success("exists"))
     } else {
-        format!("({})", style("created").yellow())
+        format!("({})", theme::warning("created"))
     };
     println!(
         "  {:<14} {} {}",
@@ -75,7 +73,7 @@ fn print_config_section(cfg: &Config, config_path: &Path, config_exists: bool, v
 
     let api_url = cfg.api_url.as_deref().unwrap_or(DEFAULT_API_URL);
     let api_label = if cfg.api_url.is_none() {
-        format!("({})", style("default").dim())
+        format!("({})", theme::muted("default"))
     } else {
         String::new()
     };
@@ -93,13 +91,13 @@ fn print_config_section(cfg: &Config, config_path: &Path, config_exists: bool, v
 fn print_claude_md_section(cwd: &Path) {
     let files = find_claude_md_files(cwd);
 
-    println!("{}:", style("CLAUDE.md files").bold());
+    println!("{}:", theme::heading("CLAUDE.md files"));
 
     if files.is_empty() {
         println!("  No CLAUDE.md files found in current directory.");
         println!(
             "  Run {} to generate CLAUDE.md files for this repository.",
-            style("`actual sync`").cyan()
+            theme::hint("`actual sync`")
         );
         return;
     }
@@ -130,24 +128,24 @@ fn print_claude_md_section(cwd: &Path) {
 
             println!(
                 "  {} {:<40} {}{}",
-                style(SUCCESS_SYMBOL).green(),
+                theme::success(&theme::SUCCESS),
                 display_path,
-                style("managed").green(),
+                theme::success("managed"),
                 detail_str
             );
         } else {
             println!(
                 "  {} {:<40} {}",
-                style(WARN_SYMBOL).yellow(),
+                theme::warning(&theme::WARN),
                 display_path,
-                style("no managed section").yellow()
+                theme::warning("no managed section")
             );
         }
     }
 }
 
 fn print_verbose_section(cfg: &Config) {
-    println!("{}:", style("Details").bold());
+    println!("{}:", theme::heading("Details"));
 
     // Telemetry
     let telemetry_enabled = cfg
@@ -159,9 +157,9 @@ fn print_verbose_section(cfg: &Config) {
         "  {:<20} {}",
         "Telemetry:",
         if telemetry_enabled {
-            style("enabled").green().to_string()
+            theme::success("enabled").to_string()
         } else {
-            style("disabled").yellow().to_string()
+            theme::warning("disabled").to_string()
         }
     );
 
@@ -188,7 +186,7 @@ fn print_verbose_section(cfg: &Config) {
 
     // Cached analysis
     if let Some(ref analysis) = cfg.cached_analysis {
-        println!("  {:<20} {}", "Cached analysis:", style("present").green());
+        println!("  {:<20} {}", "Cached analysis:", theme::success("present"));
         println!("    {:<18} {}", "Repo:", analysis.repo_path);
         if let Some(ref commit) = analysis.head_commit {
             let short = if commit.len() > 7 {
@@ -200,7 +198,7 @@ fn print_verbose_section(cfg: &Config) {
         }
         println!("    {:<18} {}", "Analyzed at:", analysis.analyzed_at);
     } else {
-        println!("  {:<20} {}", "Cached analysis:", style("none").dim());
+        println!("  {:<20} {}", "Cached analysis:", theme::muted("none"));
     }
 }
 

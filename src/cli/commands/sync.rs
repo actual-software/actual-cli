@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use console::style;
 use sha2::{Digest, Sha256};
 
 use crate::analysis::cache::{get_git_head, run_analysis_cached};
@@ -15,7 +14,8 @@ use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::{confirm_files, TerminalIO};
-use crate::cli::ui::progress::{SyncPhase, SyncPipeline, ERROR_SYMBOL, SUCCESS_SYMBOL};
+use crate::cli::ui::progress::{SyncPhase, SyncPipeline};
+use crate::cli::ui::theme;
 use crate::config::paths::{load_from, save_to};
 use crate::config::rejections::{clear_rejections, get_rejections};
 use crate::error::ActualError;
@@ -48,7 +48,7 @@ pub(crate) fn handle_result(result: Result<(), ActualError>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("{} {}", style("Error:").red().bold(), e);
+            eprintln!("{} {}", theme::error_prefix(), e);
             e.exit_code()
         }
     }
@@ -142,7 +142,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         pipeline.suspend(|| {
             eprintln!(
                 "{} Cleared ADR rejection memory for this repository",
-                style(SUCCESS_SYMBOL).green()
+                theme::success(&theme::SUCCESS)
             );
         });
     }
@@ -543,7 +543,7 @@ fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usiz
                 files_created += 1;
                 term.write_line(&format!(
                     "  {} {} (created, v{})",
-                    style(SUCCESS_SYMBOL).green(),
+                    theme::success(&theme::SUCCESS),
                     result.path,
                     result.version
                 ));
@@ -552,7 +552,7 @@ fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usiz
                 files_updated += 1;
                 term.write_line(&format!(
                     "  {} {} (updated, v{})",
-                    style(SUCCESS_SYMBOL).green(),
+                    theme::success(&theme::SUCCESS),
                     result.path,
                     result.version
                 ));
@@ -562,7 +562,7 @@ fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usiz
                 let err_msg = result.error.as_deref().unwrap_or("unknown error");
                 term.write_line(&format!(
                     "  {} {} ({})",
-                    style(ERROR_SYMBOL).red(),
+                    theme::error(&theme::ERROR),
                     result.path,
                     err_msg
                 ));

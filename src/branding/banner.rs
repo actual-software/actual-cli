@@ -56,6 +56,9 @@ fn gradient_rgb(line_idx: usize, total_lines: usize) -> (u8, u8, u8) {
 /// If `quiet` is true, the banner is suppressed entirely.
 /// The gradient goes from #00FB7E (green) at the top to #179CA9 (teal)
 /// at the bottom, using 24-bit true-color ANSI escape sequences.
+///
+/// Respects `NO_COLOR` and similar environment variables via
+/// `console::colors_enabled_stderr()`.
 pub fn print_banner(quiet: bool) {
     if quiet {
         return;
@@ -63,11 +66,16 @@ pub fn print_banner(quiet: bool) {
 
     let lines: Vec<&str> = BANNER.lines().collect();
     let total = lines.len();
+    let use_color = console::colors_enabled_stderr();
 
     for (i, line) in lines.iter().enumerate() {
-        let (r, g, b) = gradient_rgb(i, total);
-        // \x1b[38;2;R;G;Bm sets 24-bit foreground color, \x1b[0m resets
-        eprintln!("\x1b[38;2;{r};{g};{b}m{line}\x1b[0m");
+        if use_color {
+            let (r, g, b) = gradient_rgb(i, total);
+            // \x1b[38;2;R;G;Bm sets 24-bit foreground color, \x1b[0m resets
+            eprintln!("\x1b[38;2;{r};{g};{b}m{line}\x1b[0m");
+        } else {
+            eprintln!("{line}");
+        }
     }
 }
 
