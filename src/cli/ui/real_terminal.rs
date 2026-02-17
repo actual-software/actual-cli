@@ -39,7 +39,7 @@ impl Default for RealTerminal {
 
 /// Convert a terminal I/O error into an `ActualError` with the given context.
 fn terminal_io_error(context: &str, err: std::io::Error) -> ActualError {
-    ActualError::ConfigError(format!("{context}: {err}"))
+    ActualError::TerminalIOError(format!("{context}: {err}"))
 }
 
 impl TerminalIO for RealTerminal {
@@ -62,7 +62,7 @@ impl TerminalIO for RealTerminal {
             .with_prompt(prompt)
             .default(false)
             .interact_opt()
-            .map_err(|e| ActualError::ConfigError(format!("confirmation failed: {e}")))
+            .map_err(|e| ActualError::TerminalIOError(format!("confirmation failed: {e}")))
             .map(|opt| opt.unwrap_or(false))
     }
 
@@ -77,7 +77,7 @@ impl TerminalIO for RealTerminal {
             .items(items)
             .defaults(defaults)
             .interact_on_opt(&self.term)
-            .map_err(|e| ActualError::ConfigError(format!("file selection failed: {e}")))
+            .map_err(|e| ActualError::TerminalIOError(format!("file selection failed: {e}")))
     }
 }
 

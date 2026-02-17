@@ -40,6 +40,9 @@ pub enum ActualError {
 
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    #[error("Terminal I/O error: {0}")]
+    TerminalIOError(String),
 }
 
 impl ActualError {
@@ -117,6 +120,10 @@ mod tests {
             ActualError::InternalError("test".to_string()).exit_code(),
             1
         );
+        assert_eq!(
+            ActualError::TerminalIOError("test".to_string()).exit_code(),
+            1
+        );
     }
 
     #[test]
@@ -189,6 +196,16 @@ mod tests {
             msg.contains("runtime failed"),
             "expected 'runtime failed' in: {msg}"
         );
+
+        let msg = ActualError::TerminalIOError("broken pipe".to_string()).to_string();
+        assert!(
+            msg.contains("Terminal I/O error"),
+            "expected 'Terminal I/O error' in: {msg}"
+        );
+        assert!(
+            msg.contains("broken pipe"),
+            "expected 'broken pipe' in: {msg}"
+        );
     }
 
     #[test]
@@ -236,5 +253,13 @@ mod tests {
     #[test]
     fn test_hint_none_for_internal_error() {
         assert_eq!(ActualError::InternalError("test".to_string()).hint(), None);
+    }
+
+    #[test]
+    fn test_hint_none_for_terminal_io_error() {
+        assert_eq!(
+            ActualError::TerminalIOError("test".to_string()).hint(),
+            None
+        );
     }
 }
