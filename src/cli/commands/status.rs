@@ -811,6 +811,73 @@ mod tests {
         assert!(p.contains('│'), "should contain vertical border");
     }
 
+    // ─── try_detect_auth ──────────────────────────────────────────
+
+    #[test]
+    fn test_try_detect_auth_no_binary() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = std::env::var("CLAUDE_BINARY").ok();
+        std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let auth = try_detect_auth();
+        restore_env("CLAUDE_BINARY", saved);
+        assert!(auth.is_none(), "should return None when binary not found");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_try_detect_auth_authenticated() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        let content = "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\": true, \"authMethod\": \"claude.ai\", \"email\": \"user@example.com\"}'\nexit 0\n";
+        std::fs::write(&script, content).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let saved = std::env::var("CLAUDE_BINARY").ok();
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let auth = try_detect_auth();
+        restore_env("CLAUDE_BINARY", saved);
+        let auth = auth.expect("should return Some for authenticated binary");
+        assert!(auth.authenticated, "should be authenticated");
+        assert_eq!(auth.email.as_deref(), Some("user@example.com"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_try_detect_auth_not_authenticated() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        let content = "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\": false}'\nexit 0\n";
+        std::fs::write(&script, content).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let saved = std::env::var("CLAUDE_BINARY").ok();
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let auth = try_detect_auth();
+        restore_env("CLAUDE_BINARY", saved);
+        let auth = auth.expect("should return Some even when not logged in");
+        assert!(!auth.authenticated, "should not be authenticated");
+        assert!(auth.email.is_none(), "should have no email");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_try_detect_auth_subprocess_failure() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        let content = "#!/bin/sh\nexit 1\n";
+        std::fs::write(&script, content).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let saved = std::env::var("CLAUDE_BINARY").ok();
+        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let auth = try_detect_auth();
+        restore_env("CLAUDE_BINARY", saved);
+        assert!(auth.is_none(), "should return None when subprocess fails");
+    }
+
     // ─── resolve_cwd ──────────────────────────────────────────────
 
     #[test]
