@@ -1424,4 +1424,94 @@ mod tests {
         assert_eq!(info.projects.len(), 1);
         assert_eq!(info.projects[0].path, "./mymod");
     }
+
+    #[test]
+    fn test_pnpm_workspace_no_matching_dirs_falls_through() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Patterns configured but no matching directories exist
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            "packages:\n  - \"packages/*\"\n",
+        )
+        .unwrap();
+        // Don't create packages/ directory
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, ".");
+    }
+
+    #[test]
+    fn test_npm_workspace_no_matching_dirs_falls_through() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "workspaces": ["packages/*"]}"#,
+        )
+        .unwrap();
+        // Don't create packages/ directory
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, ".");
+    }
+
+    #[test]
+    fn test_lerna_no_matching_dirs_falls_through() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("lerna.json"), r#"{"packages": ["packages/*"]}"#).unwrap();
+        // Don't create packages/ directory
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, ".");
+    }
+
+    #[test]
+    fn test_cargo_workspace_no_matching_dirs_falls_through() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        // Don't create crates/ directory
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, ".");
+    }
+
+    #[test]
+    fn test_workspace_json_nonexistent_paths_falls_through() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "root"}"#).unwrap();
+        fs::write(
+            root.join("workspace.json"),
+            r#"{"projects": {"app": "apps/web", "lib": "libs/shared"}}"#,
+        )
+        .unwrap();
+        // Don't create the directories
+
+        let info = detect_monorepo(root).unwrap();
+        // All paths nonexistent, falls through to single-project mode
+        assert!(!info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, ".");
+    }
 }
