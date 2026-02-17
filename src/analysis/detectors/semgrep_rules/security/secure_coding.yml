@@ -1,0 +1,31 @@
+rules:
+  # ==========================================================================
+  # Secure Coding Practices (leaf_id: 42)
+  # ==========================================================================
+
+  - id: csharp.secure.htmlencode
+    languages: [csharp]
+    message: HTML encoding detected
+    severity: INFO
+    metadata:
+      facet_slot: security.secure_coding
+      leaf_id: "42"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: HttpUtility.HtmlEncode(...)
+          - pattern: SecurityElement.Escape(...)
+
+  - id: php.secure.htmlspecialchars
+    languages: [php]
+    message: Output encoding detected
+    severity: INFO
+    metadata:
+      facet_slot: security.secure_coding
+      leaf_id: "42"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: htmlspecialchars(...)
+          - pattern: htmlentities(...)
+          - pattern: strip_tags(...)

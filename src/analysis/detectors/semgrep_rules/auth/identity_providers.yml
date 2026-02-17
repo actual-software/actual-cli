@@ -1,0 +1,213 @@
+rules:
+  # ==========================================================================
+  # Firebase Auth
+  # ==========================================================================
+
+  - id: js.firebase.auth
+    languages: [javascript, typescript]
+    message: Firebase authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: firebase.auth()
+          - pattern: getAuth(...)
+          - pattern: signInWithEmailAndPassword(...)
+          - pattern: createUserWithEmailAndPassword(...)
+
+  # ==========================================================================
+  # Auth0
+  # ==========================================================================
+
+  - id: js.auth0.client
+    languages: [javascript, typescript]
+    message: Auth0 authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new Auth0Client(...)
+          - pattern: new AuthenticationClient(...)
+          - pattern: auth0.authorize(...)
+
+  - id: py.auth0.client
+    languages: [python]
+    message: Auth0 authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: GetToken($DOMAIN, ...)
+          - pattern: AuthorizeClient(...)
+
+  # ==========================================================================
+  # Supabase Auth
+  # ==========================================================================
+
+  - id: js.supabase.auth
+    languages: [javascript, typescript]
+    message: Supabase authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: supabase.auth.signIn(...)
+          - pattern: supabase.auth.signUp(...)
+          - pattern: $CLIENT.auth.signInWithPassword(...)
+          - pattern: $CLIENT.auth.signInWithOAuth(...)
+
+  # ==========================================================================
+  # AWS Cognito
+  # ==========================================================================
+
+  - id: js.cognito.auth
+    languages: [javascript, typescript]
+    message: AWS Cognito authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new CognitoUserPool(...)
+          - pattern: new CognitoUser(...)
+          - pattern: $USER.authenticateUser(...)
+
+  - id: py.cognito.auth
+    languages: [python]
+    message: AWS Cognito authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: boto3.client("cognito-idp")
+          - pattern: $CLIENT.initiate_auth(...)
+          - pattern: $CLIENT.admin_create_user(...)
+
+  # ==========================================================================
+  # Clerk
+  # ==========================================================================
+
+  - id: js.clerk.auth
+    languages: [javascript, typescript]
+    message: Clerk authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: useUser()
+          - pattern: useAuth()
+          - pattern: ClerkProvider(...)
+          - pattern: SignIn(...)
+          - pattern: SignUp(...)
+          - pattern: new Clerk(...)
+
+  # ==========================================================================
+  # Okta
+  # ==========================================================================
+
+  - id: js.okta.auth
+    languages: [javascript, typescript]
+    message: Okta authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new OktaAuth(...)
+          - pattern: $OKTA.signInWithCredentials(...)
+          - pattern: useOktaAuth()
+
+  # ==========================================================================
+  # SAML
+  # ==========================================================================
+
+  - id: js.saml.auth
+    languages: [javascript, typescript]
+    message: SAML authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new SAML(...)
+          - pattern: passport.use(new SamlStrategy(...))
+
+  - id: py.saml.auth
+    languages: [python]
+    message: SAML authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: OneLogin_Saml2_Auth(...)
+          - pattern: saml2.client.Saml2Client(...)
+
+  # ==========================================================================
+  # LDAP
+  # ==========================================================================
+
+  - id: js.ldap.auth
+    languages: [javascript, typescript]
+    message: LDAP authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: ldap.createClient(...)
+          - pattern: $CLIENT.bind($DN, $PASSWORD, ...)
+
+  - id: py.ldap.auth
+    languages: [python]
+    message: LDAP authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: ldap3.Connection(...)
+          - pattern: $CONN.bind(...)
+
+  - id: java.ldap.auth
+    languages: [java]
+    message: LDAP authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.providers
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new LdapTemplate(...)
+          - pattern: LdapContextSource(...)

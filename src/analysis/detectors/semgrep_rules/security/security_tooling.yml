@@ -1,0 +1,26 @@
+rules:
+  # ==========================================================================
+  # Security Tooling (leaf_id: 45)
+  # ==========================================================================
+
+  - id: csharp.security.tooling
+    languages: [csharp]
+    message: Security tooling integration detected
+    severity: INFO
+    metadata:
+      facet_slot: security.tooling
+      leaf_id: "45"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "(Snyk|Trivy|SonarQube|OWASP|DependencyCheck)"
+
+  - id: php.security.tooling
+    languages: [php]
+    message: Security tooling integration detected
+    severity: INFO
+    metadata:
+      facet_slot: security.tooling
+      leaf_id: "45"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "(Snyk|Trivy|SonarQube|OWASP|php-security-checker)"

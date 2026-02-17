@@ -1,0 +1,456 @@
+rules:
+  # ==========================================================================
+  # JWT Authentication
+  # ==========================================================================
+
+  - id: js.jwt.sign
+    languages: [javascript, typescript]
+    message: JWT token signing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: jwt.sign($PAYLOAD, ...)
+          - pattern: jsonwebtoken.sign($PAYLOAD, ...)
+
+  - id: js.jwt.verify
+    languages: [javascript, typescript]
+    message: JWT token verification detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: jwt.verify($TOKEN, ...)
+          - pattern: jsonwebtoken.verify($TOKEN, ...)
+
+  - id: py.jwt.encode
+    languages: [python]
+    message: JWT token encoding detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: jwt.encode($PAYLOAD, ...)
+          - pattern: PyJWT.encode($PAYLOAD, ...)
+
+  - id: py.jwt.decode
+    languages: [python]
+    message: JWT token decoding detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: jwt.decode($TOKEN, ...)
+          - pattern: PyJWT.decode($TOKEN, ...)
+
+  - id: go.jwt.parse
+    languages: [go]
+    message: JWT token parsing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: jwt.Parse($TOKEN, ...)
+          - pattern: jwt.ParseWithClaims($TOKEN, ...)
+
+  - id: java.jwt.sign
+    languages: [java]
+    message: JWT token generation detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Jwts.builder().$METHOD(...)
+          - pattern: JWT.create().$METHOD(...)
+
+  - id: rust.jwt.encode
+    languages: [rust]
+    message: JWT token encoding detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.90"
+    patterns:
+      - pattern-either:
+          - pattern: encode($HEADER, $CLAIMS, $KEY)
+          - pattern: jsonwebtoken::encode(...)
+
+  - id: csharp.jwt.create
+    languages: [csharp]
+    message: JWT token creation detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new JwtSecurityToken(...)
+          - pattern: JwtSecurityTokenHandler().WriteToken(...)
+
+  - id: kotlin.jwt.sign
+    languages: [kotlin]
+    message: JWT token signing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Jwts.builder().$METHOD(...)
+          - pattern: JWT.create().$METHOD(...)
+
+  # ==========================================================================
+  # OAuth / OpenID Connect
+  # ==========================================================================
+
+  - id: js.oauth.client
+    languages: [javascript, typescript]
+    message: OAuth client detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new OAuth2Client(...)
+          - pattern: OAuth2Strategy(...)
+          - pattern: passport.use(new $STRATEGY(...))
+
+  - id: js.passport.strategy
+    languages: [javascript, typescript]
+    message: Passport.js authentication strategy detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new LocalStrategy(...)
+          - pattern: new JwtStrategy(...)
+          - pattern: new GoogleStrategy(...)
+
+  - id: js.passport.authenticate
+    languages: [javascript, typescript]
+    message: Passport.js authenticate usage detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern: passport.authenticate($STRATEGY, ...)
+
+  - id: py.oauth.client
+    languages: [python]
+    message: OAuth client detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: OAuth2Session(...)
+          - pattern: oauthlib.oauth2.WebApplicationClient(...)
+
+  - id: go.oauth.client
+    languages: [go]
+    message: OAuth2 client detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: oauth2.Config{...}
+          - pattern: oauth2.NewClient(...)
+
+  - id: csharp.oauth.client
+    languages: [csharp]
+    message: OAuth client detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: AddOAuth(...)
+          - pattern: new OAuthOptions(...)
+
+  # ==========================================================================
+  # Session Management
+  # ==========================================================================
+
+  - id: js.express.session
+    languages: [javascript, typescript]
+    message: Express session management detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.session_management
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: session({ ... })
+          - pattern: expressSession({ ... })
+          - pattern: cookieSession({ ... })
+
+  - id: py.flask.session
+    languages: [python]
+    message: Flask session management detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.session_management
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: session[$KEY] = $VALUE
+          - pattern: flask.session[$KEY]
+
+  # ==========================================================================
+  # API Key Authentication
+  # ==========================================================================
+
+  - id: js.apikey.header
+    languages: [javascript, typescript]
+    message: API key header authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: $REQ.headers["x-api-key"]
+          - pattern: $REQ.headers["authorization"]
+          - pattern: $REQ.get("x-api-key")
+
+  - id: py.apikey.header
+    languages: [python]
+    message: API key header authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: request.headers.get("x-api-key")
+          - pattern: request.headers.get("Authorization")
+
+  # ==========================================================================
+  # Password Hashing
+  # ==========================================================================
+
+  - id: js.bcrypt.hash
+    languages: [javascript, typescript]
+    message: Bcrypt password hashing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.credential_storage
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: bcrypt.hash($PASSWORD, ...)
+          - pattern: bcrypt.compare($PASSWORD, ...)
+          - pattern: bcrypt.hashSync($PASSWORD, ...)
+
+  - id: py.bcrypt.hash
+    languages: [python]
+    message: Bcrypt password hashing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.credential_storage
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: bcrypt.hashpw($PASSWORD, ...)
+          - pattern: bcrypt.checkpw($PASSWORD, ...)
+
+  - id: py.passlib.hash
+    languages: [python]
+    message: Passlib password hashing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.credential_storage
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern: $CONTEXT.hash($PASSWORD)
+
+  - id: go.bcrypt.hash
+    languages: [go]
+    message: Bcrypt password hashing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.credential_storage
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: bcrypt.GenerateFromPassword($PASSWORD, ...)
+          - pattern: bcrypt.CompareHashAndPassword($HASH, $PASSWORD)
+
+  - id: rust.bcrypt.hash
+    languages: [rust]
+    message: Bcrypt password hashing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.credential_storage
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: bcrypt::hash($PASSWORD, ...)
+          - pattern: bcrypt::verify($PASSWORD, ...)
+
+  - id: csharp.bcrypt.hash
+    languages: [csharp]
+    message: BCrypt password hashing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.credential_storage
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: BCrypt.HashPassword($PASSWORD, ...)
+          - pattern: BCrypt.Verify($PASSWORD, ...)
+
+  # ==========================================================================
+  # Multi-Factor Authentication
+  # ==========================================================================
+
+  - id: js.totp.auth
+    languages: [javascript, typescript]
+    message: TOTP/2FA authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.mfa
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: speakeasy.totp(...)
+          - pattern: speakeasy.totp.verify(...)
+          - pattern: authenticator.generate(...)
+          - pattern: authenticator.verify(...)
+
+  - id: py.totp.auth
+    languages: [python]
+    message: TOTP/2FA authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.mfa
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: pyotp.TOTP($SECRET)
+          - pattern: $TOTP.verify($TOKEN)
+
+  # ==========================================================================
+  # PHP Authentication
+  # ==========================================================================
+
+  - id: php.jwt.encode
+    languages: [php]
+    message: PHP JWT encoding detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: JWT::encode($PAYLOAD, ...)
+          - pattern: Firebase\JWT\JWT::encode(...)
+
+  - id: php.jwt.decode
+    languages: [php]
+    message: PHP JWT decoding detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: JWT::decode($TOKEN, ...)
+          - pattern: Firebase\JWT\JWT::decode(...)
+
+  - id: php.password.hash
+    languages: [php]
+    message: PHP password hashing detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.credential_storage
+      leaf_id: "35"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: password_hash($PASSWORD, ...)
+          - pattern: password_verify($PASSWORD, $HASH)
+          - pattern: Hash::make($PASSWORD)
+          - pattern: Hash::check($PASSWORD, $HASH)
+
+  - id: php.laravel.auth
+    languages: [php]
+    message: Laravel authentication detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "35"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Auth::attempt($CREDENTIALS)
+          - pattern: Auth::login($USER)
+          - pattern: Auth::user()
+          - pattern: Auth::check()
+          - pattern: Auth::guard($GUARD)
+          - pattern: auth()->user()
+          - pattern: auth()->attempt($CREDENTIALS)
+
+  - id: php.session.management
+    languages: [php]
+    message: PHP session management detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.session_management
+      leaf_id: "35"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: session_start()
+          - pattern: session_destroy()
+          - pattern: session_regenerate_id(...)
+          - pattern: $_SESSION[$KEY] = $VALUE

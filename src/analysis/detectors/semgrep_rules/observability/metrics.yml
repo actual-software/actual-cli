@@ -1,0 +1,232 @@
+rules:
+  # ==========================================================================
+  # OpenTelemetry Metrics
+  # ==========================================================================
+
+  - id: js.otel.meter
+    languages: [javascript, typescript]
+    message: OpenTelemetry metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: metrics.getMeter(...)
+          - pattern: $METER.createCounter(...)
+          - pattern: $METER.createHistogram(...)
+
+  - id: py.otel.metrics
+    languages: [python]
+    message: OpenTelemetry metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: metrics.get_meter(...)
+          - pattern: $METER.create_counter(...)
+          - pattern: $METER.create_histogram(...)
+
+  # ==========================================================================
+  # Prometheus Client
+  # ==========================================================================
+
+  - id: js.prometheus.metrics
+    languages: [javascript, typescript]
+    message: Prometheus metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new Counter(...)
+          - pattern: new Histogram(...)
+          - pattern: new Gauge(...)
+
+  - id: py.prometheus.metrics
+    languages: [python]
+    message: Prometheus metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Counter($NAME, ...)
+          - pattern: Histogram($NAME, ...)
+          - pattern: Gauge($NAME, ...)
+
+  - id: go.prometheus.metrics
+    languages: [go]
+    message: Prometheus metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: prometheus.NewCounter(...)
+          - pattern: prometheus.NewHistogram(...)
+          - pattern: prometheus.NewGauge(...)
+          - pattern: promauto.NewCounter(...)
+
+  - id: java.micrometer.metrics
+    languages: [java]
+    message: Micrometer metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Counter.builder($NAME)
+          - pattern: Timer.builder($NAME)
+          - pattern: Gauge.builder($NAME, ...)
+          - pattern: meterRegistry.counter(...)
+
+  - id: rust.prometheus.metrics
+    languages: [rust]
+    message: Prometheus metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Counter::new(...)
+          - pattern: Histogram::with_opts(...)
+          - pattern: IntCounter::new(...)
+
+  - id: csharp.prometheus.metrics
+    languages: [csharp]
+    message: Prometheus metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Metrics.CreateCounter(...)
+          - pattern: Metrics.CreateHistogram(...)
+          - pattern: Metrics.CreateGauge(...)
+
+  - id: php.prometheus.metrics
+    languages: [php]
+    message: Prometheus metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new CollectorRegistry(...)
+          - pattern: $REG->getOrRegisterCounter(...)
+          - pattern: $REG->getOrRegisterGauge(...)
+
+  - id: php.statsd.metrics
+    languages: [php]
+    message: StatsD metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: new StatsDClient(...)
+          - pattern: $STATSD->increment(...)
+
+  # ==========================================================================
+  # StatsD
+  # ==========================================================================
+
+  - id: js.statsd.metrics
+    languages: [javascript, typescript]
+    message: StatsD metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new StatsD(...)
+          - pattern: $CLIENT.increment(...)
+          - pattern: $CLIENT.timing(...)
+          - pattern: $CLIENT.gauge(...)
+
+  - id: py.statsd.metrics
+    languages: [python]
+    message: StatsD metrics detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.metrics
+      leaf_id: "47"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: statsd.StatsClient(...)
+          - pattern: $CLIENT.incr(...)
+          - pattern: $CLIENT.timing(...)
+
+  # ==========================================================================
+  # Health Checks
+  # ==========================================================================
+
+  - id: js.health.endpoint
+    languages: [javascript, typescript]
+    message: Health check endpoint detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.health_checks
+      leaf_id: "47"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: $APP.get("/health", ...)
+          - pattern: $APP.get("/healthz", ...)
+          - pattern: $APP.get("/ready", ...)
+          - pattern: $APP.get("/readiness", ...)
+
+  - id: py.health.endpoint
+    languages: [python]
+    message: Health check endpoint detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.health_checks
+      leaf_id: "47"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @$APP.get("/health")
+              def $FUNC(...): ...
+          - pattern: |
+              @$APP.get("/healthz")
+              def $FUNC(...): ...
+
+  - id: go.health.endpoint
+    languages: [go]
+    message: Health check handler detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.health_checks
+      leaf_id: "47"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: http.HandleFunc("/health", ...)
+          - pattern: http.HandleFunc("/healthz", ...)
+          - pattern: $ROUTER.GET("/health", ...)

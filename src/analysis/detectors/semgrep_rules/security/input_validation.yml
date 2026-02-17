@@ -1,0 +1,256 @@
+rules:
+  # ==========================================================================
+  # JavaScript/TypeScript Validation Libraries
+  # ==========================================================================
+
+  - id: js.joi.validation
+    languages: [javascript, typescript]
+    message: Joi input validation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Joi.object({ ... })
+          - pattern: Joi.string()
+          - pattern: $SCHEMA.validate($INPUT)
+
+  - id: js.zod.validation
+    languages: [javascript, typescript]
+    message: Zod schema validation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: z.object({ ... })
+          - pattern: z.string()
+          - pattern: $SCHEMA.parse($INPUT)
+          - pattern: $SCHEMA.safeParse($INPUT)
+
+  - id: js.yup.validation
+    languages: [javascript, typescript]
+    message: Yup schema validation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: yup.object({ ... })
+          - pattern: yup.string()
+          - pattern: $SCHEMA.validate($INPUT)
+
+  - id: ts.class.validator
+    languages: [typescript]
+    message: Class-validator decorators detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @IsString()
+              $FIELD: $TYPE
+          - pattern: |
+              @IsEmail()
+              $FIELD: $TYPE
+          - pattern: |
+              @IsNotEmpty()
+              $FIELD: $TYPE
+          - pattern: |
+              @ValidateNested()
+              $FIELD: $TYPE
+
+  # ==========================================================================
+  # Python Validation Libraries
+  # ==========================================================================
+
+  - id: py.pydantic.model
+    languages: [python]
+    message: Pydantic model validation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $MODEL(BaseModel):
+                  ...
+          - pattern: |
+              @validator($FIELD)
+              def $FUNC(...): ...
+          - pattern: |
+              @field_validator($FIELD)
+              def $FUNC(...): ...
+
+  - id: py.marshmallow.schema
+    languages: [python]
+    message: Marshmallow schema validation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $SCHEMA(Schema):
+                  ...
+          - pattern: fields.String(...)
+          - pattern: $SCHEMA.load($DATA)
+
+  # ==========================================================================
+  # Java Validation
+  # ==========================================================================
+
+  - id: java.bean.validation
+    languages: [java]
+    message: Bean validation annotations detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @NotNull
+              $TYPE $FIELD;
+          - pattern: |
+              @Size(...)
+              $TYPE $FIELD;
+          - pattern: |
+              @Valid
+              $TYPE $FIELD;
+
+  # ==========================================================================
+  # Go Validation
+  # ==========================================================================
+
+  - id: go.validator.struct
+    languages: [go]
+    message: Go struct validation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: validator.New()
+          - pattern: $VALIDATOR.Struct($INPUT)
+          - pattern: $VALIDATOR.Var($INPUT, $RULES)
+
+  # ==========================================================================
+  # Rust Validation
+  # ==========================================================================
+
+  - id: rust.validator.derive
+    languages: [rust]
+    message: Rust validator derive detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: "#[derive(..., Validate, ...)]"
+          - pattern: $INPUT.validate()
+
+  # ==========================================================================
+  # C# Validation
+  # ==========================================================================
+
+  - id: csharp.dataannotations.validation
+    languages: [csharp]
+    message: Data annotations validation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: "[Required]"
+          - pattern: "[StringLength(...)]"
+          - pattern: "[Range(...)]"
+          - pattern: "[RegularExpression(...)]"
+
+  - id: csharp.fluentvalidation
+    languages: [csharp]
+    message: FluentValidation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS : AbstractValidator<$TYPE> { ... }
+          - pattern: RuleFor($EXPR).$METHOD(...)
+
+  # ==========================================================================
+  # Kotlin Validation
+  # ==========================================================================
+
+  - id: kotlin.validation.annotations
+    languages: [kotlin]
+    message: Kotlin validation annotations detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @NotNull
+              val $FIELD: $TYPE
+          - pattern: |
+              @Size(...)
+              val $FIELD: $TYPE
+
+  # ==========================================================================
+  # PHP Validation
+  # ==========================================================================
+
+  - id: php.laravel.validation
+    languages: [php]
+    message: Laravel validation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $REQUEST->validate($RULES)
+          - pattern: $REQUEST->validated()
+          - pattern: Validator::make($DATA, $RULES)
+          - pattern: $THIS->validate($REQUEST, $RULES)
+
+  - id: php.filter.var
+    languages: [php]
+    message: PHP filter_var validation detected
+    severity: INFO
+    metadata:
+      facet_slot: security.input_validation
+      leaf_id: "37"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: filter_var($INPUT, $FILTER, ...)
+          - pattern: filter_input($TYPE, $VAR, $FILTER, ...)
+          - pattern: filter_var_array($DATA, $FILTERS)

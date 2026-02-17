@@ -1,0 +1,238 @@
+rules:
+  # ==========================================================================
+  # Dependency Injection / Service Definitions
+  # ==========================================================================
+
+  - id: js.container.config
+    languages: [javascript, typescript]
+    message: Dependency injection container detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: container.bind($TOKEN).to($CLASS)
+          - pattern: container.register($TOKEN, ...)
+          - pattern: Container.set($TOKEN, ...)
+
+  - id: ts.nestjs.module
+    languages: [typescript]
+    message: NestJS module detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          @Module({
+            ...
+          })
+          class $CLASS { ... }
+
+  - id: ts.inversify.injectable
+    languages: [typescript]
+    message: Inversify injectable detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @injectable()
+              class $CLASS { ... }
+          - pattern: |
+              @inject($TOKEN)
+              $FIELD
+
+  - id: java.spring.service
+    languages: [java]
+    message: Spring service detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @Service
+              class $CLASS { ... }
+          - pattern: |
+              @Component
+              class $CLASS { ... }
+          - pattern: |
+              @Repository
+              class $CLASS { ... }
+
+  - id: java.spring.bean
+    languages: [java]
+    message: Spring bean definition detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @Bean
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              @Configuration
+              class $CLASS { ... }
+
+  - id: py.fastapi.depends.inject
+    languages: [python]
+    message: FastAPI dependency injection detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern: Depends($DEPENDENCY)
+
+  - id: go.wire.inject
+    languages: [go]
+    message: Google Wire dependency injection detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: wire.Build(...)
+          - pattern: wire.NewSet(...)
+
+  - id: csharp.di.service
+    languages: [csharp]
+    message: .NET dependency injection detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: services.AddScoped<$TYPE>()
+          - pattern: services.AddTransient<$TYPE>()
+          - pattern: services.AddSingleton<$TYPE>()
+          - pattern: services.AddScoped<$IFACE, $IMPL>()
+          - pattern: services.AddTransient<$IFACE, $IMPL>()
+          - pattern: services.AddSingleton<$IFACE, $IMPL>()
+          - pattern: services.AddDbContext<$CTX>()
+
+  # ==========================================================================
+  # Circuit Breaker / Resilience Patterns
+  # ==========================================================================
+
+  - id: js.circuit.breaker
+    languages: [javascript, typescript]
+    message: Circuit breaker pattern detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.resilience
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new CircuitBreaker(...)
+          - pattern: circuitBreaker(...)
+          - pattern: opossum(...)
+
+  - id: py.circuit.breaker
+    languages: [python]
+    message: Circuit breaker pattern detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.resilience
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: CircuitBreaker(...)
+          - pattern: |
+              @circuit(...)
+              def $FUNC(...): ...
+          - pattern: pybreaker.CircuitBreaker(...)
+
+  - id: java.resilience4j.circuitbreaker
+    languages: [java]
+    message: Resilience4j circuit breaker detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.resilience
+      leaf_id: "24"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @CircuitBreaker($OPTS)
+              $RET $METHOD(...) { ... }
+          - pattern: CircuitBreaker.of($NAME, ...)
+          - pattern: CircuitBreakerRegistry.of(...)
+
+  - id: go.hystrix.circuitbreaker
+    languages: [go]
+    message: Hystrix-go circuit breaker detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.resilience
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: hystrix.Do($NAME, ...)
+          - pattern: hystrix.Go($NAME, ...)
+
+  # ==========================================================================
+  # Retry Patterns
+  # ==========================================================================
+
+  - id: js.retry.pattern
+    languages: [javascript, typescript]
+    message: Retry pattern detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.resilience
+      leaf_id: "24"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: retry($FUNC, ...)
+          - pattern: pRetry($FUNC, ...)
+          - pattern: async-retry(...)
+
+  - id: py.tenacity.retry
+    languages: [python]
+    message: Tenacity retry pattern detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.resilience
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @retry(...)
+              def $FUNC(...): ...
+          - pattern: Retrying(...)
+
+  - id: go.retry.pattern
+    languages: [go]
+    message: Go retry pattern detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.resilience
+      leaf_id: "24"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: retry.Do(...)
+          - pattern: backoff.Retry(...)

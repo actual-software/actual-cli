@@ -1,0 +1,239 @@
+rules:
+  # ==========================================================================
+  # Redis - JavaScript/TypeScript
+  # ==========================================================================
+
+  - id: js.redis.client
+    languages: [javascript, typescript]
+    message: Redis client usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: createClient(...)
+          - pattern: Redis.createClient(...)
+          - pattern: new Redis(...)
+
+  - id: js.ioredis.client
+    languages: [javascript, typescript]
+    message: ioredis client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new Redis(...)
+          - pattern: new Redis.Cluster(...)
+          - pattern: $REDIS.get($KEY)
+          - pattern: $REDIS.set($KEY, $VALUE, ...)
+
+  # ==========================================================================
+  # Redis - Python
+  # ==========================================================================
+
+  - id: py.redis.client
+    languages: [python]
+    message: Redis client usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: redis.Redis(...)
+          - pattern: redis.from_url(...)
+          - pattern: aioredis.from_url(...)
+
+  # ==========================================================================
+  # Redis - Go
+  # ==========================================================================
+
+  - id: go.redis.client
+    languages: [go]
+    message: Redis client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: redis.NewClient(...)
+          - pattern: redis.NewClusterClient(...)
+          - pattern: $RDB.Get(...)
+          - pattern: $RDB.Set(...)
+
+  # ==========================================================================
+  # Redis - Rust
+  # ==========================================================================
+
+  - id: rust.redis.client
+    languages: [rust]
+    message: Redis client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: redis::Client::open(...)
+          - pattern: $CON.get($KEY)
+          - pattern: $CON.set($KEY, $VALUE)
+
+  # ==========================================================================
+  # Redis - C#
+  # ==========================================================================
+
+  - id: csharp.stackexchange.redis
+    languages: [csharp]
+    message: StackExchange.Redis client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: ConnectionMultiplexer.Connect(...)
+          - pattern: $DB.StringGet($KEY)
+          - pattern: $DB.StringSet($KEY, $VALUE)
+
+  # ==========================================================================
+  # Memcached
+  # ==========================================================================
+
+  - id: js.memcached.client
+    languages: [javascript, typescript]
+    message: Memcached client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: new Memcached(...)
+          - pattern: memjs.Client.create(...)
+
+  - id: py.memcached.client
+    languages: [python]
+    message: Memcached client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: pymemcache.client.Client(...)
+          - pattern: memcache.Client(...)
+
+  - id: go.memcached.client
+    languages: [go]
+    message: Memcached client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.85"
+    patterns:
+      - pattern: memcache.New(...)
+
+  # ==========================================================================
+  # Application-Level Caching
+  # ==========================================================================
+
+  - id: js.node.cache
+    languages: [javascript, typescript]
+    message: node-cache usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: new NodeCache(...)
+          - pattern: $CACHE.get($KEY)
+          - pattern: $CACHE.set($KEY, $VALUE, ...)
+
+  - id: py.cachetools
+    languages: [python]
+    message: cachetools usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: cachetools.TTLCache(...)
+          - pattern: cachetools.LRUCache(...)
+          - pattern: |
+              @cachetools.cached($CACHE)
+              def $FUNC(...): ...
+
+  - id: py.functools.lru_cache
+    languages: [python]
+    message: functools lru_cache detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.85"
+    patterns:
+      - pattern: |
+          @functools.lru_cache(...)
+          def $FUNC(...): ...
+
+  - id: java.caffeine.cache
+    languages: [java]
+    message: Caffeine cache detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Caffeine.newBuilder()
+          - pattern: $CACHE.get($KEY, ...)
+          - pattern: $CACHE.put($KEY, $VALUE)
+
+  - id: go.bigcache
+    languages: [go]
+    message: BigCache usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: bigcache.NewBigCache(...)
+          - pattern: $CACHE.Get($KEY)
+          - pattern: $CACHE.Set($KEY, $VALUE)
+
+  # ==========================================================================
+  # CDN Caching Headers
+  # ==========================================================================
+
+  - id: js.cache.headers
+    languages: [javascript, typescript]
+    message: Cache-Control header detected
+    severity: INFO
+    metadata:
+      facet_slot: data.cache_layer
+      leaf_id: "28"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: $RES.setHeader("Cache-Control", ...)
+          - pattern: $RES.set("Cache-Control", ...)

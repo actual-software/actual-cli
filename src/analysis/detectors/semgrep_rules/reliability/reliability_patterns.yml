@@ -1,0 +1,31 @@
+rules:
+  # ==========================================================================
+  # Reliability Patterns (leaf_id: 41)
+  # ==========================================================================
+
+  - id: csharp.resilience.polly
+    languages: [csharp]
+    message: Polly resilience policy detected
+    severity: INFO
+    metadata:
+      facet_slot: reliability.patterns
+      leaf_id: "41"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\bPolicy\\.Handle\\s*<[^>]+>\\s*\\(\\)\\.Retry\\b"
+          - pattern-regex: "\\bPolicy\\.Handle\\s*<[^>]+>\\s*\\(\\)\\.CircuitBreaker\\b"
+          - pattern-regex: "\\bPolicy\\.Timeout\\b"
+
+  - id: php.resilience.retry
+    languages: [php]
+    message: Retry or circuit breaker pattern detected
+    severity: INFO
+    metadata:
+      facet_slot: reliability.patterns
+      leaf_id: "41"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: retry($COUNT, $CALLBACK)
+          - pattern-regex: "\\bCircuitBreaker::"

@@ -1,0 +1,494 @@
+rules:
+  # ==========================================================================
+  # JavaScript/TypeScript E2E Testing
+  # ==========================================================================
+
+  - id: js.playwright.test
+    languages: [javascript, typescript]
+    message: Playwright E2E test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.e2e
+      leaf_id: "52"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: "import { ... } from '@playwright/test'"
+          - pattern: page.goto($URL)
+          - pattern: page.click($SELECTOR)
+          - pattern: page.fill($SELECTOR, $VALUE)
+          - pattern: page.locator($SELECTOR)
+          - pattern: expect($PAGE).toHaveURL($URL)
+          - pattern: expect($LOCATOR).toBeVisible()
+
+  - id: js.cypress.test
+    languages: [javascript, typescript]
+    message: Cypress E2E test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.e2e
+      leaf_id: "52"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: cy.visit($URL)
+          - pattern: cy.get($SELECTOR)
+          - pattern: cy.contains($TEXT)
+          - pattern: cy.click()
+          - pattern: cy.type($VALUE)
+          - pattern: cy.request($METHOD, $URL, ...)
+          - pattern: cy.intercept($METHOD, $URL, ...)
+
+  - id: js.puppeteer.test
+    languages: [javascript, typescript]
+    message: Puppeteer test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.e2e
+      leaf_id: "52"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: puppeteer.launch(...)
+          - pattern: browser.newPage()
+          - pattern: page.goto($URL)
+          - pattern: page.$($SELECTOR)
+          - pattern: page.$$($SELECTOR)
+          - pattern: page.evaluate(...)
+
+  - id: js.supertest.integration
+    languages: [javascript, typescript]
+    message: Supertest API test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: request($APP).get($PATH)
+          - pattern: request($APP).post($PATH)
+          - pattern: request($APP).put($PATH)
+          - pattern: request($APP).delete($PATH)
+          - pattern: supertest($APP)
+
+  - id: js.msw.mock
+    languages: [javascript, typescript]
+    message: MSW mock service worker detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: rest.get($PATH, ...)
+          - pattern: rest.post($PATH, ...)
+          - pattern: graphql.query($NAME, ...)
+          - pattern: graphql.mutation($NAME, ...)
+          - pattern: setupServer(...)
+
+  - id: js.nock.mock
+    languages: [javascript, typescript]
+    message: Nock HTTP mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: nock($URL).get($PATH)
+          - pattern: nock($URL).post($PATH)
+          - pattern: nock.cleanAll()
+          - pattern: nock.disableNetConnect()
+
+  - id: js.testcontainers
+    languages: [javascript, typescript]
+    message: Testcontainers integration test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new GenericContainer($IMAGE)
+          - pattern: new PostgreSqlContainer()
+          - pattern: new MySqlContainer()
+          - pattern: new MongoDBContainer()
+          - pattern: $CONTAINER.start()
+
+  # ==========================================================================
+  # Python Integration/E2E Testing
+  # ==========================================================================
+
+  - id: py.selenium.test
+    languages: [python]
+    message: Selenium test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.e2e
+      leaf_id: "52"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: webdriver.Chrome(...)
+          - pattern: webdriver.Firefox(...)
+          - pattern: driver.get($URL)
+          - pattern: driver.find_element(...)
+          - pattern: driver.find_elements(...)
+
+  - id: py.playwright.test
+    languages: [python]
+    message: Playwright Python test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.e2e
+      leaf_id: "52"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: playwright.chromium.launch(...)
+          - pattern: page.goto($URL)
+          - pattern: page.click($SELECTOR)
+          - pattern: page.fill($SELECTOR, $VALUE)
+          - pattern: expect($PAGE).to_have_url($URL)
+
+  - id: py.fastapi.testclient
+    languages: [python]
+    message: FastAPI TestClient detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: TestClient($APP)
+          - pattern: $CLIENT.get($PATH)
+          - pattern: $CLIENT.post($PATH, ...)
+          - pattern: $CLIENT.put($PATH, ...)
+          - pattern: $CLIENT.delete($PATH)
+
+  - id: py.django.testcase
+    languages: [python]
+    message: Django test case detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS(TestCase):
+                  ...
+          - pattern: |
+              class $CLASS(TransactionTestCase):
+                  ...
+          - pattern: self.client.get($PATH)
+          - pattern: self.client.post($PATH, ...)
+
+  - id: py.responses.mock
+    languages: [python]
+    message: Responses HTTP mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @responses.activate
+              def $FUNC(...): ...
+          - pattern: responses.add($METHOD, $URL, ...)
+          - pattern: responses.get($URL)
+          - pattern: responses.post($URL)
+
+  - id: py.httpretty.mock
+    languages: [python]
+    message: HTTPretty mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @httpretty.activate
+              def $FUNC(...): ...
+          - pattern: httpretty.register_uri($METHOD, $URL, ...)
+
+  - id: py.testcontainers
+    languages: [python]
+    message: Testcontainers Python detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: PostgresContainer(...)
+          - pattern: MySqlContainer(...)
+          - pattern: MongoDbContainer(...)
+          - pattern: RedisContainer(...)
+          - pattern: $CONTAINER.start()
+
+  - id: py.factory_boy
+    languages: [python]
+    message: Factory Boy test factory detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.fixtures
+      leaf_id: "54"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS(factory.Factory):
+                  ...
+          - pattern: |
+              class $CLASS(factory.DjangoModelFactory):
+                  ...
+          - pattern: $FACTORY.create(...)
+          - pattern: $FACTORY.build(...)
+
+  # ==========================================================================
+  # Go Integration Testing
+  # ==========================================================================
+
+  - id: go.httptest.test
+    languages: [go]
+    message: Go httptest detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: httptest.NewRequest($METHOD, $URL, ...)
+          - pattern: httptest.NewRecorder()
+          - pattern: httptest.NewServer(...)
+          - pattern: $RR.Code
+          - pattern: $RR.Body
+
+  - id: go.testcontainers
+    languages: [go]
+    message: Testcontainers Go detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: testcontainers.GenericContainer(...)
+          - pattern: postgres.RunContainer(...)
+          - pattern: mysql.RunContainer(...)
+          - pattern: mongodb.RunContainer(...)
+          - pattern: $CONTAINER.Terminate(...)
+
+  - id: go.sqlmock
+    languages: [go]
+    message: SQL mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: sqlmock.New()
+          - pattern: $MOCK.ExpectQuery($QUERY)
+          - pattern: $MOCK.ExpectExec($QUERY)
+          - pattern: $MOCK.ExpectationsWereMet()
+
+  # ==========================================================================
+  # Java Integration Testing
+  # ==========================================================================
+
+  - id: java.springboot.test
+    languages: [java]
+    message: Spring Boot test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @SpringBootTest
+              class $CLASS { ... }
+          - pattern: |
+              @WebMvcTest
+              class $CLASS { ... }
+          - pattern: |
+              @DataJpaTest
+              class $CLASS { ... }
+          - pattern: |
+              @Autowired
+              MockMvc $FIELD;
+
+  - id: java.mockmvc.test
+    languages: [java]
+    message: MockMvc test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: mockMvc.perform(get($PATH))
+          - pattern: mockMvc.perform(post($PATH))
+          - pattern: mockMvc.perform(put($PATH))
+          - pattern: mockMvc.perform(delete($PATH))
+          - pattern: $RESULT.andExpect(status().$STATUS())
+
+  - id: java.testcontainers
+    languages: [java]
+    message: Testcontainers Java detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new PostgreSQLContainer<>(...)
+          - pattern: new MySQLContainer<>(...)
+          - pattern: new MongoDBContainer(...)
+          - pattern: |
+              @Container
+              $TYPE $FIELD = ...;
+          - pattern: |
+              @Testcontainers
+              class $CLASS { ... }
+
+  - id: java.wiremock
+    languages: [java]
+    message: WireMock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: stubFor(get($PATH).willReturn(...))
+          - pattern: stubFor(post($PATH).willReturn(...))
+          - pattern: WireMockServer(...)
+          - pattern: WireMock.configureFor(...)
+
+  # ==========================================================================
+  # Rust Integration Testing
+  # ==========================================================================
+
+  - id: rust.integration.test
+    languages: [rust]
+    message: Rust integration test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.integration
+      leaf_id: "53"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              #[test]
+              fn $NAME() {
+                  ...
+                  Client::new()
+                  ...
+              }
+          - pattern: actix_web::test::init_service(...)
+          - pattern: actix_web::test::call_service(...)
+
+  # ==========================================================================
+  # Contract Testing
+  # ==========================================================================
+
+  - id: js.pact.contract
+    languages: [javascript, typescript]
+    message: Pact contract test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.contract
+      leaf_id: "55"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new Pact(...)
+          - pattern: provider.addInteraction(...)
+          - pattern: provider.verify()
+          - pattern: Verifier(...)
+
+  - id: py.pact.contract
+    languages: [python]
+    message: Pact Python contract test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.contract
+      leaf_id: "55"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Consumer($NAME).has_pact_with(Provider($NAME))
+          - pattern: $PACT.given($STATE).upon_receiving($DESC)
+          - pattern: $PACT.verify()
+
+  - id: java.pact.contract
+    languages: [java]
+    message: Pact JVM contract test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.contract
+      leaf_id: "55"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @Pact(...)
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              @PactVerification
+              $RET $METHOD() { ... }
+          - pattern: PactDslJsonBody()
+
+  # ==========================================================================
+  # Snapshot Testing
+  # ==========================================================================
+
+  - id: js.snapshot.test
+    languages: [javascript, typescript]
+    message: Snapshot test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.snapshot
+      leaf_id: "56"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: expect($VALUE).toMatchSnapshot()
+          - pattern: expect($VALUE).toMatchInlineSnapshot(...)
+          - pattern: toMatchSnapshot()
+
+  - id: rust.insta.snapshot
+    languages: [rust]
+    message: Insta snapshot test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.snapshot
+      leaf_id: "56"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: assert_snapshot!(...)
+          - pattern: assert_debug_snapshot!(...)
+          - pattern: assert_json_snapshot!(...)

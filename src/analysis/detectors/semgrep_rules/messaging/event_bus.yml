@@ -1,0 +1,242 @@
+rules:
+  # ==========================================================================
+  # Node.js EventEmitter
+  # ==========================================================================
+
+  - id: js.eventbus.pattern
+    languages: [javascript, typescript]
+    message: Event bus pattern detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.event_driven
+      leaf_id: "27"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: EventEmitter.emit($EVENT, ...)
+          - pattern: $EMITTER.emit($EVENT, ...)
+          - pattern: $EMITTER.on($EVENT, ...)
+          - pattern: new EventEmitter()
+
+  # ==========================================================================
+  # Kafka
+  # ==========================================================================
+
+  - id: js.kafka.producer
+    languages: [javascript, typescript]
+    message: Kafka producer detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: "$PRODUCER.send({ topic: $TOPIC, ... })"
+          - pattern: kafka.producer(...)
+          - pattern: $KAFKA.producer(...)
+
+  - id: js.kafka.consumer
+    languages: [javascript, typescript]
+    message: Kafka consumer detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: "$CONSUMER.subscribe({ topic: $TOPIC, ... })"
+          - pattern: kafka.consumer(...)
+          - pattern: $KAFKA.consumer(...)
+
+  - id: py.kafka.producer
+    languages: [python]
+    message: Kafka producer detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: KafkaProducer(...)
+          - pattern: $PRODUCER.send($TOPIC, ...)
+          - pattern: AIOKafkaProducer(...)
+
+  - id: py.kafka.consumer
+    languages: [python]
+    message: Kafka consumer detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: KafkaConsumer($TOPIC, ...)
+          - pattern: AIOKafkaConsumer(...)
+
+  - id: go.kafka.sarama
+    languages: [go]
+    message: Sarama Kafka client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: sarama.NewSyncProducer(...)
+          - pattern: sarama.NewAsyncProducer(...)
+          - pattern: sarama.NewConsumer(...)
+          - pattern: sarama.NewConsumerGroup(...)
+
+  - id: java.kafka.client
+    languages: [java]
+    message: Kafka client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new KafkaProducer<>(...)
+          - pattern: new KafkaConsumer<>(...)
+          - pattern: $PRODUCER.send($RECORD)
+
+  # ==========================================================================
+  # RabbitMQ
+  # ==========================================================================
+
+  - id: js.rabbitmq.channel
+    languages: [javascript, typescript]
+    message: RabbitMQ channel detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $CHANNEL.assertQueue(...)
+          - pattern: $CHANNEL.sendToQueue(...)
+          - pattern: $CHANNEL.consume(...)
+          - pattern: amqp.connect(...)
+
+  - id: py.pika.rabbitmq
+    languages: [python]
+    message: Pika RabbitMQ client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: pika.BlockingConnection(...)
+          - pattern: $CHANNEL.basic_publish(...)
+          - pattern: $CHANNEL.basic_consume(...)
+
+  - id: go.rabbitmq.amqp
+    languages: [go]
+    message: RabbitMQ AMQP client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: amqp.Dial(...)
+          - pattern: $CH.Publish(...)
+          - pattern: $CH.Consume(...)
+
+  - id: java.rabbitmq.client
+    languages: [java]
+    message: RabbitMQ client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new ConnectionFactory()
+          - pattern: $CHANNEL.basicPublish(...)
+          - pattern: $CHANNEL.basicConsume(...)
+
+  # ==========================================================================
+  # Celery (Python)
+  # ==========================================================================
+
+  - id: py.celery.task
+    languages: [python]
+    message: Celery task detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @$APP.task(...)
+              def $FUNC(...): ...
+          - pattern: |
+              @celery.task
+              def $FUNC(...): ...
+          - pattern: $TASK.delay(...)
+          - pattern: $TASK.apply_async(...)
+
+  # ==========================================================================
+  # NATS
+  # ==========================================================================
+
+  - id: js.nats.client
+    languages: [javascript, typescript]
+    message: NATS client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: connect($NATS_URL)
+          - pattern: $NC.publish($SUBJECT, ...)
+          - pattern: $NC.subscribe($SUBJECT, ...)
+
+  - id: go.nats.client
+    languages: [go]
+    message: NATS client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: nats.Connect(...)
+          - pattern: $NC.Publish($SUBJECT, ...)
+          - pattern: $NC.Subscribe($SUBJECT, ...)
+
+  # ==========================================================================
+  # Bull/BullMQ (Node.js)
+  # ==========================================================================
+
+  - id: js.bull.queue
+    languages: [javascript, typescript]
+    message: Bull/BullMQ queue detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new Queue($NAME, ...)
+          - pattern: new Worker($NAME, ...)
+          - pattern: $QUEUE.add($JOB, ...)
+          - pattern: $QUEUE.process(...)

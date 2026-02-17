@@ -1,0 +1,219 @@
+rules:
+  # ==========================================================================
+  # NestJS Authorization
+  # ==========================================================================
+
+  - id: ts.nestjs.guards
+    languages: [typescript]
+    message: NestJS authorization guard detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "36"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @UseGuards($GUARD)
+              class $CLASS { ... }
+          - pattern: |
+              @UseGuards($GUARD)
+              $METHOD(...) { ... }
+          - pattern: |
+              class $CLASS implements CanActivate { ... }
+
+  - id: ts.nestjs.roles
+    languages: [typescript]
+    message: NestJS role-based access control detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "36"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @Roles($ROLES)
+              $METHOD(...) { ... }
+          - pattern: |
+              @SetMetadata('roles', $ROLES)
+              $METHOD(...) { ... }
+
+  # ==========================================================================
+  # FastAPI Authorization
+  # ==========================================================================
+
+  - id: py.fastapi.depends
+    languages: [python]
+    message: FastAPI dependency injection for auth detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "36"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              def $FUNC(..., $USER: $TYPE = Depends($AUTH), ...): ...
+          - pattern: Depends(get_current_user)
+
+  # ==========================================================================
+  # Django Authorization
+  # ==========================================================================
+
+  - id: py.django.permissions
+    languages: [python]
+    message: Django permission decorator detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "36"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @permission_required($PERM)
+              def $FUNC(...): ...
+          - pattern: |
+              @login_required
+              def $FUNC(...): ...
+          - pattern: has_perm($PERMISSION)
+
+  # ==========================================================================
+  # Spring Security
+  # ==========================================================================
+
+  - id: java.spring.security
+    languages: [java]
+    message: Spring Security annotation detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "36"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @PreAuthorize($EXPR)
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              @Secured($ROLES)
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              @RolesAllowed($ROLES)
+              $RET $METHOD(...) { ... }
+
+  # ==========================================================================
+  # Express/Node.js Access Control
+  # ==========================================================================
+
+  - id: js.access.control
+    languages: [javascript, typescript]
+    message: Access control middleware detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "33"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $ROUTER.use($PATH, requireRole($ROLE))
+          - pattern: $ROUTER.use($PATH, authorize($PERMISSION))
+          - pattern: can($ACTION).on($RESOURCE)
+          - pattern: ability.can($ACTION, $RESOURCE)
+
+  - id: py.access.control
+    languages: [python]
+    message: Access control decorator detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "33"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @permission_required($PERMISSION)
+              def $FUNC(...): ...
+          - pattern: |
+              @requires_role($ROLE)
+              def $FUNC(...): ...
+
+  # ==========================================================================
+  # Go Authorization
+  # ==========================================================================
+
+  - id: go.casbin.policy
+    languages: [go]
+    message: Casbin policy enforcement detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "36"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $ENFORCER.Enforce(...)
+          - pattern: casbin.NewEnforcer(...)
+
+  # ==========================================================================
+  # Rust Authorization
+  # ==========================================================================
+
+  - id: rust.actix.guard
+    languages: [rust]
+    message: Actix-web guard middleware detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "36"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: web::guard::fn_guard(...)
+          - pattern: Guard::check(...)
+
+  # ==========================================================================
+  # C# Authorization
+  # ==========================================================================
+
+  - id: csharp.aspnet.authorize
+    languages: [csharp]
+    message: ASP.NET authorization attribute detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "36"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              [Authorize]
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              [Authorize(Roles = $ROLES)]
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              [Authorize(Policy = $POLICY)]
+              $RET $METHOD(...) { ... }
+
+  # ==========================================================================
+  # Kotlin Authorization
+  # ==========================================================================
+
+  - id: kotlin.spring.security
+    languages: [kotlin]
+    message: Spring Security annotation detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.model
+      leaf_id: "36"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @PreAuthorize($EXPR)
+              fun $METHOD(...): $RET { ... }
+          - pattern: |
+              @Secured($ROLES)
+              fun $METHOD(...): $RET { ... }

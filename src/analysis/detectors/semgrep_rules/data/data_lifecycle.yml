@@ -1,0 +1,64 @@
+rules:
+  # ==========================================================================
+  # Data Lifecycle (leaf_id: 31)
+  # ==========================================================================
+
+  - id: csharp.data.ttl
+    languages: [csharp]
+    message: Data TTL or retention policy detected
+    severity: INFO
+    metadata:
+      facet_slot: data.lifecycle.retention_and_ttl
+      leaf_id: "31"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: $CACHE.Set($KEY, $VAL, $OPTS)
+          - pattern: $OPTS.SetAbsoluteExpiration(...)
+          - pattern: $OPTS.SetSlidingExpiration(...)
+          - pattern: $ENTITY.TimeToLive = ...
+          - pattern: $ENTITY.RetentionDays = ...
+
+  - id: php.data.ttl
+    languages: [php]
+    message: Data TTL or retention policy detected
+    severity: INFO
+    metadata:
+      facet_slot: data.lifecycle.retention_and_ttl
+      leaf_id: "31"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: Cache::put($KEY, $VAL, $TTL)
+          - pattern: cache()->put($KEY, $VAL, $TTL)
+          - pattern: $CACHE->set($KEY, $VAL, $TTL)
+          - pattern: $MODEL->expires_at = $EXPR;
+          - pattern: $MODEL->retention_days = $EXPR;
+
+  - id: php.data.privacy
+    languages: [php]
+    message: Data privacy or anonymization detected
+    severity: INFO
+    metadata:
+      facet_slot: data.lifecycle.privacy
+      leaf_id: "31"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: $MODEL->anonymize(...)
+          - pattern: $MODEL->redact(...)
+          - pattern: $MODEL->forget(...)
+
+  - id: csharp.data.privacy
+    languages: [csharp]
+    message: Data privacy or anonymization detected
+    severity: INFO
+    metadata:
+      facet_slot: data.lifecycle.privacy
+      leaf_id: "31"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: $ENTITY.Anonymize(...)
+          - pattern: $ENTITY.Redact(...)
+          - pattern: $ENTITY.Forget(...)

@@ -1,0 +1,26 @@
+rules:
+  # ==========================================================================
+  # Documentation Patterns (leaf_id: 60)
+  # ==========================================================================
+
+  - id: csharp.docs.xml
+    languages: [csharp]
+    message: XML documentation comments detected
+    severity: INFO
+    metadata:
+      facet_slot: governance.docs
+      leaf_id: "60"
+      confidence: "0.7"
+    patterns:
+      - pattern: "/// <summary>"
+
+  - id: php.docs.phpdoc
+    languages: [php]
+    message: PHPDoc documentation detected
+    severity: INFO
+    metadata:
+      facet_slot: governance.docs
+      leaf_id: "60"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "\\/\\*\\*\\s*\\n\\s*\\*\\s*@"

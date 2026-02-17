@@ -1,0 +1,32 @@
+rules:
+  # ==========================================================================
+  # Authorization (leaf_id: 33)
+  # ==========================================================================
+
+  - id: csharp.authorization.policy
+    languages: [csharp]
+    message: Authorization policy or service detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.enforcement_points
+      leaf_id: "33"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: services.AddAuthorization(...)
+          - pattern: IAuthorizationService $SVC
+          - pattern: $AUTH.RequireRole(...)
+
+  - id: php.authorization.gates
+    languages: [php]
+    message: Authorization gate or policy detected
+    severity: INFO
+    metadata:
+      facet_slot: authz.enforcement_points
+      leaf_id: "33"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: "Gate::define(...)"
+          - pattern: $USER->can(...)
+          - pattern: $USER->authorize(...)

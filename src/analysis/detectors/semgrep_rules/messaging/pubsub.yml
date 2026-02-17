@@ -1,0 +1,249 @@
+rules:
+  # ==========================================================================
+  # AWS SQS
+  # ==========================================================================
+
+  - id: js.aws.sqs
+    languages: [javascript, typescript]
+    message: AWS SQS usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new SQSClient(...)
+          - pattern: SendMessageCommand(...)
+          - pattern: ReceiveMessageCommand(...)
+          - pattern: $SQS.sendMessage(...)
+
+  - id: py.aws.sqs
+    languages: [python]
+    message: AWS SQS usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: boto3.client("sqs")
+          - pattern: $SQS.send_message(...)
+          - pattern: $SQS.receive_message(...)
+
+  - id: go.aws.sqs
+    languages: [go]
+    message: AWS SQS usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: sqs.New(...)
+          - pattern: $SQS.SendMessage(...)
+          - pattern: $SQS.ReceiveMessage(...)
+
+  # ==========================================================================
+  # AWS SNS
+  # ==========================================================================
+
+  - id: js.aws.sns
+    languages: [javascript, typescript]
+    message: AWS SNS usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new SNSClient(...)
+          - pattern: PublishCommand(...)
+          - pattern: $SNS.publish(...)
+
+  - id: py.aws.sns
+    languages: [python]
+    message: AWS SNS usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: boto3.client("sns")
+          - pattern: $SNS.publish(...)
+
+  # ==========================================================================
+  # GCP Pub/Sub
+  # ==========================================================================
+
+  - id: js.gcp.pubsub
+    languages: [javascript, typescript]
+    message: GCP Pub/Sub usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new PubSub(...)
+          - pattern: $PUBSUB.topic($TOPIC)
+          - pattern: $TOPIC.publish(...)
+          - pattern: $SUBSCRIPTION.on("message", ...)
+
+  - id: py.gcp.pubsub
+    languages: [python]
+    message: GCP Pub/Sub usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: pubsub_v1.PublisherClient(...)
+          - pattern: pubsub_v1.SubscriberClient(...)
+          - pattern: $PUBLISHER.publish($TOPIC, ...)
+
+  - id: go.gcp.pubsub
+    languages: [go]
+    message: GCP Pub/Sub usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: pubsub.NewClient(...)
+          - pattern: $CLIENT.Topic($TOPIC)
+          - pattern: $TOPIC.Publish(...)
+
+  # ==========================================================================
+  # Azure Service Bus
+  # ==========================================================================
+
+  - id: js.azure.servicebus
+    languages: [javascript, typescript]
+    message: Azure Service Bus usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new ServiceBusClient(...)
+          - pattern: $CLIENT.createSender(...)
+          - pattern: $CLIENT.createReceiver(...)
+          - pattern: $SENDER.sendMessages(...)
+
+  - id: py.azure.servicebus
+    languages: [python]
+    message: Azure Service Bus usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: ServiceBusClient.from_connection_string(...)
+          - pattern: $CLIENT.get_queue_sender(...)
+          - pattern: $SENDER.send_messages(...)
+
+  - id: csharp.azure.servicebus
+    languages: [csharp]
+    message: Azure Service Bus usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new ServiceBusClient(...)
+          - pattern: $CLIENT.CreateSender(...)
+          - pattern: $SENDER.SendMessageAsync(...)
+
+  # ==========================================================================
+  # Redis Pub/Sub
+  # ==========================================================================
+
+  - id: js.redis.pubsub
+    languages: [javascript, typescript]
+    message: Redis Pub/Sub usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $REDIS.subscribe($CHANNEL, ...)
+          - pattern: $REDIS.publish($CHANNEL, $MESSAGE)
+          - pattern: $REDIS.on("message", ...)
+
+  - id: py.redis.pubsub
+    languages: [python]
+    message: Redis Pub/Sub usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $REDIS.pubsub()
+          - pattern: $PUBSUB.subscribe($CHANNEL)
+          - pattern: $REDIS.publish($CHANNEL, $MESSAGE)
+
+  - id: go.redis.pubsub
+    languages: [go]
+    message: Redis Pub/Sub usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.message_queues
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $RDB.Subscribe(...)
+          - pattern: $RDB.Publish(...)
+          - pattern: $PUBSUB.Channel()
+
+  # ==========================================================================
+  # AWS EventBridge
+  # ==========================================================================
+
+  - id: js.aws.eventbridge
+    languages: [javascript, typescript]
+    message: AWS EventBridge usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.event_driven
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new EventBridgeClient(...)
+          - pattern: PutEventsCommand(...)
+          - pattern: $EVENTBRIDGE.putEvents(...)
+
+  - id: py.aws.eventbridge
+    languages: [python]
+    message: AWS EventBridge usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.event_driven
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: boto3.client("events")
+          - pattern: $EVENTS.put_events(...)

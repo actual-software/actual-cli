@@ -1,0 +1,34 @@
+rules:
+  # ==========================================================================
+  # Process Model (leaf_id: 36)
+  # ==========================================================================
+
+  - id: csharp.process.hosted_service
+    languages: [csharp]
+    message: Background service process model detected
+    severity: INFO
+    metadata:
+      facet_slot: runtime.process_model
+      leaf_id: "36"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS : BackgroundService { ... }
+          - pattern: |
+              class $CLASS : IHostedService { ... }
+
+  - id: php.process.fork
+    languages: [php]
+    message: PHP process model (forking/event loop) detected
+    severity: INFO
+    metadata:
+      facet_slot: runtime.process_model
+      leaf_id: "36"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: pcntl_fork()
+          - pattern-regex: "\\bSwoole\\\\Process\\b"
+          - pattern-regex: "\\bReact\\\\EventLoop\\\\Loop::get\\b"
+          - pattern-regex: "\\bAmp\\\\Loop::run\\b"
