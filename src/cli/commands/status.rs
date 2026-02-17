@@ -33,18 +33,27 @@ fn resolve_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or(fallback)
 }
 
-/// Attempt to detect authentication status gracefully.
+/// Attempt to detect authentication status gracefully with a timeout.
 ///
 /// Returns `None` if the Claude binary is not found, auth check fails,
-/// or any other error occurs. The status command should never fail because
-/// of auth detection.
+/// times out (3 seconds), or any other error occurs. The status command
+/// should never fail or hang because of auth detection.
 fn try_detect_auth() -> Option<AuthDisplay> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     let binary = find_claude_binary().ok()?;
-    let status = check_auth(&binary).ok()?;
-    Some(AuthDisplay {
-        authenticated: status.logged_in,
-        email: status.email.clone(),
-    })
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(check_auth(&binary));
+    });
+    rx.recv_timeout(Duration::from_secs(3))
+        .ok()?
+        .ok()
+        .map(|status| AuthDisplay {
+            authenticated: status.logged_in,
+            email: status.email,
+        })
 }
 
 fn run_status(
@@ -143,7 +152,7 @@ fn format_claude_md_section(cwd: &Path, width: usize) -> String {
 
     for file_path in &files {
         let relative = file_path.strip_prefix(cwd).unwrap_or(file_path);
-        let display_path = relative.display().to_string();
+        let display_path = format!("./{}", relative.display());
 
         let content = std::fs::read_to_string(file_path).unwrap_or_default();
 
