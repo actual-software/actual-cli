@@ -1,0 +1,386 @@
+{
+  "timestamp": "2026-02-17T01:41:46.256694+00:00",
+  "model": "haiku",
+  "runs_per_repo": 3,
+  "results": [
+    {
+      "repo_path": "/Users/poile/repos/actualai/actual-cli",
+      "repo_name": "actual-cli",
+      "run_index": 0,
+      "duration_ms": 21271,
+      "success": true,
+      "error": null,
+      "analysis": {
+        "is_monorepo": false,
+        "project_count": 1,
+        "projects": [
+          {
+            "path": ".",
+            "name": "actual-cli",
+            "languages": [
+              "Rust"
+            ],
+            "frameworks": [
+              {
+                "name": "clap",
+                "category": "Cli"
+              },
+              {
+                "name": "tokio",
+                "category": "Cli"
+              },
+              {
+                "name": "reqwest",
+                "category": "Cli"
+              }
+            ],
+            "package_manager": "cargo",
+            "description": "ADR-powered CLAUDE.md generator CLI application"
+          }
+        ]
+      }
+    },
+    {
+      "repo_path": "/Users/poile/repos/actualai/actual-cli",
+      "repo_name": "actual-cli",
+      "run_index": 1,
+      "duration_ms": 17228,
+      "success": true,
+      "error": null,
+      "analysis": {
+        "is_monorepo": false,
+        "project_count": 1,
+        "projects": [
+          {
+            "path": ".",
+            "name": "actual-cli",
+            "languages": [
+              "Rust"
+            ],
+            "frameworks": [
+              {
+                "name": "clap",
+                "category": "Cli"
+              },
+              {
+                "name": "tokio",
+                "category": "Library"
+              },
+              {
+                "name": "reqwest",
+                "category": "Library"
+              },
+              {
+                "name": "serde",
+                "category": "Library"
+              },
+              {
+                "name": "thiserror",
+                "category": "Library"
+              }
+            ],
+            "package_manager": "cargo",
+            "description": "ADR-powered CLAUDE.md generator - a CLI tool for generating and managing Architecture Decision Records and project configuration files"
+          }
+        ]
+      }
+    },
+    {
+      "repo_path": "/Users/poile/repos/actualai/actual-cli",
+      "repo_name": "actual-cli",
+      "run_index": 2,
+      "duration_ms": 24328,
+      "success": true,
+      "error": null,
+      "analysis": {
+        "is_monorepo": false,
+        "project_count": 1,
+        "projects": [
+          {
+            "path": ".",
+            "name": "actual-cli",
+            "languages": [
+              "Rust"
+            ],
+            "frameworks": [
+              {
+                "name": "clap",
+                "category": "Cli"
+              },
+              {
+                "name": "tokio",
+                "category": "Library"
+              },
+              {
+                "name": "reqwest",
+                "category": "Library"
+              }
+            ],
+            "package_manager": "cargo",
+            "description": "ADR-powered CLAUDE.md generator - a command-line tool for generating project documentation and configuration files based on Architecture Decision Records"
+          }
+        ]
+      }
+    },
+    {
+      "repo_path": "/Users/poile/repos/wizard",
+      "repo_name": "wizard",
+      "run_index": 0,
+      "duration_ms": 30244,
+      "success": true,
+      "error": null,
+      "analysis": {
+        "is_monorepo": false,
+        "project_count": 1,
+        "projects": [
+          {
+            "path": ".",
+            "name": "grid-runner",
+            "languages": [
+              "Go"
+            ],
+            "frameworks": [
+              {
+                "name": "bubbletea",
+                "category": "Cli"
+              },
+              {
+                "name": "lipgloss",
+                "category": "Cli"
+              }
+            ],
+            "package_manager": "go",
+            "description": "A Tron-themed interactive CLI application built with Go for system initialization and configuration management, featuring a terminal UI with multiple stages for setting up DNS, WireGuard, Docker, and system services."
+          }
+        ]
+      }
+    },
+    {
+      "repo_path": "/Users/poile/repos/wizard",
+      "repo_name": "wizard",
+      "run_index": 1,
+      "duration_ms": 24722,
+      "success": false,
+      "error": "Claude Code subprocess failed: Claude Code returned an error: unknown error",
+      "analysis": null
+    },
+    {
+      "repo_path": "/Users/poile/repos/wizard",
+      "repo_name": "wizard",
+      "run_index": 2,
+      "duration_ms": 26263,
+      "success": false,
+      "error": "Claude Code subprocess failed: Claude Code returned an error: unknown error",
+      "analysis": null
+    },
+    {
+      "repo_path": "/Users/poile/repos/gastown",
+      "repo_name": "gastown",
+      "run_index": 0,
+      "duration_ms": 21545,
+      "success": true,
+      "error": null,
+      "analysis": {
+        "is_monorepo": true,
+        "project_count": 2,
+        "projects": [
+          {
+            "path": ".",
+            "name": "Gas Town CLI",
+            "languages": [
+              "Go"
+            ],
+            "frameworks": [
+              {
+                "name": "cobra",
+                "category": "Cli"
+              },
+              {
+                "name": "bubbletea",
+                "category": "Cli"
+              },
+              {
+                "name": "lipgloss",
+                "category": "Cli"
+              },
+              {
+                "name": "rod",
+                "category": "Cli"
+              }
+            ],
+            "package_manager": "go",
+            "description": "Multi-agent orchestration system for Claude Code with persistent work tracking using git-backed hooks, convoy-based work distribution, and agent coordination capabilities"
+          },
+          {
+            "path": "npm-package",
+            "name": "Gas Town NPM Package",
+            "languages": [
+              "JavaScript"
+            ],
+            "frameworks": [],
+            "package_manager": "npm",
+            "description": "NPM package wrapper for Gas Town CLI that provides binary distribution and installation support across macOS, Linux, and Windows with native binary downloading"
+          }
+        ]
+      }
+    },
+    {
+      "repo_path": "/Users/poile/repos/gastown",
+      "repo_name": "gastown",
+      "run_index": 1,
+      "duration_ms": 26077,
+      "success": true,
+      "error": null,
+      "analysis": {
+        "is_monorepo": true,
+        "project_count": 2,
+        "projects": [
+          {
+            "path": ".",
+            "name": "Gas Town (Main CLI)",
+            "languages": [
+              "Go"
+            ],
+            "frameworks": [
+              {
+                "name": "cobra",
+                "category": "Cli"
+              },
+              {
+                "name": "bubbletea",
+                "category": "Cli"
+              }
+            ],
+            "package_manager": "go",
+            "description": "Multi-agent orchestration system for Claude Code with persistent work tracking. A workspace manager that coordinates multiple AI agents working on different tasks through git-backed hooks, persistent work state tracking, and convoy-based task distribution."
+          },
+          {
+            "path": "npm-package",
+            "name": "Gas Town NPM Wrapper",
+            "languages": [
+              "JavaScript"
+            ],
+            "frameworks": [
+              {
+                "name": "nodejs",
+                "category": "Cli"
+              }
+            ],
+            "package_manager": "npm",
+            "description": "NPM package wrapper that distributes the Go CLI as a Node.js binary. Provides platform-specific binary distribution for gastown CLI across macOS, Linux, and Windows."
+          }
+        ]
+      }
+    },
+    {
+      "repo_path": "/Users/poile/repos/gastown",
+      "repo_name": "gastown",
+      "run_index": 2,
+      "duration_ms": 27904,
+      "success": true,
+      "error": null,
+      "analysis": {
+        "is_monorepo": false,
+        "project_count": 1,
+        "projects": [
+          {
+            "path": ".",
+            "name": "Gas Town",
+            "languages": [
+              "Go"
+            ],
+            "frameworks": [
+              {
+                "name": "cobra",
+                "category": "Cli"
+              },
+              {
+                "name": "bubbletea",
+                "category": "Cli"
+              },
+              {
+                "name": "rod",
+                "category": "WebBackend"
+              }
+            ],
+            "package_manager": "go",
+            "description": "Multi-agent orchestration system for Claude Code with persistent work tracking. A workspace manager that coordinates multiple AI agents working on different tasks using git-backed hooks, enabling reliable multi-agent workflows with work persistence."
+          }
+        ]
+      }
+    },
+    {
+      "repo_path": "/Users/poile/repos/rinzler",
+      "repo_name": "rinzler",
+      "run_index": 0,
+      "duration_ms": 32806,
+      "success": false,
+      "error": "Claude Code subprocess failed: Claude Code returned an error: unknown error",
+      "analysis": null
+    },
+    {
+      "repo_path": "/Users/poile/repos/rinzler",
+      "repo_name": "rinzler",
+      "run_index": 1,
+      "duration_ms": 27297,
+      "success": false,
+      "error": "Claude Code subprocess failed: Claude Code returned an error: unknown error",
+      "analysis": null
+    },
+    {
+      "repo_path": "/Users/poile/repos/rinzler",
+      "repo_name": "rinzler",
+      "run_index": 2,
+      "duration_ms": 25164,
+      "success": false,
+      "error": "Claude Code subprocess failed: Claude Code returned an error: unknown error",
+      "analysis": null
+    }
+  ],
+  "summary": [
+    {
+      "repo_name": "actual-cli",
+      "repo_path": "/Users/poile/repos/actualai/actual-cli",
+      "total_runs": 3,
+      "successful_runs": 3,
+      "min_ms": 17228,
+      "max_ms": 24328,
+      "median_ms": 21271,
+      "mean_ms": 20942,
+      "deterministic": false
+    },
+    {
+      "repo_name": "wizard",
+      "repo_path": "/Users/poile/repos/wizard",
+      "total_runs": 3,
+      "successful_runs": 1,
+      "min_ms": 30244,
+      "max_ms": 30244,
+      "median_ms": 30244,
+      "mean_ms": 30244,
+      "deterministic": true
+    },
+    {
+      "repo_name": "gastown",
+      "repo_path": "/Users/poile/repos/gastown",
+      "total_runs": 3,
+      "successful_runs": 3,
+      "min_ms": 21545,
+      "max_ms": 27904,
+      "median_ms": 26077,
+      "mean_ms": 25175,
+      "deterministic": false
+    },
+    {
+      "repo_name": "rinzler",
+      "repo_path": "/Users/poile/repos/rinzler",
+      "total_runs": 3,
+      "successful_runs": 0,
+      "min_ms": 0,
+      "max_ms": 0,
+      "median_ms": 0,
+      "mean_ms": 0,
+      "deterministic": true
+    }
+  ]
+}
