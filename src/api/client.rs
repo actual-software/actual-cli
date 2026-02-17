@@ -190,12 +190,13 @@ pub fn build_match_request(analysis: &RepoAnalysis, config: &Config) -> MatchReq
     let options = if config.include_categories.is_some()
         || config.exclude_categories.is_some()
         || config.include_general.is_some()
+        || config.max_per_framework.is_some()
     {
         Some(MatchOptions {
             categories: config.include_categories.clone(),
             exclude_categories: config.exclude_categories.clone(),
             include_general: config.include_general,
-            max_per_framework: None,
+            max_per_framework: config.max_per_framework,
         })
     } else {
         None
@@ -260,6 +261,22 @@ mod tests {
             options.categories,
             Some(vec!["security".to_string(), "testing".to_string()])
         );
+    }
+
+    #[test]
+    fn test_config_with_max_per_framework() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![make_project(".", "app", vec![Language::Rust], vec![])],
+        };
+        let config = Config {
+            max_per_framework: Some(5),
+            ..Config::default()
+        };
+        let request = build_match_request(&analysis, &config);
+        assert!(request.options.is_some());
+        let options = request.options.unwrap();
+        assert_eq!(options.max_per_framework, Some(5));
     }
 
     #[test]

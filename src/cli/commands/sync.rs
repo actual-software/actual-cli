@@ -387,40 +387,21 @@ fn raw_adrs_to_output(adrs: &[crate::api::types::Adr]) -> TailoringOutput {
 /// Scan the repository for existing CLAUDE.md files and return their
 /// contents concatenated as a string, for use as context during tailoring.
 fn find_existing_claude_md(root_dir: &Path) -> String {
-    let mut results = Vec::new();
-
-    fn walk(dir: &Path, root: &Path, results: &mut Vec<String>) {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                // Skip hidden directories and common non-project dirs
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.starts_with('.')
-                    || name_str == "node_modules"
-                    || name_str == "target"
-                    || name_str == "dist"
-                    || name_str == "build"
-                {
-                    continue;
-                }
-                walk(&path, root, results);
-            } else if entry.file_name() == "CLAUDE.md" {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
-                    let cleaned = markers::strip_managed_metadata(&content);
-                    results.push(format!("=== {rel} ===\n{cleaned}"));
-                }
-            }
-        }
-    }
-
-    walk(root_dir, root_dir, &mut results);
-    results.sort();
+    let files = super::find_claude_md_files(root_dir);
+    // `find_claude_md_files` returns paths in sorted order, and `filter_map`
+    // preserves that order, so no additional sort is needed here.
+    let results: Vec<String> = files
+        .iter()
+        .filter_map(|path| {
+            let content = std::fs::read_to_string(path).ok()?;
+            let rel = path
+                .strip_prefix(root_dir)
+                .unwrap_or(path)
+                .to_string_lossy();
+            let cleaned = markers::strip_managed_metadata(&content);
+            Some(format!("=== {rel} ===\n{cleaned}"))
+        })
+        .collect();
     results.join("\n\n")
 }
 
@@ -2055,6 +2036,47 @@ mod tests {
         assert!(result.is_empty());
         // Restore permissions for cleanup
         std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn test_find_existing_claude_md_skips_vendor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+        std::fs::write(
+            dir.path().join("vendor").join("CLAUDE.md"),
+            "Vendor content",
+        )
+        .unwrap();
+        let result = find_existing_claude_md(dir.path());
+        assert!(result.is_empty(), "should skip vendor directory");
+    }
+
+    #[test]
+    fn test_find_existing_claude_md_skips_pycache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("__pycache__")).unwrap();
+        std::fs::write(
+            dir.path().join("__pycache__").join("CLAUDE.md"),
+            "Pycache content",
+        )
+        .unwrap();
+        let result = find_existing_claude_md(dir.path());
+        assert!(result.is_empty(), "should skip __pycache__ directory");
+    }
+
+    #[test]
+    fn test_find_existing_claude_md_skips_all_ignored_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        for skip in super::super::SKIP_DIRS {
+            let d = dir.path().join(skip);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("CLAUDE.md"), "# Skip").unwrap();
+        }
+        let result = find_existing_claude_md(dir.path());
+        assert!(
+            result.is_empty(),
+            "should skip all SKIP_DIRS directories, got: {result}"
+        );
     }
 
     // ── Phase 2 integration tests ──

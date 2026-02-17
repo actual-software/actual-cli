@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use streaming_iterator::StreamingIterator;
@@ -360,22 +362,18 @@ fn count_parens(s: &str) -> i32 {
     depth
 }
 
-/// Convenience: default path to the bundled tree-sitter query packs.
-///
-/// This points to `src/analysis/detectors/tree_sitter_queries/` relative to the
-/// workspace root. Primarily useful during development and tests. Production
-/// code should pass the path explicitly.
-pub fn default_query_packs_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("analysis")
-        .join("detectors")
-        .join("tree_sitter_queries")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Default path to the bundled tree-sitter query packs (test-only).
+    fn default_query_packs_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("analysis")
+            .join("detectors")
+            .join("tree_sitter_queries")
+    }
 
     /// Helper to compile a [`QueryDefinition`] for Rust and insert it into
     /// an analyzer's `compiled_packs`. Panics if the query text is invalid
