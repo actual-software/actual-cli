@@ -104,33 +104,43 @@ pub fn detect_languages(path: &Path) -> Vec<(Language, usize)> {
     results
 }
 
-/// Normalize a language name/alias to its canonical lowercase form.
+/// Normalize a language name or alias to its canonical lowercase form.
 ///
-/// Handles common aliases and alternate names. Returns `Some(canonical)` only
-/// when the input is a known alias that differs from its canonical form.
+/// Returns `Some(canonical)` when the input is a recognized language name
+/// (including canonical forms themselves, to handle case normalization).
+/// Returns `None` only for completely unrecognized input.
 ///
-/// Returns `None` when the input is already canonical (e.g. `"rust"`) **or**
-/// when the input is not recognized at all (e.g. `"haskell"`). In both cases
-/// callers should use the original value as-is.
+/// This ensures that case variants like `"CSharp"` or `"Rust"` are always
+/// lowercased to their canonical form, and aliases like `"ts"` or `"c#"` are
+/// expanded.
 ///
 /// # Examples
 ///
 /// ```
 /// use actual_cli::analysis::static_analyzer::languages::normalize_language;
 ///
-/// assert_eq!(normalize_language("ts"), Some("typescript")); // alias → canonical
-/// assert_eq!(normalize_language("py"), Some("python"));     // alias → canonical
-/// assert_eq!(normalize_language("rust"), None);   // already canonical
-/// assert_eq!(normalize_language("haskell"), None); // unrecognized — pass through
+/// assert_eq!(normalize_language("ts"), Some("typescript"));   // alias → canonical
+/// assert_eq!(normalize_language("CSharp"), Some("csharp"));   // case variant → canonical
+/// assert_eq!(normalize_language("rust"), Some("rust"));       // already canonical
+/// assert_eq!(normalize_language("haskell"), None);            // unrecognized
 /// ```
 pub fn normalize_language(value: &str) -> Option<&'static str> {
     match value.to_lowercase().as_str() {
-        "c#" | "c_sharp" | "c-sharp" | "cs" => Some("csharp"),
-        "js" | "jsx" => Some("javascript"),
-        "ts" | "tsx" => Some("typescript"),
-        "py" => Some("python"),
-        "golang" => Some("go"),
-        "c++" | "cxx" => Some("cpp"),
+        "c#" | "c_sharp" | "c-sharp" | "cs" | "csharp" => Some("csharp"),
+        "js" | "jsx" | "javascript" => Some("javascript"),
+        "ts" | "tsx" | "typescript" => Some("typescript"),
+        "py" | "python" => Some("python"),
+        "golang" | "go" => Some("go"),
+        "c++" | "cxx" | "cpp" => Some("cpp"),
+        "rust" => Some("rust"),
+        "java" => Some("java"),
+        "kotlin" => Some("kotlin"),
+        "swift" => Some("swift"),
+        "ruby" => Some("ruby"),
+        "php" => Some("php"),
+        "c" => Some("c"),
+        "scala" => Some("scala"),
+        "elixir" => Some("elixir"),
         _ => None,
     }
 }
@@ -244,9 +254,9 @@ mod tests {
         assert_eq!(normalize_language("c_sharp"), Some("csharp"));
         assert_eq!(normalize_language("c-sharp"), Some("csharp"));
         assert_eq!(normalize_language("cs"), Some("csharp"));
-        // Canonical form returns None (already normalized)
-        assert_eq!(normalize_language("csharp"), None);
-        assert_eq!(normalize_language("CSharp"), None);
+        // Canonical form and case variants all normalize
+        assert_eq!(normalize_language("csharp"), Some("csharp"));
+        assert_eq!(normalize_language("CSharp"), Some("csharp"));
     }
 
     #[test]
@@ -286,13 +296,31 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_canonical_returns_none() {
-        assert_eq!(normalize_language("rust"), None);
-        assert_eq!(normalize_language("python"), None);
-        assert_eq!(normalize_language("go"), None);
-        assert_eq!(normalize_language("java"), None);
-        assert_eq!(normalize_language("typescript"), None);
-        assert_eq!(normalize_language("javascript"), None);
+    fn test_normalize_canonical_returns_self() {
+        assert_eq!(normalize_language("rust"), Some("rust"));
+        assert_eq!(normalize_language("python"), Some("python"));
+        assert_eq!(normalize_language("go"), Some("go"));
+        assert_eq!(normalize_language("java"), Some("java"));
+        assert_eq!(normalize_language("typescript"), Some("typescript"));
+        assert_eq!(normalize_language("javascript"), Some("javascript"));
+        assert_eq!(normalize_language("cpp"), Some("cpp"));
+        assert_eq!(normalize_language("c"), Some("c"));
+        assert_eq!(normalize_language("kotlin"), Some("kotlin"));
+        assert_eq!(normalize_language("swift"), Some("swift"));
+        assert_eq!(normalize_language("ruby"), Some("ruby"));
+        assert_eq!(normalize_language("php"), Some("php"));
+        assert_eq!(normalize_language("scala"), Some("scala"));
+        assert_eq!(normalize_language("elixir"), Some("elixir"));
+    }
+
+    #[test]
+    fn test_normalize_case_variants() {
+        assert_eq!(normalize_language("Rust"), Some("rust"));
+        assert_eq!(normalize_language("PYTHON"), Some("python"));
+        assert_eq!(normalize_language("Go"), Some("go"));
+        assert_eq!(normalize_language("Java"), Some("java"));
+        assert_eq!(normalize_language("TypeScript"), Some("typescript"));
+        assert_eq!(normalize_language("JavaScript"), Some("javascript"));
     }
 
     #[test]
