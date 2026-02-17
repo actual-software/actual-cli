@@ -419,7 +419,20 @@ pub fn confirm_and_write(
             let existing_content = std::fs::read_to_string(&full_path).ok();
             let is_new_file = existing_content.is_none();
             let detection = markers::detect_changes(existing_content.as_deref(), &file.adr_ids);
-            FileDiff::from_change_detection(&file.path, &detection, is_new_file)
+
+            // Extract old managed content stripped of metadata for text diffing.
+            let old_managed = existing_content
+                .as_deref()
+                .and_then(markers::extract_managed_content)
+                .map(markers::strip_managed_metadata);
+
+            FileDiff::from_change_detection(
+                &file.path,
+                &detection,
+                is_new_file,
+                old_managed,
+                file.content.clone(),
+            )
         })
         .collect();
 
