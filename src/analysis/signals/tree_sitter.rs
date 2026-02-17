@@ -136,10 +136,11 @@ impl TreeSitterAnalyzer {
                     .tree_sitter_language()
                     .with_context(|| format!("no grammar for {language:?}"))?;
                 let mut parser = tree_sitter::Parser::new();
-                let lang_str = language.as_str();
-                parser.set_language(&ts_lang).with_context(|| {
-                    format!("failed to set tree-sitter language for {lang_str:?}")
-                })?;
+                let msg = format!(
+                    "failed to set tree-sitter language for {:?}",
+                    language.as_str()
+                );
+                parser.set_language(&ts_lang).context(msg)?;
                 Ok(e.insert(parser))
             }
         }
@@ -748,6 +749,15 @@ mod tests {
         let matches = analyzer
             .query_file(code, "test.rs", TreeSitterLanguage::Rust)
             .expect("should not error, just skip bad query");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn query_file_no_packs_returns_empty() {
+        let mut analyzer = TreeSitterAnalyzer::without_query_packs();
+        let matches = analyzer
+            .query_file("fn hello() {}", "test.rs", TreeSitterLanguage::Rust)
+            .expect("should succeed with no query packs");
         assert!(matches.is_empty());
     }
 
