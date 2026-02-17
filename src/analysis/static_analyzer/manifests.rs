@@ -285,6 +285,10 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
                 in_require_block = false;
                 continue;
             }
+            // Skip indirect (transitive) dependencies
+            if line.contains("// indirect") {
+                continue;
+            }
             // Lines like: github.com/gin-gonic/gin v1.9.1
             if let Some(module) = line.split_whitespace().next() {
                 if !module.starts_with("//") {
@@ -296,6 +300,10 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
 
         // Single-line require: require github.com/foo/bar v1.0.0
         if let Some(rest) = line.strip_prefix("require ") {
+            // Skip indirect (transitive) dependencies
+            if line.contains("// indirect") {
+                continue;
+            }
             let rest = rest.trim();
             if let Some(module) = rest.split_whitespace().next() {
                 deps.insert(module.to_string());
@@ -1178,5 +1186,89 @@ dependencies {
             strip_python_version_specifier("flask[async]~=2.0"),
             Some("flask".to_string())
         );
+    }
+
+    #[test]
+    fn test_go_mod_indirect_deps() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            r#"
+module github.com/myorg/myapp
+
+go 1.21
+
+require (
+	github.com/gin-gonic/gin v1.9.1
+	github.com/spf13/cobra v1.7.0
+	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/sys v0.15.0 // indirect
+)
+"#,
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        // Direct dependencies should be present
+        assert!(info
+            .dependencies
+            .contains(&"github.com/gin-gonic/gin".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"github.com/spf13/cobra".to_string()));
+        // Indirect dependencies should be filtered out
+        assert!(!info.dependencies.contains(&"golang.org/x/text".to_string()));
+        assert!(!info.dependencies.contains(&"golang.org/x/sys".to_string()));
+    }
+
+    #[test]
+    fn test_go_mod_single_line_indirect() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.21\n\nrequire github.com/bar/baz v1.0.0 // indirect\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert!(!info
+            .dependencies
+            .contains(&"github.com/bar/baz".to_string()));
+    }
+
+    #[test]
+    fn test_go_mod_mixed_direct_indirect() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            r#"
+module example.com/foo
+
+go 1.21
+
+require (
+	github.com/direct/dep v1.0.0
+	github.com/indirect/dep v2.0.0 // indirect
+)
+
+require github.com/another/direct v3.0.0
+require github.com/another/indirect v4.0.0 // indirect
+"#,
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"github.com/direct/dep".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"github.com/another/direct".to_string()));
+        assert!(!info
+            .dependencies
+            .contains(&"github.com/indirect/dep".to_string()));
+        assert!(!info
+            .dependencies
+            .contains(&"github.com/another/indirect".to_string()));
     }
 }
