@@ -124,9 +124,8 @@ pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualErr
         });
     }
 
-    if projects.is_empty() {
-        return Err(ActualError::AnalysisEmpty);
-    }
+    // Note: detect_monorepo always returns at least one project (the root "."),
+    // so `projects` is never empty here. No AnalysisEmpty check needed.
 
     let mut analysis = RepoAnalysis {
         is_monorepo: mono_info.is_monorepo,
@@ -488,6 +487,34 @@ version = "0.1.0"
         assert_eq!(
             nextjs_count, 1,
             "nextjs should be deduplicated, found {nextjs_count}"
+        );
+    }
+
+    #[test]
+    fn test_static_analysis_config_framework_adds_new() {
+        // Test that a config-detected framework NOT in dep-detected list gets added
+        let dir = tempfile::tempdir().unwrap();
+        // package.json with no framework dependencies
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "app", "dependencies": {}}"#,
+        )
+        .unwrap();
+        // Create next.config.js so config detection finds nextjs,
+        // but no "next" dependency so dep detection won't find it
+        std::fs::write(dir.path().join("next.config.js"), "module.exports = {}").unwrap();
+        std::fs::write(dir.path().join("index.js"), "const x = 1;\n").unwrap();
+
+        let result = run_static_analysis(dir.path()).unwrap();
+
+        // nextjs should be present (added from config detection)
+        assert!(
+            result.projects[0]
+                .frameworks
+                .iter()
+                .any(|f| f.name == "nextjs"),
+            "expected nextjs from config detection, got: {:?}",
+            result.projects[0].frameworks
         );
     }
 }
