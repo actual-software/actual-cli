@@ -16,7 +16,7 @@ pub enum SignalSource {
 }
 
 /// A span of source code that provides evidence for a signal.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EvidenceSpan {
     pub file_path: String,
     pub start_byte: usize,
@@ -29,7 +29,7 @@ pub struct EvidenceSpan {
 }
 
 /// A single match from a detection tool (semgrep, tree-sitter, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolMatch {
     pub rule_id: String,
     pub facet_slot: String,

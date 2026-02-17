@@ -64,7 +64,9 @@ impl SemgrepScanner {
 
             // Canonicalize so the key matches what semgrep emits (semgrep
             // resolves symlinks, e.g. /tmp → /private/tmp on macOS).
-            let canonical = std::fs::canonicalize(&temp_path).unwrap_or(temp_path);
+            let canonical = std::fs::canonicalize(&temp_path).with_context(|| {
+                format!("failed to canonicalize temp path {}", temp_path.display())
+            })?;
             file_map.insert(canonical, rel_path.clone());
         }
 
