@@ -1,13 +1,8 @@
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
+use crate::cli::ui::file_confirm::TerminalIO;
 use console::style;
 use std::fmt::Write as FmtWrite;
-use std::io::{self, Write as IoWrite};
-
-/// Trait for reading user input, enabling test injection.
-pub trait InputReader {
-    fn read_line(&self) -> io::Result<String>;
-}
 
 /// Build the styled prompt string shown to the user.
 pub fn prompt_text() -> String {
@@ -91,32 +86,27 @@ pub fn parse_confirm_input(input: &str) -> Option<ConfirmAction> {
     }
 }
 
-/// Display detected projects and prompt with an injectable reader and output.
+/// Display detected projects and prompt using the given terminal.
 ///
-/// Writes the project summary to `out`, then loops reading input from `reader`
-/// until the user enters a valid response (`a`/`accept` or `r`/`reject`/`q`/`quit`).
+/// Writes the project summary via `term.write_line`, then loops reading
+/// input via `term.read_line` until the user enters a valid response
+/// (`a`/`accept` or `r`/`reject`/`q`/`quit`).
 pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
-    reader: &dyn InputReader,
-    out: &mut dyn IoWrite,
+    term: &dyn TerminalIO,
 ) -> ConfirmAction {
     let summary = format_project_summary(analysis);
-    out.write_all(summary.as_bytes()).ok();
+    term.write_line(&summary);
 
     let prompt = prompt_text();
-    out.write_all(prompt.as_bytes()).ok();
-    out.flush().ok();
 
     loop {
-        match reader.read_line() {
+        match term.read_line(&prompt) {
             Ok(input) => match parse_confirm_input(&input) {
                 Some(action) => return action,
                 None => {
                     let hint = format!("\n{}\n", invalid_input_hint());
-                    out.write_all(hint.as_bytes()).ok();
-                    let prompt = prompt_text();
-                    out.write_all(prompt.as_bytes()).ok();
-                    out.flush().ok();
+                    term.write_line(&hint);
                 }
             },
             Err(_) => return ConfirmAction::Reject,
@@ -128,62 +118,41 @@ pub fn prompt_project_confirmation(
 mod tests {
     use super::*;
     use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::error::ActualError;
+    use std::sync::Mutex;
 
-    /// A mock reader that returns a fixed string.
-    struct MockReader {
-        response: String,
+    /// A mock terminal for testing that records output and returns
+    /// predetermined inputs in sequence.
+    struct MockTerminal {
+        inputs: Mutex<Vec<String>>,
+        output: Mutex<Vec<String>>,
     }
 
-    impl MockReader {
-        fn new(response: &str) -> Self {
+    impl MockTerminal {
+        fn new(inputs: Vec<&str>) -> Self {
             Self {
-                response: response.to_string(),
+                inputs: Mutex::new(inputs.into_iter().map(|s| s.to_string()).collect()),
+                output: Mutex::new(Vec::new()),
             }
         }
-    }
 
-    impl InputReader for MockReader {
-        fn read_line(&self) -> io::Result<String> {
-            Ok(self.response.clone())
+        fn output_text(&self) -> String {
+            self.output.lock().unwrap().join("\n")
         }
     }
 
-    /// A mock reader that returns different responses on successive calls.
-    struct SequenceReader {
-        responses: Vec<String>,
-        index: AtomicUsize,
-    }
-
-    impl SequenceReader {
-        fn new(responses: Vec<&str>) -> Self {
-            Self {
-                responses: responses.into_iter().map(String::from).collect(),
-                index: AtomicUsize::new(0),
+    impl TerminalIO for MockTerminal {
+        fn read_line(&self, prompt: &str) -> Result<String, ActualError> {
+            self.output.lock().unwrap().push(prompt.to_string());
+            let mut inputs = self.inputs.lock().unwrap();
+            if inputs.is_empty() {
+                return Err(ActualError::UserCancelled);
             }
+            Ok(inputs.remove(0))
         }
-    }
 
-    impl InputReader for SequenceReader {
-        fn read_line(&self) -> io::Result<String> {
-            let i = self.index.fetch_add(1, Ordering::SeqCst);
-            if i < self.responses.len() {
-                Ok(self.responses[i].clone())
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "no more input",
-                ))
-            }
-        }
-    }
-
-    /// A mock reader that always returns an IO error.
-    struct ErrorReader;
-
-    impl InputReader for ErrorReader {
-        fn read_line(&self) -> io::Result<String> {
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe broken"))
+        fn write_line(&self, text: &str) {
+            self.output.lock().unwrap().push(text.to_string());
         }
     }
 
@@ -443,74 +412,66 @@ mod tests {
     #[test]
     fn prompt_accept_short() {
         let analysis = make_single_project_analysis();
-        let reader = MockReader::new("a");
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["a"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
     #[test]
     fn prompt_accept_full() {
         let analysis = make_single_project_analysis();
-        let reader = MockReader::new("accept");
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["accept"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
     #[test]
     fn prompt_accept_case_insensitive() {
         let analysis = make_single_project_analysis();
-        let reader = MockReader::new("Accept");
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["Accept"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
     #[test]
     fn prompt_reject_short() {
         let analysis = make_single_project_analysis();
-        let reader = MockReader::new("r");
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["r"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
     fn prompt_reject_full() {
         let analysis = make_single_project_analysis();
-        let reader = MockReader::new("reject");
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["reject"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
     fn prompt_quit_short() {
         let analysis = make_single_project_analysis();
-        let reader = MockReader::new("q");
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["q"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
     fn prompt_quit_full() {
         let analysis = make_single_project_analysis();
-        let reader = MockReader::new("quit");
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["quit"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
     fn prompt_invalid_then_accept() {
         let analysis = make_single_project_analysis();
-        let reader = SequenceReader::new(vec!["x", "invalid", "a"]);
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["x", "invalid", "a"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Accept);
-        let output = String::from_utf8(out).unwrap();
+        let output = term.output_text();
         assert!(
             output.contains("Please enter"),
             "expected hint in output: {output}"
@@ -529,47 +490,43 @@ mod tests {
     #[test]
     fn prompt_invalid_then_reject() {
         let analysis = make_single_project_analysis();
-        let reader = SequenceReader::new(vec!["", "nope", "r"]);
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["", "nope", "r"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
     fn prompt_io_error_returns_reject() {
         let analysis = make_single_project_analysis();
-        let reader = ErrorReader;
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        // Empty inputs causes read_line to return Err → Reject
+        let term = MockTerminal::new(vec![]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
     fn prompt_whitespace_trimmed() {
         let analysis = make_single_project_analysis();
-        let reader = MockReader::new("  a  ");
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        let term = MockTerminal::new(vec!["  a  "]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Accept);
     }
 
     #[test]
     fn prompt_sequence_exhausted_returns_reject() {
         let analysis = make_single_project_analysis();
-        // All responses are invalid, so the reader is exhausted → Err → Reject
-        let reader = SequenceReader::new(vec!["x"]);
-        let mut out = Vec::new();
-        let result = prompt_project_confirmation(&analysis, &reader, &mut out);
+        // First response is invalid, then inputs exhausted → Err → Reject
+        let term = MockTerminal::new(vec!["x"]);
+        let result = prompt_project_confirmation(&analysis, &term);
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
     fn prompt_writes_summary_to_output() {
         let analysis = make_single_project_analysis();
-        let reader = MockReader::new("a");
-        let mut out = Vec::new();
-        prompt_project_confirmation(&analysis, &reader, &mut out);
-        let output = String::from_utf8(out).unwrap();
+        let term = MockTerminal::new(vec!["a"]);
+        prompt_project_confirmation(&analysis, &term);
+        let output = term.output_text();
         assert!(
             output.contains("my-cli"),
             "expected project name in output: {output}"
