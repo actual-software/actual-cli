@@ -127,6 +127,27 @@ pub fn extract_last_synced(content: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
+/// Strips managed section metadata comments from content.
+///
+/// Removes `<!-- adr-ids: ... -->`, `<!-- last-synced: ... -->`, `<!-- version: ... -->`,
+/// `<!-- managed:actual-start -->`, and `<!-- managed:actual-end -->` lines so that
+/// the tailoring LLM only sees the human-readable content without tracking metadata
+/// that could cause ADR ID hallucination.
+pub fn strip_managed_metadata(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !(trimmed.starts_with("<!-- adr-ids:")
+                || trimmed.starts_with("<!-- last-synced:")
+                || trimmed.starts_with("<!-- version:")
+                || trimmed == START_MARKER
+                || trimmed == END_MARKER)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Returns the content between the START and END markers, or None if markers are absent.
 pub fn extract_managed_content(content: &str) -> Option<&str> {
     let start_idx = content.find(START_MARKER)?;
@@ -571,5 +592,120 @@ mod tests {
     fn test_next_version_no_version_in_content() {
         // Content exists but has no version comment
         assert_eq!(next_version(Some("no version here")), 1);
+    }
+
+    // --- strip_managed_metadata tests ---
+
+    #[test]
+    fn test_strip_managed_metadata_removes_adr_ids() {
+        let content = "# Rules\n<!-- adr-ids: abc-123,def-456 -->\nSome content";
+        let result = strip_managed_metadata(content);
+        assert!(
+            !result.contains("adr-ids"),
+            "should strip adr-ids: {result}"
+        );
+        assert!(
+            result.contains("# Rules"),
+            "should preserve heading: {result}"
+        );
+        assert!(
+            result.contains("Some content"),
+            "should preserve content: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_removes_last_synced() {
+        let content = "# Rules\n<!-- last-synced: 2024-01-01T00:00:00Z -->\nSome content";
+        let result = strip_managed_metadata(content);
+        assert!(
+            !result.contains("last-synced"),
+            "should strip last-synced: {result}"
+        );
+        assert!(
+            result.contains("Some content"),
+            "should preserve content: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_removes_version() {
+        let content = "# Rules\n<!-- version: 3 -->\nSome content";
+        let result = strip_managed_metadata(content);
+        assert!(
+            !result.contains("version:"),
+            "should strip version: {result}"
+        );
+        assert!(
+            result.contains("Some content"),
+            "should preserve content: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_removes_markers() {
+        let content = format!(
+            "# Before\n{}\nManaged content\n{}\n# After",
+            START_MARKER, END_MARKER
+        );
+        let result = strip_managed_metadata(&content);
+        assert!(
+            !result.contains("managed:actual"),
+            "should strip markers: {result}"
+        );
+        assert!(
+            result.contains("Managed content"),
+            "should preserve inner content: {result}"
+        );
+        assert!(
+            result.contains("# Before"),
+            "should preserve before: {result}"
+        );
+        assert!(
+            result.contains("# After"),
+            "should preserve after: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_preserves_non_metadata() {
+        let content = "# My Rules\n\n- Do this\n- Do that\n\n## Details\n\nMore info here.";
+        let result = strip_managed_metadata(content);
+        assert_eq!(
+            result, content,
+            "non-metadata content should pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_empty_input() {
+        let result = strip_managed_metadata("");
+        assert_eq!(result, "", "empty input should return empty string");
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_full_managed_section() {
+        let content = wrap_in_markers("Real content here", 2, &["id-1".into(), "id-2".into()]);
+        let result = strip_managed_metadata(&content);
+        assert!(
+            !result.contains("adr-ids"),
+            "should strip adr-ids: {result}"
+        );
+        assert!(
+            !result.contains("last-synced"),
+            "should strip last-synced: {result}"
+        );
+        assert!(
+            !result.contains("version:"),
+            "should strip version: {result}"
+        );
+        assert!(
+            !result.contains("managed:actual"),
+            "should strip markers: {result}"
+        );
+        assert!(
+            result.contains("Real content here"),
+            "should preserve real content: {result}"
+        );
     }
 }

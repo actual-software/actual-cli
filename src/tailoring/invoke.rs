@@ -31,15 +31,11 @@ pub async fn invoke_tailoring<R: ClaudeRunner>(
 
     // First attempt
     match runner.run::<TailoringOutput>(&args).await {
-        Ok(output) => {
-            validate_output(&output, &valid_ids)?;
-            Ok(output)
-        }
+        Ok(output) => validate_and_filter_output(output, &valid_ids),
         Err(ActualError::ClaudeOutputParse(_)) => {
             // Retry once on JSON parse failure
             let output: TailoringOutput = runner.run(&args).await?;
-            validate_output(&output, &valid_ids)?;
-            Ok(output)
+            validate_and_filter_output(output, &valid_ids)
         }
         Err(e) => Err(e),
     }
@@ -67,8 +63,14 @@ fn build_args(
 }
 
 /// Validate the tailoring output against the input ADR set.
-fn validate_output(output: &TailoringOutput, valid_ids: &HashSet<&str>) -> Result<(), ActualError> {
-    for file in &output.files {
+///
+/// - Errors on empty content or invalid file paths (these are fatal).
+/// - Filters out unknown ADR IDs with a warning (defense-in-depth against LLM hallucination).
+fn validate_and_filter_output(
+    mut output: TailoringOutput,
+    valid_ids: &HashSet<&str>,
+) -> Result<TailoringOutput, ActualError> {
+    for file in &mut output.files {
         if file.content.is_empty() {
             return Err(ActualError::TailoringValidationError(format!(
                 "file '{}' has empty content",
@@ -81,16 +83,26 @@ fn validate_output(output: &TailoringOutput, valid_ids: &HashSet<&str>) -> Resul
                 file.path
             )));
         }
-        for id in &file.adr_ids {
-            if !valid_ids.contains(id.as_str()) {
-                return Err(ActualError::TailoringValidationError(format!(
-                    "unknown ADR ID '{}' in file '{}'",
+        let original_count = file.adr_ids.len();
+        file.adr_ids.retain(|id| {
+            let valid = valid_ids.contains(id.as_str());
+            if !valid {
+                eprintln!(
+                    "  warning: filtered unknown ADR ID '{}' from file '{}' (likely LLM hallucination)",
                     id, file.path
-                )));
+                );
             }
+            valid
+        });
+        if file.adr_ids.len() < original_count {
+            let filtered = original_count - file.adr_ids.len();
+            eprintln!(
+                "  filtered {filtered} hallucinated ADR ID(s) from '{}'",
+                file.path
+            );
         }
     }
-    Ok(())
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -268,14 +280,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unknown_adr_id_validation_error() {
+    async fn test_unknown_adr_id_filtered_not_error() {
         let adrs = vec![make_adr("adr-001")];
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
                 content: "# Rules".to_string(),
                 reasoning: "Root level rules".to_string(),
-                adr_ids: vec!["adr-999".to_string()],
+                adr_ids: vec!["adr-001".to_string(), "adr-999".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -290,13 +302,36 @@ mod tests {
 
         let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
 
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("unknown ADR ID"),
-            "expected 'unknown ADR ID' in: {msg}"
-        );
-        assert!(matches!(err, ActualError::TailoringValidationError(_)));
+        let output = result.unwrap();
+        // The invalid ID should be filtered out, leaving only the valid one
+        assert_eq!(output.files[0].adr_ids, vec!["adr-001"]);
+    }
+
+    #[tokio::test]
+    async fn test_all_adr_ids_hallucinated_results_in_empty_ids() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "CLAUDE.md".to_string(),
+                content: "# Rules".to_string(),
+                reasoning: "Root level rules".to_string(),
+                adr_ids: vec!["adr-999".to_string(), "adr-888".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockClaudeRunner::single(&json);
+
+        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+
+        let output = result.unwrap();
+        assert!(output.files[0].adr_ids.is_empty());
     }
 
     #[tokio::test]
