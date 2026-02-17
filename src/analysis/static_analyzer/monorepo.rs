@@ -211,13 +211,14 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
     let projects: Vec<ProjectInfo> = match json.get("projects") {
         Some(serde_json::Value::Object(obj)) => obj
             .iter()
-            .filter_map(|(name, val)| {
-                val.as_str()
-                    .filter(|p| root.join(p).is_dir())
-                    .map(|p| ProjectInfo {
+            .filter_map(|(_, val)| {
+                val.as_str().filter(|p| root.join(p).is_dir()).map(|p| {
+                    let name = extract_project_name(&root.join(p));
+                    ProjectInfo {
                         path: p.to_string(),
-                        name: name.clone(),
-                    })
+                        name,
+                    }
+                })
             })
             .collect(),
         _ => return Ok(None),
@@ -292,8 +293,9 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
         if in_use_block {
             if !trimmed.is_empty() && !trimmed.starts_with("//") {
                 let path = trimmed.split("//").next().unwrap_or("").trim();
-                if !path.is_empty() {
-                    dirs.push(path.to_string());
+                let cleaned = path.strip_prefix("./").unwrap_or(path);
+                if !cleaned.is_empty() {
+                    dirs.push(cleaned.to_string());
                 }
             }
             continue;
@@ -306,8 +308,9 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 
         if let Some(rest) = trimmed.strip_prefix("use ") {
             let dir = rest.split("//").next().unwrap_or("").trim();
-            if !dir.is_empty() && dir != "(" {
-                dirs.push(dir.to_string());
+            let cleaned = dir.strip_prefix("./").unwrap_or(dir);
+            if !cleaned.is_empty() && cleaned != "(" {
+                dirs.push(cleaned.to_string());
             }
         }
     }
@@ -800,7 +803,7 @@ mod tests {
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
         assert_eq!(info.projects.len(), 1);
-        assert_eq!(info.projects[0].path, "./mymod");
+        assert_eq!(info.projects[0].path, "mymod");
     }
 
     #[test]
@@ -819,7 +822,7 @@ mod tests {
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
         assert_eq!(info.projects.len(), 1);
-        assert_eq!(info.projects[0].path, "./exists");
+        assert_eq!(info.projects[0].path, "exists");
     }
 
     #[test]
@@ -940,7 +943,8 @@ mod tests {
 
         let mut names: Vec<&str> = info.projects.iter().map(|p| p.name.as_str()).collect();
         names.sort();
-        assert_eq!(names, vec!["app-one", "lib-two"]);
+        // Names come from extract_project_name (directory name fallback)
+        assert_eq!(names, vec!["one", "two"]);
     }
 
     #[test]
@@ -1046,7 +1050,7 @@ mod tests {
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
         assert_eq!(info.projects.len(), 1);
-        assert_eq!(info.projects[0].path, "./mymod");
+        assert_eq!(info.projects[0].path, "mymod");
     }
 
     #[test]
@@ -1403,8 +1407,8 @@ mod tests {
         assert_eq!(info.projects.len(), 2);
 
         let paths: Vec<&str> = info.projects.iter().map(|p| p.path.as_str()).collect();
-        assert!(paths.contains(&"./cmd/server"));
-        assert!(paths.contains(&"./pkg/lib"));
+        assert!(paths.contains(&"cmd/server"));
+        assert!(paths.contains(&"pkg/lib"));
     }
 
     #[test]
@@ -1422,7 +1426,7 @@ mod tests {
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
         assert_eq!(info.projects.len(), 1);
-        assert_eq!(info.projects[0].path, "./mymod");
+        assert_eq!(info.projects[0].path, "mymod");
     }
 
     #[test]
