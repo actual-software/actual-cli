@@ -1,5 +1,6 @@
 use crate::api::client::ActualApiClient;
 use crate::config::types::Config;
+use crate::error::ActualError;
 use crate::telemetry::metrics::SyncMetrics;
 
 const SERVICE_KEY: &str = "ak_telemetry_prod_actual_cli";
@@ -10,9 +11,21 @@ const SERVICE_KEY: &str = "ak_telemetry_prod_actual_cli";
 /// Telemetry is opt-out — it can be disabled via the `ACTUAL_NO_TELEMETRY=1`
 /// environment variable or by setting `telemetry.enabled: false` in config.
 pub async fn report_metrics(metrics: &SyncMetrics, config: &Config, api_url: &str) {
+    let _ = try_report_metrics(metrics, config, api_url).await;
+}
+
+/// Inner implementation that returns errors instead of swallowing them.
+///
+/// Extracted so callers can inspect failures in tests while
+/// [`report_metrics`] remains fire-and-forget.
+async fn try_report_metrics(
+    metrics: &SyncMetrics,
+    config: &Config,
+    api_url: &str,
+) -> Result<(), ActualError> {
     // Opt-out via env var
     if std::env::var("ACTUAL_NO_TELEMETRY").ok().as_deref() == Some("1") {
-        return;
+        return Ok(());
     }
 
     // Opt-out via config
@@ -22,15 +35,12 @@ pub async fn report_metrics(metrics: &SyncMetrics, config: &Config, api_url: &st
         .and_then(|t| t.enabled)
         .unwrap_or(true)
     {
-        return;
+        return Ok(());
     }
 
     let request = metrics.to_counter_request();
-    let client = match ActualApiClient::new(api_url) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let _ = client.post_telemetry(&request, SERVICE_KEY).await;
+    let client = ActualApiClient::new(api_url)?;
+    client.post_telemetry(&request, SERVICE_KEY).await
 }
 
 #[cfg(test)]
@@ -83,6 +93,42 @@ mod tests {
 
         report_metrics(&metrics, &config, &server.url()).await;
         mock.assert_async().await;
+
+        restore_env(saved);
+    }
+
+    #[tokio::test]
+    async fn test_try_report_returns_ok_on_success() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_env();
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/counter/record")
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let metrics = sample_metrics();
+        let config = Config::default();
+
+        let result = try_report_metrics(&metrics, &config, &server.url()).await;
+        assert!(result.is_ok());
+        mock.assert_async().await;
+
+        restore_env(saved);
+    }
+
+    #[tokio::test]
+    async fn test_try_report_returns_err_on_network_failure() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_env();
+
+        let metrics = sample_metrics();
+        let config = Config::default();
+
+        let result = try_report_metrics(&metrics, &config, "http://127.0.0.1:1").await;
+        assert!(result.is_err());
 
         restore_env(saved);
     }
