@@ -1,3 +1,4 @@
+pub mod ir;
 pub mod language_resolver;
 pub mod rule_resolver;
 pub mod semgrep;
