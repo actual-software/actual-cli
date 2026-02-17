@@ -137,6 +137,21 @@ fn format_value(value: &serde_json::Value) -> String {
     }
 }
 
+/// Compare two leaf_id strings: numeric IDs sort first (ascending),
+/// then non-numeric IDs sort lexicographically.  When two different
+/// strings parse to the same `u64` (e.g. `"01"` vs `"1"`), the raw
+/// string is used as a tiebreaker.
+fn compare_leaf_ids(a: &str, b: &str) -> std::cmp::Ordering {
+    let ka = a.parse::<u64>().ok();
+    let kb = b.parse::<u64>().ok();
+    match (ka, kb) {
+        (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.cmp(b),
+    }
+}
+
 /// Build a canonical IR from a set of ToolMatch signals for a single file.
 ///
 /// The algorithm:
@@ -148,20 +163,8 @@ fn format_value(value: &serde_json::Value) -> String {
 pub fn build_canonical_ir(file_key: &str, language: &str, matches: &[ToolMatch]) -> CanonicalIR {
     let buckets = aggregate_matches_by_leaf(matches);
 
-    // Sort leaf_ids: numeric IDs first (ascending), then non-numeric IDs lexicographically.
-    // Uses Option<u64> to distinguish parsed numerics from non-numeric fallbacks,
-    // avoiding ambiguity if a leaf_id is literally u64::MAX.
     let mut sorted_leaf_ids: Vec<&String> = buckets.keys().collect();
-    sorted_leaf_ids.sort_by(|a, b| {
-        let ka = a.parse::<u64>().ok();
-        let kb = b.parse::<u64>().ok();
-        match (ka, kb) {
-            (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.cmp(b),
-        }
-    });
+    sorted_leaf_ids.sort_by(|a, b| compare_leaf_ids(a, b));
 
     // Build facets_by_leaf_id map and IR text simultaneously.
     let mut facets_by_leaf_id = HashMap::new();
@@ -685,35 +688,27 @@ mod tests {
     }
 
     #[test]
-    fn test_non_numeric_before_numeric_sorts_after() {
-        // Use 4 leaf IDs (2 non-numeric, 2 numeric) so the sort algorithm
-        // must invoke the comparator in both directions, exercising both
-        // (Some(_), None) => Less  (line 160) and
-        // (None, Some(_)) => Greater (line 161).
-        let matches = vec![
-            make_match("r1", "s", "alpha", serde_json::json!("a"), 0.9),
-            make_match("r2", "s", "2", serde_json::json!("b"), 0.9),
-            make_match("r3", "s", "beta", serde_json::json!("c"), 0.9),
-            make_match("r4", "s", "1", serde_json::json!("d"), 0.9),
-        ];
-        let ir = build_canonical_ir("f.rs", "rust", &matches);
-        let pos_1 = ir.ir_text.find("LEAF[1]").unwrap();
-        let pos_2 = ir.ir_text.find("LEAF[2]").unwrap();
-        let pos_alpha = ir.ir_text.find("LEAF[alpha]").unwrap();
-        let pos_beta = ir.ir_text.find("LEAF[beta]").unwrap();
-        // Numeric IDs sort before non-numeric IDs.
-        assert!(
-            pos_1 < pos_alpha,
-            "numeric 1 should sort before non-numeric alpha"
-        );
-        assert!(
-            pos_2 < pos_alpha,
-            "numeric 2 should sort before non-numeric alpha"
-        );
-        // Within numeric IDs, sort numerically.
-        assert!(pos_1 < pos_2, "1 should sort before 2");
-        // Within non-numeric IDs, sort lexicographically.
-        assert!(pos_alpha < pos_beta, "alpha should sort before beta");
+    fn test_compare_leaf_ids_all_branches() {
+        use std::cmp::Ordering;
+
+        // (Some, Some) — both numeric
+        assert_eq!(compare_leaf_ids("1", "2"), Ordering::Less);
+        assert_eq!(compare_leaf_ids("10", "2"), Ordering::Greater);
+        assert_eq!(compare_leaf_ids("5", "5"), Ordering::Equal);
+
+        // (Some, Some) with tiebreaker — same numeric, different strings
+        assert_eq!(compare_leaf_ids("01", "1"), Ordering::Less); // "01" < "1" lexicographically
+
+        // (Some, None) — numeric before non-numeric
+        assert_eq!(compare_leaf_ids("1", "alpha"), Ordering::Less);
+
+        // (None, Some) — non-numeric after numeric
+        assert_eq!(compare_leaf_ids("alpha", "1"), Ordering::Greater);
+
+        // (None, None) — both non-numeric, lexicographic
+        assert_eq!(compare_leaf_ids("alpha", "beta"), Ordering::Less);
+        assert_eq!(compare_leaf_ids("beta", "alpha"), Ordering::Greater);
+        assert_eq!(compare_leaf_ids("same", "same"), Ordering::Equal);
     }
 
     #[test]
