@@ -15,7 +15,6 @@ use crate::claude::subprocess::CliClaudeRunner;
 use crate::cli::args::SyncArgs;
 use crate::cli::commands::auth::check_auth;
 use crate::cli::commands::sync::{resolve_cwd, run_sync};
-use crate::cli::ui::confirm::InputReader;
 use crate::cli::ui::file_confirm::TerminalIO;
 use crate::config::paths::config_path;
 use crate::error::ActualError;
@@ -72,21 +71,5 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
 
     let cfg_path = config_path()?;
     let runner = CliClaudeRunner::new(binary_path, Duration::from_secs(300));
-    let reader = StdinReader;
-    run_sync(args, &root_dir, &cfg_path, &term, &runner, &reader)
-}
-
-/// Reads a line from stdin for the project confirmation prompt.
-///
-/// This is a thin wrapper around `std::io::stdin().read_line()` that
-/// implements [`InputReader`]. It lives in this coverage-excluded module
-/// because stdin cannot be controlled in unit tests.
-pub struct StdinReader;
-
-impl InputReader for StdinReader {
-    fn read_line(&self) -> std::io::Result<String> {
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf)?;
-        Ok(buf)
-    }
+    run_sync(args, &root_dir, &cfg_path, &term, &runner)
 }
