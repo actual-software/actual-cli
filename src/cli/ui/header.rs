@@ -38,7 +38,7 @@ pub fn render_header_bar(width: usize, version: &str, auth: Option<&AuthDisplay>
     let left = format!(" actual v{version}");
     let right = format_auth_status(auth);
 
-    let left_len = left.len();
+    let left_len = console::measure_text_width(&left);
     let right_len = console::measure_text_width(&right);
 
     // Pad between left and right; if the line is too narrow, just concatenate.
