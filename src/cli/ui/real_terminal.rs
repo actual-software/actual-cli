@@ -10,6 +10,8 @@
 
 use std::time::Duration;
 
+use dialoguer::MultiSelect;
+
 use crate::claude::binary::find_claude_binary;
 use crate::claude::subprocess::CliClaudeRunner;
 use crate::cli::args::SyncArgs;
@@ -61,6 +63,20 @@ impl TerminalIO for RealTerminal {
             .interact_opt()
             .map_err(|e| ActualError::ConfigError(format!("confirmation failed: {e}")))
             .map(|opt| opt.unwrap_or(false))
+    }
+
+    fn select_files(
+        &self,
+        prompt: &str,
+        items: &[String],
+        defaults: &[bool],
+    ) -> Result<Option<Vec<usize>>, ActualError> {
+        MultiSelect::new()
+            .with_prompt(prompt)
+            .items(items)
+            .defaults(defaults)
+            .interact_on_opt(&self.term)
+            .map_err(|e| ActualError::ConfigError(format!("file selection failed: {e}")))
     }
 }
 

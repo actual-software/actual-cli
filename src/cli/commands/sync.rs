@@ -554,6 +554,7 @@ mod tests {
 
     struct MockTerminal {
         inputs: Mutex<Vec<String>>,
+        select_result: Mutex<Option<Option<Vec<usize>>>>,
         output: Mutex<Vec<String>>,
     }
 
@@ -561,8 +562,14 @@ mod tests {
         fn new(inputs: Vec<&str>) -> Self {
             Self {
                 inputs: Mutex::new(inputs.into_iter().map(|s| s.to_string()).collect()),
+                select_result: Mutex::new(None),
                 output: Mutex::new(Vec::new()),
             }
+        }
+
+        fn with_selection(mut self, result: Option<Vec<usize>>) -> Self {
+            self.select_result = Mutex::new(Some(result));
+            self
         }
 
         fn output_text(&self) -> String {
@@ -581,6 +588,19 @@ mod tests {
 
         fn write_line(&self, text: &str) {
             self.output.lock().unwrap().push(text.to_string());
+        }
+
+        fn select_files(
+            &self,
+            _prompt: &str,
+            items: &[String],
+            _defaults: &[bool],
+        ) -> Result<Option<Vec<usize>>, ActualError> {
+            match self.select_result.lock().unwrap().take() {
+                Some(result) => Ok(result),
+                // Default: accept all files
+                None => Ok(Some((0..items.len()).collect())),
+            }
         }
     }
 
@@ -786,8 +806,8 @@ mod tests {
             make_file("CLAUDE.md", "Root rules", vec!["adr-001"]),
             make_file("apps/web/CLAUDE.md", "Web rules", vec!["adr-002"]),
         ]);
-        // Reject file 2, then accept
-        let term = MockTerminal::new(vec!["r 2", "a"]);
+        // Select only file 1 (index 0), skip file 2
+        let term = MockTerminal::new(vec![]).with_selection(Some(vec![0]));
 
         let result = confirm_and_write(&output, dir.path(), false, false, false, &term).unwrap();
 
@@ -805,7 +825,8 @@ mod tests {
     fn test_confirm_and_write_quit() {
         let dir = tempfile::tempdir().unwrap();
         let output = make_output(vec![make_file("CLAUDE.md", "Root rules", vec!["adr-001"])]);
-        let term = MockTerminal::new(vec!["q"]);
+        // User cancels the selection
+        let term = MockTerminal::new(vec![]).with_selection(None);
 
         let result = confirm_and_write(&output, dir.path(), false, false, false, &term);
 
@@ -937,8 +958,8 @@ mod tests {
             make_file("CLAUDE.md", "Root rules", vec!["adr-001"]),
             make_file("apps/web/CLAUDE.md", "Web rules", vec!["adr-002"]),
         ]);
-        // Reject both files, then accept
-        let term = MockTerminal::new(vec!["r 1", "r 2", "a"]);
+        // Select nothing (reject all)
+        let term = MockTerminal::new(vec![]).with_selection(Some(vec![]));
 
         let result = confirm_and_write(&output, dir.path(), false, false, false, &term).unwrap();
 
@@ -978,8 +999,8 @@ mod tests {
             make_file("apps/api/CLAUDE.md", "API rules", vec!["adr-004"]),
         ]);
 
-        // Reject file 4 (apps/api/CLAUDE.md), accept rest
-        let term = MockTerminal::new(vec!["r 4", "a"]);
+        // Select files 0-2, reject file 3 (apps/api/CLAUDE.md)
+        let term = MockTerminal::new(vec![]).with_selection(Some(vec![0, 1, 2]));
 
         let result = confirm_and_write(&output, dir.path(), false, false, false, &term).unwrap();
 
@@ -1128,8 +1149,8 @@ mod tests {
     fn test_run_sync_no_flags_prompts_user() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
-        // First "y" for project confirm (dialoguer y/n), second "a" for file confirm
-        let term = MockTerminal::new(vec!["y", "a"]);
+        // "y" for project confirm (dialoguer y/n), select_files handles file confirm
+        let term = MockTerminal::new(vec!["y"]).with_selection(Some(vec![]));
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let args = make_sync_args(false, false, false, false, &server.url());
         let result = run_sync(
@@ -1403,8 +1424,8 @@ mod tests {
             .create();
 
         let dir = tempfile::tempdir().unwrap();
-        // "y" for project confirm, "q" for file confirm (user quits)
-        let term = MockTerminal::new(vec!["y", "q"]);
+        // "y" for project confirm, file confirm cancelled via select_files
+        let term = MockTerminal::new(vec!["y"]).with_selection(None);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         // force=false, no_tailor=true so we get raw output and enter confirmation flow
         let args = SyncArgs {
