@@ -348,6 +348,31 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_frameworks_config_only_no_deps() {
+        // Config frameworks should be added via detect_frameworks
+        // when there are no dependencies (tests the merge branch)
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Dockerfile"), "FROM node:18").unwrap();
+
+        let deps = DependencyInfo {
+            dependencies: vec![],
+            dev_dependencies: vec![],
+        };
+
+        let frameworks = detect_frameworks(&deps, dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"docker"));
+    }
+
+    #[test]
+    fn test_detect_config_nonexistent_dir() {
+        // read_dir fails for nonexistent path — tests the Err branch of read_dir
+        let frameworks = detect_config_frameworks(std::path::Path::new("/nonexistent/path/12345"));
+        // Should not panic, just skip terraform detection
+        assert!(!frameworks.iter().any(|f| f.name == "terraform"));
+    }
+
+    #[test]
     fn test_detect_unknown_dependency_not_in_registry() {
         let dir = tempdir().unwrap();
         let deps = DependencyInfo {

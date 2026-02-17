@@ -378,21 +378,19 @@ fn parse_build_gradle(project_dir: &Path, deps: &mut HashSet<String>) {
 
         let re = regex_gradle_dependency();
         for cap in re.captures_iter(&content) {
-            // Group 1 = double-quoted in parens, Group 2 = single-quoted bare,
-            // Group 3 = single-quoted in parens
+            // At least one of the 3 capture groups always matches
             let coord = cap
                 .get(1)
                 .or_else(|| cap.get(2))
                 .or_else(|| cap.get(3))
-                .map(|m| m.as_str());
-            if let Some(coord) = coord {
-                // Format: group:artifact:version — extract artifact
-                let parts: Vec<&str> = coord.split(':').collect();
-                if parts.len() >= 2 {
-                    deps.insert(parts[1].to_string());
-                    // Also insert the groupId for Java/Kotlin framework matching
-                    deps.insert(parts[0].to_string());
-                }
+                .expect("regex guarantees at least one group matches")
+                .as_str();
+            // Format: group:artifact:version — extract artifact
+            let parts: Vec<&str> = coord.split(':').collect();
+            if parts.len() >= 2 {
+                deps.insert(parts[1].to_string());
+                // Also insert the groupId for Java/Kotlin framework matching
+                deps.insert(parts[0].to_string());
             }
         }
     }
@@ -426,16 +424,17 @@ fn parse_package_swift(project_dir: &Path, deps: &mut HashSet<String>) {
 
     let url_re = regex_swift_package_url();
     for cap in url_re.captures_iter(&content) {
-        if let Some(url) = cap.get(1) {
-            // Extract package name from URL: https://github.com/foo/Bar.git -> Bar
-            let url_str = url.as_str();
-            if let Some(name) = url_str
-                .rsplit('/')
-                .next()
-                .and_then(|s| s.strip_suffix(".git").or(Some(s)))
-            {
-                deps.insert(name.to_string());
-            }
+        // Group 1 always matches since the regex requires it
+        let url_str = cap
+            .get(1)
+            .expect("regex guarantees group 1 matches")
+            .as_str();
+        let name = url_str
+            .rsplit('/')
+            .next()
+            .map(|s| s.strip_suffix(".git").unwrap_or(s));
+        if let Some(name) = name {
+            deps.insert(name.to_string());
         }
     }
 }
@@ -999,6 +998,120 @@ dependencies {
 
         let info = parse_dependencies(dir.path());
         assert!(info.dependencies.contains(&"com.example".to_string()));
+    }
+
+    #[test]
+    fn test_cargo_toml_no_dependencies_section() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my-app\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+        assert!(info.dev_dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_pipfile_no_packages_section() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Pipfile"),
+            "[source]\nurl = \"https://pypi.org/simple\"\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+        assert!(info.dev_dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_pyproject_toml_non_string_dependency() {
+        // Test where item.as_str() returns None in PEP 631 dependencies
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"my-app\"\ndependencies = [42, \"flask\"]\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.contains(&"flask".to_string()));
+        // 42 should be silently skipped
+    }
+
+    #[test]
+    fn test_pyproject_toml_optional_deps_non_array_group() {
+        // Test where optional-dependencies group value is not an array
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"my-app\"\n\n[project.optional-dependencies]\ndev = \"not-an-array\"\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dev_dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_pyproject_toml_optional_deps_non_string_items() {
+        // Test where optional-dependencies items are not strings
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"my-app\"\n\n[project.optional-dependencies]\ndev = [42, \"pytest\"]\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dev_dependencies.contains(&"pytest".to_string()));
+    }
+
+    #[test]
+    fn test_strip_python_specifier_only_specifier() {
+        // A string like ">=3.0" with no package name before the specifier
+        assert_eq!(strip_python_version_specifier(">=3.0"), None);
+    }
+
+    #[test]
+    fn test_go_mod_empty_lines_in_require_block() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.21\n\nrequire (\n\n\tgithub.com/bar/baz v1.0.0\n\n)\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"github.com/bar/baz".to_string()));
+    }
+
+    #[test]
+    fn test_build_gradle_no_matching_pattern() {
+        // A gradle file with no matching dependency patterns
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("build.gradle"),
+            "plugins {\n    id 'java'\n}\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        // No deps from this file
+        assert!(info.dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_package_swift_url_only_name_portion() {
+        // URL that is just a bare name without .git suffix
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Package.swift"),
+            ".package(url: \"https://github.com/apple/swift-nio\", from: \"2.0.0\")\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.contains(&"swift-nio".to_string()));
     }
 
     #[test]
