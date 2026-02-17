@@ -61,6 +61,23 @@ tempfile = "3"
 # Static analysis
 tokei = "12"
 
+# Tree-sitter parsing
+tree-sitter = "0.25"
+streaming-iterator = "0.1"
+tree-sitter-rust = "0.24"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-php = "0.24"
+# tree-sitter-kotlin excluded: v0.3 depends on tree-sitter 0.20, incompatible with 0.24
+tree-sitter-swift = "0.7"
+
 [features]
 integration = []
 live-e2e = []
