@@ -54,7 +54,7 @@ fn run_status(
     config_exists: bool,
     cwd: &Path,
 ) {
-    let width = console::Term::stderr()
+    let width = console::Term::stdout()
         .size_checked()
         .map(|(_, cols)| cols as usize)
         .unwrap_or(80)
@@ -93,23 +93,22 @@ fn format_config_section(
     let config_annotation = if config_exists {
         format!("{} exists", theme::SUCCESS)
     } else {
-        format!("{} created", theme::SUCCESS)
+        format!("{} created", theme::WARN)
     };
 
     let api_url = cfg.api_url.as_deref().unwrap_or(DEFAULT_API_URL);
-    let api_annotation = if cfg.api_url.is_none() {
-        "(default)".to_string()
-    } else {
-        String::new()
-    };
 
-    let mut panel = Panel::titled("Configuration")
-        .kv_annotated(
-            "Config file",
-            &config_path.display().to_string(),
-            &config_annotation,
-        )
-        .kv_annotated("API URL", api_url, &api_annotation);
+    let panel_with_config = Panel::titled("Configuration").kv_annotated(
+        "Config file",
+        &config_path.display().to_string(),
+        &config_annotation,
+    );
+
+    let mut panel = if cfg.api_url.is_none() {
+        panel_with_config.kv_annotated("API URL", api_url, "(default)")
+    } else {
+        panel_with_config.kv("API URL", api_url)
+    };
 
     if verbose {
         let model = cfg
