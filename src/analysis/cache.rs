@@ -37,6 +37,14 @@ pub fn get_git_head(repo_path: &Path) -> Option<String> {
     parse_git_head_output(output)
 }
 
+/// Serialize a value to a YAML [`serde_yaml::Value`], mapping any serialization
+/// error to [`ActualError::ConfigError`].
+fn serialize_for_cache<T: serde::Serialize>(value: &T) -> Result<serde_yaml::Value, ActualError> {
+    serde_yaml::to_value(value).map_err(|e| {
+        ActualError::ConfigError(format!("Failed to serialize analysis for caching: {e}"))
+    })
+}
+
 /// Run repository analysis with caching based on git HEAD.
 ///
 /// If the repository has a git HEAD that matches the cached analysis,
@@ -86,9 +94,7 @@ pub fn run_analysis_cached(
     let cached_analysis = CachedAnalysis {
         repo_path: repo_path.to_string_lossy().to_string(),
         head_commit: Some(head_hash),
-        analysis: serde_yaml::to_value(&analysis).map_err(|e| {
-            ActualError::ConfigError(format!("Failed to serialize analysis for caching: {e}"))
-        })?,
+        analysis: serialize_for_cache(&analysis)?,
         analyzed_at: chrono::Utc::now(),
     };
     cfg.cached_analysis = Some(cached_analysis);
@@ -564,5 +570,32 @@ mod tests {
         let deserialized: RepoAnalysis =
             serde_yaml::from_value(cached.analysis).expect("cached analysis should deserialize");
         assert_eq!(deserialized.projects.len(), result.projects.len());
+    }
+
+    #[test]
+    fn test_serialize_for_cache_success() {
+        let analysis = valid_analysis();
+        let result = serialize_for_cache(&analysis);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_serialize_for_cache_error_returns_config_error() {
+        /// A type whose `Serialize` implementation always fails.
+        struct AlwaysFail;
+
+        impl serde::Serialize for AlwaysFail {
+            fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional test failure"))
+            }
+        }
+
+        let err = serialize_for_cache(&AlwaysFail).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to serialize analysis for caching"),
+            "expected ConfigError with serialization message, got: {}",
+            err
+        );
     }
 }
