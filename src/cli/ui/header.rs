@@ -84,6 +84,23 @@ fn format_auth_status(auth: Option<&AuthDisplay>) -> String {
     }
 }
 
+/// Print the header bar to stderr, querying the terminal width.
+///
+/// Mirrors the pattern used by [`crate::branding::banner::print_banner`]:
+/// direct stderr output for branding/chrome that is not part of the
+/// testable data path.
+pub fn print_header_bar(auth: &AuthDisplay) {
+    let width = console::Term::stderr()
+        .size_checked()
+        .map(|(_, cols)| cols as usize)
+        .unwrap_or(80)
+        .min(90);
+    eprint!(
+        "{}",
+        render_header_bar(width, env!("CARGO_PKG_VERSION"), Some(auth))
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
