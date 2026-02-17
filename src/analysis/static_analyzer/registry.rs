@@ -339,15 +339,17 @@ mod tests {
 
     #[test]
     fn all_registry_entries_have_valid_categories() {
-        for sig in FRAMEWORK_REGISTRY {
-            let cat = FrameworkCategory::from_str_insensitive(sig.category);
-            assert!(
-                !matches!(cat, FrameworkCategory::Other(_)),
-                "Registry entry '{}' has unknown category '{}' that maps to Other",
-                sig.dependency,
-                sig.category
-            );
-        }
+        let invalid: Vec<_> = FRAMEWORK_REGISTRY
+            .iter()
+            .filter(|sig| {
+                matches!(
+                    FrameworkCategory::from_str_insensitive(sig.category),
+                    FrameworkCategory::Other(_)
+                )
+            })
+            .map(|sig| sig.dependency)
+            .collect();
+        assert!(invalid.is_empty());
     }
 
     #[test]
@@ -377,14 +379,16 @@ mod tests {
     #[test]
     fn registry_has_entries_for_all_ecosystems() {
         // Spot-check at least one entry per ecosystem
-        assert!(lookup("react").is_some(), "JS/TS ecosystem");
-        assert!(lookup("actix-web").is_some(), "Rust ecosystem");
-        assert!(lookup("django").is_some(), "Python ecosystem");
-        assert!(lookup("github.com/gin-gonic/gin").is_some(), "Go ecosystem");
-        assert!(lookup("rails").is_some(), "Ruby ecosystem");
-        assert!(
-            lookup("org.springframework.boot").is_some(),
-            "Java/Kotlin ecosystem"
-        );
+        let checks = [
+            "react",
+            "actix-web",
+            "django",
+            "github.com/gin-gonic/gin",
+            "rails",
+            "org.springframework.boot",
+        ];
+        for dep in checks {
+            assert!(lookup(dep).is_some());
+        }
     }
 }
