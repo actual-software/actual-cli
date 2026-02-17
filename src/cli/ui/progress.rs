@@ -3,6 +3,10 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::sync::LazyLock;
 use std::time::Duration;
 
+/// Style for phases in "waiting" state (not yet started).
+static WAITING_STYLE: LazyLock<ProgressStyle> =
+    LazyLock::new(|| ProgressStyle::with_template("  ○ {msg}").expect("invalid waiting template"));
+
 /// Style for the active (spinning) state.
 static SPINNING_STYLE: LazyLock<ProgressStyle> = LazyLock::new(|| {
     ProgressStyle::with_template("{spinner} {msg}").expect("invalid spinner template")
@@ -63,12 +67,10 @@ impl SyncPipeline {
         }
 
         let mp = MultiProgress::new();
-        let waiting_style =
-            ProgressStyle::with_template("  ○ {msg}").expect("invalid waiting template");
 
         let bars = std::array::from_fn(|i| {
             let bar = mp.add(ProgressBar::new_spinner());
-            bar.set_style(waiting_style.clone());
+            bar.set_style(WAITING_STYLE.clone());
             bar.set_message(format!("{}...", PHASE_LABELS[i]));
             Some(bar)
         });
