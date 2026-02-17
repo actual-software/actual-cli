@@ -304,7 +304,7 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
             if !trimmed.is_empty() && !trimmed.starts_with("//") {
                 let dir_str = trimmed.split("//").next().unwrap_or("").trim();
                 let cleaned = dir_str.strip_prefix("./").unwrap_or(dir_str);
-                if !cleaned.is_empty() {
+                if !cleaned.is_empty() && !cleaned.split('/').any(|c| c == "..") {
                     dirs.push(cleaned.to_string());
                 }
             }
@@ -319,7 +319,7 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
         if let Some(rest) = trimmed.strip_prefix("use ") {
             let dir = rest.split("//").next().unwrap_or("").trim();
             let cleaned = dir.strip_prefix("./").unwrap_or(dir);
-            if !cleaned.is_empty() && cleaned != "(" {
+            if !cleaned.is_empty() && cleaned != "(" && !cleaned.split('/').any(|c| c == "..") {
                 dirs.push(cleaned.to_string());
             }
         }
@@ -358,8 +358,13 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 /// Expand glob patterns relative to root and build project info for each match.
 ///
 /// Supports negation patterns (prefixed with `!`) which exclude matching directories
-/// from the result set.
+/// from the result set. Uses `fs::canonicalize` to resolve symlinks and reject
+/// entries that escape the repo root.
 fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
+    let canonical_root = match fs::canonicalize(root) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
     let mut projects = Vec::new();
 
     // Separate inclusion and exclusion patterns
@@ -386,17 +391,21 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
                 continue;
             }
 
-            // Compute relative path; skip entries outside repo root or at root.
-            let rel = entry
-                .strip_prefix(root)
-                .ok()
-                .map(|r| r.to_string_lossy().to_string());
-            let rel = match rel {
-                Some(r) if !r.is_empty() && !r.contains("..") => r,
+            // Canonicalize each entry to resolve symlinks and `..` segments,
+            // then verify it is within the canonical repo root.
+            let canonical_entry = match fs::canonicalize(&entry) {
+                Ok(c) if c.starts_with(&canonical_root) => c,
                 _ => continue,
             };
+            let rel = match canonical_entry.strip_prefix(&canonical_root) {
+                Ok(r) => r.to_string_lossy().to_string(),
+                Err(_) => continue,
+            };
+            if rel.is_empty() {
+                continue;
+            }
 
-            let name = extract_project_name(&entry);
+            let name = extract_project_name(&canonical_entry);
             projects.push(ProjectInfo { path: rel, name });
         }
     }
@@ -1639,6 +1648,50 @@ mod tests {
         // Negation pattern excludes the matching directory
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].path, "packages/included");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_glob_expansion_rejects_symlink_escaping_root() {
+        use std::os::unix::fs as unix_fs;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("packages")).unwrap();
+
+        // Create a real directory inside root
+        fs::create_dir_all(root.join("packages/legit")).unwrap();
+
+        // Create a directory outside root
+        let outside = dir.path().join("outside-secret");
+        fs::create_dir_all(&outside).unwrap();
+
+        // Create a symlink inside root that points outside
+        unix_fs::symlink(&outside, root.join("packages/evil")).unwrap();
+
+        let patterns = vec!["packages/*".to_string()];
+        let projects = expand_glob_patterns(&root, &patterns);
+
+        // Only "legit" should appear; the symlink to outside should be rejected
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].path, "packages/legit");
+    }
+
+    #[test]
+    fn test_go_work_double_dot_in_dirname_accepted() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // A directory name containing ".." as a substring (not a path component)
+        // should be accepted, e.g., "foo..bar"
+        fs::write(root.join("go.work"), "go 1.21\n\nuse ./foo..bar\n").unwrap();
+        fs::create_dir_all(root.join("foo..bar")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, "foo..bar");
     }
 
     #[test]
