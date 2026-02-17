@@ -1,7 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::api::DEFAULT_API_URL;
+use crate::branding::banner::print_banner;
+use crate::claude::binary::find_claude_binary;
 use crate::cli::args::StatusArgs;
+use crate::cli::commands::auth::check_auth;
+use crate::cli::ui::header::{render_header_bar, AuthDisplay};
+use crate::cli::ui::panel::Panel;
 use crate::cli::ui::theme;
 use crate::config;
 use crate::config::types::Config;
@@ -28,6 +33,20 @@ fn resolve_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or(fallback)
 }
 
+/// Attempt to detect authentication status gracefully.
+///
+/// Returns `None` if the Claude binary is not found, auth check fails,
+/// or any other error occurs. The status command should never fail because
+/// of auth detection.
+fn try_detect_auth() -> Option<AuthDisplay> {
+    let binary = find_claude_binary().ok()?;
+    let status = check_auth(&binary).ok()?;
+    Some(AuthDisplay {
+        authenticated: status.logged_in,
+        email: status.email.clone(),
+    })
+}
+
 fn run_status(
     args: &StatusArgs,
     cfg: &Config,
@@ -35,165 +54,170 @@ fn run_status(
     config_exists: bool,
     cwd: &Path,
 ) {
-    // 1. Config section
-    print_config_section(cfg, config_path, config_exists, args.verbose);
+    let width = console::Term::stderr()
+        .size_checked()
+        .map(|(_, cols)| cols as usize)
+        .unwrap_or(80)
+        .min(90);
 
-    println!();
+    // Banner + header bar
+    print_banner(false);
+    let auth = try_detect_auth();
+    eprint!(
+        "{}",
+        render_header_bar(width, env!("CARGO_PKG_VERSION"), auth.as_ref())
+    );
 
-    // 2. CLAUDE.md files section
-    print_claude_md_section(cwd);
+    // Config panel
+    println!(
+        "{}",
+        format_config_section(cfg, config_path, config_exists, args.verbose, width)
+    );
 
-    // 3. Verbose: cached analysis
+    // CLAUDE.md files panel
+    println!("{}", format_claude_md_section(cwd, width));
+
+    // Verbose details panel
     if args.verbose {
-        println!();
-        print_verbose_section(cfg);
+        println!("{}", format_verbose_section(cfg, width));
     }
 }
 
-fn print_config_section(cfg: &Config, config_path: &Path, config_exists: bool, verbose: bool) {
-    println!("{}:", theme::heading("Config"));
-
-    let exists_label = if config_exists {
-        format!("({})", theme::success("exists"))
+fn format_config_section(
+    cfg: &Config,
+    config_path: &Path,
+    config_exists: bool,
+    verbose: bool,
+    width: usize,
+) -> String {
+    let config_annotation = if config_exists {
+        format!("{} exists", theme::SUCCESS)
     } else {
-        format!("({})", theme::warning("created"))
+        format!("{} created", theme::SUCCESS)
     };
-    println!(
-        "  {:<14} {} {}",
-        "Config file:",
-        config_path.display(),
-        exists_label
-    );
 
     let api_url = cfg.api_url.as_deref().unwrap_or(DEFAULT_API_URL);
-    let api_label = if cfg.api_url.is_none() {
-        format!("({})", theme::muted("default"))
+    let api_annotation = if cfg.api_url.is_none() {
+        "(default)".to_string()
     } else {
         String::new()
     };
-    println!("  {:<14} {} {}", "API URL:", api_url, api_label);
+
+    let mut panel = Panel::titled("Configuration")
+        .kv_annotated(
+            "Config file",
+            &config_path.display().to_string(),
+            &config_annotation,
+        )
+        .kv_annotated("API URL", api_url, &api_annotation);
 
     if verbose {
         let model = cfg
             .model
             .as_deref()
             .unwrap_or("not set (will use server default)");
-        println!("  {:<14} {}", "Model:", model);
+        panel = panel.kv("Model", model);
     }
+
+    panel.render(width)
 }
 
-fn print_claude_md_section(cwd: &Path) {
+fn format_claude_md_section(cwd: &Path, width: usize) -> String {
     let files = find_claude_md_files(cwd);
 
-    println!("{}:", theme::heading("CLAUDE.md files"));
-
     if files.is_empty() {
-        println!("  No CLAUDE.md files found in current directory.");
-        println!(
-            "  Run {} to generate CLAUDE.md files for this repository.",
+        let panel = Panel::titled("CLAUDE.md Files").line(&format!(
+            "No CLAUDE.md files found. Run {} to generate.",
             theme::hint("`actual sync`")
-        );
-        return;
+        ));
+        return panel.render(width);
     }
+
+    let mut panel = Panel::titled("CLAUDE.md Files");
+    let mut managed_count: usize = 0;
+    let mut unmanaged_count: usize = 0;
 
     for file_path in &files {
         let relative = file_path.strip_prefix(cwd).unwrap_or(file_path);
-        let display_path = format!("./{}", relative.display());
+        let display_path = relative.display().to_string();
 
         let content = std::fs::read_to_string(file_path).unwrap_or_default();
 
         if markers::has_managed_section(&content) {
+            managed_count += 1;
             let version = markers::extract_version(&content);
-            let last_synced = markers::extract_last_synced(&content);
-
-            let mut details = Vec::new();
-            if let Some(v) = version {
-                details.push(format!("v{v}"));
-            }
-            if let Some(ts) = last_synced {
-                details.push(format!("synced {ts}"));
-            }
-
-            let detail_str = if details.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", details.join(", "))
+            let version_str = match version {
+                Some(v) => format!("v{v}"),
+                None => String::new(),
             };
-
-            println!(
-                "  {} {:<40} {}{}",
-                theme::success(&theme::SUCCESS),
-                display_path,
-                theme::success("managed"),
-                detail_str
-            );
+            let label = format!("{} {display_path}", theme::SUCCESS);
+            panel = panel.kv_annotated(&label, "managed", &version_str);
         } else {
-            println!(
-                "  {} {:<40} {}",
-                theme::warning(&theme::WARN),
-                display_path,
-                theme::warning("no managed section")
-            );
+            unmanaged_count += 1;
+            let label = format!("{} {display_path}", theme::WARN);
+            panel = panel.kv(&label, "unmanaged");
         }
     }
+
+    let footer = format!(
+        "{} managed {} {} unmanaged",
+        managed_count,
+        theme::muted("·"),
+        unmanaged_count
+    );
+    panel = panel.footer(&footer);
+
+    panel.render(width)
 }
 
-fn print_verbose_section(cfg: &Config) {
-    println!("{}:", theme::heading("Details"));
-
-    // Telemetry
+fn format_verbose_section(cfg: &Config, width: usize) -> String {
     let telemetry_enabled = cfg
         .telemetry
         .as_ref()
         .and_then(|t| t.enabled)
         .unwrap_or(true);
-    println!(
-        "  {:<20} {}",
-        "Telemetry:",
-        if telemetry_enabled {
-            theme::success("enabled").to_string()
-        } else {
-            theme::warning("disabled").to_string()
-        }
-    );
-
-    // Batch size
-    let batch_size = cfg.batch_size.unwrap_or(15);
-    println!("  {:<20} {}", "Batch size:", batch_size);
-
-    // Concurrency
-    let concurrency = cfg.concurrency.unwrap_or(3);
-    println!("  {:<20} {}", "Concurrency:", concurrency);
-
-    // Rejected ADRs
-    if let Some(ref rejected) = cfg.rejected_adrs {
-        let total: usize = rejected.values().map(|v| v.len()).sum();
-        println!(
-            "  {:<20} {} across {} repos",
-            "Rejected ADRs:",
-            total,
-            rejected.len()
-        );
+    let telemetry_value = if telemetry_enabled {
+        format!("{}", theme::success("enabled"))
     } else {
-        println!("  {:<20} none", "Rejected ADRs:");
-    }
+        format!("{}", theme::warning("disabled"))
+    };
 
-    // Cached analysis
+    let batch_size = cfg.batch_size.unwrap_or(15);
+    let concurrency = cfg.concurrency.unwrap_or(3);
+
+    let rejected_adrs_value = if let Some(ref rejected) = cfg.rejected_adrs {
+        let total: usize = rejected.values().map(|v| v.len()).sum();
+        format!("{total} across {} repos", rejected.len())
+    } else {
+        "none".to_string()
+    };
+
+    let mut panel = Panel::titled("Details")
+        .kv("Telemetry", &telemetry_value)
+        .kv("Batch size", &batch_size.to_string())
+        .kv("Concurrency", &concurrency.to_string())
+        .kv("Rejected ADRs", &rejected_adrs_value);
+
     if let Some(ref analysis) = cfg.cached_analysis {
-        println!("  {:<20} {}", "Cached analysis:", theme::success("present"));
-        println!("    {:<18} {}", "Repo:", analysis.repo_path);
+        let mut details = vec![format!("repo: {}", analysis.repo_path)];
         if let Some(ref commit) = analysis.head_commit {
             let short = if commit.len() > 7 {
                 &commit[..7]
             } else {
                 commit
             };
-            println!("    {:<18} {}", "HEAD:", short);
+            details.push(format!("HEAD: {short}"));
         }
-        println!("    {:<18} {}", "Analyzed at:", analysis.analyzed_at);
+        details.push(format!("at: {}", analysis.analyzed_at));
+        panel = panel.kv("Cached analysis", &format!("{}", theme::success("present")));
+        for detail in &details {
+            panel = panel.line(&format!("  {detail}"));
+        }
     } else {
-        println!("  {:<20} {}", "Cached analysis:", theme::muted("none"));
+        panel = panel.kv("Cached analysis", &format!("{}", theme::muted("none")));
     }
+
+    panel.render(width)
 }
 
 /// Recursively find all files named `CLAUDE.md` under the given root directory.
@@ -265,6 +289,11 @@ mod tests {
         std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
         f();
         restore_env("ACTUAL_CONFIG", saved);
+    }
+
+    /// Strip ANSI codes from rendered output for assertion.
+    fn plain(rendered: &str) -> String {
+        console::strip_ansi_codes(rendered).into_owned()
     }
 
     // ─── find_claude_md_files ────────────────────────────────────
@@ -406,79 +435,152 @@ mod tests {
         assert!(std::env::var(key).is_err());
     }
 
-    // ─── print_config_section ────────────────────────────────────
+    // ─── format_config_section ───────────────────────────────────
 
     #[test]
-    fn test_print_config_section_default_config() {
+    fn test_format_config_section_default_config() {
         let cfg = Config::default();
         let path = PathBuf::from("/tmp/test/config.yaml");
-        // Exercises the config_exists=true branch and api_url=None branch
-        print_config_section(&cfg, &path, true, false);
+        let output = format_config_section(&cfg, &path, true, false, 80);
+        let p = plain(&output);
+        assert!(p.contains("Configuration"), "should have panel title");
+        assert!(
+            p.contains("/tmp/test/config.yaml"),
+            "should show config path"
+        );
+        assert!(p.contains("exists"), "should show 'exists' annotation");
+        assert!(p.contains("API URL"), "should show API URL label");
+        assert!(p.contains("(default)"), "should show '(default)' for API");
+        assert!(
+            !p.contains("Model"),
+            "should not show Model when not verbose"
+        );
     }
 
     #[test]
-    fn test_print_config_section_created_config() {
+    fn test_format_config_section_created_config() {
         let cfg = Config::default();
         let path = PathBuf::from("/tmp/test/config.yaml");
-        // Exercises the config_exists=false (created) branch
-        print_config_section(&cfg, &path, false, false);
+        let output = format_config_section(&cfg, &path, false, false, 80);
+        let p = plain(&output);
+        assert!(p.contains("created"), "should show 'created' annotation");
     }
 
     #[test]
-    fn test_print_config_section_custom_api_url() {
+    fn test_format_config_section_custom_api_url() {
         let cfg = Config {
             api_url: Some("https://custom.api.com".to_string()),
             ..Config::default()
         };
         let path = PathBuf::from("/tmp/test/config.yaml");
-        // Exercises the api_url.is_some() branch
-        print_config_section(&cfg, &path, true, false);
+        let output = format_config_section(&cfg, &path, true, false, 80);
+        let p = plain(&output);
+        assert!(
+            p.contains("https://custom.api.com"),
+            "should show custom API URL"
+        );
+        assert!(
+            !p.contains("(default)"),
+            "should not show '(default)' for custom URL"
+        );
     }
 
     #[test]
-    fn test_print_config_section_verbose_with_model() {
+    fn test_format_config_section_verbose_with_model() {
         let cfg = Config {
             model: Some("opus".to_string()),
             ..Config::default()
         };
         let path = PathBuf::from("/tmp/test/config.yaml");
-        // Exercises verbose=true with model set
-        print_config_section(&cfg, &path, true, true);
+        let output = format_config_section(&cfg, &path, true, true, 80);
+        let p = plain(&output);
+        assert!(p.contains("Model"), "should show Model in verbose mode");
+        assert!(p.contains("opus"), "should show model name");
     }
 
     #[test]
-    fn test_print_config_section_verbose_no_model() {
+    fn test_format_config_section_verbose_no_model() {
         let cfg = Config::default();
         let path = PathBuf::from("/tmp/test/config.yaml");
-        // Exercises verbose=true with model=None
-        print_config_section(&cfg, &path, true, true);
+        let output = format_config_section(&cfg, &path, true, true, 80);
+        let p = plain(&output);
+        assert!(p.contains("Model"), "should show Model in verbose mode");
+        assert!(
+            p.contains("not set"),
+            "should show 'not set' for default model"
+        );
     }
 
-    // ─── print_claude_md_section ─────────────────────────────────
+    #[test]
+    fn test_format_config_section_has_box_borders() {
+        let cfg = Config::default();
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, false, 80);
+        let p = plain(&output);
+        assert!(
+            p.contains('┌'),
+            "should contain top-left corner box character"
+        );
+        assert!(
+            p.contains('└'),
+            "should contain bottom-left corner box character"
+        );
+        assert!(p.contains('│'), "should contain vertical border character");
+    }
+
+    // ─── format_claude_md_section ────────────────────────────────
 
     #[test]
-    fn test_print_claude_md_section_empty() {
+    fn test_format_claude_md_section_empty() {
         let dir = tempdir().unwrap();
-        print_claude_md_section(dir.path());
+        let output = format_claude_md_section(dir.path(), 80);
+        let p = plain(&output);
+        assert!(
+            p.contains("CLAUDE.md Files"),
+            "should have panel title: {p}"
+        );
+        assert!(
+            p.contains("No CLAUDE.md files found"),
+            "should show empty message: {p}"
+        );
+        assert!(
+            p.contains("actual sync"),
+            "should show hint to run sync: {p}"
+        );
     }
 
     #[test]
-    fn test_print_claude_md_section_unmanaged() {
+    fn test_format_claude_md_section_unmanaged() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("CLAUDE.md"), "# No markers").unwrap();
-        print_claude_md_section(dir.path());
+        let output = format_claude_md_section(dir.path(), 80);
+        let p = plain(&output);
+        assert!(p.contains("unmanaged"), "should show 'unmanaged': {p}");
+        assert!(p.contains("0 managed"), "should show 0 managed count: {p}");
+        assert!(
+            p.contains("1 unmanaged"),
+            "should show 1 unmanaged count: {p}"
+        );
     }
 
     #[test]
-    fn test_print_claude_md_section_managed() {
+    fn test_format_claude_md_section_managed() {
         let dir = tempdir().unwrap();
         let managed = markers::wrap_in_markers("test content", 2, &[]);
         std::fs::write(dir.path().join("CLAUDE.md"), &managed).unwrap();
-        print_claude_md_section(dir.path());
+        let output = format_claude_md_section(dir.path(), 80);
+        let p = plain(&output);
+        assert!(p.contains("managed"), "should show 'managed': {p}");
+        assert!(p.contains("v2"), "should show version: {p}");
+        assert!(p.contains("1 managed"), "should show 1 managed count: {p}");
+        assert!(
+            p.contains("0 unmanaged"),
+            "should show 0 unmanaged count: {p}"
+        );
     }
 
     #[test]
-    fn test_print_claude_md_section_managed_no_metadata() {
+    fn test_format_claude_md_section_managed_no_metadata() {
         let dir = tempdir().unwrap();
         // Managed section but without version/last-synced metadata
         let content = format!(
@@ -487,60 +589,113 @@ mod tests {
             markers::END_MARKER
         );
         std::fs::write(dir.path().join("CLAUDE.md"), &content).unwrap();
-        print_claude_md_section(dir.path());
+        let output = format_claude_md_section(dir.path(), 80);
+        let p = plain(&output);
+        assert!(
+            p.contains("managed"),
+            "should show 'managed' for file with markers: {p}"
+        );
+        assert!(p.contains("1 managed"), "should show 1 managed count: {p}");
     }
 
-    // ─── print_verbose_section ───────────────────────────────────
+    #[test]
+    fn test_format_claude_md_section_summary_counts() {
+        let dir = tempdir().unwrap();
+        // Create one managed and one unmanaged file
+        let managed = markers::wrap_in_markers("test content", 1, &[]);
+        std::fs::write(dir.path().join("CLAUDE.md"), &managed).unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("CLAUDE.md"), "# Unmanaged").unwrap();
+        let output = format_claude_md_section(dir.path(), 80);
+        let p = plain(&output);
+        assert!(p.contains("1 managed"), "should show 1 managed count: {p}");
+        assert!(
+            p.contains("1 unmanaged"),
+            "should show 1 unmanaged count: {p}"
+        );
+    }
+
+    // ─── format_verbose_section ──────────────────────────────────
 
     #[test]
-    fn test_print_verbose_section_defaults() {
+    fn test_format_verbose_section_defaults() {
         let cfg = Config::default();
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(p.contains("Details"), "should have panel title: {p}");
+        assert!(p.contains("Telemetry"), "should show Telemetry: {p}");
+        assert!(p.contains("enabled"), "should show 'enabled': {p}");
+        assert!(p.contains("Batch size"), "should show Batch size: {p}");
+        assert!(p.contains("15"), "should show default batch size: {p}");
+        assert!(p.contains("Concurrency"), "should show Concurrency: {p}");
+        assert!(p.contains("3"), "should show default concurrency: {p}");
+        assert!(
+            p.contains("Rejected ADRs"),
+            "should show Rejected ADRs: {p}"
+        );
+        assert!(
+            p.contains("none"),
+            "should show 'none' for rejected ADRs: {p}"
+        );
     }
 
     #[test]
-    fn test_print_verbose_section_telemetry_disabled() {
+    fn test_format_verbose_section_telemetry_disabled() {
         let cfg = Config {
             telemetry: Some(TelemetryConfig {
                 enabled: Some(false),
             }),
             ..Config::default()
         };
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(p.contains("disabled"), "should show 'disabled': {p}");
     }
 
     #[test]
-    fn test_print_verbose_section_telemetry_enabled_explicit() {
+    fn test_format_verbose_section_telemetry_enabled_explicit() {
         let cfg = Config {
             telemetry: Some(TelemetryConfig {
                 enabled: Some(true),
             }),
             ..Config::default()
         };
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(p.contains("enabled"), "should show 'enabled': {p}");
     }
 
     #[test]
-    fn test_print_verbose_section_telemetry_none_in_struct() {
+    fn test_format_verbose_section_telemetry_none_in_struct() {
         let cfg = Config {
             telemetry: Some(TelemetryConfig { enabled: None }),
             ..Config::default()
         };
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        // defaults to enabled
+        assert!(
+            p.contains("enabled"),
+            "should show 'enabled' when None: {p}"
+        );
     }
 
     #[test]
-    fn test_print_verbose_section_with_custom_batch_and_concurrency() {
+    fn test_format_verbose_section_with_custom_batch_and_concurrency() {
         let cfg = Config {
             batch_size: Some(25),
             concurrency: Some(8),
             ..Config::default()
         };
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(p.contains("25"), "should show custom batch size: {p}");
+        assert!(p.contains("8"), "should show custom concurrency: {p}");
     }
 
     #[test]
-    fn test_print_verbose_section_with_rejected_adrs() {
+    fn test_format_verbose_section_with_rejected_adrs() {
         let mut rejected = HashMap::new();
         rejected.insert(
             "repo1".to_string(),
@@ -551,11 +706,17 @@ mod tests {
             rejected_adrs: Some(rejected),
             ..Config::default()
         };
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(p.contains("3"), "should show total rejected count: {p}");
+        assert!(
+            p.contains("2 repos"),
+            "should show repo count for rejected: {p}"
+        );
     }
 
     #[test]
-    fn test_print_verbose_section_with_cached_analysis_long_commit() {
+    fn test_format_verbose_section_with_cached_analysis_long_commit() {
         let cfg = Config {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: "/home/user/project".to_string(),
@@ -565,11 +726,25 @@ mod tests {
             }),
             ..Config::default()
         };
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(
+            p.contains("present"),
+            "should show 'present' for cached analysis: {p}"
+        );
+        assert!(
+            p.contains("/home/user/project"),
+            "should show repo path: {p}"
+        );
+        assert!(p.contains("abc123d"), "should show short commit hash: {p}");
+        assert!(
+            !p.contains("abc123def456789"),
+            "should not show full commit hash: {p}"
+        );
     }
 
     #[test]
-    fn test_print_verbose_section_with_cached_analysis_short_commit() {
+    fn test_format_verbose_section_with_cached_analysis_short_commit() {
         let cfg = Config {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: "/home/user/project".to_string(),
@@ -579,11 +754,13 @@ mod tests {
             }),
             ..Config::default()
         };
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(p.contains("abc"), "should show short commit: {p}");
     }
 
     #[test]
-    fn test_print_verbose_section_with_cached_analysis_no_commit() {
+    fn test_format_verbose_section_with_cached_analysis_no_commit() {
         let cfg = Config {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: "/home/user/project".to_string(),
@@ -593,11 +770,20 @@ mod tests {
             }),
             ..Config::default()
         };
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(
+            p.contains("present"),
+            "should show 'present' for cached analysis: {p}"
+        );
+        assert!(
+            p.contains("/home/user/project"),
+            "should show repo path: {p}"
+        );
     }
 
     #[test]
-    fn test_print_verbose_section_with_cached_analysis_exactly_7_char_commit() {
+    fn test_format_verbose_section_with_cached_analysis_exactly_7_char_commit() {
         let cfg = Config {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: "/home/user/project".to_string(),
@@ -607,7 +793,22 @@ mod tests {
             }),
             ..Config::default()
         };
-        print_verbose_section(&cfg);
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(
+            p.contains("abcdefg"),
+            "should show exactly 7-char commit: {p}"
+        );
+    }
+
+    #[test]
+    fn test_format_verbose_section_has_box_borders() {
+        let cfg = Config::default();
+        let output = format_verbose_section(&cfg, 80);
+        let p = plain(&output);
+        assert!(p.contains('┌'), "should contain top-left corner");
+        assert!(p.contains('└'), "should contain bottom-left corner");
+        assert!(p.contains('│'), "should contain vertical border");
     }
 
     // ─── resolve_cwd ──────────────────────────────────────────────
