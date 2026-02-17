@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use glob::glob;
+use ignore::WalkBuilder;
 use serde::Deserialize;
 
 /// Result of monorepo detection.
@@ -363,69 +363,83 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 /// Expand glob patterns relative to root and build project info for each match.
 ///
 /// Supports negation patterns (prefixed with `!`) which exclude matching directories
-/// from the result set. Uses `fs::canonicalize` to resolve symlinks and reject
-/// entries that escape the repo root.
+/// from the result set. Uses the `ignore` crate's [`WalkBuilder`] to walk the
+/// filesystem while respecting `.gitignore` rules, which automatically skips
+/// dependency directories (e.g. `node_modules`), build artifacts, and hidden
+/// directories that are gitignored. This prevents catastrophic slowdowns when
+/// glob patterns like `apps/**` would otherwise recurse into tens of thousands
+/// of nested directories.
+///
+/// Uses `fs::canonicalize` to resolve symlinks and reject entries that escape
+/// the repo root.
 fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
     // Canonicalize root once; if this fails, root doesn't exist and there's
     // nothing to expand — callers will see an empty vec and fall through.
     let Ok(canonical_root) = fs::canonicalize(root) else {
         return Vec::new();
     };
-    let mut projects = Vec::new();
 
-    // Separate inclusion and exclusion patterns
+    // Separate inclusion and exclusion patterns, compile them into glob matchers.
+    let mut inclusion_globs = Vec::new();
     let mut exclusion_globs = Vec::new();
     for pattern in patterns {
         if let Some(negated) = pattern.strip_prefix('!') {
-            let full = root.join(negated);
-            if let Ok(pat) = glob::Pattern::new(&full.to_string_lossy()) {
+            if let Ok(pat) = glob::Pattern::new(negated) {
                 exclusion_globs.push(pat);
             }
+        } else if let Ok(pat) = glob::Pattern::new(pattern) {
+            inclusion_globs.push(pat);
+        }
+    }
+
+    if inclusion_globs.is_empty() {
+        return Vec::new();
+    }
+
+    // Walk the filesystem respecting .gitignore rules. This is the key
+    // performance fix: the walker skips gitignored directories (node_modules,
+    // .next, dist, etc.) without ever descending into them.
+    let walker = WalkBuilder::new(root)
+        .hidden(false) // Don't skip hidden dirs — let .gitignore decide
+        .follow_links(false) // Don't follow symlinks (security: prevents escaping root)
+        .build();
+
+    let mut projects = Vec::new();
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
         }
 
-        let full_pattern = root.join(pattern);
-        let pattern_str = full_pattern.to_string_lossy().to_string();
-
-        let entries = match glob(&pattern_str) {
-            Ok(paths) => paths,
-            Err(_) => continue,
+        // Canonicalize each entry to resolve symlinks and `..` segments,
+        // then verify it is within the canonical repo root.
+        let canonical_entry = match fs::canonicalize(path) {
+            Ok(c) if c.starts_with(&canonical_root) => c,
+            _ => continue,
         };
-
-        for entry in entries.flatten() {
-            if !entry.is_dir() {
-                continue;
-            }
-
-            // Canonicalize each entry to resolve symlinks and `..` segments,
-            // then verify it is within the canonical repo root.
-            let canonical_entry = match fs::canonicalize(&entry) {
-                Ok(c) if c.starts_with(&canonical_root) => c,
-                _ => continue,
-            };
-            // strip_prefix is guaranteed to succeed after starts_with
-            let rel = canonical_entry
-                .strip_prefix(&canonical_root)
-                .expect("starts_with already verified")
-                .to_string_lossy()
-                .to_string();
-            if rel.is_empty() {
-                continue;
-            }
-
-            let name = extract_project_name(&canonical_entry);
-            projects.push(ProjectInfo { path: rel, name });
+        // strip_prefix is guaranteed to succeed after starts_with
+        let rel = canonical_entry
+            .strip_prefix(&canonical_root)
+            .expect("starts_with already verified")
+            .to_string_lossy()
+            .to_string();
+        if rel.is_empty() {
+            continue;
         }
-    }
 
-    // Apply exclusion patterns as a post-filter
-    if !exclusion_globs.is_empty() {
-        projects.retain(|p| {
-            let full_path = root.join(&p.path).to_string_lossy().to_string();
-            !exclusion_globs.iter().any(|g| g.matches(&full_path))
-        });
-    }
+        // Check if the relative path matches any inclusion glob pattern
+        if !inclusion_globs.iter().any(|g| g.matches(&rel)) {
+            continue;
+        }
 
+        // Check exclusion patterns
+        if exclusion_globs.iter().any(|g| g.matches(&rel)) {
+            continue;
+        }
+
+        let name = extract_project_name(&canonical_entry);
+        projects.push(ProjectInfo { path: rel, name });
+    }
     projects
 }
 

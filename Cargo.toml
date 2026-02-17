@@ -59,6 +59,7 @@ tempfile = "3"
 
 # Static analysis
 tokei = "12"
+ignore = "0.4"
 
 # Tree-sitter parsing
 tree-sitter = "0.25"
