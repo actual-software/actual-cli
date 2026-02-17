@@ -82,49 +82,8 @@ pub fn confirm_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::ui::test_utils::MockTerminal;
     use crate::tailoring::types::{SkippedAdr, TailoringSummary};
-    use std::sync::Mutex;
-
-    struct MockTerminal {
-        select_result: Mutex<Option<Option<Vec<usize>>>>,
-        output: Mutex<Vec<String>>,
-    }
-
-    impl MockTerminal {
-        fn with_selection(result: Option<Vec<usize>>) -> Self {
-            Self {
-                select_result: Mutex::new(Some(result)),
-                output: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn output_text(&self) -> String {
-            self.output.lock().unwrap().join("\n")
-        }
-    }
-
-    impl TerminalIO for MockTerminal {
-        fn read_line(&self, _prompt: &str) -> Result<String, ActualError> {
-            Err(ActualError::UserCancelled)
-        }
-
-        fn write_line(&self, text: &str) {
-            self.output.lock().unwrap().push(text.to_string());
-        }
-
-        fn select_files(
-            &self,
-            _prompt: &str,
-            _items: &[String],
-            _defaults: &[bool],
-        ) -> Result<Option<Vec<usize>>, ActualError> {
-            self.select_result
-                .lock()
-                .unwrap()
-                .take()
-                .ok_or(ActualError::UserCancelled)
-        }
-    }
 
     fn make_test_output(file_count: usize) -> TailoringOutput {
         let files: Vec<FileOutput> = (1..=file_count)
@@ -177,7 +136,7 @@ mod tests {
     #[test]
     fn test_confirm_files_force_returns_all() {
         let output = make_test_output(3);
-        let term = MockTerminal::with_selection(Some(vec![]));
+        let term = MockTerminal::with_selection_only(Some(vec![]));
         let result = confirm_files(&output, true, &term).unwrap();
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].path, "path/file1.md");
@@ -188,7 +147,7 @@ mod tests {
     #[test]
     fn test_confirm_files_force_empty_list() {
         let output = make_test_output(0);
-        let term = MockTerminal::with_selection(Some(vec![]));
+        let term = MockTerminal::with_selection_only(Some(vec![]));
         let result = confirm_files(&output, true, &term).unwrap();
         assert!(result.is_empty());
     }
@@ -198,7 +157,7 @@ mod tests {
     #[test]
     fn test_confirm_files_accept_all() {
         let output = make_test_output(2);
-        let term = MockTerminal::with_selection(Some(vec![0, 1]));
+        let term = MockTerminal::with_selection_only(Some(vec![0, 1]));
         let result = confirm_files(&output, false, &term).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].path, "path/file1.md");
@@ -208,7 +167,7 @@ mod tests {
     #[test]
     fn test_confirm_files_cancelled() {
         let output = make_test_output(2);
-        let term = MockTerminal::with_selection(None);
+        let term = MockTerminal::with_selection_only(None);
         let result = confirm_files(&output, false, &term);
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
@@ -220,7 +179,7 @@ mod tests {
     fn test_confirm_files_reject_file() {
         let output = make_test_output(3);
         // Select files 0 and 2, skip file 1
-        let term = MockTerminal::with_selection(Some(vec![0, 2]));
+        let term = MockTerminal::with_selection_only(Some(vec![0, 2]));
         let result = confirm_files(&output, false, &term).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].path, "path/file1.md");
@@ -230,7 +189,7 @@ mod tests {
     #[test]
     fn test_confirm_files_reject_all() {
         let output = make_test_output(2);
-        let term = MockTerminal::with_selection(Some(vec![]));
+        let term = MockTerminal::with_selection_only(Some(vec![]));
         let result = confirm_files(&output, false, &term).unwrap();
         assert!(result.is_empty());
     }
@@ -238,7 +197,7 @@ mod tests {
     #[test]
     fn test_confirm_files_skipped_adrs_message() {
         let output = make_test_output_with_skipped();
-        let term = MockTerminal::with_selection(Some(vec![0, 1]));
+        let term = MockTerminal::with_selection_only(Some(vec![0, 1]));
         let _ = confirm_files(&output, false, &term).unwrap();
         let text = term.output_text();
         assert!(
@@ -251,7 +210,7 @@ mod tests {
     fn test_confirm_files_partial_selection() {
         let output = make_test_output(4);
         // Select only files at index 1 and 3
-        let term = MockTerminal::with_selection(Some(vec![1, 3]));
+        let term = MockTerminal::with_selection_only(Some(vec![1, 3]));
         let result = confirm_files(&output, false, &term).unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].path, "path/file2.md");
@@ -261,7 +220,7 @@ mod tests {
     #[test]
     fn test_confirm_files_empty_file_list_no_force() {
         let output = make_test_output(0);
-        let term = MockTerminal::with_selection(Some(vec![]));
+        let term = MockTerminal::with_selection_only(Some(vec![]));
         let result = confirm_files(&output, false, &term).unwrap();
         assert!(result.is_empty());
     }
@@ -273,7 +232,7 @@ mod tests {
             id: "adr-skip-1".to_string(),
             reason: "not applicable".to_string(),
         }];
-        let term = MockTerminal::with_selection(Some(vec![]));
+        let term = MockTerminal::with_selection_only(Some(vec![]));
         let result = confirm_files(&output, false, &term).unwrap();
         assert!(result.is_empty());
         let text = term.output_text();
@@ -287,10 +246,7 @@ mod tests {
     fn test_confirm_files_select_error() {
         let output = make_test_output(2);
         // No result set — select_files returns an error
-        let term = MockTerminal {
-            select_result: Mutex::new(None),
-            output: Mutex::new(Vec::new()),
-        };
+        let term = MockTerminal::new(vec![]);
         let result = confirm_files(&output, false, &term);
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
@@ -302,7 +258,7 @@ mod tests {
 
     #[test]
     fn mock_terminal_read_line_returns_error() {
-        let term = MockTerminal::with_selection(Some(vec![]));
+        let term = MockTerminal::with_selection_only(Some(vec![]));
         let result = term.read_line("prompt");
         assert!(matches!(result, Err(ActualError::UserCancelled)));
     }
