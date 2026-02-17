@@ -44,7 +44,7 @@ pub struct SyncResult {
 /// generic instantiation of `run_sync` in `sync.rs` is `MockRunner` from
 /// unit tests.
 pub fn exec(args: &SyncArgs) -> i32 {
-    super::handle_result(crate::cli::ui::real_terminal::sync_run(args))
+    super::handle_result(super::sync_wiring::sync_run(args))
 }
 
 /// Resolve the current working directory, falling back to `"."` if
