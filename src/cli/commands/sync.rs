@@ -104,7 +104,12 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     // 5. Confirmation (unless --force)
     if args.force {
         // Show project summary even in --force mode for visibility
-        let summary = format_project_summary(&analysis);
+        let width = console::Term::stderr()
+            .size_checked()
+            .map(|(_, cols)| cols as usize)
+            .unwrap_or(80)
+            .min(90);
+        let summary = format_project_summary(&analysis, width);
         pipeline.suspend(|| eprintln!("{summary}"));
     } else {
         // prompt_project_confirmation displays the project summary itself
