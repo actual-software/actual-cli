@@ -9,13 +9,7 @@ use crate::error::ActualError;
 use crate::generation::markers;
 
 pub fn exec(args: &StatusArgs) -> i32 {
-    match load_and_run(args) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("{} {}", theme::error_prefix(), e);
-            e.exit_code()
-        }
-    }
+    super::handle_result(load_and_run(args))
 }
 
 fn load_and_run(args: &StatusArgs) -> Result<(), ActualError> {

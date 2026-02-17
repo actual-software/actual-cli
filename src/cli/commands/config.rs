@@ -1,18 +1,11 @@
 use std::path::Path;
 
 use crate::cli::args::{ConfigAction, ConfigArgs};
-use crate::cli::ui::theme;
 use crate::config;
 use crate::error::ActualError;
 
 pub fn exec(args: &ConfigArgs) -> i32 {
-    match run(args) {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("{} {}", theme::error_prefix(), e);
-            e.exit_code()
-        }
-    }
+    super::handle_result(run(args))
 }
 
 fn run(args: &ConfigArgs) -> Result<(), ActualError> {
