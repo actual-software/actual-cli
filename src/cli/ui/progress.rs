@@ -1,6 +1,16 @@
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use std::sync::LazyLock;
 use std::time::Duration;
+
+/// Style for the active (spinning) state.
+static SPINNING_STYLE: LazyLock<ProgressStyle> = LazyLock::new(|| {
+    ProgressStyle::with_template("{spinner} {msg}").expect("invalid spinner template")
+});
+
+/// Style for completed phases (success, error, warn, skip).
+static FINISHED_STYLE: LazyLock<ProgressStyle> =
+    LazyLock::new(|| ProgressStyle::with_template("  {msg}").expect("invalid finished template"));
 
 /// Symbols for terminal status output
 pub const SUCCESS_SYMBOL: &str = "✔";
@@ -68,9 +78,7 @@ impl SyncPipeline {
     /// Transition a phase to the active (spinning) state.
     pub fn start(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
-            let spinning_style =
-                ProgressStyle::with_template("{spinner} {msg}").expect("invalid spinner template");
-            bar.set_style(spinning_style);
+            bar.set_style(SPINNING_STYLE.clone());
             bar.set_message(message.to_string());
             bar.enable_steady_tick(Duration::from_millis(80));
         }
@@ -82,7 +90,7 @@ impl SyncPipeline {
     /// output is consistent regardless of whether `start()` was called first.
     pub fn success(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
-            bar.set_style(Self::finished_style());
+            bar.set_style(FINISHED_STYLE.clone());
             bar.finish_with_message(format!("{} {message}", style(SUCCESS_SYMBOL).green()));
         }
     }
@@ -93,7 +101,7 @@ impl SyncPipeline {
     /// as opposed to `success()` which implies the phase ran and succeeded.
     pub fn skip(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
-            bar.set_style(Self::finished_style());
+            bar.set_style(FINISHED_STYLE.clone());
             bar.finish_with_message(format!("{} {message}", style("─").dim()));
         }
     }
@@ -104,7 +112,7 @@ impl SyncPipeline {
     /// output is consistent regardless of whether `start()` was called first.
     pub fn error(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
-            bar.set_style(Self::finished_style());
+            bar.set_style(FINISHED_STYLE.clone());
             bar.finish_with_message(format!("{} {message}", style(ERROR_SYMBOL).red()));
         }
     }
@@ -115,24 +123,19 @@ impl SyncPipeline {
     /// output is consistent regardless of whether `start()` was called first.
     pub fn warn(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
-            bar.set_style(Self::finished_style());
+            bar.set_style(FINISHED_STYLE.clone());
             bar.finish_with_message(format!("{} {message}", style(WARN_SYMBOL).yellow()));
         }
-    }
-
-    /// Style used when a phase has completed (success, error, warn, or skip).
-    fn finished_style() -> ProgressStyle {
-        ProgressStyle::with_template("  {msg}").expect("invalid finished template")
     }
 
     /// Mark all unfinished phases as skipped.
     ///
     /// Uses the same visual treatment as [`skip()`]: a dim dash prefix
-    /// rendered via `finished_style()` with the symbol embedded in the message.
+    /// rendered via `FINISHED_STYLE` with the symbol embedded in the message.
     pub fn finish_remaining(&self) {
         for bar in self.bars.iter().flatten() {
             if !bar.is_finished() {
-                bar.set_style(Self::finished_style());
+                bar.set_style(FINISHED_STYLE.clone());
                 bar.finish_with_message(format!("{} skipped", style("─").dim()));
             }
         }
