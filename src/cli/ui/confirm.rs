@@ -11,27 +11,19 @@ fn abbreviate_language(lang: &Language) -> &str {
         Language::TypeScript => "ts",
         Language::JavaScript => "js",
         Language::Python => "py",
-        _ => {
-            // Use Display impl which delegates to as_str() (lowercase)
-            // Since we can't return a &str from to_string(), match remaining variants
-            match lang {
-                Language::Rust => "rust",
-                Language::Go => "go",
-                Language::Java => "java",
-                Language::Kotlin => "kotlin",
-                Language::Swift => "swift",
-                Language::Ruby => "ruby",
-                Language::Php => "php",
-                Language::C => "c",
-                Language::Cpp => "cpp",
-                Language::CSharp => "csharp",
-                Language::Scala => "scala",
-                Language::Elixir => "elixir",
-                Language::Other => "other",
-                // Already matched above
-                Language::TypeScript | Language::JavaScript | Language::Python => unreachable!(),
-            }
-        }
+        Language::Rust => "rust",
+        Language::Go => "go",
+        Language::Java => "java",
+        Language::Kotlin => "kotlin",
+        Language::Swift => "swift",
+        Language::Ruby => "ruby",
+        Language::Php => "php",
+        Language::C => "c",
+        Language::Cpp => "cpp",
+        Language::CSharp => "csharp",
+        Language::Scala => "scala",
+        Language::Elixir => "elixir",
+        Language::Other => "other",
     }
 }
 
@@ -339,12 +331,23 @@ mod tests {
     // ── format_metadata / abbreviate_language tests ──
 
     #[test]
-    fn abbreviate_language_common_abbreviations() {
+    fn abbreviate_language_all_variants() {
         assert_eq!(abbreviate_language(&Language::TypeScript), "ts");
         assert_eq!(abbreviate_language(&Language::JavaScript), "js");
         assert_eq!(abbreviate_language(&Language::Python), "py");
         assert_eq!(abbreviate_language(&Language::Rust), "rust");
         assert_eq!(abbreviate_language(&Language::Go), "go");
+        assert_eq!(abbreviate_language(&Language::Java), "java");
+        assert_eq!(abbreviate_language(&Language::Kotlin), "kotlin");
+        assert_eq!(abbreviate_language(&Language::Swift), "swift");
+        assert_eq!(abbreviate_language(&Language::Ruby), "ruby");
+        assert_eq!(abbreviate_language(&Language::Php), "php");
+        assert_eq!(abbreviate_language(&Language::C), "c");
+        assert_eq!(abbreviate_language(&Language::Cpp), "cpp");
+        assert_eq!(abbreviate_language(&Language::CSharp), "csharp");
+        assert_eq!(abbreviate_language(&Language::Scala), "scala");
+        assert_eq!(abbreviate_language(&Language::Elixir), "elixir");
+        assert_eq!(abbreviate_language(&Language::Other), "other");
     }
 
     #[test]
@@ -404,6 +407,43 @@ mod tests {
         };
         let meta = format_metadata(&project);
         assert_eq!(meta, "ts, js · npm");
+    }
+
+    #[test]
+    fn format_metadata_only_pm() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![],
+            frameworks: vec![],
+            package_manager: Some("npm".to_string()),
+            description: None,
+        };
+        let meta = format_metadata(&project);
+        assert_eq!(meta, "npm");
+    }
+
+    #[test]
+    fn format_metadata_multiple_frameworks() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![Language::Rust],
+            frameworks: vec![
+                Framework {
+                    name: "actix-web".to_string(),
+                    category: FrameworkCategory::WebBackend,
+                },
+                Framework {
+                    name: "diesel".to_string(),
+                    category: FrameworkCategory::Data,
+                },
+            ],
+            package_manager: None,
+            description: None,
+        };
+        let meta = format_metadata(&project);
+        assert_eq!(meta, "rust · actix-web, diesel");
     }
 
     #[test]
