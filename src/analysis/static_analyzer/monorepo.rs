@@ -206,6 +206,7 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
         )
     })?;
 
+    let canonical_root = fs::canonicalize(root)?;
     let projects: Vec<ProjectInfo> = match json.get("projects") {
         Some(serde_json::Value::Object(obj)) => obj
             .iter()
@@ -217,11 +218,13 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
                         .and_then(|r| r.as_str())
                         .map(|s| s.to_string())
                 })?;
-                // Reject paths containing `..` to prevent directory traversal
-                if path_str.contains("..") || !root.join(&path_str).is_dir() {
-                    return None;
-                }
-                let name = extract_project_name(&root.join(&path_str));
+                // Use canonicalize to reject paths that escape the repo root
+                let resolved = root.join(&path_str);
+                let canonical = match fs::canonicalize(&resolved) {
+                    Ok(c) if c.starts_with(&canonical_root) && c.is_dir() => c,
+                    _ => return None,
+                };
+                let name = extract_project_name(&canonical);
                 Some(ProjectInfo {
                     path: path_str,
                     name,
@@ -326,9 +329,19 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
         return Ok(None);
     }
 
+    let canonical_root = fs::canonicalize(root).ok();
     let projects: Vec<ProjectInfo> = dirs
         .into_iter()
-        .filter(|d| !d.contains("..") && root.join(d).is_dir())
+        .filter(|d| {
+            let resolved = root.join(d);
+            if !resolved.is_dir() {
+                return false;
+            }
+            match (&canonical_root, fs::canonicalize(&resolved).ok()) {
+                (Some(cr), Some(cp)) => cp.starts_with(cr),
+                _ => false,
+            }
+        })
         .map(|d| {
             let name = extract_project_name(&root.join(&d));
             ProjectInfo { path: d, name }
@@ -378,10 +391,10 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
 
             // Compute relative path from root; skip entries that resolve to
             // root itself or escape it via `..` components.
-            let rel = entry
-                .strip_prefix(root)
-                .map(|r| r.to_string_lossy().to_string())
-                .unwrap_or_default();
+            let rel = match entry.strip_prefix(root) {
+                Ok(r) => r.to_string_lossy().to_string(),
+                Err(_) => continue, // skip entries outside repo root
+            };
             if rel.is_empty() || rel.contains("..") {
                 continue;
             }
