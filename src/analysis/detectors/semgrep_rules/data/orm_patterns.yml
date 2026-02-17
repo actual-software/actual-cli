@@ -1,0 +1,358 @@
+rules:
+  # ==========================================================================
+  # Prisma (JavaScript/TypeScript)
+  # ==========================================================================
+
+  - id: js.prisma.client
+    languages: [javascript, typescript]
+    message: Prisma client usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new PrismaClient(...)
+          - pattern: $PRISMA.$MODEL.findMany(...)
+          - pattern: $PRISMA.$MODEL.findUnique(...)
+          - pattern: $PRISMA.$MODEL.create(...)
+          - pattern: $PRISMA.$MODEL.update(...)
+          - pattern: $PRISMA.$MODEL.delete(...)
+
+  # ==========================================================================
+  # TypeORM (JavaScript/TypeScript)
+  # ==========================================================================
+
+  - id: js.typeorm.repository
+    languages: [javascript, typescript]
+    message: TypeORM repository usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: getRepository($ENTITY)
+          - pattern: $REPO.find(...)
+          - pattern: $REPO.findOne(...)
+          - pattern: $REPO.save(...)
+
+  - id: ts.typeorm.entity
+    languages: [typescript]
+    message: TypeORM entity detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          @Entity(...)
+          class $CLASS { ... }
+
+  # ==========================================================================
+  # Drizzle (JavaScript/TypeScript)
+  # ==========================================================================
+
+  - id: js.drizzle.schema
+    languages: [javascript, typescript]
+    message: Drizzle ORM schema detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: pgTable($NAME, { ... })
+          - pattern: mysqlTable($NAME, { ... })
+          - pattern: sqliteTable($NAME, { ... })
+
+  - id: js.drizzle.query
+    languages: [javascript, typescript]
+    message: Drizzle ORM query detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: $DB.select().from($TABLE)
+          - pattern: $DB.insert($TABLE).values(...)
+          - pattern: $DB.update($TABLE).set(...)
+
+  # ==========================================================================
+  # SQLAlchemy (Python)
+  # ==========================================================================
+
+  - id: py.sqlalchemy.session
+    languages: [python]
+    message: SQLAlchemy session usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $SESSION.query($MODEL)
+          - pattern: $SESSION.add($OBJ)
+          - pattern: $SESSION.commit()
+          - pattern: $SESSION.execute(...)
+
+  - id: py.sqlalchemy.model
+    languages: [python]
+    message: SQLAlchemy model detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          class $MODEL(Base):
+              ...
+
+  # ==========================================================================
+  # Django ORM (Python)
+  # ==========================================================================
+
+  - id: py.django.model
+    languages: [python]
+    message: Django model detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          class $MODEL(models.Model):
+              ...
+
+  - id: py.django.queryset
+    languages: [python]
+    message: Django QuerySet usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $MODEL.objects.filter(...)
+          - pattern: $MODEL.objects.get(...)
+          - pattern: $MODEL.objects.all()
+          - pattern: $MODEL.objects.create(...)
+
+  # ==========================================================================
+  # GORM (Go)
+  # ==========================================================================
+
+  - id: go.gorm.model
+    languages: [go]
+    message: GORM model detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: gorm.Model
+          - pattern: $DB.AutoMigrate(...)
+
+  - id: go.gorm.query
+    languages: [go]
+    message: GORM query detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $DB.Find(...)
+          - pattern: $DB.First(...)
+          - pattern: $DB.Create(...)
+          - pattern: $DB.Save(...)
+          - pattern: $DB.Where(...).Find(...)
+
+  # ==========================================================================
+  # JPA/Hibernate (Java)
+  # ==========================================================================
+
+  - id: java.jpa.entity
+    languages: [java]
+    message: JPA entity detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          @Entity
+          class $CLASS { ... }
+
+  - id: java.jpa.repository
+    languages: [java]
+    message: JPA repository detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          interface $REPO extends JpaRepository<$ENTITY, $ID> { ... }
+
+  # ==========================================================================
+  # Diesel (Rust)
+  # ==========================================================================
+
+  - id: rust.diesel.model
+    languages: [rust]
+    message: Diesel model detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: "#[derive(..., Queryable, ...)]"
+          - pattern: "#[derive(..., Insertable, ...)]"
+          - pattern: table!(...)
+
+  - id: rust.diesel.query
+    languages: [rust]
+    message: Diesel query detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $TABLE.filter(...)
+          - pattern: diesel::insert_into($TABLE)
+          - pattern: diesel::update($TABLE)
+
+  # ==========================================================================
+  # Entity Framework (C#)
+  # ==========================================================================
+
+  - id: csharp.efcore.dbcontext
+    languages: [csharp]
+    message: Entity Framework DbContext detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS : DbContext { ... }
+          - pattern: $CTX.Set<$ENTITY>()
+          - pattern: $CTX.SaveChanges()
+
+  - id: csharp.efcore.entity
+    languages: [csharp]
+    message: Entity Framework entity configuration detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: modelBuilder.Entity<$ENTITY>()
+          - pattern: |
+              [Table($NAME)]
+              class $CLASS { ... }
+
+  - id: csharp.efcore.dbset
+    languages: [csharp]
+    message: Entity Framework DbSet detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.85"
+    patterns:
+      - pattern-regex: "DbSet<[^>]+>\\s+\\w+\\s*\\{\\s*get;\\s*set;\\s*\\}"
+
+  # ==========================================================================
+  # Exposed (Kotlin)
+  # ==========================================================================
+
+  - id: kotlin.exposed.table
+    languages: [kotlin]
+    message: Exposed table definition detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: integer($NAME)
+          - pattern: varchar($NAME, $LENGTH)
+          - pattern: Table.select { ... }
+
+  - id: kotlin.exposed.query
+    languages: [kotlin]
+    message: Exposed query detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $TABLE.select { ... }
+          - pattern: $TABLE.insert { ... }
+          - pattern: $TABLE.update { ... }
+
+  # ==========================================================================
+  # Eloquent (PHP/Laravel)
+  # ==========================================================================
+
+  - id: php.eloquent.model
+    languages: [php]
+    message: Laravel Eloquent model detected
+    severity: INFO
+    metadata:
+      facet_slot: data.modeling.style
+      leaf_id: "29"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          class $MODEL extends Model { ... }
+
+  - id: php.eloquent.query
+    languages: [php]
+    message: Eloquent query builder detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $MODEL::find($ID)
+          - pattern: $MODEL::findOrFail($ID)
+          - pattern: $MODEL::where(...)->get()
+          - pattern: $MODEL::where(...)->first()
+          - pattern: $MODEL::create($DATA)
+          - pattern: $MODEL::all()
+          - pattern: $MODEL::query()
+          - pattern: DB::table($TABLE)->select(...)
+          - pattern: DB::table($TABLE)->where(...)
+          - pattern: DB::table($TABLE)->insert($DATA)
+          - pattern: DB::table($TABLE)->update($DATA)

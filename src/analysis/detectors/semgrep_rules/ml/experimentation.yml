@@ -1,0 +1,30 @@
+rules:
+  # ==========================================================================
+  # Experimentation (leaf_id: 59)
+  # ==========================================================================
+
+  - id: csharp.ml.experimentation
+    languages: [csharp]
+    message: ML experimentation framework detected
+    severity: INFO
+    metadata:
+      facet_slot: ml.experimentation
+      leaf_id: "59"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: mlContext.Auto().CreateExperiment(...)
+          - pattern: new AutoMLExperiment(...)
+
+  - id: php.ml.experimentation
+    languages: [php]
+    message: Experimentation flag detected
+    severity: INFO
+    metadata:
+      facet_slot: ml.experimentation
+      leaf_id: "59"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: $FEATURE_FLAGS->isEnabled(...)
+          - pattern-regex: "\\bLaunchDarkly\\\\LDClient\\b"

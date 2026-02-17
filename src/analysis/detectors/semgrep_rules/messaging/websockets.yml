@@ -1,0 +1,269 @@
+rules:
+  # ==========================================================================
+  # Socket.io (JavaScript/TypeScript)
+  # ==========================================================================
+
+  - id: js.socketio.server
+    languages: [javascript, typescript]
+    message: Socket.io server detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new Server(...)
+          - pattern: io.on("connection", ...)
+          - pattern: $SOCKET.emit($EVENT, ...)
+          - pattern: $SOCKET.on($EVENT, ...)
+
+  - id: js.socketio.client
+    languages: [javascript, typescript]
+    message: Socket.io client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: io($URL, ...)
+          - pattern: io.connect($URL, ...)
+          - pattern: $SOCKET.emit($EVENT, ...)
+
+  # ==========================================================================
+  # ws (Node.js WebSocket)
+  # ==========================================================================
+
+  - id: js.ws.server
+    languages: [javascript, typescript]
+    message: WebSocket server detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new WebSocketServer(...)
+          - pattern: new WebSocket.Server(...)
+          - pattern: $WSS.on("connection", ...)
+
+  - id: js.ws.client
+    languages: [javascript, typescript]
+    message: WebSocket client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new WebSocket($URL)
+          - pattern: $WS.on("message", ...)
+          - pattern: $WS.send($DATA)
+
+  # ==========================================================================
+  # Python WebSockets
+  # ==========================================================================
+
+  - id: py.websockets.server
+    languages: [python]
+    message: Python websockets server detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: websockets.serve(...)
+          - pattern: await $WS.recv()
+          - pattern: await $WS.send($MSG)
+
+  - id: py.fastapi.websocket
+    languages: [python]
+    message: FastAPI WebSocket endpoint detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @$APP.websocket($PATH)
+              async def $FUNC($WS: WebSocket): ...
+          - pattern: await $WS.accept()
+          - pattern: await $WS.receive_text()
+
+  - id: py.socketio.server
+    languages: [python]
+    message: Python Socket.io server detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: socketio.Server(...)
+          - pattern: socketio.AsyncServer(...)
+          - pattern: |
+              @$SIO.event
+              def $FUNC(...): ...
+
+  # ==========================================================================
+  # Go WebSockets
+  # ==========================================================================
+
+  - id: go.gorilla.websocket
+    languages: [go]
+    message: Gorilla WebSocket detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: websocket.Upgrader{...}
+          - pattern: $UPGRADER.Upgrade(...)
+          - pattern: $CONN.ReadMessage()
+          - pattern: $CONN.WriteMessage(...)
+
+  - id: go.nhooyr.websocket
+    languages: [go]
+    message: nhooyr WebSocket detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: websocket.Accept(...)
+          - pattern: $CONN.Read(...)
+          - pattern: $CONN.Write(...)
+
+  # ==========================================================================
+  # Rust WebSockets
+  # ==========================================================================
+
+  - id: rust.tokiotungstenite.websocket
+    languages: [rust]
+    message: tokio-tungstenite WebSocket detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: connect_async($URL).await
+          - pattern: accept_async($STREAM).await
+          - pattern: $WS.send($MSG).await
+
+  - id: rust.actix.websocket
+    languages: [rust]
+    message: Actix-web WebSocket detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: ws::start(...)
+          - pattern: ctx.text($MSG)
+          - pattern: ctx.binary($DATA)
+
+  # ==========================================================================
+  # Java WebSockets
+  # ==========================================================================
+
+  - id: java.spring.websocket
+    languages: [java]
+    message: Spring WebSocket detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @EnableWebSocket
+              class $CLASS { ... }
+          - pattern: |
+              @MessageMapping($PATH)
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              @SendTo($DEST)
+              $RET $METHOD(...) { ... }
+
+  - id: java.jsr356.websocket
+    languages: [java]
+    message: JSR-356 WebSocket endpoint detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "@ServerEndpoint\\("
+          - pattern-regex: "@OnMessage"
+          - pattern-regex: "@OnOpen"
+          - pattern-regex: "@OnClose"
+
+  # ==========================================================================
+  # C# WebSockets
+  # ==========================================================================
+
+  - id: csharp.signalr.hub
+    languages: [csharp]
+    message: SignalR hub detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS : Hub { ... }
+          - pattern: Clients.All.SendAsync(...)
+          - pattern: endpoints.MapHub<$HUB>($PATH)
+
+  - id: csharp.websocket.middleware
+    languages: [csharp]
+    message: WebSocket middleware detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: app.UseWebSockets()
+          - pattern: $CTX.WebSockets.AcceptWebSocketAsync()
+
+  # ==========================================================================
+  # Kotlin WebSockets
+  # ==========================================================================
+
+  - id: kotlin.ktor.websocket
+    languages: [kotlin]
+    message: Ktor WebSocket detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.realtime
+      leaf_id: "27"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: webSocket($PATH) { ... }
+          - pattern: send(Frame.Text($MSG))
+          - pattern: incoming.receive()

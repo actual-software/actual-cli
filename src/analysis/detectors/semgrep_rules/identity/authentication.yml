@@ -1,0 +1,32 @@
+rules:
+  # ==========================================================================
+  # Authentication (leaf_id: 32)
+  # ==========================================================================
+
+  - id: csharp.authentication.builder
+    languages: [csharp]
+    message: ASP.NET authentication configuration detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "32"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: services.AddAuthentication(...)
+          - pattern: AddJwtBearer(...)
+          - pattern: AddCookie(...)
+
+  - id: php.authentication.laravel
+    languages: [php]
+    message: Laravel authentication configuration detected
+    severity: INFO
+    metadata:
+      facet_slot: authn.methods
+      leaf_id: "32"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: Auth::routes(...)
+          - pattern-regex: "\\bSanctum::"
+          - pattern: Passport::routes(...)

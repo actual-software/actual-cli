@@ -1,0 +1,30 @@
+rules:
+  # ==========================================================================
+  # QA / Quality Gates (leaf_id: 40)
+  # ==========================================================================
+
+  - id: csharp.quality.suppressions
+    languages: [csharp]
+    message: Quality gate suppression detected
+    severity: INFO
+    metadata:
+      facet_slot: quality.gates
+      leaf_id: "40"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "#pragma\\s+warning\\s+disable"
+          - pattern-regex: "\\bSuppressMessage\\s*\\("
+
+  - id: php.quality.static_analysis
+    languages: [php]
+    message: Static analysis suppression detected
+    severity: INFO
+    metadata:
+      facet_slot: quality.gates
+      leaf_id: "40"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "@psalm-"
+          - pattern-regex: "@phpstan-"

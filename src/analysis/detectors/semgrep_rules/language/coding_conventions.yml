@@ -1,0 +1,48 @@
+rules:
+  # ==========================================================================
+  # Coding Conventions (leaf_id: 18)
+  # ==========================================================================
+
+  - id: csharp.nullable.enable
+    languages: [csharp]
+    message: Nullable reference types enabled
+    severity: INFO
+    metadata:
+      facet_slot: style.formatter
+      leaf_id: "18"
+      confidence: "0.7"
+    patterns:
+      - pattern: "#nullable enable"
+
+  - id: csharp.layered.namespace
+    languages: [csharp]
+    message: Layered namespace convention detected
+    severity: INFO
+    metadata:
+      facet_slot: style.module_boundaries_conventions
+      leaf_id: "18"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "namespace\\s+([A-Za-z0-9_.]+\\.)?(Controllers|Services|Repositories|Domain|Application|Infrastructure|Adapters|Ports)(\\.|\\b)"
+
+  - id: php.strict_types
+    languages: [php]
+    message: PHP strict types declaration detected
+    severity: INFO
+    metadata:
+      facet_slot: style.formatter
+      leaf_id: "18"
+      confidence: "0.7"
+    patterns:
+      - pattern: "declare(strict_types=1);"
+
+  - id: php.layered.namespace
+    languages: [php]
+    message: Layered namespace convention detected
+    severity: INFO
+    metadata:
+      facet_slot: style.module_boundaries_conventions
+      leaf_id: "18"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "namespace\\s+([A-Za-z0-9_\\\\]+\\\\)?(Controllers|Services|Repositories|Domain|Application|Infrastructure|Adapters|Ports)"

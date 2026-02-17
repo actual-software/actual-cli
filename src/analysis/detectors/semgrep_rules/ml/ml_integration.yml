@@ -1,0 +1,30 @@
+rules:
+  # ==========================================================================
+  # ML/AI Integration (leaf_id: 58)
+  # ==========================================================================
+
+  - id: csharp.ml.integration
+    languages: [csharp]
+    message: ML.NET model usage detected
+    severity: INFO
+    metadata:
+      facet_slot: ml.integration
+      leaf_id: "58"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\bnew\\s+PredictionEngine\\s*<"
+          - pattern: $ML.Model.Load(...)
+
+  - id: php.ml.integration
+    languages: [php]
+    message: PHP ML integration detected
+    severity: INFO
+    metadata:
+      facet_slot: ml.integration
+      leaf_id: "58"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\bRubix\\\\ML\\\\Pipeline\\b"
+          - pattern-regex: "\\bPhpml\\\\Classification\\\\[A-Za-z0-9_]+\\b"

@@ -1,0 +1,32 @@
+rules:
+  # ==========================================================================
+  # Data Protection (leaf_id: 44)
+  # ==========================================================================
+
+  - id: csharp.data_protection
+    languages: [csharp]
+    message: ASP.NET data protection API detected
+    severity: INFO
+    metadata:
+      facet_slot: security.data_protection
+      leaf_id: "44"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: IDataProtector $NAME
+          - pattern: $PROVIDER.CreateProtector(...)
+          - pattern: $PROTECTOR.Protect(...)
+
+  - id: php.data_protection
+    languages: [php]
+    message: Application-level data protection detected
+    severity: INFO
+    metadata:
+      facet_slot: security.data_protection
+      leaf_id: "44"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: Crypt::encryptString(...)
+          - pattern: Crypt::decryptString(...)
+          - pattern: sodium_crypto_secretbox(...)

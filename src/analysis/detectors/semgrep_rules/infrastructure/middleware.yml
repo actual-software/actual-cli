@@ -1,0 +1,150 @@
+rules:
+  # ==========================================================================
+  # Middleware and Request Interceptors
+  # ==========================================================================
+
+  - id: js.express.middleware
+    languages: [javascript, typescript]
+    message: Express middleware detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.middleware
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $APP.use($MIDDLEWARE)
+          - pattern: $APP.use($PATH, $MIDDLEWARE)
+          - pattern: |
+              function $FUNC($REQ, $RES, $NEXT) {
+                ...
+                $NEXT(...)
+                ...
+              }
+
+  - id: ts.nestjs.middleware
+    languages: [typescript]
+    message: NestJS middleware detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.middleware
+      leaf_id: "24"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @Injectable()
+              class $CLASS implements NestMiddleware { ... }
+          - pattern: |
+              @UseGuards($GUARD)
+              $METHOD(...) { ... }
+          - pattern: |
+              @UseInterceptors($INTERCEPTOR)
+              $METHOD(...) { ... }
+
+  - id: py.fastapi.middleware
+    languages: [python]
+    message: FastAPI middleware detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.middleware
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @$APP.middleware($TYPE)
+              async def $FUNC(...): ...
+          - pattern: $APP.add_middleware($MIDDLEWARE, ...)
+
+  - id: py.django.middleware
+    languages: [python]
+    message: Django middleware detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.middleware
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern: |
+          class $CLASS(MiddlewareMixin):
+              ...
+
+  - id: go.middleware.handler
+    languages: [go]
+    message: Go middleware handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.middleware
+      leaf_id: "24"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: func $FUNC($NEXT http.Handler) http.Handler { ... }
+          - pattern: func $FUNC($NEXT http.HandlerFunc) http.HandlerFunc { ... }
+
+  - id: java.spring.interceptor
+    languages: [java]
+    message: Spring interceptor detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.middleware
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS implements HandlerInterceptor { ... }
+          - pattern: |
+              class $CLASS implements WebRequestInterceptor { ... }
+
+  # ==========================================================================
+  # API Gateway / Proxy Patterns
+  # ==========================================================================
+
+  - id: js.http.proxy
+    languages: [javascript, typescript]
+    message: HTTP proxy detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.api_gateways
+      leaf_id: "24"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: httpProxy.createProxyServer(...)
+          - pattern: createProxyMiddleware(...)
+
+  - id: go.reverseproxy
+    languages: [go]
+    message: Go reverse proxy detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.api_gateways
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: httputil.NewSingleHostReverseProxy(...)
+          - pattern: "&httputil.ReverseProxy{...}"
+
+  # ==========================================================================
+  # Laravel Middleware (PHP)
+  # ==========================================================================
+
+  - id: php.laravel.middleware
+    languages: [php]
+    message: Laravel middleware detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.middleware
+      leaf_id: "24"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS {
+                  public function handle($REQUEST, $NEXT, ...) { ... }
+              }
+          - pattern: Route::middleware($MIDDLEWARE)
+          - pattern: $THIS->middleware($MIDDLEWARE)

@@ -1,0 +1,289 @@
+rules:
+  # ==========================================================================
+  # PostgreSQL Clients
+  # ==========================================================================
+
+  - id: js.pg.client
+    languages: [javascript, typescript]
+    message: PostgreSQL client usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new Client(...)
+          - pattern: new Pool(...)
+          - pattern: $POOL.query(...)
+          - pattern: $CLIENT.query(...)
+
+  - id: py.asyncpg.connect
+    languages: [python]
+    message: asyncpg connection detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern: asyncpg.connect(...)
+
+  - id: py.psycopg.connect
+    languages: [python]
+    message: psycopg connection detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: psycopg.connect(...)
+          - pattern: psycopg2.connect(...)
+
+  - id: go.pgx.connect
+    languages: [go]
+    message: pgx PostgreSQL client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: pgx.Connect(...)
+          - pattern: pgxpool.New(...)
+          - pattern: $POOL.Query(...)
+
+  - id: rust.sqlx.postgres
+    languages: [rust]
+    message: SQLx PostgreSQL client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: PgPool::connect(...)
+          - pattern: sqlx::query(...)
+          - pattern: sqlx::PgPoolOptions::new()
+
+  # ==========================================================================
+  # MongoDB Clients
+  # ==========================================================================
+
+  - id: js.mongodb.client
+    languages: [javascript, typescript]
+    message: MongoDB client usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: MongoClient.connect(...)
+          - pattern: mongoose.connect(...)
+          - pattern: mongoose.model($NAME, ...)
+
+  - id: py.pymongo.client
+    languages: [python]
+    message: PyMongo client detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: pymongo.MongoClient(...)
+          - pattern: motor.motor_asyncio.AsyncIOMotorClient(...)
+
+  - id: go.mongo.client
+    languages: [go]
+    message: MongoDB Go driver detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: mongo.Connect(...)
+          - pattern: $CLIENT.Database(...)
+          - pattern: $COLL.Find(...)
+
+  # ==========================================================================
+  # MySQL Clients
+  # ==========================================================================
+
+  - id: js.mysql.client
+    languages: [javascript, typescript]
+    message: MySQL client usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: mysql.createConnection(...)
+          - pattern: mysql.createPool(...)
+          - pattern: mysql2.createConnection(...)
+
+  - id: py.mysql.connector
+    languages: [python]
+    message: MySQL connector detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: mysql.connector.connect(...)
+          - pattern: pymysql.connect(...)
+          - pattern: aiomysql.connect(...)
+
+  # ==========================================================================
+  # Raw SQL Detection
+  # ==========================================================================
+
+  - id: js.raw.sql
+    languages: [javascript, typescript]
+    message: Raw SQL query detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.8"
+    patterns:
+      - pattern-regex: "(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\\s+"
+
+  - id: py.raw.sql
+    languages: [python]
+    message: Raw SQL query detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.8"
+    patterns:
+      - pattern-regex: '(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)\s+'
+
+  - id: csharp.ado.net.sqlclient
+    languages: [csharp]
+    message: ADO.NET SQL client usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new SqlConnection(...)
+          - pattern: new SqlCommand(...)
+          - pattern: $CONN.CreateCommand(...)
+          - pattern: $CMD.ExecuteReader(...)
+          - pattern: $CMD.ExecuteNonQuery(...)
+          - pattern: $CMD.ExecuteScalar(...)
+
+  - id: csharp.dapper.query
+    languages: [csharp]
+    message: Dapper query usage detected
+    severity: INFO
+    metadata:
+      facet_slot: data.access.patterns
+      leaf_id: "30"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $CONN.Query<$TYPE>(...)
+          - pattern: $CONN.QueryAsync<$TYPE>(...)
+          - pattern: $CONN.Execute(...)
+          - pattern: $CONN.ExecuteAsync(...)
+
+  # ==========================================================================
+  # Database Migrations
+  # ==========================================================================
+
+  - id: js.knex.migration
+    languages: [javascript, typescript]
+    message: Knex.js migration detected
+    severity: INFO
+    metadata:
+      facet_slot: data.schema_management
+      leaf_id: "29"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: knex.schema.createTable(...)
+          - pattern: knex.schema.alterTable(...)
+          - pattern: exports.up = function(knex) { ... }
+
+  - id: py.alembic.migration
+    languages: [python]
+    message: Alembic migration detected
+    severity: INFO
+    metadata:
+      facet_slot: data.schema_management
+      leaf_id: "29"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: op.create_table(...)
+          - pattern: op.add_column(...)
+          - pattern: |
+              def upgrade():
+                  ...
+
+  # ==========================================================================
+  # PHP Database Clients
+  # ==========================================================================
+
+  - id: php.pdo.query
+    languages: [php]
+    message: PDO database query detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new PDO($DSN, ...)
+          - pattern: $PDO->prepare($SQL)
+          - pattern: $PDO->query($SQL)
+          - pattern: $PDO->exec($SQL)
+
+  - id: php.mysqli.query
+    languages: [php]
+    message: MySQLi database query detected
+    severity: INFO
+    metadata:
+      facet_slot: data.primary_datastores
+      leaf_id: "28"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new mysqli($HOST, ...)
+          - pattern: mysqli_connect($HOST, ...)
+          - pattern: $MYSQLI->query($SQL)
+          - pattern: $MYSQLI->prepare($SQL)
+
+  - id: php.laravel.migration
+    languages: [php]
+    message: Laravel migration detected
+    severity: INFO
+    metadata:
+      facet_slot: data.schema_management
+      leaf_id: "29"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Schema::create($TABLE, ...)
+          - pattern: Schema::table($TABLE, ...)
+          - pattern: Schema::drop($TABLE)
+          - pattern: Schema::dropIfExists($TABLE)

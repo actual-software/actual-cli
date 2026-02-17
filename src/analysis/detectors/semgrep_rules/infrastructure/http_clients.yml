@@ -1,0 +1,231 @@
+rules:
+  # ==========================================================================
+  # JavaScript/TypeScript HTTP Clients
+  # ==========================================================================
+
+  - id: js.axios.client
+    languages: [javascript, typescript]
+    message: Axios HTTP client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: axios.get($URL, ...)
+          - pattern: axios.post($URL, ...)
+          - pattern: axios.put($URL, ...)
+          - pattern: axios.delete($URL, ...)
+          - pattern: axios.create(...)
+
+  - id: js.fetch.client
+    languages: [javascript, typescript]
+    message: Fetch API usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.8"
+    patterns:
+      - pattern: fetch($URL, ...)
+
+  - id: js.got.client
+    languages: [javascript, typescript]
+    message: Got HTTP client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: got($URL, ...)
+          - pattern: got.get($URL, ...)
+          - pattern: got.post($URL, ...)
+
+  - id: js.superagent.client
+    languages: [javascript, typescript]
+    message: SuperAgent HTTP client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: superagent.get($URL)
+          - pattern: superagent.post($URL)
+          - pattern: request.get($URL)
+          - pattern: request.post($URL)
+
+  # ==========================================================================
+  # Python HTTP Clients
+  # ==========================================================================
+
+  - id: py.requests.client
+    languages: [python]
+    message: Requests library usage detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: requests.get($URL, ...)
+          - pattern: requests.post($URL, ...)
+          - pattern: requests.put($URL, ...)
+          - pattern: requests.delete($URL, ...)
+          - pattern: requests.Session()
+
+  - id: py.httpx.client
+    languages: [python]
+    message: HTTPX async client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: httpx.AsyncClient(...)
+          - pattern: httpx.Client(...)
+          - pattern: httpx.get($URL, ...)
+          - pattern: httpx.post($URL, ...)
+
+  - id: py.aiohttp.client
+    languages: [python]
+    message: aiohttp client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: aiohttp.ClientSession(...)
+          - pattern: $SESSION.get($URL, ...)
+          - pattern: $SESSION.post($URL, ...)
+
+  # ==========================================================================
+  # Go HTTP Clients
+  # ==========================================================================
+
+  - id: go.http.client
+    languages: [go]
+    message: Go HTTP client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: http.Get($URL)
+          - pattern: http.Post($URL, ...)
+          - pattern: http.PostForm($URL, ...)
+          - pattern: $CLIENT.Do($REQ)
+          - pattern: "&http.Client{...}"
+
+  - id: go.resty.client
+    languages: [go]
+    message: Resty HTTP client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: resty.New()
+          - pattern: $CLIENT.R().Get($URL)
+          - pattern: $CLIENT.R().Post($URL)
+
+  # ==========================================================================
+  # Java HTTP Clients
+  # ==========================================================================
+
+  - id: java.httpclient
+    languages: [java]
+    message: Java HTTP client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: HttpClient.newHttpClient()
+          - pattern: HttpClient.newBuilder()
+          - pattern: $CLIENT.send($REQUEST, ...)
+
+  - id: java.resttemplate
+    languages: [java]
+    message: Spring RestTemplate detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new RestTemplate()
+          - pattern: $REST.getForObject($URL, ...)
+          - pattern: $REST.postForObject($URL, ...)
+          - pattern: $REST.exchange($URL, ...)
+
+  - id: java.webclient
+    languages: [java]
+    message: Spring WebClient detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: WebClient.create(...)
+          - pattern: WebClient.builder()
+          - pattern: $CLIENT.get().uri($URL)
+          - pattern: $CLIENT.post().uri($URL)
+
+  # ==========================================================================
+  # Rust HTTP Clients
+  # ==========================================================================
+
+  - id: rust.reqwest.client
+    languages: [rust]
+    message: Reqwest HTTP client detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: reqwest::Client::new()
+          - pattern: reqwest::get($URL)
+          - pattern: $CLIENT.get($URL)
+          - pattern: $CLIENT.post($URL)
+
+  # ==========================================================================
+  # C# HTTP Clients
+  # ==========================================================================
+
+  - id: csharp.httpclient
+    languages: [csharp]
+    message: .NET HttpClient detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.external_clients
+      leaf_id: "26"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new HttpClient()
+          - pattern: $CLIENT.GetAsync($URL)
+          - pattern: $CLIENT.PostAsync($URL, ...)
+          - pattern: $CLIENT.SendAsync($REQUEST)
+          - pattern: $FACTORY.CreateClient(...)
+          - pattern: services.AddHttpClient(...)

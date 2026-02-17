@@ -1,0 +1,30 @@
+rules:
+  # ==========================================================================
+  # Data Pipelines (leaf_id: 57)
+  # ==========================================================================
+
+  - id: csharp.ml.data_pipeline
+    languages: [csharp]
+    message: ML.NET data pipeline detected
+    severity: INFO
+    metadata:
+      facet_slot: ml.data_pipelines
+      leaf_id: "57"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\b[A-Za-z0-9_]+\\.Data\\.LoadFromTextFile\\s*<"
+          - pattern-regex: "\\b[A-Za-z0-9_]+\\.Data\\.CreateEnumerable\\s*<"
+
+  - id: php.ml.data_pipeline
+    languages: [php]
+    message: Data pipeline library detected
+    severity: INFO
+    metadata:
+      facet_slot: ml.data_pipelines
+      leaf_id: "57"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\bLeague\\\\Csv\\\\Reader::createFromPath\\b"
+          - pattern-regex: "\\bSymfony\\\\Component\\\\Serializer\\\\Serializer\\b"

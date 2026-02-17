@@ -1,0 +1,19 @@
+rules:
+  # ==========================================================================
+  # Resource Management (leaf_id: 38)
+  # ==========================================================================
+
+  - id: php.runtime.resource_limits
+    languages: [php]
+    message: PHP runtime resource limits detected
+    severity: INFO
+    metadata:
+      facet_slot: runtime.resource_controls
+      leaf_id: "38"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: ini_set("memory_limit", ...)
+          - pattern: set_time_limit(...)
+          - pattern: gc_enable()
+          - pattern: gc_collect_cycles()

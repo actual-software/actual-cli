@@ -1,0 +1,31 @@
+rules:
+  # ==========================================================================
+  # Paradigms / Style (leaf_id: 17)
+  # ==========================================================================
+
+  - id: csharp.paradigm.async
+    languages: [csharp]
+    message: Async/await concurrency model detected
+    severity: INFO
+    metadata:
+      facet_slot: paradigm.concurrency_model
+      leaf_id: "17"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: async Task $METHOD(...)
+          - pattern: await $EXPR
+
+  - id: csharp.paradigm.functional
+    languages: [csharp]
+    message: Functional-style LINQ usage detected
+    severity: INFO
+    metadata:
+      facet_slot: paradigm.primary
+      leaf_id: "17"
+      confidence: "0.6"
+    patterns:
+      - pattern-either:
+          - pattern: $SEQ.Select(...)
+          - pattern: $SEQ.Where(...)
+          - pattern: $SEQ.Aggregate(...)

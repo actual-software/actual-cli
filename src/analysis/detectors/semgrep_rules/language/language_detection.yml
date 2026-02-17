@@ -1,0 +1,30 @@
+rules:
+  # ==========================================================================
+  # Language Detection (leaf_id: 16)
+  # ==========================================================================
+
+  - id: csharp.language.detected
+    languages: [csharp]
+    message: C# language detected
+    severity: INFO
+    metadata:
+      facet_slot: languages.detected
+      leaf_id: "16"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: using System;
+          - pattern: namespace $NS { ... }
+
+  - id: php.language.detected
+    languages: [php]
+    message: PHP language detected
+    severity: INFO
+    metadata:
+      facet_slot: languages.detected
+      leaf_id: "16"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "^<\\?php"
+          - pattern-regex: "^namespace\\s+[A-Za-z0-9_\\\\]+;"

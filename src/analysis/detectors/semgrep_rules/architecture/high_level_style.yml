@@ -1,0 +1,48 @@
+rules:
+  # ==========================================================================
+  # High-Level Architecture Style (leaf_id: 22)
+  # ==========================================================================
+
+  - id: csharp.arch.ddd
+    languages: [csharp]
+    message: DDD-style namespace detected
+    severity: INFO
+    metadata:
+      facet_slot: arch.style
+      leaf_id: "22"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "namespace\\s+[A-Za-z0-9_.]+\\.(Domain|Application|Infrastructure|SharedKernel)"
+
+  - id: csharp.arch.hexagonal
+    languages: [csharp]
+    message: Hexagonal architecture naming detected
+    severity: INFO
+    metadata:
+      facet_slot: arch.style
+      leaf_id: "22"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "namespace\\s+[A-Za-z0-9_.]+\\.(Ports|Adapters)"
+
+  - id: php.arch.ddd
+    languages: [php]
+    message: DDD-style namespace detected
+    severity: INFO
+    metadata:
+      facet_slot: arch.style
+      leaf_id: "22"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "namespace\\s+[A-Za-z0-9_\\\\]+\\\\(Domain|Application|Infrastructure|SharedKernel)"
+
+  - id: php.arch.hexagonal
+    languages: [php]
+    message: Hexagonal architecture naming detected
+    severity: INFO
+    metadata:
+      facet_slot: arch.style
+      leaf_id: "22"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "namespace\\s+[A-Za-z0-9_\\\\]+\\\\(Ports|Adapters)"
