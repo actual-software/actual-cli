@@ -322,11 +322,14 @@ pub fn lookup(dependency: &str) -> Option<&'static FrameworkSignature> {
         return Some(sig);
     }
 
-    // Prefix match for Go module paths (versioned imports like /v2, /v3)
+    // Prefix match for Go module paths (versioned imports like /v2, /v3).
+    // Require the next character after the prefix to be '/' to avoid false
+    // positives (e.g. "github.com/gorilla/muxer" should not match "github.com/gorilla/mux").
     if dependency.contains('/') {
-        return FRAMEWORK_REGISTRY
-            .iter()
-            .find(|s| dependency.starts_with(s.dependency));
+        return FRAMEWORK_REGISTRY.iter().find(|s| {
+            dependency.starts_with(s.dependency)
+                && dependency.as_bytes().get(s.dependency.len()) == Some(&b'/')
+        });
     }
 
     None
@@ -374,6 +377,16 @@ mod tests {
     #[test]
     fn lookup_missing_returns_none() {
         assert!(lookup("nonexistent-package").is_none());
+    }
+
+    #[test]
+    fn lookup_go_module_prefix_boundary() {
+        // "github.com/gorilla/muxer" should NOT match "github.com/gorilla/mux"
+        // because "muxer" is not a sub-path of "mux".
+        assert!(lookup("github.com/gorilla/muxer").is_none());
+        // But a genuine sub-path like /v2 should still match.
+        let sig = lookup("github.com/gin-gonic/gin/v2").expect("versioned gin should match");
+        assert_eq!(sig.framework_name, "gin");
     }
 
     #[test]
