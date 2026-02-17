@@ -86,7 +86,9 @@ pub fn run_analysis_cached(
     let cached_analysis = CachedAnalysis {
         repo_path: repo_path.to_string_lossy().to_string(),
         head_commit: Some(head_hash),
-        analysis: serde_yaml::to_value(&analysis).unwrap(),
+        analysis: serde_yaml::to_value(&analysis).map_err(|e| {
+            ActualError::ConfigError(format!("Failed to serialize analysis for caching: {e}"))
+        })?,
         analyzed_at: chrono::Utc::now(),
     };
     cfg.cached_analysis = Some(cached_analysis);
@@ -533,5 +535,34 @@ mod tests {
             updated_cached.analyzed_at > old_time,
             "force=true should update the cache with a newer analyzed_at timestamp"
         );
+    }
+
+    #[test]
+    fn test_cache_save_serialization_does_not_panic() {
+        // Exercises the cache save path where serde_yaml::to_value is called.
+        // Previously this used .unwrap() which would panic on serialization failure.
+        // Now it uses .map_err()? to propagate errors properly.
+        let repo_dir = tempdir().unwrap();
+        let head_hash = create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Write empty config — forces a cache miss and triggers the save path
+        let cfg = config::Config::default();
+        config::paths::save_to(&cfg, &config_path).unwrap();
+
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(result.projects.len(), 1);
+
+        // Verify the analysis was serialized and saved to cache
+        let saved_cfg = config::paths::load_from(&config_path).unwrap();
+        let cached = saved_cfg.cached_analysis.unwrap();
+        assert_eq!(cached.head_commit, Some(head_hash));
+
+        // Verify the cached analysis round-trips correctly
+        let deserialized: RepoAnalysis =
+            serde_yaml::from_value(cached.analysis).expect("cached analysis should deserialize");
+        assert_eq!(deserialized.projects.len(), result.projects.len());
     }
 }
