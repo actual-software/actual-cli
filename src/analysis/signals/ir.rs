@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{EvidenceSpan, SignalSource, ToolMatch};
 
@@ -65,6 +65,7 @@ struct LeafBucket {
     facet_slot: String,
     values: Vec<serde_json::Value>,
     confidence: f64,
+    rule_ids_set: HashSet<String>,
     rule_ids: Vec<String>,
     spans: Vec<SpanSummary>,
 }
@@ -80,6 +81,7 @@ fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucke
                 facet_slot: m.facet_slot.clone(),
                 values: Vec::new(),
                 confidence: 0.0,
+                rule_ids_set: HashSet::new(),
                 rule_ids: Vec::new(),
                 spans: Vec::new(),
             });
@@ -89,8 +91,8 @@ fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucke
             bucket.confidence = m.confidence;
         }
 
-        // Collect unique rule_ids.
-        if !bucket.rule_ids.contains(&m.rule_id) {
+        // Collect unique rule_ids (HashSet for O(1) dedup, Vec for insertion order).
+        if bucket.rule_ids_set.insert(m.rule_id.clone()) {
             bucket.rule_ids.push(m.rule_id.clone());
         }
 
@@ -136,8 +138,13 @@ pub fn build_canonical_ir(file_key: &str, language: &str, matches: &[ToolMatch])
     let buckets = aggregate_matches_by_leaf(matches);
 
     // Sort leaf_ids numerically (parse as u64, fall back to max for non-numeric).
+    // Secondary lexicographic sort ensures determinism when non-numeric IDs collide at u64::MAX.
     let mut sorted_leaf_ids: Vec<&String> = buckets.keys().collect();
-    sorted_leaf_ids.sort_by_key(|id| id.parse::<u64>().unwrap_or(u64::MAX));
+    sorted_leaf_ids.sort_by(|a, b| {
+        let ka = a.parse::<u64>().unwrap_or(u64::MAX);
+        let kb = b.parse::<u64>().unwrap_or(u64::MAX);
+        ka.cmp(&kb).then_with(|| a.cmp(b))
+    });
 
     // Build facets_by_leaf_id map and IR text simultaneously.
     let mut facets_by_leaf_id = HashMap::new();
@@ -588,6 +595,25 @@ mod tests {
         let json = serde_json::to_string(&facet).unwrap();
         let deserialized: FacetData = serde_json::from_str(&json).unwrap();
         assert_eq!(facet, deserialized);
+    }
+
+    #[test]
+    fn test_non_numeric_leaf_ids_sorted_deterministically() {
+        let matches = vec![
+            make_match("r1", "s", "beta", serde_json::json!("b"), 0.9),
+            make_match("r2", "s", "alpha", serde_json::json!("a"), 0.9),
+            make_match("r3", "s", "3", serde_json::json!("c"), 0.9),
+        ];
+        let ir1 = build_canonical_ir("f.rs", "rust", &matches);
+        let ir2 = build_canonical_ir("f.rs", "rust", &matches);
+        // Hash must be deterministic even with non-numeric leaf IDs.
+        assert_eq!(ir1.ir_hash, ir2.ir_hash);
+        // Numeric leaf "3" should come first, then "alpha" < "beta" lexicographically.
+        let pos_3 = ir1.ir_text.find("LEAF[3]").unwrap();
+        let pos_alpha = ir1.ir_text.find("LEAF[alpha]").unwrap();
+        let pos_beta = ir1.ir_text.find("LEAF[beta]").unwrap();
+        assert!(pos_3 < pos_alpha);
+        assert!(pos_alpha < pos_beta);
     }
 
     #[test]
