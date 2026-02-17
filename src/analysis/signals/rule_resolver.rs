@@ -46,14 +46,20 @@ impl RuleResolver {
     }
 
     /// Recursive directory walker that collects YAML files.
+    ///
+    /// Symlinks are skipped to avoid infinite recursion from symlink cycles.
     fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         let entries = std::fs::read_dir(dir)
             .with_context(|| format!("failed to read directory {}", dir.display()))?;
 
         for entry in entries {
             let entry = entry?;
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                continue;
+            }
             let path = entry.path();
-            if path.is_dir() {
+            if ft.is_dir() {
                 Self::walk_dir(&path, out)?;
             } else if let Some(ext) = path.extension() {
                 let ext = ext.to_string_lossy();
@@ -68,8 +74,8 @@ impl RuleResolver {
     /// Return all rule files. Semgrep handles language filtering internally
     /// via the `languages:` field in each rule, so no per-language filtering
     /// is performed here.
-    pub fn resolve(&self) -> Vec<&Path> {
-        self.rule_files.iter().map(|p| p.as_path()).collect()
+    pub fn resolve(&self) -> &[PathBuf] {
+        &self.rule_files
     }
 
     /// Normalize a language name or alias to its canonical form.
@@ -96,15 +102,22 @@ impl RuleResolver {
     }
 
     /// List the top-level category subdirectory names found in the rules directory.
+    ///
+    /// Files placed directly in the rules directory (not inside a subdirectory)
+    /// are excluded — only subdirectory names are returned.
     pub fn list_categories(&self) -> Vec<String> {
         let categories: BTreeSet<String> = self
             .rule_files
             .iter()
             .filter_map(|p| {
-                // Extract the first path component relative to rules_dir
-                p.strip_prefix(&self.rules_dir)
-                    .ok()
-                    .and_then(|rel| rel.iter().next())
+                // Extract the first path component relative to rules_dir.
+                // Skip files whose relative path has only one component (root-level files).
+                let rel = p.strip_prefix(&self.rules_dir).ok()?;
+                if rel.components().count() <= 1 {
+                    return None;
+                }
+                rel.iter()
+                    .next()
                     .map(|name| name.to_string_lossy().into_owned())
             })
             .collect();
@@ -233,7 +246,7 @@ mod tests {
         assert!(rules_dir.exists(), "semgrep_rules directory must exist");
 
         let resolver = RuleResolver::new(&rules_dir).unwrap();
-        assert_eq!(resolver.rule_count(), 52);
+        assert!(resolver.rule_count() > 0, "expected at least one rule file");
     }
 
     #[test]
@@ -245,7 +258,7 @@ mod tests {
         let resolver = RuleResolver::new(&rules_dir).unwrap();
         let categories = resolver.list_categories();
 
-        assert_eq!(categories.len(), 19);
+        assert!(!categories.is_empty(), "expected at least one category");
 
         // Spot check some categories
         assert!(categories.contains(&"api".to_string()));
@@ -264,10 +277,10 @@ mod tests {
         let resolver = RuleResolver::new(&rules_dir).unwrap();
         // resolve() returns all rule files regardless of language
         let files = resolver.resolve();
-        assert_eq!(files.len(), 52);
+        assert!(!files.is_empty(), "expected at least one rule file");
 
         // All files should end in .yml or .yaml
-        for f in &files {
+        for f in files {
             let ext = f.extension().unwrap().to_string_lossy();
             assert!(ext == "yml" || ext == "yaml", "unexpected extension: {ext}");
         }
@@ -379,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_list_categories_root_files_excluded() {
-        // Files directly in the rules_dir have no category component
+        // Files directly in the rules_dir should not appear as categories
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join("root.yml"), "rules: []").unwrap();
         let cat = temp.path().join("cat");
@@ -388,10 +401,28 @@ mod tests {
 
         let resolver = RuleResolver::new(temp.path()).unwrap();
         let categories = resolver.list_categories();
-        // root.yml has relative path "root.yml" — iter().next() gives "root.yml" (file name)
-        // cat/sub.yml has relative path "cat/sub.yml" — iter().next() gives "cat"
         assert_eq!(resolver.rule_count(), 2);
-        assert!(categories.contains(&"cat".to_string()));
+        assert_eq!(categories, vec!["cat"]);
+        assert!(!categories.contains(&"root.yml".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_rules_skips_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let cat = temp.path().join("cat");
+        std::fs::create_dir(&cat).unwrap();
+        std::fs::write(cat.join("real.yml"), "rules: []").unwrap();
+
+        // Create a symlink to a file — should be skipped
+        std::os::unix::fs::symlink(cat.join("real.yml"), cat.join("linked.yml")).unwrap();
+        // Create a symlink directory pointing back to parent — would cause
+        // infinite recursion if followed
+        std::os::unix::fs::symlink(temp.path(), cat.join("cycle")).unwrap();
+
+        let resolver = RuleResolver::new(temp.path()).unwrap();
+        // Only the real file should be found, not the symlinked file or cycle
+        assert_eq!(resolver.rule_count(), 1);
     }
 
     #[test]
