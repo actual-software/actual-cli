@@ -44,13 +44,13 @@ pub async fn invoke_tailoring<R: ClaudeRunner>(
     }
 }
 
-/// Serialize a value to JSON, mapping errors to `ActualError::ConfigError`.
+/// Serialize a value to JSON, mapping errors to `ActualError::InternalError`.
 pub(crate) fn serialize_json<T: Serialize + ?Sized>(
     value: &T,
     label: &str,
 ) -> Result<String, ActualError> {
     serde_json::to_string(value)
-        .map_err(|e| ActualError::ConfigError(format!("Failed to serialize {label}: {e}")))
+        .map_err(|e| ActualError::InternalError(format!("Failed to serialize {label}: {e}")))
 }
 
 /// Build the CLI argument list for the tailoring invocation.
@@ -385,7 +385,7 @@ mod tests {
             msg.contains("Failed to serialize test"),
             "expected 'Failed to serialize test' in: {msg}"
         );
-        assert!(matches!(err, ActualError::ConfigError(_)));
+        assert!(matches!(err, ActualError::InternalError(_)));
     }
 
     #[test]
