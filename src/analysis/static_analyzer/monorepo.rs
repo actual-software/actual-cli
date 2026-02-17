@@ -361,9 +361,10 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 /// from the result set. Uses `fs::canonicalize` to resolve symlinks and reject
 /// entries that escape the repo root.
 fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
-    let canonical_root = match fs::canonicalize(root) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
+    // Canonicalize root once; if this fails, root doesn't exist and there's
+    // nothing to expand — callers will see an empty vec and fall through.
+    let Ok(canonical_root) = fs::canonicalize(root) else {
+        return Vec::new();
     };
     let mut projects = Vec::new();
 
@@ -397,10 +398,12 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
                 Ok(c) if c.starts_with(&canonical_root) => c,
                 _ => continue,
             };
-            let rel = match canonical_entry.strip_prefix(&canonical_root) {
-                Ok(r) => r.to_string_lossy().to_string(),
-                Err(_) => continue,
-            };
+            // strip_prefix is guaranteed to succeed after starts_with
+            let rel = canonical_entry
+                .strip_prefix(&canonical_root)
+                .expect("starts_with already verified")
+                .to_string_lossy()
+                .to_string();
             if rel.is_empty() {
                 continue;
             }
@@ -1598,6 +1601,13 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[package]\nname = 42\n").unwrap();
 
         assert!(name_from_cargo_toml(root).is_none());
+    }
+
+    #[test]
+    fn test_glob_expansion_nonexistent_root_returns_empty() {
+        let patterns = vec!["packages/*".to_string()];
+        let projects = expand_glob_patterns(Path::new("/nonexistent/root/path"), &patterns);
+        assert!(projects.is_empty());
     }
 
     #[test]
