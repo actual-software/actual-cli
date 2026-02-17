@@ -410,4 +410,14 @@ mod tests {
         assert!(msg.contains("Skipped"), "expected skip msg in: {msg}");
         assert!(!msg.contains('['), "skip should have no timing in: {msg}");
     }
+
+    #[test]
+    fn test_success_without_start_no_timing() {
+        let pipeline = SyncPipeline::new(false);
+        // success() without start() — elapsed_suffix should return empty
+        pipeline.success(SyncPhase::Fetch, "Done");
+        let msg = bar(&pipeline, SyncPhase::Fetch).message().to_string();
+        assert!(msg.contains("Done"), "expected msg in: {msg}");
+        assert!(!msg.contains('['), "no timing without start in: {msg}");
+    }
 }
