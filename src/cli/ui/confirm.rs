@@ -376,4 +376,13 @@ mod tests {
             "expected header in output: {output}"
         );
     }
+
+    // ── MockTerminal trait coverage ──
+
+    #[test]
+    fn mock_terminal_select_files_returns_none() {
+        let term = MockTerminal::new(vec![]);
+        let result = term.select_files("prompt", &["a".to_string()], &[true]);
+        assert_eq!(result.unwrap(), None);
+    }
 }
