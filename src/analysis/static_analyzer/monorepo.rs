@@ -329,17 +329,14 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
         return Ok(None);
     }
 
-    let canonical_root = fs::canonicalize(root).ok();
+    let canonical_root = fs::canonicalize(root)?;
     let projects: Vec<ProjectInfo> = dirs
         .into_iter()
         .filter(|d| {
             let resolved = root.join(d);
-            if !resolved.is_dir() {
-                return false;
-            }
-            match (&canonical_root, fs::canonicalize(&resolved).ok()) {
-                (Some(cr), Some(cp)) => cp.starts_with(cr),
-                _ => false,
+            match fs::canonicalize(&resolved) {
+                Ok(cp) => cp.starts_with(&canonical_root) && cp.is_dir(),
+                Err(_) => false,
             }
         })
         .map(|d| {
