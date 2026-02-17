@@ -15,7 +15,7 @@ use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::{confirm_files, TerminalIO};
-use crate::cli::ui::progress::{Spinner, ERROR_SYMBOL, SUCCESS_SYMBOL};
+use crate::cli::ui::progress::{SyncPhase, SyncPipeline, ERROR_SYMBOL, SUCCESS_SYMBOL};
 use crate::config::paths::{load_from, save_to};
 use crate::config::rejections::{clear_rejections, get_rejections};
 use crate::error::ActualError;
@@ -78,25 +78,38 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     // 1. Show banner
     print_banner(false);
 
-    // 2. Check environment (git status)
-    let spinner = Spinner::new("Checking environment...", false);
+    // 2. Create pipeline and check environment (git status)
+    let pipeline = SyncPipeline::new(false);
+    pipeline.start(SyncPhase::Environment, "Checking environment...");
     let is_git = get_git_head(root_dir).is_some();
     if is_git {
-        spinner.success("Environment OK");
+        pipeline.success(SyncPhase::Environment, "Environment OK");
     } else {
-        spinner.warn("Not a git repository (caching disabled)");
+        pipeline.warn(
+            SyncPhase::Environment,
+            "Not a git repository (caching disabled)",
+        );
     }
 
     // 3. Run analysis (cached if in a git repo)
-    let spinner = Spinner::new("Analyzing repository...", false);
+    pipeline.start(SyncPhase::Analysis, "Analyzing repository...");
     let rt = tokio::runtime::Runtime::new().expect("Failed to create async runtime");
-    let analysis = rt.block_on(run_analysis_cached(
+    let analysis = match rt.block_on(run_analysis_cached(
         runner,
         args.model.as_deref(),
         root_dir,
         cfg_path,
-    ))?;
-    spinner.success("Analysis complete");
+    )) {
+        Ok(a) => {
+            pipeline.success(SyncPhase::Analysis, "Analysis complete");
+            a
+        }
+        Err(e) => {
+            pipeline.error(SyncPhase::Analysis, &format!("Analysis failed: {e}"));
+            pipeline.finish_remaining();
+            return Err(e);
+        }
+    };
 
     // 4. Filter by --project if specified
     let analysis = filter_projects(analysis, &args.projects)?;
@@ -105,11 +118,12 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     if args.force {
         // Show project summary even in --force mode for visibility
         let summary = format_project_summary(&analysis);
-        eprintln!("{summary}");
+        pipeline.suspend(|| eprintln!("{summary}"));
     } else {
         // prompt_project_confirmation displays the project summary itself
-        let action = prompt_project_confirmation(&analysis, term);
+        let action = pipeline.suspend(|| prompt_project_confirmation(&analysis, term));
         if matches!(action, ConfirmAction::Reject) {
+            pipeline.finish_remaining();
             return Err(ActualError::UserCancelled);
         }
     }
@@ -154,18 +168,22 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         );
     }
 
-    let spinner = Spinner::new("Fetching ADRs...", false);
+    pipeline.start(SyncPhase::Fetch, "Fetching ADRs...");
     let response = rt.block_on(async {
         with_retry(&RetryConfig::default(), || client.post_match(&request)).await
     });
 
     let response = match response {
         Ok(r) => {
-            spinner.success(&format!("Fetched {} ADRs", r.matched_adrs.len()));
+            pipeline.success(
+                SyncPhase::Fetch,
+                &format!("Fetched {} ADRs", r.matched_adrs.len()),
+            );
             r
         }
         Err(e) => {
-            spinner.error(&format!("API request failed: {e}"));
+            pipeline.error(SyncPhase::Fetch, &format!("API request failed: {e}"));
+            pipeline.finish_remaining();
             return Err(e);
         }
     };
@@ -189,9 +207,10 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     let existing_paths = find_existing_claude_md(root_dir);
 
     let output = if args.no_tailor {
+        pipeline.success(SyncPhase::Tailor, "Tailoring skipped (--no-tailor)");
         raw_adrs_to_output(&filtered_adrs)
     } else {
-        let spinner = Spinner::new("Tailoring ADRs...", false);
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs...");
         let tailoring_config = ConcurrentTailoringConfig {
             concurrency: config.concurrency.unwrap_or(3),
             batch_size: config.batch_size.unwrap_or(15),
@@ -207,14 +226,17 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         ));
         match result {
             Ok(output) => {
-                spinner.success(&format!(
-                    "Tailored {} ADRs into {} files",
-                    output.summary.applicable, output.summary.files_generated
-                ));
+                pipeline.success(
+                    SyncPhase::Tailor,
+                    &format!(
+                        "Tailored {} ADRs into {} files",
+                        output.summary.applicable, output.summary.files_generated
+                    ),
+                );
                 output
             }
             Err(e) => {
-                spinner.error(&format!("Tailoring failed: {e}"));
+                pipeline.error(SyncPhase::Tailor, &format!("Tailoring failed: {e}"));
                 return Err(e);
             }
         }
