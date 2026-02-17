@@ -98,7 +98,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
     }
 
     let auth_display = AuthDisplay {
-        authenticated: true,
+        authenticated: auth_status.logged_in,
         email: auth_status.email.clone(),
     };
     print_header_bar(&auth_display);
