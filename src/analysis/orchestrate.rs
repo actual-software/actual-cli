@@ -1,10 +1,12 @@
 use std::path::Path;
 
-use crate::analysis::types::RepoAnalysis;
-use crate::claude::options::InvocationOptions;
-use crate::claude::prompts::analysis_prompt;
-use crate::claude::schemas::REPO_ANALYSIS_SCHEMA;
-use crate::claude::subprocess::ClaudeRunner;
+use crate::analysis::static_analyzer::frameworks::{
+    detect_config_frameworks, detect_frameworks, detect_package_manager,
+};
+use crate::analysis::static_analyzer::languages::detect_languages;
+use crate::analysis::static_analyzer::manifests::parse_dependencies;
+use crate::analysis::static_analyzer::monorepo::detect_monorepo;
+use crate::analysis::types::{Framework, Language, Project, RepoAnalysis};
 use crate::error::ActualError;
 
 /// Normalize a project path relative to a working directory.
@@ -74,204 +76,89 @@ fn normalize_analysis(analysis: &mut RepoAnalysis, working_dir: &Path) {
     }
 }
 
-/// Run repository analysis using Claude Code.
+/// Run repository analysis using deterministic static analysis.
 ///
-/// Builds the analysis prompt + invocation options, calls the runner,
-/// and validates the result. Retries once on JSON parse failure.
-/// After successful parsing, normalizes project paths relative to
-/// `working_dir`.
-pub async fn run_analysis(
-    runner: &impl ClaudeRunner,
-    model_override: Option<&str>,
-    working_dir: &Path,
-) -> Result<RepoAnalysis, ActualError> {
-    let mut opts = InvocationOptions::for_analysis(model_override);
-    opts.json_schema = Some(REPO_ANALYSIS_SCHEMA.to_string());
+/// Layer 1: Fast manifest-based analysis (< 500ms, no external tools).
+/// 1. Detect monorepo structure → project paths
+/// 2. For each project: detect languages, parse manifests, detect frameworks
+/// 3. Assemble RepoAnalysis with normalized paths
+pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualError> {
+    let mono_info = detect_monorepo(working_dir)
+        .map_err(|e| ActualError::ConfigError(format!("Monorepo detection failed: {e}")))?;
 
-    let prompt = analysis_prompt();
-    let mut args = vec![prompt];
-    args.extend(opts.to_args());
+    let mut projects = Vec::new();
+    for project_info in &mono_info.projects {
+        let project_dir = working_dir.join(&project_info.path);
 
-    // First attempt
-    let result: Result<RepoAnalysis, ActualError> = runner.run(&args).await;
+        // Detect languages via tokei
+        let languages: Vec<Language> = detect_languages(&project_dir)
+            .into_iter()
+            .map(|(lang, _loc)| lang)
+            .collect();
 
-    let mut analysis = match result {
-        Ok(a) => a,
-        Err(ActualError::ClaudeOutputParse(_)) => {
-            // Retry once on parse failure
-            runner.run::<RepoAnalysis>(&args).await?
+        // Parse manifests for dependencies
+        let deps = parse_dependencies(&project_dir);
+
+        // Detect frameworks from deps + config files
+        let mut frameworks = detect_frameworks(&deps, &project_dir);
+        let config_frameworks = detect_config_frameworks(&project_dir);
+        for cf in config_frameworks {
+            if !frameworks.iter().any(|f| f.name == cf.name) {
+                frameworks.push(cf);
+            }
         }
-        Err(e) => return Err(e),
-    };
 
-    if analysis.projects.is_empty() {
+        // Detect package manager from lockfiles
+        let package_manager = detect_package_manager(&project_dir);
+
+        // Build description from detected info
+        let description = build_project_description(&languages, &frameworks);
+
+        projects.push(Project {
+            path: project_info.path.clone(),
+            name: project_info.name.clone(),
+            languages,
+            frameworks,
+            package_manager,
+            description,
+        });
+    }
+
+    if projects.is_empty() {
         return Err(ActualError::AnalysisEmpty);
     }
 
-    // Normalize project paths (absolute -> relative, strip ./ and trailing /)
-    normalize_analysis(&mut analysis, working_dir);
+    let mut analysis = RepoAnalysis {
+        is_monorepo: mono_info.is_monorepo,
+        projects,
+    };
 
+    normalize_analysis(&mut analysis, working_dir);
     Ok(analysis)
+}
+
+/// Build a human-readable description from detected languages and frameworks.
+fn build_project_description(languages: &[Language], frameworks: &[Framework]) -> Option<String> {
+    if languages.is_empty() && frameworks.is_empty() {
+        return None;
+    }
+    let lang_str: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
+    let fw_str: Vec<String> = frameworks.iter().map(|f| f.name.clone()).collect();
+
+    let mut parts = Vec::new();
+    if !lang_str.is_empty() {
+        parts.push(lang_str.join(", "));
+    }
+    if !fw_str.is_empty() {
+        parts.push(format!("using {}", fw_str.join(", ")));
+    }
+    Some(parts.join(" "))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::de::DeserializeOwned;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Mutex;
-
-    /// Valid fixture JSON matching the RepoAnalysis schema.
-    const VALID_ANALYSIS_JSON: &str = r#"{
-        "is_monorepo": false,
-        "projects": [{
-            "path": ".",
-            "name": "my-app",
-            "languages": ["rust"],
-            "frameworks": [{"name": "actix-web", "category": "web-backend"}],
-            "package_manager": "cargo",
-            "description": "A web application"
-        }]
-    }"#;
-
-    const EMPTY_PROJECTS_JSON: &str = r#"{
-        "is_monorepo": false,
-        "projects": []
-    }"#;
-
-    /// A canned response: either a JSON string (parsed by serde) or a
-    /// non-parse error returned directly.
-    enum MockResponse {
-        Json(String),
-        Error(ActualError),
-    }
-
-    /// Mock runner that returns a sequence of responses.
-    /// Each call pops the next response from the queue.
-    /// Using a single mock type avoids multiple monomorphizations of
-    /// `run_analysis`, which keeps coverage at 100%.
-    struct MockRunner {
-        responses: Mutex<Vec<MockResponse>>,
-        call_count: AtomicU32,
-    }
-
-    impl MockRunner {
-        fn from_json(responses: Vec<&str>) -> Self {
-            Self {
-                responses: Mutex::new(
-                    responses
-                        .into_iter()
-                        .map(|s| MockResponse::Json(s.to_string()))
-                        .collect(),
-                ),
-                call_count: AtomicU32::new(0),
-            }
-        }
-
-        fn from_error(error: ActualError) -> Self {
-            Self {
-                responses: Mutex::new(vec![MockResponse::Error(error)]),
-                call_count: AtomicU32::new(0),
-            }
-        }
-
-        fn calls(&self) -> u32 {
-            self.call_count.load(Ordering::SeqCst)
-        }
-    }
-
-    impl ClaudeRunner for MockRunner {
-        async fn run<T: DeserializeOwned + Send>(
-            &self,
-            _args: &[String],
-        ) -> Result<T, ActualError> {
-            self.call_count.fetch_add(1, Ordering::SeqCst);
-            let response = {
-                let mut responses = self.responses.lock().unwrap();
-                responses.remove(0)
-            };
-            match response {
-                MockResponse::Json(json) => {
-                    let parsed: T = serde_json::from_str(&json)?;
-                    Ok(parsed)
-                }
-                MockResponse::Error(e) => Err(e),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_valid_analysis_returns_correct_result() {
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
-        let working_dir = Path::new("/tmp/test-repo");
-        let result = run_analysis(&runner, None, working_dir).await.unwrap();
-
-        assert!(!result.is_monorepo);
-        assert_eq!(result.projects.len(), 1);
-        assert_eq!(result.projects[0].name, "my-app");
-        assert_eq!(result.projects[0].path, ".");
-        assert_eq!(result.projects[0].languages.len(), 1);
-        assert_eq!(result.projects[0].frameworks.len(), 1);
-        assert_eq!(result.projects[0].frameworks[0].name, "actix-web");
-        assert_eq!(runner.calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_empty_projects_returns_error() {
-        let runner = MockRunner::from_json(vec![EMPTY_PROJECTS_JSON]);
-        let working_dir = Path::new("/tmp/test-repo");
-        let err = run_analysis(&runner, None, working_dir).await.unwrap_err();
-
-        assert_eq!(err.to_string(), "Analysis returned no projects");
-        assert_eq!(runner.calls(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_invalid_json_then_valid_retries_successfully() {
-        let runner = MockRunner::from_json(vec!["not valid json", VALID_ANALYSIS_JSON]);
-        let working_dir = Path::new("/tmp/test-repo");
-        let result = run_analysis(&runner, None, working_dir).await.unwrap();
-
-        assert_eq!(result.projects.len(), 1);
-        assert_eq!(result.projects[0].name, "my-app");
-        assert_eq!(runner.calls(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_invalid_json_both_times_returns_parse_error() {
-        let runner = MockRunner::from_json(vec!["not valid json", "also not valid json"]);
-        let working_dir = Path::new("/tmp/test-repo");
-        let err = run_analysis(&runner, None, working_dir).await.unwrap_err();
-
-        let msg = err.to_string();
-        assert!(msg.contains("Failed to parse"));
-        assert_eq!(runner.calls(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_non_parse_error_propagates_without_retry() {
-        let runner = MockRunner::from_error(ActualError::ClaudeSubprocessFailed {
-            message: "process crashed".to_string(),
-            stderr: "segfault".to_string(),
-        });
-        let working_dir = Path::new("/tmp/test-repo");
-        let err = run_analysis(&runner, None, working_dir).await.unwrap_err();
-
-        let msg = err.to_string();
-        assert!(msg.contains("subprocess failed"));
-    }
-
-    #[tokio::test]
-    async fn test_model_override_passed_to_args() {
-        let runner = MockRunner::from_json(vec![VALID_ANALYSIS_JSON]);
-        let working_dir = Path::new("/tmp/test-repo");
-        let result = run_analysis(&runner, Some("opus"), working_dir)
-            .await
-            .unwrap();
-
-        assert_eq!(result.projects[0].name, "my-app");
-        assert_eq!(runner.calls(), 1);
-    }
+    use crate::analysis::types::FrameworkCategory;
 
     // -- normalize_project_path tests --
 
@@ -295,9 +182,6 @@ mod tests {
 
     #[test]
     fn test_normalize_canonical_fallback_root_match() {
-        // Simulates macOS /var -> /private/var: working_dir is /var/folders/X
-        // but Claude returns /private/var/folders/X. The raw strip_prefix fails,
-        // but the canonical path matches.
         let working_dir = Path::new("/var/folders/X");
         let canonical = Path::new("/private/var/folders/X");
         assert_eq!(
@@ -322,8 +206,6 @@ mod tests {
 
     #[test]
     fn test_normalize_canonical_none_falls_through() {
-        // When canonical is None (canonicalize failed), unrelated absolute paths
-        // pass through unchanged.
         let working_dir = Path::new("/home/user/project");
         assert_eq!(
             normalize_project_path("/other/path", working_dir, None),
@@ -333,8 +215,6 @@ mod tests {
 
     #[test]
     fn test_normalize_canonical_some_but_no_match_falls_through() {
-        // When canonical is Some but the absolute path matches neither
-        // working_dir nor canonical_dir, the path passes through unchanged.
         let working_dir = Path::new("/home/user/project");
         let canonical = Path::new("/real/home/user/project");
         assert_eq!(
@@ -397,88 +277,217 @@ mod tests {
         assert_eq!(normalize_project_path("./", working_dir, None), ".");
     }
 
-    #[tokio::test]
-    async fn test_run_analysis_normalizes_absolute_paths() {
+    // -- run_static_analysis tests --
+
+    #[test]
+    fn test_static_analysis_rust_project() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a Cargo.toml so monorepo detection finds a single project
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "test-project"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4"
+"#,
+        )
+        .unwrap();
+        // Create a Cargo.lock so package manager is detected
+        std::fs::write(dir.path().join("Cargo.lock"), "# lock file").unwrap();
+        // Create a Rust source file so language detection picks it up
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+        let result = run_static_analysis(dir.path()).unwrap();
+
+        assert!(!result.is_monorepo);
+        assert_eq!(result.projects.len(), 1);
+        assert_eq!(result.projects[0].path, ".");
+        assert!(result.projects[0].languages.contains(&Language::Rust));
+        assert_eq!(result.projects[0].package_manager.as_deref(), Some("cargo"));
+    }
+
+    #[test]
+    fn test_static_analysis_js_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "my-app", "dependencies": {"react": "^18.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+        std::fs::write(
+            dir.path().join("index.js"),
+            "const x = 1;\nconsole.log(x);\n",
+        )
+        .unwrap();
+
+        let result = run_static_analysis(dir.path()).unwrap();
+
+        assert!(!result.is_monorepo);
+        assert_eq!(result.projects.len(), 1);
+        assert_eq!(result.projects[0].package_manager.as_deref(), Some("npm"));
+    }
+
+    #[test]
+    fn test_static_analysis_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // Empty dir — monorepo detection returns a single project with no manifest,
+        // but there's still one project entry (the root). It should NOT be empty.
+        // However, detect_monorepo always returns at least one project (the root).
+        // So AnalysisEmpty won't trigger from an empty dir.
+        let result = run_static_analysis(dir.path());
+        // Should succeed with one project that has no languages
+        assert!(result.is_ok());
+        let analysis = result.unwrap();
+        assert_eq!(analysis.projects.len(), 1);
+        assert_eq!(analysis.projects[0].path, ".");
+    }
+
+    #[test]
+    fn test_static_analysis_monorepo_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a pnpm workspace monorepo
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - apps/*\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("package.json"), r#"{"name": "monorepo"}"#).unwrap();
+        // Create sub-projects
+        std::fs::create_dir_all(dir.path().join("apps/web")).unwrap();
+        std::fs::write(
+            dir.path().join("apps/web/package.json"),
+            r#"{"name": "web-app", "dependencies": {"react": "^18.0.0"}}"#,
+        )
+        .unwrap();
+
+        let result = run_static_analysis(dir.path()).unwrap();
+
+        assert!(result.is_monorepo);
+        assert!(!result.projects.is_empty());
+    }
+
+    #[test]
+    fn test_static_analysis_normalizes_paths() {
         // Use a real temp directory so canonicalize() succeeds inside
         // normalize_analysis, exercising the Ok path of canonicalize.
         let dir = tempfile::tempdir().unwrap();
-        let working_dir = dir.path();
-        let abs_path = working_dir.to_string_lossy().to_string();
-        let json_with_absolute_path = format!(
-            r#"{{
-            "is_monorepo": false,
-            "projects": [{{
-                "path": "{}",
-                "name": "my-app",
-                "languages": ["rust"],
-                "frameworks": [{{"name": "actix-web", "category": "web-backend"}}],
-                "package_manager": "cargo",
-                "description": "A web application"
-            }}]
-        }}"#,
-            abs_path
-        );
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "test-proj"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
 
-        let runner = MockRunner::from_json(vec![&json_with_absolute_path]);
-        let result = run_analysis(&runner, None, working_dir).await.unwrap();
+        let result = run_static_analysis(dir.path()).unwrap();
 
+        // Path should be normalized to "."
         assert_eq!(result.projects[0].path, ".");
     }
 
-    #[tokio::test]
-    async fn test_run_analysis_normalizes_absolute_subdir_path() {
-        // Uses a real temp dir with a subdirectory absolute path to exercise
-        // the non-empty branch of relative_or_dot through normalize_analysis.
+    #[test]
+    fn test_static_analysis_monorepo_io_error() {
+        // detect_monorepo returns std::io::Error on malformed workspace files
         let dir = tempfile::tempdir().unwrap();
-        let working_dir = dir.path();
-        let sub_path = format!("{}/apps/web", working_dir.to_string_lossy());
-        let json = format!(
-            r#"{{
-            "is_monorepo": true,
-            "projects": [{{
-                "path": "{}",
-                "name": "web",
-                "languages": ["typescript"],
-                "frameworks": [],
-                "package_manager": "npm",
-                "description": "Web app"
-            }}]
-        }}"#,
-            sub_path
+        // Write an invalid pnpm-workspace.yaml that will parse but is malformed
+        std::fs::write(
+            dir.path().join("pnpm-workspace.yaml"),
+            "{{invalid yaml content",
+        )
+        .unwrap();
+
+        let result = run_static_analysis(dir.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("Monorepo detection failed"),
+            "expected 'Monorepo detection failed' in: {}",
+            err
         );
-
-        let runner = MockRunner::from_json(vec![&json]);
-        let result = run_analysis(&runner, None, working_dir).await.unwrap();
-
-        assert_eq!(result.projects[0].path, "apps/web");
     }
 
-    #[tokio::test]
-    async fn test_run_analysis_normalizes_dot_slash_paths() {
-        let working_dir = Path::new("/home/user/project");
-        let json_with_dot_slash = r#"{
-            "is_monorepo": true,
-            "projects": [{
-                "path": "./apps/web",
-                "name": "web",
-                "languages": ["typescript"],
-                "frameworks": [],
-                "package_manager": "npm",
-                "description": "Web app"
-            }, {
-                "path": "./apps/api",
-                "name": "api",
-                "languages": ["typescript"],
-                "frameworks": [],
-                "package_manager": "npm",
-                "description": "API"
-            }]
-        }"#;
+    // -- build_project_description tests --
 
-        let runner = MockRunner::from_json(vec![json_with_dot_slash]);
-        let result = run_analysis(&runner, None, working_dir).await.unwrap();
+    #[test]
+    fn test_build_description_empty() {
+        assert_eq!(build_project_description(&[], &[]), None);
+    }
 
-        assert_eq!(result.projects[0].path, "apps/web");
-        assert_eq!(result.projects[1].path, "apps/api");
+    #[test]
+    fn test_build_description_languages_only() {
+        let langs = vec![Language::Rust, Language::Python];
+        let desc = build_project_description(&langs, &[]).unwrap();
+        assert_eq!(desc, "rust, python");
+    }
+
+    #[test]
+    fn test_build_description_frameworks_only() {
+        let fws = vec![Framework {
+            name: "actix-web".to_string(),
+            category: FrameworkCategory::WebBackend,
+        }];
+        let desc = build_project_description(&[], &fws).unwrap();
+        assert_eq!(desc, "using actix-web");
+    }
+
+    #[test]
+    fn test_build_description_both() {
+        let langs = vec![Language::Rust];
+        let fws = vec![Framework {
+            name: "actix-web".to_string(),
+            category: FrameworkCategory::WebBackend,
+        }];
+        let desc = build_project_description(&langs, &fws).unwrap();
+        assert_eq!(desc, "rust using actix-web");
+    }
+
+    #[test]
+    fn test_build_description_multiple_frameworks() {
+        let langs = vec![Language::TypeScript];
+        let fws = vec![
+            Framework {
+                name: "react".to_string(),
+                category: FrameworkCategory::WebFrontend,
+            },
+            Framework {
+                name: "nextjs".to_string(),
+                category: FrameworkCategory::WebFrontend,
+            },
+        ];
+        let desc = build_project_description(&langs, &fws).unwrap();
+        assert_eq!(desc, "typescript using react, nextjs");
+    }
+
+    #[test]
+    fn test_static_analysis_config_frameworks_dedup() {
+        // Test that config-detected frameworks are deduplicated with dep-detected ones
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name": "app", "dependencies": {"next": "^14.0.0"}}"#,
+        )
+        .unwrap();
+        // Also create next.config.js (config detection)
+        std::fs::write(dir.path().join("next.config.js"), "module.exports = {}").unwrap();
+        std::fs::write(dir.path().join("index.js"), "const x = 1;\n").unwrap();
+
+        let result = run_static_analysis(dir.path()).unwrap();
+
+        // nextjs should appear only once, not duplicated
+        let nextjs_count = result.projects[0]
+            .frameworks
+            .iter()
+            .filter(|f| f.name == "nextjs")
+            .count();
+        assert_eq!(
+            nextjs_count, 1,
+            "nextjs should be deduplicated, found {nextjs_count}"
+        );
     }
 }

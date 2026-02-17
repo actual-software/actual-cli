@@ -24,31 +24,6 @@ mod tests {
         script
     }
 
-    /// Create a fake binary that handles auth OK but returns invalid JSON for
-    /// the analysis `--print` invocation.
-    fn create_analysis_invalid_json_binary(
-        dir: &std::path::Path,
-        auth_json: &str,
-    ) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let script = dir.join("fake-claude");
-        let content = format!(
-            "#!/bin/sh\n\
-             if [ \"$1\" = \"auth\" ]; then\n\
-             printf '%s\\n' '{auth_json}'\n\
-             exit 0\n\
-             elif [ \"$1\" = \"--print\" ]; then\n\
-             printf '%s\\n' 'not valid json'\n\
-             exit 0\n\
-             fi\n\
-             echo 'unexpected invocation' >&2\n\
-             exit 1\n",
-        );
-        std::fs::write(&script, content).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        script
-    }
-
     /// Create a fake binary that handles auth + analysis OK but crashes on the
     /// tailoring invocation (detected via `skipped_adrs` in args).
     fn create_tailoring_crash_binary(
@@ -212,35 +187,16 @@ mod tests {
     // ── Analysis error tests ────────────────────────────────────────────
 
     #[test]
-    fn analysis_invalid_json_exits_1() {
+    fn analysis_malformed_workspace_exits_1() {
         let server = mockito::Server::new();
-        let dir = tempfile::tempdir().unwrap();
-        let binary_path = create_analysis_invalid_json_binary(dir.path(), AUTH_OK);
-        let config_path = dir.path().join("config.yaml");
-        let env = TestEnv {
-            dir,
-            config_path,
-            binary_path,
-            api_url: server.url(),
-        };
-
+        let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
+        // Create a malformed pnpm-workspace.yaml to trigger a static analysis error
+        env.write_file("pnpm-workspace.yaml", "{{invalid yaml content");
         env.cmd()
             .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
             .assert()
             .code(1)
-            .stderr(predicate::str::contains("Failed to parse"));
-    }
-
-    #[test]
-    fn analysis_empty_projects_exits_1() {
-        let server = mockito::Server::new();
-        let empty_analysis = r#"{"is_monorepo": false, "projects": []}"#;
-        let env = TestEnv::new(&server, AUTH_OK, empty_analysis);
-        env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
-            .assert()
-            .code(1)
-            .stderr(predicate::str::contains("no projects"));
+            .stderr(predicate::str::contains("Monorepo detection failed"));
     }
 
     // ── Tailoring error tests ───────────────────────────────────────────

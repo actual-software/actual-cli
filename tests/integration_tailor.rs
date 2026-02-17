@@ -139,6 +139,7 @@ mod tests {
         );
 
         let env = TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_MONOREPO, &tailoring_json);
+        env.setup_monorepo();
         env.cmd()
             .args(["sync", "--force", "--api-url", &env.api_url])
             .assert()
@@ -256,9 +257,8 @@ mod tests {
         let captured = env.read_file("captured_args.txt");
         let invocations = parse_captured_invocations(&captured);
         assert!(
-            invocations.len() >= 2,
-            "expected at least 2 invocations (analysis + tailoring), got {}",
-            invocations.len()
+            !invocations.is_empty(),
+            "expected at least 1 invocation (tailoring), got 0",
         );
         // Find the tailoring invocation (has a --json-schema arg containing skipped_adrs)
         let tailoring_inv = invocations
@@ -326,9 +326,8 @@ mod tests {
         let captured = env.read_file("captured_args.txt");
         let invocations = parse_captured_invocations(&captured);
         assert!(
-            invocations.len() >= 2,
-            "expected at least 2 invocations, got {}",
-            invocations.len()
+            !invocations.is_empty(),
+            "expected at least 1 invocation (tailoring), got 0",
         );
         // Find the tailoring invocation
         let tailoring_inv = invocations

@@ -137,6 +137,7 @@ mod tests {
             .create();
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_MONOREPO);
+        env.setup_monorepo();
         env.cmd()
             .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
             .assert()
@@ -225,7 +226,7 @@ mod tests {
             .assert()
             .success()
             .stderr(predicate::str::contains("API request to:"))
-            .stderr(predicate::str::contains("test-app"))
+            .stderr(predicate::str::contains("projects:"))
             .stderr(predicate::str::contains("matched:"));
     }
 
@@ -250,6 +251,7 @@ mod tests {
             .create();
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_MONOREPO);
+        env.setup_monorepo();
         env.cmd()
             .args([
                 "sync",
@@ -287,6 +289,7 @@ mod tests {
             .create();
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_MONOREPO);
+        env.setup_monorepo();
         env.cmd()
             .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
             .assert()
