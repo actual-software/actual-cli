@@ -164,6 +164,24 @@ The tailoring phase uses `RepoAnalysis` output to match ADRs and generate CLAUDE
 
 ---
 
+## Synthesis
+
+The LLM analysis took 17-34 seconds per repo and failed roughly a quarter of the time -- Claude subprocess errors, hallucinated framework categories that changed between runs, and descriptions that were never the same twice. Every single repo produced different output on repeat runs.
+
+The static analyzer does the same job in 4-16 milliseconds for single-project repos. That's not a percentage improvement, that's a category change -- from "user waits and watches a spinner" to "instant." Even sprintreview, a 607-project pnpm monorepo that would have been prohibitively expensive to analyze with Claude, finishes in 2 seconds. It never fails, and it produces identical output every time.
+
+The tradeoff is real though. The LLM was better at two things:
+
+**It understood project boundaries without being told.** Rinzler has 5 distinct subprojects -- a Next.js dashboard, a Go proxy, two Node workers, and Kubernetes infrastructure -- but no workspace config file tying them together. The LLM figured this out from context. The static analyzer sees one flat repo because it only recognizes monorepos through explicit workspace configs (pnpm-workspace.yaml, Cargo.toml `[workspace]`, etc.). Same problem with gastown, which has a Go CLI and an npm distribution wrapper -- the LLM saw two projects, the static analyzer sees one.
+
+**It recognized more frameworks.** The LLM picked up bubbletea, lipgloss, and rod from Go dependencies, and ArgoCD/Helm from Kubernetes manifests. The static analyzer only knows about the ~60 frameworks hardcoded in its registry. If it's not in the list, it doesn't exist. The registry is easy to extend, but it will always be playing catch-up compared to an LLM that can infer "this go.mod imports `github.com/charmbracelet/bubbletea`, that's a TUI framework."
+
+On the flip side, the static analyzer catches things the LLM missed -- it found Python and serde in actual-cli, and github-actions CI configs across every repo. The LLM was too focused on the "main" language to notice supporting files.
+
+**Bottom line**: the speed and reliability gains are enormous and unambiguous. The accuracy regressions are real but scoped -- they affect repos without workspace configs and frameworks not yet in the registry. Both are fixable with targeted follow-up work (heuristic subproject detection, registry expansion).
+
+---
+
 ## Raw Data
 
 - LLM baseline results: [`benches/analysis_baseline_results_llm.json`](../benches/analysis_baseline_results_llm.json)
