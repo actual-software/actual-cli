@@ -40,7 +40,7 @@ pub struct SyncResult {
 /// Entry point for `actual sync`.
 ///
 /// Production wiring (`CliClaudeRunner`, `RealTerminal`) lives in
-/// `real_terminal.rs` (which is excluded from coverage) so that the only
+/// `sync_wiring.rs` (which is excluded from coverage) so that the only
 /// generic instantiation of `run_sync` in `sync.rs` is `MockRunner` from
 /// unit tests.
 pub fn exec(args: &SyncArgs) -> i32 {
