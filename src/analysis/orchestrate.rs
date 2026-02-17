@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use crate::analysis::static_analyzer::frameworks::{
-    detect_config_frameworks, detect_frameworks, detect_package_manager,
-};
+use crate::analysis::static_analyzer::frameworks::{detect_frameworks, detect_package_manager};
 use crate::analysis::static_analyzer::languages::detect_languages;
 use crate::analysis::static_analyzer::manifests::parse_dependencies;
 use crate::analysis::static_analyzer::monorepo::detect_monorepo;
@@ -99,14 +97,10 @@ pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualErr
         // Parse manifests for dependencies
         let deps = parse_dependencies(&project_dir);
 
-        // Detect frameworks from deps + config files
-        let mut frameworks = detect_frameworks(&deps, &project_dir);
-        let config_frameworks = detect_config_frameworks(&project_dir);
-        for cf in config_frameworks {
-            if !frameworks.iter().any(|f| f.name == cf.name) {
-                frameworks.push(cf);
-            }
-        }
+        // Detect frameworks from deps + config files.
+        // Note: detect_frameworks internally calls detect_config_frameworks
+        // and deduplicates, so no additional dedup is needed here.
+        let frameworks = detect_frameworks(&deps, &project_dir);
 
         // Detect package manager from lockfiles
         let package_manager = detect_package_manager(&project_dir);
@@ -404,11 +398,7 @@ version = "0.1.0"
         let result = run_static_analysis(dir.path());
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Monorepo detection failed"),
-            "expected 'Monorepo detection failed' in: {}",
-            err
-        );
+        assert!(err.to_string().contains("Monorepo detection failed"));
     }
 
     // -- build_project_description tests --
@@ -464,35 +454,8 @@ version = "0.1.0"
     }
 
     #[test]
-    fn test_static_analysis_config_frameworks_dedup() {
-        // Test that config-detected frameworks are deduplicated with dep-detected ones
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("package.json"),
-            r#"{"name": "app", "dependencies": {"next": "^14.0.0"}}"#,
-        )
-        .unwrap();
-        // Also create next.config.js (config detection)
-        std::fs::write(dir.path().join("next.config.js"), "module.exports = {}").unwrap();
-        std::fs::write(dir.path().join("index.js"), "const x = 1;\n").unwrap();
-
-        let result = run_static_analysis(dir.path()).unwrap();
-
-        // nextjs should appear only once, not duplicated
-        let nextjs_count = result.projects[0]
-            .frameworks
-            .iter()
-            .filter(|f| f.name == "nextjs")
-            .count();
-        assert_eq!(
-            nextjs_count, 1,
-            "nextjs should be deduplicated, found {nextjs_count}"
-        );
-    }
-
-    #[test]
-    fn test_static_analysis_config_framework_adds_new() {
-        // Test that a config-detected framework NOT in dep-detected list gets added
+    fn test_static_analysis_config_frameworks_included() {
+        // Test that config-detected frameworks are included via detect_frameworks
         let dir = tempfile::tempdir().unwrap();
         // package.json with no framework dependencies
         std::fs::write(
@@ -500,21 +463,16 @@ version = "0.1.0"
             r#"{"name": "app", "dependencies": {}}"#,
         )
         .unwrap();
-        // Create next.config.js so config detection finds nextjs,
-        // but no "next" dependency so dep detection won't find it
+        // Create next.config.js so config detection finds nextjs
         std::fs::write(dir.path().join("next.config.js"), "module.exports = {}").unwrap();
         std::fs::write(dir.path().join("index.js"), "const x = 1;\n").unwrap();
 
         let result = run_static_analysis(dir.path()).unwrap();
 
-        // nextjs should be present (added from config detection)
-        assert!(
-            result.projects[0]
-                .frameworks
-                .iter()
-                .any(|f| f.name == "nextjs"),
-            "expected nextjs from config detection, got: {:?}",
-            result.projects[0].frameworks
-        );
+        // nextjs should be present (detect_frameworks includes config detection)
+        assert!(result.projects[0]
+            .frameworks
+            .iter()
+            .any(|f| f.name == "nextjs"));
     }
 }
