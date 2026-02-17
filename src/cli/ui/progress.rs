@@ -120,22 +120,40 @@ impl SyncPipeline {
     }
 
     /// Stop a phase and show a success (green checkmark) message.
+    ///
+    /// Switches the style to a plain `"  {msg}"` template so the rendered
+    /// output is consistent regardless of whether `start()` was called first.
     pub fn success(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bars.get(phase as usize) {
+            let finished_style =
+                ProgressStyle::with_template("  {msg}").expect("invalid finished template");
+            bar.set_style(finished_style);
             bar.finish_with_message(format!("{} {message}", style(SUCCESS_SYMBOL).green()));
         }
     }
 
     /// Stop a phase and show an error (red X) message.
+    ///
+    /// Switches the style to a plain `"  {msg}"` template so the rendered
+    /// output is consistent regardless of whether `start()` was called first.
     pub fn error(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bars.get(phase as usize) {
+            let finished_style =
+                ProgressStyle::with_template("  {msg}").expect("invalid finished template");
+            bar.set_style(finished_style);
             bar.finish_with_message(format!("{} {message}", style(ERROR_SYMBOL).red()));
         }
     }
 
     /// Stop a phase and show a warning (yellow triangle) message.
+    ///
+    /// Switches the style to a plain `"  {msg}"` template so the rendered
+    /// output is consistent regardless of whether `start()` was called first.
     pub fn warn(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bars.get(phase as usize) {
+            let finished_style =
+                ProgressStyle::with_template("  {msg}").expect("invalid finished template");
+            bar.set_style(finished_style);
             bar.finish_with_message(format!("{} {message}", style(WARN_SYMBOL).yellow()));
         }
     }
