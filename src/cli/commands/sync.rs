@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -14,6 +15,7 @@ use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::confirm_files;
+use crate::cli::ui::panel::Panel;
 use crate::cli::ui::progress::{SyncPhase, SyncPipeline};
 use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
@@ -239,7 +241,16 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     };
 
     // ── Phase 3: confirm + write (fully implemented) ──
-    confirm_and_write(&output, root_dir, args.force, args.dry_run, args.full, term)?;
+    let elapsed = pipeline.total_elapsed();
+    confirm_and_write(
+        &output,
+        root_dir,
+        args.force,
+        args.dry_run,
+        args.full,
+        term,
+        elapsed,
+    )?;
     Ok(())
 }
 
@@ -426,6 +437,7 @@ pub fn confirm_and_write(
     dry_run: bool,
     full: bool,
     term: &dyn TerminalIO,
+    elapsed: Duration,
 ) -> Result<SyncResult, ActualError> {
     // Step 1: Compute diffs
     let diffs: Vec<FileDiff> = output
@@ -495,40 +507,44 @@ pub fn confirm_and_write(
     let results = write_files(root_dir, &confirmed);
 
     // Step 6: Report results and return SyncResult
-    let (files_created, files_updated, files_failed) = report_write_results(&results, term);
+    let width = console::Term::stdout()
+        .size_checked()
+        .map(|(_, cols)| cols as usize)
+        .unwrap_or(80)
+        .min(90);
+    let (files_created, files_updated, files_failed) =
+        report_write_results(&results, files_rejected, elapsed, term, width);
 
-    let sync_result = SyncResult {
+    Ok(SyncResult {
         files_created,
         files_updated,
         files_failed,
         files_rejected,
-    };
-
-    term.write_line(&format!(
-        "\nSync complete: {} created, {} updated, {} failed, {} rejected",
-        sync_result.files_created,
-        sync_result.files_updated,
-        sync_result.files_failed,
-        sync_result.files_rejected,
-    ));
-
-    Ok(sync_result)
+    })
 }
 
-/// Report per-file write results to the terminal.
+/// Report per-file write results to the terminal using a Panel.
 ///
 /// Returns `(created, updated, failed)` counts.
-fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usize, usize, usize) {
+fn report_write_results(
+    results: &[WriteResult],
+    rejected_count: usize,
+    elapsed: Duration,
+    term: &dyn TerminalIO,
+    width: usize,
+) -> (usize, usize, usize) {
     let mut files_created = 0;
     let mut files_updated = 0;
     let mut files_failed = 0;
+
+    let mut panel = Panel::titled("Results");
 
     for result in results {
         match result.action {
             WriteAction::Created => {
                 files_created += 1;
-                term.write_line(&format!(
-                    "  {} {} (created, v{})",
+                panel = panel.line(&format!(
+                    "{} {}    created   v{}",
                     theme::success(&theme::SUCCESS),
                     result.path,
                     result.version
@@ -536,8 +552,8 @@ fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usiz
             }
             WriteAction::Updated => {
                 files_updated += 1;
-                term.write_line(&format!(
-                    "  {} {} (updated, v{})",
+                panel = panel.line(&format!(
+                    "{} {}    updated   v{}",
                     theme::success(&theme::SUCCESS),
                     result.path,
                     result.version
@@ -546,8 +562,8 @@ fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usiz
             WriteAction::Failed => {
                 files_failed += 1;
                 let err_msg = result.error.as_deref().unwrap_or("unknown error");
-                term.write_line(&format!(
-                    "  {} {} ({})",
+                panel = panel.line(&format!(
+                    "{} {}    error     {}",
                     theme::error(&theme::ERROR),
                     result.path,
                     err_msg
@@ -555,6 +571,14 @@ fn report_write_results(results: &[WriteResult], term: &dyn TerminalIO) -> (usiz
             }
         }
     }
+
+    let elapsed_secs = elapsed.as_secs_f64();
+    let summary = format!(
+        "Sync complete: {files_created} created \u{00b7} {files_updated} updated \u{00b7} {files_failed} failed \u{00b7} {rejected_count} rejected    [{elapsed_secs:.1}s total]"
+    );
+
+    panel = panel.separator().footer(&summary);
+    term.write_line(&panel.render(width));
 
     (files_created, files_updated, files_failed)
 }
@@ -673,7 +697,16 @@ mod tests {
         ]);
         let term = MockTerminal::new(vec![]);
 
-        let result = confirm_and_write(&output, dir.path(), true, false, false, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            true,
+            false,
+            false,
+            &term,
+            Duration::from_secs(1),
+        )
+        .unwrap();
 
         assert_eq!(result.files_created, 2);
         assert_eq!(result.files_updated, 0);
@@ -698,7 +731,16 @@ mod tests {
         let output = make_output(vec![make_file("CLAUDE.md", "Root rules", vec!["adr-001"])]);
         let term = MockTerminal::new(vec![]);
 
-        let result = confirm_and_write(&output, dir.path(), false, true, false, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            false,
+            true,
+            false,
+            &term,
+            Duration::from_secs(0),
+        )
+        .unwrap();
 
         // Dry run: nothing written
         assert_eq!(result.files_created, 0);
@@ -729,7 +771,16 @@ mod tests {
         )]);
         let term = MockTerminal::new(vec![]);
 
-        let result = confirm_and_write(&output, dir.path(), false, true, true, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            false,
+            true,
+            true,
+            &term,
+            Duration::from_secs(0),
+        )
+        .unwrap();
 
         assert_eq!(result.files_created, 0);
 
@@ -761,7 +812,16 @@ mod tests {
         // Select only file 1 (index 0), skip file 2
         let term = MockTerminal::new(vec![]).with_selection(Some(vec![0]));
 
-        let result = confirm_and_write(&output, dir.path(), false, false, false, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            false,
+            false,
+            false,
+            &term,
+            Duration::from_secs(1),
+        )
+        .unwrap();
 
         assert_eq!(result.files_created, 1);
         assert_eq!(result.files_rejected, 1);
@@ -780,7 +840,15 @@ mod tests {
         // User cancels the selection
         let term = MockTerminal::new(vec![]).with_selection(None);
 
-        let result = confirm_and_write(&output, dir.path(), false, false, false, &term);
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            false,
+            false,
+            false,
+            &term,
+            Duration::from_secs(0),
+        );
 
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
@@ -806,7 +874,16 @@ mod tests {
         ]);
         let term = MockTerminal::new(vec![]);
 
-        let result = confirm_and_write(&output, dir.path(), true, false, false, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            true,
+            false,
+            false,
+            &term,
+            Duration::from_secs(1),
+        )
+        .unwrap();
 
         // First file succeeds, second fails
         assert_eq!(result.files_created, 1);
@@ -836,7 +913,16 @@ mod tests {
         )]);
         let term = MockTerminal::new(vec![]);
 
-        let result = confirm_and_write(&output, dir.path(), true, false, false, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            true,
+            false,
+            false,
+            &term,
+            Duration::from_secs(1),
+        )
+        .unwrap();
 
         assert_eq!(result.files_created, 1);
         assert_eq!(result.files_updated, 0);
@@ -873,7 +959,16 @@ mod tests {
         )]);
         let term = MockTerminal::new(vec![]);
 
-        let result = confirm_and_write(&output, dir.path(), true, false, false, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            true,
+            false,
+            false,
+            &term,
+            Duration::from_secs(1),
+        )
+        .unwrap();
 
         assert_eq!(result.files_created, 0);
         assert_eq!(result.files_updated, 1);
@@ -893,7 +988,16 @@ mod tests {
         let output = make_output(vec![]);
         let term = MockTerminal::new(vec![]);
 
-        let result = confirm_and_write(&output, dir.path(), true, false, false, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            true,
+            false,
+            false,
+            &term,
+            Duration::from_secs(0),
+        )
+        .unwrap();
 
         assert_eq!(result.files_created, 0);
         assert_eq!(result.files_updated, 0);
@@ -913,7 +1017,16 @@ mod tests {
         // Select nothing (reject all)
         let term = MockTerminal::new(vec![]).with_selection(Some(vec![]));
 
-        let result = confirm_and_write(&output, dir.path(), false, false, false, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            false,
+            false,
+            false,
+            &term,
+            Duration::from_secs(0),
+        )
+        .unwrap();
 
         assert_eq!(result.files_created, 0);
         assert_eq!(result.files_updated, 0);
@@ -954,18 +1067,30 @@ mod tests {
         // Select files 0-2, reject file 3 (apps/api/CLAUDE.md)
         let term = MockTerminal::new(vec![]).with_selection(Some(vec![0, 1, 2]));
 
-        let result = confirm_and_write(&output, dir.path(), false, false, false, &term).unwrap();
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            false,
+            false,
+            false,
+            &term,
+            Duration::from_secs(5),
+        )
+        .unwrap();
 
         assert_eq!(result.files_created, 1, "expected 1 created (apps/web)");
         assert_eq!(result.files_updated, 1, "expected 1 updated (root)");
         assert_eq!(result.files_failed, 1, "expected 1 failed (fail/)");
         assert_eq!(result.files_rejected, 1, "expected 1 rejected (apps/api)");
 
-        // Verify summary line
+        // Verify summary line (now uses · separators in panel footer)
         let text = term.output_text();
         assert!(
-            text.contains("Sync complete: 1 created, 1 updated, 1 failed, 1 rejected"),
-            "expected correct summary line in: {text}"
+            text.contains("1 created")
+                && text.contains("1 updated")
+                && text.contains("1 failed")
+                && text.contains("1 rejected"),
+            "expected correct summary counts in: {text}"
         );
     }
 
@@ -1416,7 +1541,8 @@ mod tests {
             error: None,
         }];
 
-        let (created, updated, failed) = report_write_results(&results, &term);
+        let (created, updated, failed) =
+            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
 
         assert_eq!(created, 0);
         assert_eq!(updated, 0);
@@ -1439,7 +1565,8 @@ mod tests {
             error: None,
         }];
 
-        let (created, updated, failed) = report_write_results(&results, &term);
+        let (created, updated, failed) =
+            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
 
         assert_eq!(created, 1);
         assert_eq!(updated, 0);
@@ -1462,7 +1589,8 @@ mod tests {
             error: None,
         }];
 
-        let (created, updated, failed) = report_write_results(&results, &term);
+        let (created, updated, failed) =
+            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
 
         assert_eq!(created, 0);
         assert_eq!(updated, 1);
@@ -1485,7 +1613,8 @@ mod tests {
             error: Some("permission denied".to_string()),
         }];
 
-        let (created, updated, failed) = report_write_results(&results, &term);
+        let (created, updated, failed) =
+            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
 
         assert_eq!(created, 0);
         assert_eq!(updated, 0);
@@ -1522,11 +1651,168 @@ mod tests {
             },
         ];
 
-        let (created, updated, failed) = report_write_results(&results, &term);
+        let (created, updated, failed) =
+            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
 
         assert_eq!(created, 1);
         assert_eq!(updated, 1);
         assert_eq!(failed, 1);
+    }
+
+    // ── Panel rendering tests ──
+
+    #[test]
+    fn test_report_write_results_panel_has_box_characters() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![WriteResult {
+            path: "CLAUDE.md".to_string(),
+            action: WriteAction::Created,
+            version: 1,
+            error: None,
+        }];
+
+        report_write_results(&results, 0, Duration::from_secs(3), &term, 80);
+
+        let text = term.output_text();
+        let stripped = console::strip_ansi_codes(&text);
+        assert!(
+            stripped.contains("Results"),
+            "expected panel title 'Results' in: {stripped}"
+        );
+        assert!(
+            stripped.contains('\u{250c}'), // ┌
+            "expected top-left border in: {stripped}"
+        );
+        assert!(
+            stripped.contains('\u{2514}'), // └
+            "expected bottom-left border in: {stripped}"
+        );
+        assert!(
+            stripped.contains('\u{2502}'), // │
+            "expected side border in: {stripped}"
+        );
+    }
+
+    #[test]
+    fn test_report_write_results_panel_has_separator() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![WriteResult {
+            path: "CLAUDE.md".to_string(),
+            action: WriteAction::Created,
+            version: 1,
+            error: None,
+        }];
+
+        report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
+
+        let text = term.output_text();
+        let stripped = console::strip_ansi_codes(&text);
+        assert!(
+            stripped.contains('\u{251c}') && stripped.contains('\u{2524}'), // ├ and ┤
+            "expected separator T-junctions in: {stripped}"
+        );
+    }
+
+    #[test]
+    fn test_report_write_results_panel_has_timing() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![WriteResult {
+            path: "CLAUDE.md".to_string(),
+            action: WriteAction::Created,
+            version: 1,
+            error: None,
+        }];
+
+        report_write_results(&results, 0, Duration::from_millis(7300), &term, 80);
+
+        let text = term.output_text();
+        let stripped = console::strip_ansi_codes(&text);
+        assert!(
+            stripped.contains("[7.3s total]"),
+            "expected timing display in: {stripped}"
+        );
+    }
+
+    #[test]
+    fn test_report_write_results_panel_dot_separated_summary() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![
+            WriteResult {
+                path: "CLAUDE.md".to_string(),
+                action: WriteAction::Created,
+                version: 1,
+                error: None,
+            },
+            WriteResult {
+                path: "apps/web/CLAUDE.md".to_string(),
+                action: WriteAction::Updated,
+                version: 2,
+                error: None,
+            },
+        ];
+
+        report_write_results(&results, 1, Duration::from_secs(2), &term, 80);
+
+        let text = term.output_text();
+        let stripped = console::strip_ansi_codes(&text);
+        assert!(
+            stripped.contains("\u{00b7}"),
+            "expected middle dot separator in: {stripped}"
+        );
+        assert!(
+            stripped.contains("1 created")
+                && stripped.contains("1 updated")
+                && stripped.contains("0 failed")
+                && stripped.contains("1 rejected"),
+            "expected all counts in: {stripped}"
+        );
+    }
+
+    #[test]
+    fn test_report_write_results_panel_mixed_results() {
+        let term = MockTerminal::new(vec![]);
+        let results = vec![
+            WriteResult {
+                path: "CLAUDE.md".to_string(),
+                action: WriteAction::Updated,
+                version: 3,
+                error: None,
+            },
+            WriteResult {
+                path: "apps/web/CLAUDE.md".to_string(),
+                action: WriteAction::Created,
+                version: 1,
+                error: None,
+            },
+            WriteResult {
+                path: "apps/api/CLAUDE.md".to_string(),
+                action: WriteAction::Failed,
+                version: 0,
+                error: Some("permission denied".to_string()),
+            },
+        ];
+
+        let (created, updated, failed) =
+            report_write_results(&results, 2, Duration::from_millis(4500), &term, 80);
+
+        assert_eq!(created, 1);
+        assert_eq!(updated, 1);
+        assert_eq!(failed, 1);
+
+        let text = term.output_text();
+        let stripped = console::strip_ansi_codes(&text);
+        // Verify all file entries
+        assert!(stripped.contains("CLAUDE.md") && stripped.contains("updated"));
+        assert!(stripped.contains("apps/web/CLAUDE.md") && stripped.contains("created"));
+        assert!(stripped.contains("apps/api/CLAUDE.md") && stripped.contains("permission denied"));
+        // Verify panel footer
+        assert!(stripped.contains("1 created"));
+        assert!(stripped.contains("1 updated"));
+        assert!(stripped.contains("1 failed"));
+        assert!(stripped.contains("2 rejected"));
+        assert!(stripped.contains("[4.5s total]"));
+        // Verify panel structure
+        assert!(stripped.contains("Results"));
     }
 
     // ── compute_repo_key tests ──
