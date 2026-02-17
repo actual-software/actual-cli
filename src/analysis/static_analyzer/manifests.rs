@@ -55,7 +55,10 @@ fn parse_package_json(
     };
     let parsed: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("Warning: failed to parse {}: {e}", path.display());
+            return;
+        }
     };
 
     if let Some(obj) = parsed.get("dependencies").and_then(|v| v.as_object()) {
@@ -84,7 +87,10 @@ fn parse_cargo_toml(
     };
     let parsed: toml::Value = match content.parse() {
         Ok(v) => v,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("Warning: failed to parse {}: {e}", path.display());
+            return;
+        }
     };
 
     if let Some(table) = parsed.get("dependencies").and_then(|v| v.as_table()) {
@@ -113,7 +119,10 @@ fn parse_pyproject_toml(
     };
     let parsed: toml::Value = match content.parse() {
         Ok(v) => v,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("Warning: failed to parse {}: {e}", path.display());
+            return;
+        }
     };
 
     // PEP 631 format: [project].dependencies is a list of strings like "requests>=2.0"
@@ -234,7 +243,10 @@ fn parse_pipfile(project_dir: &Path, deps: &mut HashSet<String>, dev_deps: &mut 
     };
     let parsed: toml::Value = match content.parse() {
         Ok(v) => v,
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("Warning: failed to parse {}: {e}", path.display());
+            return;
+        }
     };
 
     if let Some(table) = parsed.get("packages").and_then(|v| v.as_table()) {
