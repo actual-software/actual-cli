@@ -894,4 +894,456 @@ mod tests {
         // Falls through to single-project since there are no workspace patterns
         assert!(!info.is_monorepo);
     }
+
+    #[test]
+    fn test_nx_with_workspace_json() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        // No package.json workspaces, but workspace.json exists
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "version": "1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("workspace.json"),
+            r#"{"projects": {"app-one": "apps/one", "lib-two": "libs/two"}}"#,
+        )
+        .unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 2);
+
+        let mut names: Vec<&str> = info.projects.iter().map(|p| p.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["app-one", "lib-two"]);
+    }
+
+    #[test]
+    fn test_workspace_json_empty_projects() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "version": "1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(root.join("workspace.json"), r#"{"projects": {}}"#).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_workspace_json_non_object_projects() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "version": "1.0.0"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("workspace.json"),
+            r#"{"projects": ["not-an-object"]}"#,
+        )
+        .unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_turbo_without_workspaces_falls_through() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("turbo.json"), r#"{"pipeline": {}}"#).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "solo-turbo", "version": "1.0.0"}"#,
+        )
+        .unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+        assert_eq!(info.projects[0].name, "solo-turbo");
+    }
+
+    #[test]
+    fn test_lerna_without_packages_key() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("lerna.json"), r#"{"version": "independent"}"#).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_lerna_with_empty_packages() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("lerna.json"), r#"{"packages": []}"#).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_cargo_workspace_with_empty_members() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_go_work_with_comments_in_use_block() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("go.work"),
+            "go 1.21\n\nuse (\n\t// this is a comment\n\t./mymod\n\n)\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("mymod")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, "./mymod");
+    }
+
+    #[test]
+    fn test_go_work_all_dirs_nonexistent_falls_through() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("go.work"),
+            "go 1.21\n\nuse (\n\t./missing1\n\t./missing2\n)\n",
+        )
+        .unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        // All dirs nonexistent, but still detected as monorepo (has use directives)
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 0);
+    }
+
+    #[test]
+    fn test_go_work_empty_file() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("go.work"), "go 1.21\n").unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        // No use directives, not a monorepo
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_go_work_use_with_parenthesis_on_same_line() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("go.work"), "go 1.21\n\nuse (\n\t./mod1\n)\n").unwrap();
+        fs::create_dir_all(root.join("mod1")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.projects.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_workspace_patterns_workspaces_is_number() {
+        let json: serde_json::Value = serde_json::from_str(r#"{"workspaces": 42}"#).unwrap();
+        let patterns = extract_workspace_patterns(&json);
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_extract_workspace_patterns_no_workspaces_key() {
+        let json: serde_json::Value = serde_json::from_str(r#"{"name": "root"}"#).unwrap();
+        let patterns = extract_workspace_patterns(&json);
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_extract_workspace_patterns_object_without_packages() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"workspaces": {"nohoist": ["**/react"]}}"#).unwrap();
+        let patterns = extract_workspace_patterns(&json);
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_extract_workspace_patterns_array_with_non_strings() {
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"workspaces": ["packages/*", 42, null]}"#).unwrap();
+        let patterns = extract_workspace_patterns(&json);
+        assert_eq!(patterns, vec!["packages/*"]);
+    }
+
+    #[test]
+    fn test_name_from_package_json_no_name_field() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("package.json"), r#"{"version": "1.0.0"}"#).unwrap();
+
+        assert!(name_from_package_json(root).is_none());
+    }
+
+    #[test]
+    fn test_name_from_package_json_invalid_json() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("package.json"), "not json").unwrap();
+
+        assert!(name_from_package_json(root).is_none());
+    }
+
+    #[test]
+    fn test_name_from_package_json_name_is_not_string() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("package.json"), r#"{"name": 123}"#).unwrap();
+
+        assert!(name_from_package_json(root).is_none());
+    }
+
+    #[test]
+    fn test_name_from_package_json_nonexistent() {
+        let dir = tempdir().unwrap();
+        assert!(name_from_package_json(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_name_from_cargo_toml_no_package_section() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+
+        assert!(name_from_cargo_toml(root).is_none());
+    }
+
+    #[test]
+    fn test_name_from_cargo_toml_invalid_toml() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("Cargo.toml"), "not valid toml [[[").unwrap();
+
+        assert!(name_from_cargo_toml(root).is_none());
+    }
+
+    #[test]
+    fn test_name_from_cargo_toml_nonexistent() {
+        let dir = tempdir().unwrap();
+        assert!(name_from_cargo_toml(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_name_from_pyproject_toml_nonexistent() {
+        let dir = tempdir().unwrap();
+        assert!(name_from_pyproject_toml(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_name_from_pyproject_toml_no_project_or_poetry() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("pyproject.toml"),
+            "[build-system]\nrequires = [\"setuptools\"]\n",
+        )
+        .unwrap();
+
+        assert!(name_from_pyproject_toml(root).is_none());
+    }
+
+    #[test]
+    fn test_name_from_pyproject_toml_invalid_toml() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("pyproject.toml"), "not valid [[[").unwrap();
+
+        assert!(name_from_pyproject_toml(root).is_none());
+    }
+
+    #[test]
+    fn test_name_from_go_mod_nonexistent() {
+        let dir = tempdir().unwrap();
+        assert!(name_from_go_mod(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_name_from_go_mod_no_module_line() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("go.mod"), "go 1.21\n\nrequire (\n)\n").unwrap();
+
+        assert!(name_from_go_mod(root).is_none());
+    }
+
+    #[test]
+    fn test_name_from_go_mod_simple_module_no_slash() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("go.mod"), "module myapp\n\ngo 1.21\n").unwrap();
+
+        assert_eq!(name_from_go_mod(root), Some("myapp".to_string()));
+    }
+
+    #[test]
+    fn test_project_name_unknown_fallback() {
+        // Path::new("/") has no file_name() — triggers the "unknown" fallback
+        let name = extract_project_name(Path::new("/"));
+        assert_eq!(name, "unknown");
+    }
+
+    #[test]
+    fn test_invalid_pnpm_workspace_yaml() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("pnpm-workspace.yaml"),
+            ":\n  - not: valid: yaml: {{{\n",
+        )
+        .unwrap();
+
+        let result = detect_monorepo(root);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_package_json() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("package.json"), "not valid json!!!").unwrap();
+
+        let result = detect_monorepo(root);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_lerna_json() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("lerna.json"), "not json").unwrap();
+
+        let result = detect_monorepo(root);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_cargo_toml() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("Cargo.toml"), "not valid toml [[[").unwrap();
+
+        let result = detect_monorepo(root);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_workspace_json() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "root"}"#).unwrap();
+        fs::write(root.join("workspace.json"), "not json!!!").unwrap();
+
+        let result = detect_monorepo(root);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_lerna_packages_not_array() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("lerna.json"), r#"{"packages": "not-an-array"}"#).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_cargo_workspace_members_not_array() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = \"not-an-array\"\n",
+        )
+        .unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_workspace_json_projects_value_not_string() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("nx.json"), "{}").unwrap();
+        fs::write(root.join("package.json"), r#"{"name": "root"}"#).unwrap();
+        fs::write(root.join("workspace.json"), r#"{"projects": {"app": 42}}"#).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        // Project value is not a string, gets filtered out, so empty projects → falls through
+        assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn test_name_from_cargo_toml_package_name_not_string() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(root.join("Cargo.toml"), "[package]\nname = 42\n").unwrap();
+
+        assert!(name_from_cargo_toml(root).is_none());
+    }
+
+    #[test]
+    fn test_glob_expansion_invalid_pattern_skipped() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // An invalid glob pattern (unclosed bracket) should be skipped
+        let patterns = vec!["packages/[invalid".to_string()];
+        let projects = expand_glob_patterns(root, &patterns);
+        assert!(projects.is_empty());
+    }
 }
