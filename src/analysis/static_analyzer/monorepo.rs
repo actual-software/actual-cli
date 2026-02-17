@@ -217,11 +217,11 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
                         .and_then(|r| r.as_str())
                         .map(|s| s.to_string())
                 })?;
-                let resolved = root.join(&path_str);
-                if !resolved.starts_with(root) || !resolved.is_dir() {
+                // Reject paths containing `..` to prevent directory traversal
+                if path_str.contains("..") || !root.join(&path_str).is_dir() {
                     return None;
                 }
-                let name = extract_project_name(&resolved);
+                let name = extract_project_name(&root.join(&path_str));
                 Some(ProjectInfo {
                     path: path_str,
                     name,
@@ -376,12 +376,13 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
                 continue;
             }
 
-            // Compute relative path from root; skip entries that escape it.
+            // Compute relative path from root; skip entries that escape it
+            // via `..` (e.g. patterns like `../*`).
             let rel = entry
                 .strip_prefix(root)
                 .map(|r| r.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if rel.is_empty() || rel.starts_with("..") {
+                .unwrap_or_else(|_| "..".to_string());
+            if rel.starts_with("..") {
                 continue;
             }
 
