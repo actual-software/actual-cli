@@ -18,13 +18,22 @@ pub struct QueryDefinition {
     pub capture_name: Option<String>,
 }
 
+/// A query definition paired with its pre-compiled tree-sitter query.
+///
+/// Queries are compiled once at load time and reused across files, avoiding
+/// redundant compilation on every `query_file` call.
+struct CompiledQuery {
+    definition: QueryDefinition,
+    query: tree_sitter::Query,
+}
+
 /// Tree-sitter parser and query executor.
 ///
 /// Parses source files using tree-sitter grammars and executes `.scm` query
 /// packs to extract architecture signals.
 pub struct TreeSitterAnalyzer {
     parser_cache: HashMap<TreeSitterLanguage, tree_sitter::Parser>,
-    query_packs: HashMap<TreeSitterLanguage, Vec<QueryDefinition>>,
+    compiled_packs: HashMap<TreeSitterLanguage, Vec<CompiledQuery>>,
 }
 
 impl TreeSitterAnalyzer {
@@ -33,10 +42,10 @@ impl TreeSitterAnalyzer {
     /// Each file in the directory should be named `<language_id>.scm`
     /// (e.g. `rust.scm`, `typescript.scm`).
     pub fn new(query_packs_dir: &Path) -> Result<Self> {
-        let query_packs = Self::load_all_query_packs(query_packs_dir)?;
+        let compiled_packs = Self::load_all_query_packs(query_packs_dir)?;
         Ok(Self {
             parser_cache: HashMap::new(),
-            query_packs,
+            compiled_packs,
         })
     }
 
@@ -44,7 +53,7 @@ impl TreeSitterAnalyzer {
     pub fn without_query_packs() -> Self {
         Self {
             parser_cache: HashMap::new(),
-            query_packs: HashMap::new(),
+            compiled_packs: HashMap::new(),
         }
     }
 
@@ -68,21 +77,16 @@ impl TreeSitterAnalyzer {
         language: TreeSitterLanguage,
     ) -> Result<Vec<ToolMatch>> {
         let tree = self.parse(content, language)?;
-        let ts_lang = language
-            .tree_sitter_language()
-            .with_context(|| format!("no grammar for {language:?}"))?;
         let content_bytes = content.as_bytes();
         let mut matches = Vec::new();
 
-        if let Some(definitions) = self.query_packs.get(&language) {
-            for def in definitions {
-                let query = match tree_sitter::Query::new(&ts_lang, &def.query_text) {
-                    Ok(q) => q,
-                    Err(_) => continue, // skip queries that fail to compile
-                };
+        if let Some(compiled) = self.compiled_packs.get(&language) {
+            for cq in compiled {
+                let def = &cq.definition;
+                let query = &cq.query;
 
                 let mut cursor = tree_sitter::QueryCursor::new();
-                let mut query_matches = cursor.matches(&query, tree.root_node(), content_bytes);
+                let mut query_matches = cursor.matches(query, tree.root_node(), content_bytes);
 
                 while let Some(m) = query_matches.next() {
                     for capture in m.captures {
@@ -146,10 +150,8 @@ impl TreeSitterAnalyzer {
         }
     }
 
-    /// Load all `<lang>.scm` files from a directory.
-    fn load_all_query_packs(
-        dir: &Path,
-    ) -> Result<HashMap<TreeSitterLanguage, Vec<QueryDefinition>>> {
+    /// Load all `<lang>.scm` files from a directory and pre-compile queries.
+    fn load_all_query_packs(dir: &Path) -> Result<HashMap<TreeSitterLanguage, Vec<CompiledQuery>>> {
         let mut packs = HashMap::new();
 
         let entries = match std::fs::read_dir(dir) {
@@ -179,15 +181,49 @@ impl TreeSitterAnalyzer {
                 None => continue, // skip unrecognised language files
             };
 
+            let ts_lang = match language.tree_sitter_language() {
+                Some(l) => l,
+                None => continue, // skip languages without grammar crates
+            };
+
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading query pack {}", path.display()))?;
             let definitions = parse_query_pack(&content, stem);
-            if !definitions.is_empty() && language.tree_sitter_language().is_some() {
-                packs.insert(language, definitions);
+            let compiled = Self::compile_definitions(definitions, &ts_lang, stem);
+            if !compiled.is_empty() {
+                packs.insert(language, compiled);
             }
         }
 
         Ok(packs)
+    }
+
+    /// Compile a list of query definitions against a tree-sitter language.
+    ///
+    /// Definitions that fail to compile are logged and skipped.
+    fn compile_definitions(
+        definitions: Vec<QueryDefinition>,
+        ts_lang: &tree_sitter::Language,
+        lang_id: &str,
+    ) -> Vec<CompiledQuery> {
+        definitions
+            .into_iter()
+            .filter_map(
+                |def| match tree_sitter::Query::new(ts_lang, &def.query_text) {
+                    Ok(query) => Some(CompiledQuery {
+                        definition: def,
+                        query,
+                    }),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: skipping query {}/{} that failed to compile: {e}",
+                            lang_id, def.rule_id
+                        );
+                        None
+                    }
+                },
+            )
+            .collect()
     }
 
     /// Map a `.scm` file stem (e.g. `"rust"`, `"tsx"`) to a language variant.
@@ -340,6 +376,27 @@ pub fn default_query_packs_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to compile a [`QueryDefinition`] for Rust and insert it into
+    /// an analyzer's `compiled_packs`. Panics if the query text is invalid
+    /// Rust tree-sitter syntax (use for intentionally valid test queries).
+    fn insert_compiled_rust(analyzer: &mut TreeSitterAnalyzer, defs: Vec<QueryDefinition>) {
+        let ts_lang = TreeSitterLanguage::Rust.tree_sitter_language().unwrap();
+        let compiled: Vec<CompiledQuery> = defs
+            .into_iter()
+            .filter_map(|def| {
+                tree_sitter::Query::new(&ts_lang, &def.query_text)
+                    .ok()
+                    .map(|query| CompiledQuery {
+                        definition: def,
+                        query,
+                    })
+            })
+            .collect();
+        analyzer
+            .compiled_packs
+            .insert(TreeSitterLanguage::Rust, compiled);
+    }
 
     // ---- parse_query_pack ----
 
@@ -651,10 +708,8 @@ mod tests {
     fn query_file_with_inline_query() {
         // Test querying with an inline query pack (not from .scm files).
         let mut analyzer = TreeSitterAnalyzer::without_query_packs();
-
-        // Manually insert a query definition.
-        analyzer.query_packs.insert(
-            TreeSitterLanguage::Rust,
+        insert_compiled_rust(
+            &mut analyzer,
             vec![QueryDefinition {
                 rule_id: "test.fn_name".to_string(),
                 facet_slot: "test.slot".to_string(),
@@ -687,8 +742,8 @@ mod tests {
         // The query "(function_item name: (identifier) @name)" produces captures
         // named "name". If we set capture_name to "other", we should get 0 matches.
         let mut analyzer = TreeSitterAnalyzer::without_query_packs();
-        analyzer.query_packs.insert(
-            TreeSitterLanguage::Rust,
+        insert_compiled_rust(
+            &mut analyzer,
             vec![QueryDefinition {
                 rule_id: "test.filter".to_string(),
                 facet_slot: "test.slot".to_string(),
@@ -710,8 +765,8 @@ mod tests {
     fn query_file_no_capture_name_returns_all_captures() {
         // When capture_name is None, all captures produce ToolMatches.
         let mut analyzer = TreeSitterAnalyzer::without_query_packs();
-        analyzer.query_packs.insert(
-            TreeSitterLanguage::Rust,
+        insert_compiled_rust(
+            &mut analyzer,
             vec![QueryDefinition {
                 rule_id: "test.all".to_string(),
                 facet_slot: "test.slot".to_string(),
@@ -730,26 +785,20 @@ mod tests {
     }
 
     #[test]
-    fn query_file_bad_query_skipped() {
-        // A query definition with invalid query_text should be silently skipped.
-        let mut analyzer = TreeSitterAnalyzer::without_query_packs();
-        analyzer.query_packs.insert(
-            TreeSitterLanguage::Rust,
-            vec![QueryDefinition {
-                rule_id: "test.bad".to_string(),
-                facet_slot: "test.slot".to_string(),
-                leaf_id: "1".to_string(),
-                confidence: 0.5,
-                query_text: "(this_is_not_a_valid_node_type) @x".to_string(),
-                capture_name: None,
-            }],
-        );
-
-        let code = "fn hello() {}";
-        let matches = analyzer
-            .query_file(code, "test.rs", TreeSitterLanguage::Rust)
-            .expect("should not error, just skip bad query");
-        assert!(matches.is_empty());
+    fn bad_query_skipped_at_compile_time() {
+        // A query definition with invalid query_text should be skipped during
+        // compilation, so it never appears in compiled_packs.
+        let ts_lang = TreeSitterLanguage::Rust.tree_sitter_language().unwrap();
+        let defs = vec![QueryDefinition {
+            rule_id: "test.bad".to_string(),
+            facet_slot: "test.slot".to_string(),
+            leaf_id: "1".to_string(),
+            confidence: 0.5,
+            query_text: "(this_is_not_a_valid_node_type) @x".to_string(),
+            capture_name: None,
+        }];
+        let compiled = TreeSitterAnalyzer::compile_definitions(defs, &ts_lang, "rust");
+        assert!(compiled.is_empty());
     }
 
     #[test]
@@ -792,9 +841,11 @@ mod tests {
 
         let analyzer = TreeSitterAnalyzer::new(tmp.path()).expect("should load");
         // Should only load rust.scm, skip readme.txt and haskell.scm
-        assert!(analyzer.query_packs.contains_key(&TreeSitterLanguage::Rust));
+        assert!(analyzer
+            .compiled_packs
+            .contains_key(&TreeSitterLanguage::Rust));
         assert!(!analyzer
-            .query_packs
+            .compiled_packs
             .contains_key(&TreeSitterLanguage::Kotlin));
     }
 
@@ -811,15 +862,15 @@ mod tests {
 
         let analyzer = TreeSitterAnalyzer::new(tmp.path()).expect("should load");
         assert!(!analyzer
-            .query_packs
-            .contains_key(&TreeSitterLanguage::Kotlin),);
+            .compiled_packs
+            .contains_key(&TreeSitterLanguage::Kotlin));
     }
 
     #[test]
     fn load_query_packs_empty_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let analyzer = TreeSitterAnalyzer::new(tmp.path()).expect("should load empty");
-        assert!(analyzer.query_packs.is_empty());
+        assert!(analyzer.compiled_packs.is_empty());
     }
 
     #[test]
