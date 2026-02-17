@@ -703,6 +703,25 @@ mod tests {
     }
 
     #[test]
+    fn test_same_numeric_value_different_strings_tiebreak() {
+        // "01" and "1" both parse to u64 1, exercising the then_with
+        // lexicographic tiebreaker in the leaf_id comparator.
+        let matches = vec![
+            make_match("r1", "s", "01", serde_json::json!("a"), 0.9),
+            make_match("r2", "s", "1", serde_json::json!("b"), 0.9),
+        ];
+        let ir = build_canonical_ir("f.rs", "rust", &matches);
+        assert_eq!(ir.leaf_count, 2);
+        // "01" < "1" lexicographically, so "01" should appear first.
+        let pos_01 = ir.ir_text.find("LEAF[01]").unwrap();
+        let pos_1 = ir.ir_text.find("LEAF[1]").unwrap();
+        assert!(
+            pos_01 < pos_1,
+            "01 should sort before 1 via lexicographic tiebreaker"
+        );
+    }
+
+    #[test]
     fn test_span_summary_serialization_roundtrip() {
         let summary = SpanSummary {
             file_path: "test.rs".to_string(),
