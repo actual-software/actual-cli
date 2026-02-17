@@ -284,4 +284,78 @@ mod tests {
         let frameworks = detect_frameworks(&deps, dir.path());
         assert!(frameworks.is_empty());
     }
+
+    #[test]
+    fn test_detect_config_no_terraform_files() {
+        // Dir with files but no .tf — terraform should NOT be detected
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
+        fs::write(dir.path().join("README.md"), "# Hello").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(!names.contains(&"terraform"));
+    }
+
+    #[test]
+    fn test_detect_config_docker_compose() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("docker-compose.yml"), "version: '3'").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"docker-compose"));
+    }
+
+    #[test]
+    fn test_detect_config_angular() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("angular.json"), "{}").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"angular"));
+    }
+
+    #[test]
+    fn test_detect_config_vue() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("vue.config.js"), "module.exports = {}").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"vue"));
+    }
+
+    #[test]
+    fn test_detect_config_tailwind() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("tailwind.config.js"), "module.exports = {}").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"tailwindcss"));
+    }
+
+    #[test]
+    fn test_detect_config_vite() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("vite.config.ts"), "export default {}").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"vite"));
+    }
+
+    #[test]
+    fn test_detect_unknown_dependency_not_in_registry() {
+        let dir = tempdir().unwrap();
+        let deps = DependencyInfo {
+            dependencies: vec!["some-unknown-package".to_string()],
+            dev_dependencies: vec![],
+        };
+
+        let frameworks = detect_frameworks(&deps, dir.path());
+        assert!(frameworks.is_empty());
+    }
 }
