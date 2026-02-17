@@ -379,7 +379,8 @@ fn find_existing_claude_md(root_dir: &Path) -> String {
             } else if entry.file_name() == "CLAUDE.md" {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy();
-                    results.push(format!("=== {rel} ===\n{content}"));
+                    let cleaned = markers::strip_managed_metadata(&content);
+                    results.push(format!("=== {rel} ===\n{cleaned}"));
                 }
             }
         }
@@ -1799,6 +1800,38 @@ mod tests {
         .unwrap();
         let result = find_existing_claude_md(dir.path());
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_find_existing_claude_md_strips_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "# My Rules\n\n<!-- managed:actual-start -->\n<!-- last-synced: 2024-01-01T00:00:00Z -->\n<!-- version: 1 -->\n<!-- adr-ids: abc-123,def-456 -->\n\n## Some Rules\n\nDo this.\n\n<!-- managed:actual-end -->";
+        std::fs::write(dir.path().join("CLAUDE.md"), content).unwrap();
+        let result = find_existing_claude_md(dir.path());
+        assert!(
+            !result.contains("adr-ids"),
+            "should strip adr-ids metadata: {result}"
+        );
+        assert!(
+            !result.contains("last-synced"),
+            "should strip last-synced metadata: {result}"
+        );
+        assert!(
+            !result.contains("version:"),
+            "should strip version metadata: {result}"
+        );
+        assert!(
+            !result.contains("managed:actual"),
+            "should strip managed markers: {result}"
+        );
+        assert!(
+            result.contains("Some Rules"),
+            "should preserve content: {result}"
+        );
+        assert!(
+            result.contains("Do this"),
+            "should preserve content: {result}"
+        );
     }
 
     #[test]
