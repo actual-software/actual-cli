@@ -17,6 +17,7 @@ use crate::claude::subprocess::CliClaudeRunner;
 use crate::cli::args::SyncArgs;
 use crate::cli::commands::auth::check_auth;
 use crate::cli::commands::sync::{resolve_cwd, run_sync};
+use crate::cli::ui::header::AuthDisplay;
 use dialoguer::Confirm as DialoguerConfirm;
 
 use crate::cli::ui::terminal::TerminalIO;
@@ -96,7 +97,19 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
         return Err(ActualError::ClaudeNotAuthenticated);
     }
 
+    let auth_display = AuthDisplay {
+        authenticated: auth_status.is_usable(),
+        email: auth_status.email.clone(),
+    };
+
     let cfg_path = config_path()?;
     let runner = CliClaudeRunner::new(binary_path, Duration::from_secs(300));
-    run_sync(args, &root_dir, &cfg_path, &term, &runner)
+    run_sync(
+        args,
+        &root_dir,
+        &cfg_path,
+        &term,
+        &runner,
+        Some(auth_display),
+    )
 }
