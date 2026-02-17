@@ -1,5 +1,7 @@
+pub mod language_resolver;
 pub mod rule_resolver;
 pub mod semgrep;
+pub mod tree_sitter;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -41,11 +43,12 @@ pub struct ToolMatch {
     pub raw: Option<serde_json::Value>,
 }
 
-/// Collection of architecture signals for a single file.
-#[derive(Debug, Clone)]
+/// Aggregated architecture signals from all detection tools.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ArchitectureSignals {
-    pub file_key: String,
     pub matches: Vec<ToolMatch>,
+    pub files_analyzed: usize,
+    pub queries_executed: usize,
 }
 
 impl ArchitectureSignals {
@@ -137,6 +140,53 @@ mod tests {
     }
 
     #[test]
+    fn evidence_span_round_trip() {
+        let span = EvidenceSpan {
+            file_path: "src/main.rs".to_string(),
+            start_byte: 10,
+            end_byte: 42,
+            start_line: Some(1),
+            end_line: Some(3),
+            source: SignalSource::TreeSitter,
+        };
+        let json = serde_json::to_string(&span).unwrap();
+        let deserialized: EvidenceSpan = serde_json::from_str(&json).unwrap();
+        assert_eq!(span, deserialized);
+    }
+
+    #[test]
+    fn tool_match_round_trip() {
+        let m = ToolMatch {
+            rule_id: "ts.rust.pub_function".to_string(),
+            facet_slot: "api.public.contracts".to_string(),
+            leaf_id: "25".to_string(),
+            value: serde_json::Value::String("pub fn hello()".to_string()),
+            confidence: 0.9,
+            spans: vec![EvidenceSpan {
+                file_path: "src/lib.rs".to_string(),
+                start_byte: 0,
+                end_byte: 14,
+                start_line: Some(1),
+                end_line: Some(1),
+                source: SignalSource::TreeSitter,
+            }],
+            raw: None,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let deserialized: ToolMatch = serde_json::from_str(&json).unwrap();
+        assert_eq!(m, deserialized);
+    }
+
+    #[test]
+    fn signal_source_serializes_to_snake_case() {
+        let ts = serde_json::to_string(&SignalSource::TreeSitter).unwrap();
+        assert_eq!(ts, "\"tree_sitter\"");
+
+        let sg = serde_json::to_string(&SignalSource::Semgrep).unwrap();
+        assert_eq!(sg, "\"semgrep\"");
+    }
+
+    #[test]
     fn test_tool_match_roundtrip() {
         let m = sample_tool_match("js.express.route", "boundaries.service_definitions", "23");
         let json = serde_json::to_string(&m).unwrap();
@@ -167,14 +217,23 @@ mod tests {
     }
 
     #[test]
+    fn architecture_signals_default_is_empty() {
+        let signals = ArchitectureSignals::default();
+        assert!(signals.matches.is_empty());
+        assert_eq!(signals.files_analyzed, 0);
+        assert_eq!(signals.queries_executed, 0);
+    }
+
+    #[test]
     fn test_matches_by_leaf_id() {
         let signals = ArchitectureSignals {
-            file_key: "src/main.rs".to_string(),
             matches: vec![
                 sample_tool_match("rule1", "slot_a", "10"),
                 sample_tool_match("rule2", "slot_b", "10"),
                 sample_tool_match("rule3", "slot_a", "20"),
             ],
+            files_analyzed: 0,
+            queries_executed: 0,
         };
         let by_leaf = signals.matches_by_leaf_id();
         assert_eq!(by_leaf.len(), 2);
@@ -185,12 +244,13 @@ mod tests {
     #[test]
     fn test_matches_by_facet_slot() {
         let signals = ArchitectureSignals {
-            file_key: "src/main.rs".to_string(),
             matches: vec![
                 sample_tool_match("rule1", "slot_a", "10"),
                 sample_tool_match("rule2", "slot_b", "10"),
                 sample_tool_match("rule3", "slot_a", "20"),
             ],
+            files_analyzed: 0,
+            queries_executed: 0,
         };
         let by_facet = signals.matches_by_facet_slot();
         assert_eq!(by_facet.len(), 2);
@@ -201,8 +261,9 @@ mod tests {
     #[test]
     fn test_matches_by_leaf_id_empty() {
         let signals = ArchitectureSignals {
-            file_key: "empty.rs".to_string(),
             matches: vec![],
+            files_analyzed: 0,
+            queries_executed: 0,
         };
         assert!(signals.matches_by_leaf_id().is_empty());
     }
@@ -210,8 +271,9 @@ mod tests {
     #[test]
     fn test_matches_by_facet_slot_empty() {
         let signals = ArchitectureSignals {
-            file_key: "empty.rs".to_string(),
             matches: vec![],
+            files_analyzed: 0,
+            queries_executed: 0,
         };
         assert!(signals.matches_by_facet_slot().is_empty());
     }
