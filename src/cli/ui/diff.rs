@@ -80,7 +80,10 @@ const MAX_DIFF_LINES: usize = 20;
 /// Uses `similar::TextDiff` for line-level diffing with colored output:
 /// green for additions, red for removals.  Large diffs are truncated
 /// after [`MAX_DIFF_LINES`] changed lines.
-pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<String> {
+///
+/// Each returned string is a single styled diff line (e.g. `"+ new rule"`)
+/// without any tree-drawing prefix — the caller adds those.
+pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<Vec<String>> {
     let diff = TextDiff::from_lines(old_content, new_content);
 
     let has_changes = diff
@@ -97,7 +100,7 @@ pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<Strin
         .filter(|c| !matches!(c.tag(), ChangeTag::Equal))
         .count();
 
-    let mut output = String::new();
+    let mut lines = Vec::new();
     let mut shown = 0;
 
     for change in diff.iter_all_changes() {
@@ -107,12 +110,12 @@ pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<Strin
         match change.tag() {
             ChangeTag::Delete => {
                 let line = change.value().trim_end_matches('\n');
-                let _ = writeln!(output, "    {}", theme::error(format!("- {line}")));
+                lines.push(format!("{}", theme::error(format!("- {line}"))));
                 shown += 1;
             }
             ChangeTag::Insert => {
                 let line = change.value().trim_end_matches('\n');
-                let _ = writeln!(output, "    {}", theme::success(format!("+ {line}")));
+                lines.push(format!("{}", theme::success(format!("+ {line}"))));
                 shown += 1;
             }
             ChangeTag::Equal => {}
@@ -120,30 +123,29 @@ pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<Strin
     }
 
     if total_changes > MAX_DIFF_LINES {
-        let _ = writeln!(
-            output,
-            "    ... and {} more changes",
+        lines.push(format!(
+            "... and {} more changes",
             total_changes - MAX_DIFF_LINES
-        );
+        ));
     }
 
-    Some(output)
+    Some(lines)
 }
 
 /// Format a single file's change summary.
 ///
 /// Returns a styled, human-readable string suitable for terminal output.
-/// Includes a content-level diff (when available) below the numeric summary.
+/// The header line has the path left-aligned and compact counts right-aligned.
+/// Content-level diffs use tree-drawing prefixes (`├─` / `└─`).
 pub fn format_file_diff(diff: &FileDiff) -> String {
     let mut output = String::new();
 
     match &diff.change {
         FileChange::NewFile { rule_count } => {
-            let _ = writeln!(output, "  {}: (new file)", diff.path);
             let noun = if *rule_count == 1 { "rule" } else { "rules" };
-            let _ = writeln!(output, "    + {rule_count} {noun}");
-            if let Some(content_diff) = format_content_diff("", &diff.new_content) {
-                output.push_str(&content_diff);
+            let _ = writeln!(output, "{}  (new file) + {rule_count} {noun}", diff.path);
+            if let Some(diff_lines) = format_content_diff("", &diff.new_content) {
+                append_tree_lines(&mut output, &diff_lines);
             }
         }
         FileChange::Update {
@@ -151,23 +153,32 @@ pub fn format_file_diff(diff: &FileDiff) -> String {
             updated,
             removed,
         } => {
-            let _ = writeln!(output, "  {}:", diff.path);
             let _ = writeln!(
                 output,
-                "    + {added} new, ~ {updated} updated, - {removed} removed"
+                "{}  + {added} new  ~ {updated} upd  - {removed} rm",
+                diff.path
             );
             if let Some(old) = &diff.old_content {
-                if let Some(content_diff) = format_content_diff(old, &diff.new_content) {
-                    output.push_str(&content_diff);
+                if let Some(diff_lines) = format_content_diff(old, &diff.new_content) {
+                    append_tree_lines(&mut output, &diff_lines);
                 }
             }
         }
         FileChange::NoChanges => {
-            let _ = writeln!(output, "  {}: no changes", diff.path);
+            let _ = writeln!(output, "{}  no changes", diff.path);
         }
     }
 
     output
+}
+
+/// Append diff lines with tree-drawing prefixes (`├─` / `└─`).
+fn append_tree_lines(output: &mut String, lines: &[String]) {
+    let n = lines.len();
+    for (i, line) in lines.iter().enumerate() {
+        let prefix = if i == n - 1 { "└─" } else { "├─" };
+        let _ = writeln!(output, "{prefix}  {line}");
+    }
 }
 
 /// Format a multi-file diff summary.
@@ -199,8 +210,9 @@ mod tests {
 
     #[test]
     fn content_diff_additions_only() {
-        let result = format_content_diff("", "line one\nline two\n").unwrap();
-        let plain = console::strip_ansi_codes(&result);
+        let lines = format_content_diff("", "line one\nline two\n").unwrap();
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
         assert!(
             plain.contains("+ line one"),
             "expected addition in: {plain}"
@@ -213,8 +225,9 @@ mod tests {
 
     #[test]
     fn content_diff_deletions_only() {
-        let result = format_content_diff("old line\n", "").unwrap();
-        let plain = console::strip_ansi_codes(&result);
+        let lines = format_content_diff("old line\n", "").unwrap();
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
         assert!(
             plain.contains("- old line"),
             "expected deletion in: {plain}"
@@ -225,8 +238,9 @@ mod tests {
     fn content_diff_mixed_changes() {
         let old = "keep\nremove me\n";
         let new = "keep\nadd me\n";
-        let result = format_content_diff(old, new).unwrap();
-        let plain = console::strip_ansi_codes(&result);
+        let lines = format_content_diff(old, new).unwrap();
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
         assert!(
             plain.contains("- remove me"),
             "expected deletion in: {plain}"
@@ -239,8 +253,9 @@ mod tests {
         // Generate more than MAX_DIFF_LINES (20) changed lines
         let old_lines: String = (0..15).map(|i| format!("old {i}\n")).collect();
         let new_lines: String = (0..15).map(|i| format!("new {i}\n")).collect();
-        let result = format_content_diff(&old_lines, &new_lines).unwrap();
-        let plain = console::strip_ansi_codes(&result);
+        let lines = format_content_diff(&old_lines, &new_lines).unwrap();
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
         assert!(
             plain.contains("... and "),
             "expected truncation message in: {plain}"
@@ -256,8 +271,9 @@ mod tests {
         // Generate exactly MAX_DIFF_LINES (20) changed lines: 10 deletions + 10 insertions
         let old_lines: String = (0..10).map(|i| format!("old {i}\n")).collect();
         let new_lines: String = (0..10).map(|i| format!("new {i}\n")).collect();
-        let result = format_content_diff(&old_lines, &new_lines).unwrap();
-        let plain = console::strip_ansi_codes(&result);
+        let lines = format_content_diff(&old_lines, &new_lines).unwrap();
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
         assert!(
             !plain.contains("... and "),
             "should not truncate at exactly MAX_DIFF_LINES: {plain}"
@@ -284,6 +300,7 @@ mod tests {
             plain.contains("+ 8 rules"),
             "expected '+ 8 rules' in: {plain}"
         );
+        assert!(plain.contains("CLAUDE.md"), "expected path in: {plain}");
     }
 
     #[test]
@@ -316,12 +333,9 @@ mod tests {
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
-        assert!(plain.contains('+'), "expected '+' in: {plain}");
-        assert!(plain.contains('~'), "expected '~' in: {plain}");
-        assert!(plain.contains('-'), "expected '-' in: {plain}");
-        assert!(plain.contains('3'), "expected added count in: {plain}");
-        assert!(plain.contains('1'), "expected updated count in: {plain}");
-        assert!(plain.contains('2'), "expected removed count in: {plain}");
+        assert!(plain.contains("+ 3 new"), "expected '+ 3 new' in: {plain}");
+        assert!(plain.contains("~ 1 upd"), "expected '~ 1 upd' in: {plain}");
+        assert!(plain.contains("- 2 rm"), "expected '- 2 rm' in: {plain}");
     }
 
     #[test]
@@ -346,6 +360,11 @@ mod tests {
             plain.contains("+ new line"),
             "expected addition in: {plain}"
         );
+        // Tree-drawing chars should be present
+        assert!(
+            plain.contains("├─") || plain.contains("└─"),
+            "expected tree-drawing chars in: {plain}"
+        );
     }
 
     #[test]
@@ -362,10 +381,14 @@ mod tests {
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
-        // Should show numeric summary but no content diff lines
+        // Should show compact numeric summary but no content diff lines
         assert!(
             plain.contains("+ 1 new"),
             "expected numeric summary in: {plain}"
+        );
+        assert!(
+            plain.contains("~ 0 upd"),
+            "expected update count in: {plain}"
         );
         assert!(
             !plain.contains("+ new content"),
@@ -387,7 +410,7 @@ mod tests {
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
-        // Should show numeric summary but no content diff
+        // Should show compact numeric summary but no content diff
         assert!(
             plain.contains("+ 1 new"),
             "expected numeric summary in: {plain}"
@@ -554,5 +577,113 @@ mod tests {
     fn format_diff_summary_empty() {
         let output = format_diff_summary(&[]);
         assert!(output.is_empty(), "expected empty output, got: {output}");
+    }
+
+    // ── tree-drawing and compact count tests ──
+
+    #[test]
+    fn compact_count_format_in_update() {
+        let diff = FileDiff {
+            path: "CLAUDE.md".to_string(),
+            change: FileChange::Update {
+                added: 5,
+                updated: 2,
+                removed: 1,
+            },
+            old_content: Some(String::new()),
+            new_content: String::new(),
+        };
+        let output = format_file_diff(&diff);
+        let plain = console::strip_ansi_codes(&output);
+        assert!(
+            plain.contains("+ 5 new  ~ 2 upd  - 1 rm"),
+            "expected compact count format in: {plain}"
+        );
+    }
+
+    #[test]
+    fn single_diff_line_uses_last_prefix() {
+        let diff = FileDiff {
+            path: "CLAUDE.md".to_string(),
+            change: FileChange::Update {
+                added: 1,
+                updated: 0,
+                removed: 0,
+            },
+            old_content: Some(String::new()),
+            new_content: "only line\n".to_string(),
+        };
+        let output = format_file_diff(&diff);
+        let plain = console::strip_ansi_codes(&output);
+        // Single diff line should use └─ (last/only line)
+        assert!(
+            plain.contains("└─"),
+            "expected └─ for single diff line in: {plain}"
+        );
+        assert!(
+            !plain.contains("├─"),
+            "should not have ├─ for single diff line in: {plain}"
+        );
+    }
+
+    #[test]
+    fn multiple_diff_lines_use_correct_tree_prefixes() {
+        let diff = FileDiff {
+            path: "CLAUDE.md".to_string(),
+            change: FileChange::Update {
+                added: 1,
+                updated: 0,
+                removed: 1,
+            },
+            old_content: Some("old line\n".to_string()),
+            new_content: "new line\n".to_string(),
+        };
+        let output = format_file_diff(&diff);
+        let plain = console::strip_ansi_codes(&output);
+        // Multiple diff lines: first uses ├─, last uses └─
+        assert!(
+            plain.contains("├─"),
+            "expected ├─ for non-last diff line in: {plain}"
+        );
+        assert!(
+            plain.contains("└─"),
+            "expected └─ for last diff line in: {plain}"
+        );
+    }
+
+    #[test]
+    fn no_leading_indent_in_file_header() {
+        let diff = FileDiff {
+            path: "CLAUDE.md".to_string(),
+            change: FileChange::NoChanges,
+            old_content: Some("same".to_string()),
+            new_content: "same".to_string(),
+        };
+        let output = format_file_diff(&diff);
+        // Should NOT start with 2-space indent
+        assert!(
+            output.starts_with("CLAUDE.md"),
+            "expected path at start of line, got: {output}"
+        );
+    }
+
+    #[test]
+    fn new_file_header_format() {
+        let diff = FileDiff {
+            path: "apps/web/CLAUDE.md".to_string(),
+            change: FileChange::NewFile { rule_count: 8 },
+            old_content: None,
+            new_content: String::new(),
+        };
+        let output = format_file_diff(&diff);
+        let plain = console::strip_ansi_codes(&output);
+        assert!(
+            plain.contains("apps/web/CLAUDE.md"),
+            "expected path in: {plain}"
+        );
+        assert!(
+            plain.contains("(new file) + 8 rules"),
+            "expected '(new file) + 8 rules' in: {plain}"
+        );
     }
 }

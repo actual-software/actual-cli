@@ -14,6 +14,7 @@ use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::confirm_files;
+use crate::cli::ui::panel::Panel;
 use crate::cli::ui::progress::{SyncPhase, SyncPipeline};
 use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
@@ -453,11 +454,19 @@ pub fn confirm_and_write(
         })
         .collect();
 
-    // Step 2: Display diff summary
+    // Step 2: Display diff summary in a panel
     let summary = format_diff_summary(&diffs);
     if !summary.is_empty() {
-        term.write_line("Changes:");
-        term.write_line(&summary);
+        let width = console::Term::stdout()
+            .size_checked()
+            .map(|(_, cols)| cols as usize)
+            .unwrap_or(80)
+            .min(90);
+        let mut panel = Panel::titled("Changes");
+        for line in summary.lines() {
+            panel = panel.line(line);
+        }
+        term.write_line(&panel.render(width));
     }
 
     // Step 3: Handle --dry-run
@@ -709,11 +718,11 @@ mod tests {
         // File should NOT exist on disk
         assert!(!dir.path().join("CLAUDE.md").exists());
 
-        // Diff summary should be displayed
+        // Diff summary should be displayed in a panel
         let text = term.output_text();
         assert!(
-            text.contains("Changes:"),
-            "expected changes header in: {text}"
+            text.contains("Changes"),
+            "expected changes panel in: {text}"
         );
     }
 
