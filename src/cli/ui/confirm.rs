@@ -12,7 +12,7 @@ pub trait InputReader {
 /// Build the styled prompt string shown to the user.
 pub fn prompt_text() -> String {
     format!(
-        "  {} {} {} {}",
+        "  Confirm project configuration — {} {} {} {} ",
         style("[a]").green().bold(),
         "accept",
         style("[r]").red().bold(),
@@ -103,7 +103,7 @@ pub fn prompt_project_confirmation(
     let summary = format_project_summary(analysis);
     out.write_all(summary.as_bytes()).ok();
 
-    let prompt = format!("{}\n", prompt_text());
+    let prompt = prompt_text();
     out.write_all(prompt.as_bytes()).ok();
     out.flush().ok();
 
@@ -112,9 +112,9 @@ pub fn prompt_project_confirmation(
             Ok(input) => match parse_confirm_input(&input) {
                 Some(action) => return action,
                 None => {
-                    let hint = format!("{}\n", invalid_input_hint());
+                    let hint = format!("\n{}\n", invalid_input_hint());
                     out.write_all(hint.as_bytes()).ok();
-                    let prompt = format!("{}\n", prompt_text());
+                    let prompt = prompt_text();
                     out.write_all(prompt.as_bytes()).ok();
                     out.flush().ok();
                 }
@@ -373,6 +373,10 @@ mod tests {
     #[test]
     fn prompt_text_contains_accept_and_reject() {
         let text = prompt_text();
+        assert!(
+            text.contains("Confirm project configuration"),
+            "expected label in: {text}"
+        );
         assert!(text.contains("accept"), "expected 'accept' in: {text}");
         assert!(text.contains("reject"), "expected 'reject' in: {text}");
     }
