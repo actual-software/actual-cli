@@ -70,6 +70,7 @@ struct LeafBucket {
     confidence: f64,
     rule_ids_set: HashSet<String>,
     rule_ids: Vec<String>,
+    evidence_count: usize,
     spans: Vec<SpanSummary>,
 }
 
@@ -86,6 +87,7 @@ fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucke
                 confidence: 0.0,
                 rule_ids_set: HashSet::new(),
                 rule_ids: Vec::new(),
+                evidence_count: 0,
                 spans: Vec::new(),
             });
 
@@ -110,6 +112,9 @@ fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucke
                 bucket.values.push(m.value.clone());
             }
         }
+
+        // Track total evidence count (uncapped) for accurate reporting.
+        bucket.evidence_count += m.spans.len();
 
         // Collect span summaries, capped to prevent oversized IR.
         for span in &m.spans {
@@ -167,7 +172,7 @@ pub fn build_canonical_ir(file_key: &str, language: &str, matches: &[ToolMatch])
             facet_slot: bucket.facet_slot.clone(),
             values: bucket.values.clone(),
             confidence: bucket.confidence,
-            evidence_count: bucket.spans.len(),
+            evidence_count: bucket.evidence_count,
             rule_ids: bucket.rule_ids.clone(),
             spans: bucket.spans.clone(),
         };
@@ -558,7 +563,8 @@ mod tests {
         let ir = build_canonical_ir("f.rs", "rust", &matches);
         let facet = &ir.facets_by_leaf_id["1"];
         assert_eq!(facet.spans.len(), MAX_SPANS_PER_LEAF);
-        assert_eq!(facet.evidence_count, MAX_SPANS_PER_LEAF);
+        // evidence_count tracks the true total, not the capped span count.
+        assert_eq!(facet.evidence_count, 60);
     }
 
     #[test]
