@@ -118,7 +118,7 @@ pub fn detect_languages(path: &Path) -> Result<Vec<(Language, usize)>> {
 ///
 /// assert_eq!(normalize_language("ts"), Some("typescript"));
 /// assert_eq!(normalize_language("py"), Some("python"));
-/// assert_eq!(normalize_language("rust"), None); // already canonical
+/// assert_eq!(normalize_language("rust"), None); // not an alias (unrecognized inputs also return None)
 /// ```
 pub fn normalize_language(value: &str) -> Option<&'static str> {
     match value.to_lowercase().as_str() {
