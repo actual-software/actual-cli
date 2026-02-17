@@ -62,25 +62,30 @@ impl SemgrepScanner {
 
             std::fs::write(&temp_path, content).context("failed to write temp file")?;
 
-            file_map.insert(temp_path, rel_path.clone());
+            // Canonicalize so the key matches what semgrep emits (semgrep
+            // resolves symlinks, e.g. /tmp → /private/tmp on macOS).
+            let canonical = std::fs::canonicalize(&temp_path).unwrap_or(temp_path);
+            file_map.insert(canonical, rel_path.clone());
         }
 
         Ok((temp_dir, file_map))
     }
 
     /// Build the argument list for semgrep.
-    fn build_args(rule_files: &[PathBuf], scan_dir: &std::path::Path) -> Vec<String> {
-        let mut args = vec![
-            "scan".to_string(),
-            "--json".to_string(),
-            "--no-git-ignore".to_string(),
-            "--metrics=off".to_string(),
+    ///
+    /// Uses `OsString` to preserve non-UTF-8 paths without lossy conversion.
+    fn build_args(rule_files: &[PathBuf], scan_dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "scan".into(),
+            "--json".into(),
+            "--no-git-ignore".into(),
+            "--metrics=off".into(),
         ];
         for rule_file in rule_files {
-            args.push("--config".to_string());
-            args.push(rule_file.display().to_string());
+            args.push("--config".into());
+            args.push(rule_file.into());
         }
-        args.push(scan_dir.display().to_string());
+        args.push(scan_dir.into());
         args
     }
 
@@ -128,8 +133,11 @@ impl SemgrepScanner {
         let (temp_dir, file_map) = Self::prepare_temp_files(files)?;
         let args = Self::build_args(rule_files, temp_dir.path());
 
-        // Build and run the command
+        // Build and run the command.  `kill_on_drop(true)` ensures the
+        // child is killed if the future is cancelled by a timeout rather
+        // than leaving an orphan process.
         let mut cmd = Command::new(&self.semgrep_bin);
+        cmd.kill_on_drop(true);
         for arg in &args {
             cmd.arg(arg);
         }
@@ -173,9 +181,12 @@ impl SemgrepScanner {
             let path_str = finding.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let temp_path = PathBuf::from(path_str);
 
-            // Map temp path back to original path
+            // Map temp path back to original path.  Canonicalize for lookup
+            // since file_map keys were canonicalized at insertion time.
+            let lookup_key =
+                std::fs::canonicalize(&temp_path).unwrap_or_else(|_| temp_path.clone());
             let original_path = file_map
-                .get(&temp_path)
+                .get(&lookup_key)
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| path_str.to_string());
 
@@ -731,11 +742,12 @@ mod tests {
     // ---- scanner creation tests ----
 
     #[test]
-    fn test_scanner_new_returns_result() {
-        // new() delegates to with_name("semgrep"), which is fully tested
-        // by test_with_name_* tests. Here we just verify new() returns a Result.
-        let result = SemgrepScanner::new(std::time::Duration::from_secs(30));
-        assert!(result.is_ok() || result.is_err());
+    fn test_new_delegates_to_with_name() {
+        // new() delegates to with_name("semgrep").  The Ok path is already
+        // exercised by test_with_name_finds_existing_binary (using "sh"),
+        // so here we just verify the delegation works without panicking.
+        // In CI, semgrep is typically not installed, so this returns Err.
+        let _result = SemgrepScanner::new(std::time::Duration::from_secs(30));
     }
 
     #[test]
