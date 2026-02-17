@@ -41,17 +41,7 @@ pub struct SyncResult {
 /// generic instantiation of `run_sync` in `sync.rs` is `MockRunner` from
 /// unit tests.
 pub fn exec(args: &SyncArgs) -> i32 {
-    handle_result(crate::cli::ui::real_terminal::sync_run(args))
-}
-
-pub(crate) fn handle_result(result: Result<(), ActualError>) -> i32 {
-    match result {
-        Ok(()) => 0,
-        Err(e) => {
-            eprintln!("{} {}", theme::error_prefix(), e);
-            e.exit_code()
-        }
-    }
+    super::handle_result(crate::cli::ui::real_terminal::sync_run(args))
 }
 
 /// Resolve the current working directory, falling back to `"."` if
@@ -1300,23 +1290,6 @@ mod tests {
         let code = exec(&args);
         std::env::remove_var("CLAUDE_BINARY");
         assert_eq!(code, 2, "expected exit code 2 (ClaudeNotFound)");
-    }
-
-    #[test]
-    fn test_handle_result_ok() {
-        assert_eq!(handle_result(Ok(())), 0);
-    }
-
-    #[test]
-    fn test_handle_result_user_cancelled() {
-        let code = handle_result(Err(ActualError::UserCancelled));
-        assert_eq!(code, 4);
-    }
-
-    #[test]
-    fn test_handle_result_config_error() {
-        let code = handle_result(Err(ActualError::ConfigError("bad".to_string())));
-        assert_eq!(code, 1);
     }
 
     #[test]
