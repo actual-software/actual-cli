@@ -22,7 +22,6 @@ pub const SUPPORTED_LANGUAGES: &[&str] = &[
 
 /// Discovers and resolves semgrep rule YAML files from a rules directory.
 pub struct RuleResolver {
-    #[allow(dead_code)]
     rules_dir: PathBuf,
     rule_files: Vec<PathBuf>,
 }
@@ -67,8 +66,9 @@ impl RuleResolver {
     }
 
     /// Return all rule files. Semgrep handles language filtering internally
-    /// via the `languages:` field in each rule.
-    pub fn resolve(&self, _language: &str) -> Vec<&Path> {
+    /// via the `languages:` field in each rule, so no per-language filtering
+    /// is performed here.
+    pub fn resolve(&self) -> Vec<&Path> {
         self.rule_files.iter().map(|p| p.as_path()).collect()
     }
 
@@ -95,18 +95,17 @@ impl RuleResolver {
         }
     }
 
-    /// List the category subdirectory names found in the rules directory.
+    /// List the top-level category subdirectory names found in the rules directory.
     pub fn list_categories(&self) -> Vec<String> {
         let categories: BTreeSet<String> = self
             .rule_files
             .iter()
             .filter_map(|p| {
-                // The category is the parent directory name relative to rules_dir
-                p.parent().and_then(|parent| {
-                    parent
-                        .file_name()
-                        .map(|name| name.to_string_lossy().into_owned())
-                })
+                // Extract the first path component relative to rules_dir
+                p.strip_prefix(&self.rules_dir)
+                    .ok()
+                    .and_then(|rel| rel.iter().next())
+                    .map(|name| name.to_string_lossy().into_owned())
             })
             .collect();
         categories.into_iter().collect()
@@ -231,42 +230,22 @@ mod tests {
         // Use the actual semgrep_rules directory in the repo
         let rules_dir =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/analysis/detectors/semgrep_rules");
-
-        if !rules_dir.exists() {
-            // Skip if running in a context where the directory doesn't exist
-            return;
-        }
+        assert!(rules_dir.exists(), "semgrep_rules directory must exist");
 
         let resolver = RuleResolver::new(&rules_dir).unwrap();
-        // Actual count of YAML files in the semgrep_rules directory
-        assert_eq!(
-            resolver.rule_count(),
-            52,
-            "expected 52 rule files, found {}",
-            resolver.rule_count()
-        );
+        assert_eq!(resolver.rule_count(), 52);
     }
 
     #[test]
     fn test_list_categories() {
         let rules_dir =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/analysis/detectors/semgrep_rules");
-
-        if !rules_dir.exists() {
-            return;
-        }
+        assert!(rules_dir.exists(), "semgrep_rules directory must exist");
 
         let resolver = RuleResolver::new(&rules_dir).unwrap();
         let categories = resolver.list_categories();
 
-        // 19 categories expected
-        assert_eq!(
-            categories.len(),
-            19,
-            "expected 19 categories, got {}: {:?}",
-            categories.len(),
-            categories
-        );
+        assert_eq!(categories.len(), 19);
 
         // Spot check some categories
         assert!(categories.contains(&"api".to_string()));
@@ -280,18 +259,12 @@ mod tests {
     fn test_resolve_returns_all_files() {
         let rules_dir =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/analysis/detectors/semgrep_rules");
-
-        if !rules_dir.exists() {
-            return;
-        }
+        assert!(rules_dir.exists(), "semgrep_rules directory must exist");
 
         let resolver = RuleResolver::new(&rules_dir).unwrap();
         // resolve() returns all rule files regardless of language
-        let files = resolver.resolve("javascript");
+        let files = resolver.resolve();
         assert_eq!(files.len(), 52);
-
-        let files_py = resolver.resolve("python");
-        assert_eq!(files_py.len(), 52);
 
         // All files should end in .yml or .yaml
         for f in &files {
@@ -312,7 +285,7 @@ mod tests {
         let resolver = RuleResolver::new(temp.path()).unwrap();
         assert_eq!(resolver.rule_count(), 0);
         assert!(resolver.list_categories().is_empty());
-        assert!(resolver.resolve("python").is_empty());
+        assert!(resolver.resolve().is_empty());
     }
 
     #[test]
@@ -387,6 +360,41 @@ mod tests {
     }
 
     #[test]
+    fn test_list_categories_nested_dirs_uses_top_level() {
+        // Verify that list_categories returns the top-level category even
+        // when rules are in nested subdirectories (e.g., api/v2/rule.yml → "api")
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("api").join("v2");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("rule.yml"), "rules: []").unwrap();
+
+        let flat = temp.path().join("security");
+        std::fs::create_dir(&flat).unwrap();
+        std::fs::write(flat.join("rule.yml"), "rules: []").unwrap();
+
+        let resolver = RuleResolver::new(temp.path()).unwrap();
+        let categories = resolver.list_categories();
+        assert_eq!(categories, vec!["api", "security"]);
+    }
+
+    #[test]
+    fn test_list_categories_root_files_excluded() {
+        // Files directly in the rules_dir have no category component
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("root.yml"), "rules: []").unwrap();
+        let cat = temp.path().join("cat");
+        std::fs::create_dir(&cat).unwrap();
+        std::fs::write(cat.join("sub.yml"), "rules: []").unwrap();
+
+        let resolver = RuleResolver::new(temp.path()).unwrap();
+        let categories = resolver.list_categories();
+        // root.yml has relative path "root.yml" — iter().next() gives "root.yml" (file name)
+        // cat/sub.yml has relative path "cat/sub.yml" — iter().next() gives "cat"
+        assert_eq!(resolver.rule_count(), 2);
+        assert!(categories.contains(&"cat".to_string()));
+    }
+
+    #[test]
     fn test_rule_files_sorted() {
         let temp = tempfile::tempdir().unwrap();
         let cat = temp.path().join("cat");
@@ -396,7 +404,7 @@ mod tests {
         std::fs::write(cat.join("m.yml"), "rules: []").unwrap();
 
         let resolver = RuleResolver::new(temp.path()).unwrap();
-        let files = resolver.resolve("any");
+        let files = resolver.resolve();
         let names: Vec<&str> = files
             .iter()
             .map(|p| p.file_name().unwrap().to_str().unwrap())

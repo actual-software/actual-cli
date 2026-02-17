@@ -23,10 +23,15 @@ impl SemgrepScanner {
     /// Create a new scanner, verifying that the semgrep binary is available.
     pub fn new(timeout: std::time::Duration) -> Result<Self> {
         let semgrep_bin = which::which("semgrep").context("semgrep binary not found in PATH")?;
-        Ok(Self {
+        Ok(Self::with_binary(semgrep_bin, timeout))
+    }
+
+    /// Create a scanner with an explicit binary path.
+    fn with_binary(semgrep_bin: PathBuf, timeout: std::time::Duration) -> Self {
+        Self {
             semgrep_bin,
             timeout,
-        })
+        }
     }
 
     /// Prepare temp directory with files and return (temp_dir, file_map).
@@ -38,17 +43,14 @@ impl SemgrepScanner {
 
         for (i, (rel_path, content)) in files.iter().enumerate() {
             let subdir = temp_dir.path().join(format!("f{i}"));
-            std::fs::create_dir_all(&subdir).with_context(|| {
-                format!("failed to create subdir for file {}", rel_path.display())
-            })?;
+            std::fs::create_dir_all(&subdir).context("failed to create temp subdir")?;
 
             let file_name = rel_path
                 .file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("file.txt"));
             let temp_path = subdir.join(file_name);
 
-            std::fs::write(&temp_path, content)
-                .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
+            std::fs::write(&temp_path, content).context("failed to write temp file")?;
 
             file_map.insert(temp_path, rel_path.clone());
         }
@@ -81,7 +83,7 @@ impl SemgrepScanner {
 
         if stdout.trim().is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("login") || stderr.contains("Login") {
+            if stderr.to_ascii_lowercase().contains("login") {
                 bail!(
                     "semgrep requires login (v1.100+). \
                      Try running `semgrep login` or use an older version. \
@@ -658,7 +660,21 @@ mod tests {
         let result = SemgrepScanner::process_output(&output, &file_map);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Login"));
+        assert!(err.contains("login") || err.contains("Login"));
+    }
+
+    #[test]
+    fn test_process_output_login_error_all_caps() {
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: b"LOGIN REQUIRED".to_vec(),
+            success: false,
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("login") || err.contains("LOGIN"));
     }
 
     #[test]
@@ -705,17 +721,25 @@ mod tests {
     // ---- scanner creation tests ----
 
     #[test]
-    fn test_scanner_creation_fails_without_semgrep() {
+    fn test_scanner_new_error_message() {
+        // Verify that new() returns a meaningful error when semgrep is missing.
+        // If semgrep happens to be installed, the Ok path is exercised via
+        // with_binary (used in all other tests); either way both branches
+        // produce a valid SemgrepScanner.
         let result = SemgrepScanner::new(std::time::Duration::from_secs(30));
-        match result {
-            Ok(scanner) => {
-                assert!(!scanner.semgrep_bin.as_os_str().is_empty());
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                assert!(msg.contains("semgrep"));
-            }
+        if let Err(e) = result {
+            assert!(format!("{e}").contains("semgrep"));
         }
+    }
+
+    #[test]
+    fn test_with_binary_constructor() {
+        let scanner = SemgrepScanner::with_binary(
+            PathBuf::from("/usr/bin/fake_semgrep"),
+            std::time::Duration::from_secs(60),
+        );
+        assert_eq!(scanner.semgrep_bin, PathBuf::from("/usr/bin/fake_semgrep"));
+        assert_eq!(scanner.timeout, std::time::Duration::from_secs(60));
     }
 
     // ---- scan_batch early-return tests ----
@@ -723,10 +747,10 @@ mod tests {
     #[tokio::test]
     async fn test_scan_batch_empty_files() {
         // scan_batch returns early when files is empty, never runs the binary
-        let scanner = SemgrepScanner {
-            semgrep_bin: PathBuf::from("/nonexistent/semgrep"),
-            timeout: std::time::Duration::from_secs(5),
-        };
+        let scanner = SemgrepScanner::with_binary(
+            PathBuf::from("/nonexistent/semgrep"),
+            std::time::Duration::from_secs(5),
+        );
         let result = scanner.scan_batch(&[], &[PathBuf::from("rule.yml")]).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
@@ -734,10 +758,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_batch_empty_rules() {
-        let scanner = SemgrepScanner {
-            semgrep_bin: PathBuf::from("/nonexistent/semgrep"),
-            timeout: std::time::Duration::from_secs(5),
-        };
+        let scanner = SemgrepScanner::with_binary(
+            PathBuf::from("/nonexistent/semgrep"),
+            std::time::Duration::from_secs(5),
+        );
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner.scan_batch(&files, &[]).await;
         assert!(result.is_ok());
@@ -746,10 +770,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_batch_both_empty() {
-        let scanner = SemgrepScanner {
-            semgrep_bin: PathBuf::from("/nonexistent/semgrep"),
-            timeout: std::time::Duration::from_secs(5),
-        };
+        let scanner = SemgrepScanner::with_binary(
+            PathBuf::from("/nonexistent/semgrep"),
+            std::time::Duration::from_secs(5),
+        );
         let result = scanner.scan_batch(&[], &[]).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
@@ -757,10 +781,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_batch_nonexistent_binary() {
-        let scanner = SemgrepScanner {
-            semgrep_bin: PathBuf::from("/nonexistent/binary/semgrep"),
-            timeout: std::time::Duration::from_secs(5),
-        };
+        let scanner = SemgrepScanner::with_binary(
+            PathBuf::from("/nonexistent/binary/semgrep"),
+            std::time::Duration::from_secs(5),
+        );
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
             .scan_batch(&files, &[PathBuf::from("rules.yml")])
@@ -790,10 +814,7 @@ mod tests {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let scanner = SemgrepScanner {
-            semgrep_bin: script_path,
-            timeout: std::time::Duration::from_secs(5),
-        };
+        let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
             .scan_batch(&files, &[PathBuf::from("rules.yml")])
@@ -804,30 +825,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_batch_script_with_findings() {
+        // This script discovers the actual temp dir from its last argument (the scan dir)
+        // and outputs JSON with a path that matches what prepare_temp_files creates,
+        // so that the path-remapping logic in process_output is exercised.
         let temp = tempfile::tempdir().unwrap();
         let script_path = temp.path().join("fake_semgrep_findings.sh");
-        let json_output = serde_json::json!({
-            "results": [
-                {
-                    "check_id": "test.rule",
-                    "path": "/tmp/placeholder/f0/test.js",
-                    "start": {"line": 1, "col": 1, "offset": 0},
-                    "end": {"line": 1, "col": 10, "offset": 9},
-                    "extra": {
-                        "metadata": {
-                            "facet_slot": "boundaries.api",
-                            "leaf_id": "99",
-                            "confidence": "0.8"
-                        },
-                        "lines": "const x = 1;"
-                    }
-                }
-            ]
-        });
-        let script_content = format!(
-            "#!/bin/sh\necho '{}'",
-            json_output.to_string().replace('\'', "'\"'\"'")
-        );
+        // The script uses $SCAN_DIR (last argument) to construct a path matching
+        // the temp file layout: <scan_dir>/f0/test.js
+        let script_content = r#"#!/bin/sh
+# Last argument is the scan directory
+for arg; do SCAN_DIR="$arg"; done
+cat <<EOJSON
+{"results": [{"check_id": "test.rule", "path": "${SCAN_DIR}/f0/test.js", "start": {"line": 1, "col": 1, "offset": 0}, "end": {"line": 1, "col": 10, "offset": 9}, "extra": {"metadata": {"facet_slot": "boundaries.api", "leaf_id": "99", "confidence": "0.8"}, "lines": "const x = 1;"}}]}
+EOJSON
+"#;
         std::fs::write(&script_path, script_content).unwrap();
 
         #[cfg(unix)]
@@ -836,10 +847,7 @@ mod tests {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let scanner = SemgrepScanner {
-            semgrep_bin: script_path,
-            timeout: std::time::Duration::from_secs(5),
-        };
+        let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
             .scan_batch(&files, &[PathBuf::from("rules.yml")])
@@ -849,6 +857,11 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].rule_id, "test.rule");
         assert_eq!(matches[0].facet_slot, "boundaries.api");
+        // Verify path remapping: the temp path should be mapped back to the original
+        assert_eq!(
+            matches[0].spans[0].file_path, "test.js",
+            "path should be remapped from temp dir to original relative path"
+        );
     }
 
     #[tokio::test]
@@ -867,10 +880,7 @@ mod tests {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let scanner = SemgrepScanner {
-            semgrep_bin: script_path,
-            timeout: std::time::Duration::from_secs(5),
-        };
+        let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
             .scan_batch(&files, &[PathBuf::from("rules.yml")])
@@ -895,10 +905,7 @@ mod tests {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let scanner = SemgrepScanner {
-            semgrep_bin: script_path,
-            timeout: std::time::Duration::from_secs(5),
-        };
+        let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
             .scan_batch(&files, &[PathBuf::from("rules.yml")])
@@ -919,10 +926,7 @@ mod tests {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let scanner = SemgrepScanner {
-            semgrep_bin: script_path,
-            timeout: std::time::Duration::from_secs(5),
-        };
+        let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
             .scan_batch(&files, &[PathBuf::from("rules.yml")])
@@ -943,11 +947,11 @@ mod tests {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let scanner = SemgrepScanner {
-            semgrep_bin: script_path,
+        let scanner = SemgrepScanner::with_binary(
+            script_path,
             // Very short timeout to trigger quickly
-            timeout: std::time::Duration::from_millis(100),
-        };
+            std::time::Duration::from_millis(100),
+        );
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
             .scan_batch(&files, &[PathBuf::from("rules.yml")])
