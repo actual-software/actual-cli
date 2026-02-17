@@ -292,8 +292,8 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 
         if in_use_block {
             if !trimmed.is_empty() && !trimmed.starts_with("//") {
-                let path = trimmed.split("//").next().unwrap_or("").trim();
-                let cleaned = path.strip_prefix("./").unwrap_or(path);
+                let dir_str = trimmed.split("//").next().unwrap_or("").trim();
+                let cleaned = dir_str.strip_prefix("./").unwrap_or(dir_str);
                 if !cleaned.is_empty() {
                     dirs.push(cleaned.to_string());
                 }
