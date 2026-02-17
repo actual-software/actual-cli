@@ -10,6 +10,9 @@ const TAXONOMY_VERSION_V2: &str = "arch_ir_taxonomy_v2";
 /// Maximum number of values to keep per leaf to prevent oversized IR.
 const MAX_VALUES_PER_LEAF: usize = 10;
 
+/// Maximum number of spans to keep per leaf to prevent oversized IR payloads.
+const MAX_SPANS_PER_LEAF: usize = 50;
+
 /// Summary of an evidence span for the IR output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SpanSummary {
@@ -108,9 +111,11 @@ fn aggregate_matches_by_leaf(matches: &[ToolMatch]) -> HashMap<String, LeafBucke
             }
         }
 
-        // Collect span summaries from all spans in the match.
+        // Collect span summaries, capped to prevent oversized IR.
         for span in &m.spans {
-            bucket.spans.push(SpanSummary::from_evidence_span(span));
+            if bucket.spans.len() < MAX_SPANS_PER_LEAF {
+                bucket.spans.push(SpanSummary::from_evidence_span(span));
+            }
         }
     }
 
@@ -526,6 +531,34 @@ mod tests {
         assert_eq!(facet.spans.len(), 2);
         assert_eq!(facet.spans[0].file_path, "a.rs");
         assert_eq!(facet.spans[1].file_path, "b.rs");
+    }
+
+    #[test]
+    fn test_spans_limited_to_max() {
+        // Create matches that would produce more spans than the cap.
+        let matches: Vec<ToolMatch> = (0..60)
+            .map(|i| {
+                make_match_with_spans(
+                    "rule",
+                    "slot",
+                    "1",
+                    serde_json::json!(format!("v{i}")),
+                    0.9,
+                    vec![EvidenceSpan {
+                        file_path: format!("file_{i}.rs"),
+                        start_byte: 0,
+                        end_byte: 10,
+                        start_line: Some(1),
+                        end_line: Some(2),
+                        source: SignalSource::Semgrep,
+                    }],
+                )
+            })
+            .collect();
+        let ir = build_canonical_ir("f.rs", "rust", &matches);
+        let facet = &ir.facets_by_leaf_id["1"];
+        assert_eq!(facet.spans.len(), MAX_SPANS_PER_LEAF);
+        assert_eq!(facet.evidence_count, MAX_SPANS_PER_LEAF);
     }
 
     #[test]
