@@ -11,9 +11,10 @@ use crate::tailoring::types::{FileOutput, SkippedAdr, TailoringOutput, Tailoring
 ///   `reasoning` strings are combined with `"; "`.
 /// - Different file paths: both are included in the result.
 /// - `skipped_adrs` are deduplicated by `id` (first occurrence wins).
-/// - `summary` is recomputed: `total_input` and `applicable` and `not_applicable`
-///   are summed across all inputs, and `files_generated` is the number of unique
-///   file paths in the merged result.
+/// - `summary` is recomputed from deduplicated data: `applicable` counts unique ADR IDs
+///   across all merged files, `not_applicable` counts deduplicated skipped ADRs,
+///   `total_input` is `applicable + not_applicable`, and `files_generated` is the
+///   number of unique file paths in the merged result.
 pub fn merge_outputs(outputs: Vec<TailoringOutput>) -> TailoringOutput {
     // Merge files, preserving insertion order by path.
     let mut file_map: BTreeMap<String, FileOutput> = BTreeMap::new();
@@ -54,13 +55,20 @@ pub fn merge_outputs(outputs: Vec<TailoringOutput>) -> TailoringOutput {
         }
     }
 
-    // Recompute summary.
-    let total_input: usize = outputs.iter().map(|o| o.summary.total_input).sum();
-    let applicable: usize = outputs.iter().map(|o| o.summary.applicable).sum();
-    let not_applicable: usize = outputs.iter().map(|o| o.summary.not_applicable).sum();
-    let files_generated = file_map.len();
-
+    // Recompute summary from deduplicated data.
     let files: Vec<FileOutput> = file_map.into_values().collect();
+    let applicable: usize = {
+        let mut unique_adr_ids: HashSet<&str> = HashSet::new();
+        for file in &files {
+            for id in &file.adr_ids {
+                unique_adr_ids.insert(id.as_str());
+            }
+        }
+        unique_adr_ids.len()
+    };
+    let not_applicable = skipped_adrs.len(); // Already deduplicated (lines 46-55)
+    let total_input = applicable + not_applicable;
+    let files_generated = files.len();
 
     TailoringOutput {
         files,
@@ -202,10 +210,10 @@ mod tests {
         // Reasoning combined with "; "
         assert_eq!(file.reasoning, "First batch; Second batch");
 
-        // Summary recomputed
+        // Summary recomputed from deduplicated ADR IDs
         assert_eq!(merged.summary.files_generated, 1);
-        assert_eq!(merged.summary.total_input, 4); // 2 + 2
-        assert_eq!(merged.summary.applicable, 4);
+        assert_eq!(merged.summary.total_input, 3); // 3 unique ADRs + 0 skipped
+        assert_eq!(merged.summary.applicable, 3); // adr-001, adr-002, adr-003
         assert_eq!(merged.summary.not_applicable, 0);
     }
 
@@ -245,6 +253,47 @@ mod tests {
         assert_eq!(merged.summary.files_generated, 2);
         assert_eq!(merged.summary.total_input, 2);
         assert_eq!(merged.summary.applicable, 2);
+    }
+
+    #[test]
+    fn test_merge_outputs_deduplicates_summary_counts() {
+        // Two outputs that share the same ADR
+        let shared_adr = "adr-shared";
+        let out1 = make_output(
+            vec![FileOutput {
+                path: "project-a/CLAUDE.md".to_string(),
+                content: "content A".to_string(),
+                reasoning: "reason A".to_string(),
+                adr_ids: vec!["adr-a1".to_string(), shared_adr.to_string()],
+            }],
+            vec![SkippedAdr {
+                id: "adr-skip1".to_string(),
+                reason: "not applicable".to_string(),
+            }],
+        );
+        let out2 = make_output(
+            vec![FileOutput {
+                path: "project-b/CLAUDE.md".to_string(),
+                content: "content B".to_string(),
+                reasoning: "reason B".to_string(),
+                adr_ids: vec!["adr-b1".to_string(), shared_adr.to_string()],
+            }],
+            vec![SkippedAdr {
+                id: "adr-skip1".to_string(), // Same skipped ADR
+                reason: "not applicable".to_string(),
+            }],
+        );
+
+        let merged = merge_outputs(vec![out1, out2]);
+
+        // Unique applicable ADRs: adr-a1, adr-shared, adr-b1 = 3
+        assert_eq!(merged.summary.applicable, 3);
+        // Unique skipped ADRs: adr-skip1 = 1
+        assert_eq!(merged.summary.not_applicable, 1);
+        // Total: 3 + 1 = 4
+        assert_eq!(merged.summary.total_input, 4);
+        // Two different paths = 2 files
+        assert_eq!(merged.summary.files_generated, 2);
     }
 
     #[test]
