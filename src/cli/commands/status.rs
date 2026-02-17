@@ -155,7 +155,11 @@ fn format_claude_md_section(cwd: &Path, width: usize) -> String {
                 None => String::new(),
             };
             let label = format!("{} {display_path}", theme::SUCCESS);
-            panel = panel.kv_annotated(&label, "managed", &version_str);
+            if version_str.is_empty() {
+                panel = panel.kv(&label, "managed");
+            } else {
+                panel = panel.kv_annotated(&label, "managed", &version_str);
+            }
         } else {
             unmanaged_count += 1;
             let label = format!("{} {display_path}", theme::WARN);
