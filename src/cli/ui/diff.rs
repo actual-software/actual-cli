@@ -349,6 +349,60 @@ mod tests {
     }
 
     #[test]
+    fn format_update_without_old_content_skips_diff() {
+        let diff = FileDiff {
+            path: "CLAUDE.md".to_string(),
+            change: FileChange::Update {
+                added: 1,
+                updated: 0,
+                removed: 0,
+            },
+            old_content: None,
+            new_content: "new content\n".to_string(),
+        };
+        let output = format_file_diff(&diff);
+        let plain = console::strip_ansi_codes(&output);
+        // Should show numeric summary but no content diff lines
+        assert!(
+            plain.contains("+ 1 new"),
+            "expected numeric summary in: {plain}"
+        );
+        assert!(
+            !plain.contains("+ new content"),
+            "should not show content diff when old_content is None: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_update_identical_content_no_diff() {
+        let diff = FileDiff {
+            path: "CLAUDE.md".to_string(),
+            change: FileChange::Update {
+                added: 1,
+                updated: 0,
+                removed: 0,
+            },
+            old_content: Some("same content\n".to_string()),
+            new_content: "same content\n".to_string(),
+        };
+        let output = format_file_diff(&diff);
+        let plain = console::strip_ansi_codes(&output);
+        // Should show numeric summary but no content diff
+        assert!(
+            plain.contains("+ 1 new"),
+            "expected numeric summary in: {plain}"
+        );
+        assert!(
+            !plain.contains("- same"),
+            "should not show deletion for identical content: {plain}"
+        );
+        assert!(
+            !plain.contains("+ same"),
+            "should not show addition for identical content: {plain}"
+        );
+    }
+
+    #[test]
     fn format_zero_changes_shows_no_changes() {
         let diff = FileDiff {
             path: "CLAUDE.md".to_string(),
