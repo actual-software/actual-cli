@@ -15,6 +15,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "glob",
+ "ignore",
  "indicatif",
  "mockito",
  "predicates",
