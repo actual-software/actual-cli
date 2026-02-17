@@ -1,0 +1,296 @@
+rules:
+  # ==========================================================================
+  # JavaScript/TypeScript Logging
+  # ==========================================================================
+
+  - id: js.pino.logger
+    languages: [javascript, typescript]
+    message: Pino logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: pino(...)
+          - pattern: $LOGGER.info(...)
+          - pattern: $LOGGER.error(...)
+          - pattern: $LOGGER.warn(...)
+          - pattern: $LOGGER.debug(...)
+
+  - id: js.winston.logger
+    languages: [javascript, typescript]
+    message: Winston logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: winston.createLogger(...)
+          - pattern: winston.format.$METHOD(...)
+
+  - id: js.bunyan.logger
+    languages: [javascript, typescript]
+    message: Bunyan logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.9"
+    patterns:
+      - pattern: bunyan.createLogger(...)
+
+  # ==========================================================================
+  # Python Logging
+  # ==========================================================================
+
+  - id: py.logging.logger
+    languages: [python]
+    message: Python logging detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: logging.getLogger(...)
+          - pattern: logging.info(...)
+          - pattern: logging.error(...)
+          - pattern: logging.warning(...)
+
+  - id: py.structlog.logger
+    languages: [python]
+    message: structlog detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: structlog.get_logger(...)
+          - pattern: structlog.wrap_logger(...)
+
+  - id: py.loguru.logger
+    languages: [python]
+    message: loguru detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern: from loguru import logger
+
+  # ==========================================================================
+  # Go Logging
+  # ==========================================================================
+
+  - id: go.zap.logger
+    languages: [go]
+    message: Zap logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: zap.NewProduction(...)
+          - pattern: zap.NewDevelopment(...)
+          - pattern: $LOGGER.Info(...)
+          - pattern: $LOGGER.Error(...)
+
+  - id: go.logrus.logger
+    languages: [go]
+    message: Logrus logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: logrus.New()
+          - pattern: logrus.WithFields(...)
+
+  - id: go.zerolog.logger
+    languages: [go]
+    message: Zerolog logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: zerolog.New(...)
+          - pattern: log.Info().Msg(...)
+
+  # ==========================================================================
+  # Java Logging
+  # ==========================================================================
+
+  - id: java.slf4j.logger
+    languages: [java]
+    message: SLF4J logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: LoggerFactory.getLogger(...)
+          - pattern: $LOGGER.info(...)
+          - pattern: $LOGGER.error(...)
+
+  - id: java.log4j.logger
+    languages: [java]
+    message: Log4j logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.9"
+    patterns:
+      - pattern: LogManager.getLogger(...)
+
+  # ==========================================================================
+  # Rust Logging
+  # ==========================================================================
+
+  - id: rust.tracing.logger
+    languages: [rust]
+    message: Rust tracing/logging detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: tracing::info!(...)
+          - pattern: tracing::error!(...)
+          - pattern: tracing::warn!(...)
+          - pattern: log::info!(...)
+
+  - id: rust.env_logger
+    languages: [rust]
+    message: env_logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.9"
+    patterns:
+      - pattern: env_logger::init()
+
+  # ==========================================================================
+  # C# Logging
+  # ==========================================================================
+
+  - id: csharp.ilogger
+    languages: [csharp]
+    message: .NET ILogger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: $LOGGER.LogInformation(...)
+          - pattern: $LOGGER.LogError(...)
+          - pattern: $LOGGER.LogWarning(...)
+
+  - id: csharp.serilog
+    languages: [csharp]
+    message: Serilog detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Log.Information(...)
+          - pattern: Log.Error(...)
+          - pattern: new LoggerConfiguration()
+
+  # ==========================================================================
+  # Kotlin Logging
+  # ==========================================================================
+
+  - id: kotlin.slf4j.logger
+    languages: [kotlin]
+    message: Kotlin SLF4J logger detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: LoggerFactory.getLogger(...)
+          - pattern: $LOGGER.info(...)
+          - pattern: $LOGGER.error(...)
+
+  - id: kotlin.kotlinlogging
+    languages: [kotlin]
+    message: kotlin-logging detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: KotlinLogging.logger(...)
+          - pattern: logger.info { ... }
+
+  # ==========================================================================
+  # PHP Logging
+  # ==========================================================================
+
+  - id: php.laravel.log
+    languages: [php]
+    message: Laravel logging detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Log::info($MSG, ...)
+          - pattern: Log::error($MSG, ...)
+          - pattern: Log::warning($MSG, ...)
+          - pattern: Log::debug($MSG, ...)
+          - pattern: Log::critical($MSG, ...)
+          - pattern: Log::alert($MSG, ...)
+          - pattern: Log::notice($MSG, ...)
+          - pattern: Log::emergency($MSG, ...)
+          - pattern: logger()->info($MSG, ...)
+          - pattern: logger()->error($MSG, ...)
+
+  - id: php.monolog.logger
+    languages: [php]
+    message: Monolog logging detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.logging
+      leaf_id: "46"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new Logger($NAME)
+          - pattern: $LOGGER->info($MSG, ...)
+          - pattern: $LOGGER->error($MSG, ...)
+          - pattern: $LOGGER->warning($MSG, ...)
+          - pattern: $LOGGER->debug($MSG, ...)
+          - pattern: $LOGGER->pushHandler($HANDLER)

@@ -1,0 +1,223 @@
+rules:
+  # ==========================================================================
+  # gRPC - JavaScript/TypeScript
+  # ==========================================================================
+
+  - id: js.grpc.service
+    languages: [javascript, typescript]
+    message: gRPC service implementation detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: grpc.loadPackageDefinition(...)
+          - pattern: new grpc.Server()
+          - pattern: $SERVER.addService(...)
+
+  - id: js.grpc.client
+    languages: [javascript, typescript]
+    message: gRPC client detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new $SERVICE($HOST, grpc.credentials.$CREDS)
+          - pattern: grpc.credentials.createInsecure()
+
+  # ==========================================================================
+  # gRPC - Python
+  # ==========================================================================
+
+  - id: py.grpc.servicer
+    languages: [python]
+    message: gRPC servicer detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS($SERVICER):
+                  ...
+          - pattern-regex: add_\w+_to_server\(
+          - pattern: grpc.server(...)
+
+  - id: py.grpc.stub
+    languages: [python]
+    message: gRPC client stub detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $STUB($CHANNEL)
+          - pattern: grpc.insecure_channel(...)
+          - pattern: grpc.secure_channel(...)
+
+  # ==========================================================================
+  # gRPC - Go
+  # ==========================================================================
+
+  - id: go.grpc.server
+    languages: [go]
+    message: gRPC server detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: grpc.NewServer(...)
+          - pattern-regex: Register\w+Server\(
+          - pattern: $SERVER.Serve($LISTENER)
+
+  - id: go.grpc.client
+    languages: [go]
+    message: gRPC client detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: grpc.Dial($TARGET, ...)
+          - pattern: grpc.DialContext(...)
+          - pattern-regex: New\w+Client\(
+
+  # ==========================================================================
+  # gRPC - Java
+  # ==========================================================================
+
+  - id: java.grpc.service
+    languages: [java]
+    message: gRPC service detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern-regex: extends \w+Grpc\.\w+ImplBase
+          - pattern: ServerBuilder.forPort($PORT)
+          - pattern: $SERVER.addService(...)
+
+  - id: java.grpc.stub
+    languages: [java]
+    message: gRPC client stub detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $GRPC.newBlockingStub($CHANNEL)
+          - pattern: $GRPC.newStub($CHANNEL)
+          - pattern: ManagedChannelBuilder.forAddress(...)
+
+  # ==========================================================================
+  # gRPC - Rust
+  # ==========================================================================
+
+  - id: rust.tonic.service
+    languages: [rust]
+    message: Tonic gRPC service detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              #[tonic::async_trait]
+              impl $SERVICE for $STRUCT { ... }
+          - pattern: Server::builder()
+          - pattern: $X.add_service($SERVICE)
+
+  - id: rust.tonic.client
+    languages: [rust]
+    message: Tonic gRPC client detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $CLIENT::connect($URI).await
+          - pattern: Channel::from_static(...)
+
+  # ==========================================================================
+  # gRPC - C#
+  # ==========================================================================
+
+  - id: csharp.grpc.service
+    languages: [csharp]
+    message: gRPC service detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS : $SERVICE.ServiceBase { ... }
+          - pattern: endpoints.MapGrpcService<$SERVICE>()
+
+  - id: csharp.grpc.client
+    languages: [csharp]
+    message: gRPC client detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: new $SERVICE.ServiceClient($CHANNEL)
+          - pattern: GrpcChannel.ForAddress(...)
+
+  # ==========================================================================
+  # gRPC - Kotlin
+  # ==========================================================================
+
+  - id: kotlin.grpc.service
+    languages: [kotlin]
+    message: gRPC service detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "class \\w+ : \\w+Grpc\\.\\w+ImplBase"
+          - pattern: ServerBuilder.forPort($PORT)
+
+  - id: kotlin.grpc.client
+    languages: [kotlin]
+    message: gRPC client stub detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $GRPC.newBlockingStub($CHANNEL)
+          - pattern: ManagedChannelBuilder.forAddress(...)

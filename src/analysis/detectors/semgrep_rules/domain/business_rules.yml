@@ -1,0 +1,58 @@
+rules:
+  # ==========================================================================
+  # Business Rules Encoding (leaf_id: 56)
+  # ==========================================================================
+
+  - id: csharp.domain.validation
+    languages: [csharp]
+    message: Business rule validation detected
+    severity: INFO
+    metadata:
+      facet_slot: domain.validation
+      leaf_id: "56"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: if (!$COND) throw new $EX(...)
+          - pattern: Guard.Against.$RULE(...)
+
+  - id: csharp.domain.rules
+    languages: [csharp]
+    message: Business rule class detected
+    severity: INFO
+    metadata:
+      facet_slot: domain.rules_encoding
+      leaf_id: "56"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $NAME : IBusinessRule { ... }
+          - pattern: |
+              class $NAME : IRule { ... }
+
+  - id: php.domain.validation
+    languages: [php]
+    message: Business rule validation detected
+    severity: INFO
+    metadata:
+      facet_slot: domain.validation
+      leaf_id: "56"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: if (!$COND) { throw new $EX(...); }
+          - pattern: Assert::that(...)
+
+  - id: php.domain.rules
+    languages: [php]
+    message: Business rule class detected
+    severity: INFO
+    metadata:
+      facet_slot: domain.rules_encoding
+      leaf_id: "56"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: interface $NAME extends Rule { ... }
+          - pattern: class $NAME implements Rule { ... }

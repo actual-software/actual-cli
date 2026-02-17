@@ -1,0 +1,52 @@
+rules:
+  # ==========================================================================
+  # Domain Modeling (leaf_id: 55)
+  # ==========================================================================
+
+  - id: csharp.domain.value_object
+    languages: [csharp]
+    message: Value object or domain entity detected
+    severity: INFO
+    metadata:
+      facet_slot: domain.modeling_style
+      leaf_id: "55"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\brecord\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\("
+          - pattern: class $NAME { ... public $NAME(...) { ... } }
+
+  - id: csharp.domain.boundary
+    languages: [csharp]
+    message: Domain boundary namespace detected
+    severity: INFO
+    metadata:
+      facet_slot: domain.boundaries
+      leaf_id: "55"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "namespace\\s+[A-Za-z0-9_.]+\\.(Domain|Sales|Billing|Inventory)"
+
+  - id: php.domain.value_object
+    languages: [php]
+    message: Value object or domain entity detected
+    severity: INFO
+    metadata:
+      facet_slot: domain.modeling_style
+      leaf_id: "55"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: final class $NAME { ... }
+          - pattern: class $NAME { ... private function __construct(...) { ... } }
+
+  - id: php.domain.boundary
+    languages: [php]
+    message: Domain boundary namespace detected
+    severity: INFO
+    metadata:
+      facet_slot: domain.boundaries
+      leaf_id: "55"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "namespace\\s+[A-Za-z0-9_\\\\]+\\\\(Domain|Sales|Billing|Inventory)"

@@ -1,0 +1,288 @@
+rules:
+  # ==========================================================================
+  # OpenTelemetry Tracing
+  # ==========================================================================
+
+  - id: js.otel.tracer
+    languages: [javascript, typescript]
+    message: OpenTelemetry tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: trace.getTracer(...)
+          - pattern: $TRACER.startSpan(...)
+          - pattern: $TRACER.startActiveSpan(...)
+
+  - id: py.otel.tracer
+    languages: [python]
+    message: OpenTelemetry tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: trace.get_tracer(...)
+          - pattern: $TRACER.start_span(...)
+          - pattern: $TRACER.start_as_current_span(...)
+
+  - id: go.otel.tracer
+    languages: [go]
+    message: OpenTelemetry tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: otel.Tracer(...)
+          - pattern: $TRACER.Start(...)
+          - pattern: trace.SpanFromContext(...)
+
+  - id: java.otel.tracer
+    languages: [java]
+    message: OpenTelemetry tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: GlobalOpenTelemetry.getTracer(...)
+          - pattern: $TRACER.spanBuilder($NAME)
+          - pattern: Span.current()
+
+  - id: rust.otel.tracer
+    languages: [rust]
+    message: OpenTelemetry tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: global::tracer(...)
+          - pattern: $TRACER.start(...)
+          - pattern: tracing::span!(...)
+
+  # ==========================================================================
+  # Jaeger
+  # ==========================================================================
+
+  - id: js.jaeger.tracer
+    languages: [javascript, typescript]
+    message: Jaeger tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: initTracer(...)
+          - pattern: new JaegerExporter(...)
+
+  - id: py.jaeger.tracer
+    languages: [python]
+    message: Jaeger tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: JaegerExporter(...)
+          - pattern: Config(service_name=$SERVICE, ...)
+
+  - id: go.jaeger.tracer
+    languages: [go]
+    message: Jaeger tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: jaeger.NewExporter(...)
+          - pattern: jaeger.NewThriftCollector(...)
+
+  # ==========================================================================
+  # DataDog APM
+  # ==========================================================================
+
+  - id: js.datadog.tracer
+    languages: [javascript, typescript]
+    message: DataDog APM tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: ddTrace.init(...)
+          - pattern: $TRACER.trace(...)
+          - pattern: $TRACER.wrap(...)
+
+  - id: py.datadog.tracer
+    languages: [python]
+    message: DataDog APM tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: ddtrace.tracer
+          - pattern: |
+              @tracer.wrap(...)
+              def $FUNC(...): ...
+
+  - id: go.datadog.tracer
+    languages: [go]
+    message: DataDog APM tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: tracer.Start(...)
+          - pattern: tracer.StartSpan(...)
+
+  # ==========================================================================
+  # AWS X-Ray
+  # ==========================================================================
+
+  - id: js.xray.tracer
+    languages: [javascript, typescript]
+    message: AWS X-Ray tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: AWSXRay.captureHTTPsGlobal(...)
+          - pattern: AWSXRay.getSegment()
+          - pattern: AWSXRay.captureAsyncFunc(...)
+
+  - id: py.xray.tracer
+    languages: [python]
+    message: AWS X-Ray tracer detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: xray_recorder.begin_segment(...)
+          - pattern: xray_recorder.capture(...)
+          - pattern: |
+              @xray_recorder.capture(...)
+              def $FUNC(...): ...
+
+  # ==========================================================================
+  # Sentry Performance
+  # ==========================================================================
+
+  - id: js.sentry.performance
+    languages: [javascript, typescript]
+    message: Sentry performance monitoring detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Sentry.startTransaction(...)
+          - pattern: $TRANSACTION.startChild(...)
+          - pattern: Sentry.captureException(...)
+
+  - id: py.sentry.performance
+    languages: [python]
+    message: Sentry performance monitoring detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: sentry_sdk.start_transaction(...)
+          - pattern: $SPAN.start_child(...)
+
+  # ==========================================================================
+  # C# Tracing / Profiling
+  # ==========================================================================
+
+  - id: csharp.otel.tracer
+    languages: [csharp]
+    message: OpenTelemetry tracing detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\bActivitySource\\s+[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*new\\s+ActivitySource\\b"
+          - pattern: Sdk.CreateTracerProviderBuilder(...)
+
+  - id: csharp.miniprofiler
+    languages: [csharp]
+    message: MiniProfiler usage detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.profiling
+      leaf_id: "48"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: MiniProfiler.StartNew(...)
+          - pattern: AddMiniProfiler(...)
+
+  # ==========================================================================
+  # PHP Tracing / Profiling
+  # ==========================================================================
+
+  - id: php.otel.tracer
+    languages: [php]
+    message: OpenTelemetry tracing detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\bOpenTelemetry\\\\API\\\\Trace\\\\TracerProvider::getDefaultTracer\\b"
+          - pattern: $TRACER->spanBuilder(...)
+
+  - id: php.sentry.tracer
+    languages: [php]
+    message: Sentry tracing detected
+    severity: INFO
+    metadata:
+      facet_slot: obs.tracing
+      leaf_id: "48"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\\\Sentry\\\\init\\b"
+          - pattern-regex: "\\\\Sentry\\\\startTransaction\\b"

@@ -1,0 +1,342 @@
+rules:
+  # ==========================================================================
+  # JavaScript/Node.js Crypto
+  # ==========================================================================
+
+  - id: js.crypto.encrypt
+    languages: [javascript, typescript]
+    message: Crypto encryption detected
+    severity: INFO
+    metadata:
+      facet_slot: security.encryption
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createCipheriv(...)
+          - pattern: crypto.createDecipheriv(...)
+          - pattern: crypto.createHash(...)
+          - pattern: crypto.randomBytes(...)
+
+  # ==========================================================================
+  # Python Cryptography
+  # ==========================================================================
+
+  - id: py.crypto.encrypt
+    languages: [python]
+    message: Cryptography library usage detected
+    severity: INFO
+    metadata:
+      facet_slot: security.encryption
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Fernet($KEY)
+          - pattern: Cipher($ALGORITHM, ...)
+          - pattern: hashes.SHA256()
+
+  # ==========================================================================
+  # Go Crypto
+  # ==========================================================================
+
+  - id: go.crypto.encrypt
+    languages: [go]
+    message: Crypto encryption detected
+    severity: INFO
+    metadata:
+      facet_slot: security.encryption
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: aes.NewCipher($KEY)
+          - pattern: cipher.NewGCM($BLOCK)
+          - pattern: sha256.Sum256($DATA)
+
+  # ==========================================================================
+  # Java Crypto
+  # ==========================================================================
+
+  - id: java.crypto.cipher
+    languages: [java]
+    message: Java cipher usage detected
+    severity: INFO
+    metadata:
+      facet_slot: security.encryption
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Cipher.getInstance($ALGORITHM)
+          - pattern: $CIPHER.init($MODE, $KEY, ...)
+          - pattern: MessageDigest.getInstance($ALGORITHM)
+
+  # ==========================================================================
+  # Rust Crypto
+  # ==========================================================================
+
+  - id: rust.crypto.encrypt
+    languages: [rust]
+    message: Rust cryptography usage detected
+    severity: INFO
+    metadata:
+      facet_slot: security.encryption
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Aes256Gcm::new(...)
+          - pattern: Sha256::digest(...)
+          - pattern: ring::aead::$METHOD(...)
+
+  # ==========================================================================
+  # C# Crypto
+  # ==========================================================================
+
+  - id: csharp.crypto.encrypt
+    languages: [csharp]
+    message: .NET cryptography usage detected
+    severity: INFO
+    metadata:
+      facet_slot: security.encryption
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Aes.Create()
+          - pattern: SHA256.Create()
+          - pattern: $CRYPTO.CreateEncryptor(...)
+
+  # ==========================================================================
+  # CORS Configuration
+  # ==========================================================================
+
+  - id: js.cors.config
+    languages: [javascript, typescript]
+    message: CORS configuration detected
+    severity: INFO
+    metadata:
+      facet_slot: security.cors
+      leaf_id: "40"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: cors({ ... })
+          - pattern: $APP.use(cors(...))
+          - pattern: $APP.enableCors(...)
+
+  - id: py.cors.config
+    languages: [python]
+    message: CORS configuration detected
+    severity: INFO
+    metadata:
+      facet_slot: security.cors
+      leaf_id: "40"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: CORSMiddleware(...)
+          - pattern: CORS($APP, ...)
+
+  # ==========================================================================
+  # Rate Limiting
+  # ==========================================================================
+
+  - id: js.rate.limit
+    languages: [javascript, typescript]
+    message: Rate limiting middleware detected
+    severity: INFO
+    metadata:
+      facet_slot: security.rate_limiting
+      leaf_id: "41"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: rateLimit({ ... })
+          - pattern: new RateLimiter(...)
+          - pattern: $APP.use(rateLimit(...))
+
+  - id: py.rate.limit
+    languages: [python]
+    message: Rate limiting detected
+    severity: INFO
+    metadata:
+      facet_slot: security.rate_limiting
+      leaf_id: "41"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Limiter(...)
+          - pattern: |
+              @limiter.limit($RATE)
+              def $FUNC(...): ...
+
+  - id: go.rate.limit
+    languages: [go]
+    message: Rate limiting detected
+    severity: INFO
+    metadata:
+      facet_slot: security.rate_limiting
+      leaf_id: "41"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: rate.NewLimiter(...)
+          - pattern: $LIMITER.Allow()
+
+  # ==========================================================================
+  # Security Headers
+  # ==========================================================================
+
+  - id: js.helmet.security
+    languages: [javascript, typescript]
+    message: Helmet security headers detected
+    severity: INFO
+    metadata:
+      facet_slot: security.headers
+      leaf_id: "40"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: helmet()
+          - pattern: helmet({ ... })
+          - pattern: $APP.use(helmet(...))
+
+  - id: js.csp.header
+    languages: [javascript, typescript]
+    message: Content Security Policy detected
+    severity: INFO
+    metadata:
+      facet_slot: security.headers
+      leaf_id: "40"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: contentSecurityPolicy({ ... })
+          - pattern: $RES.setHeader("Content-Security-Policy", ...)
+
+  # ==========================================================================
+  # CSRF Protection
+  # ==========================================================================
+
+  - id: js.csrf.token
+    languages: [javascript, typescript]
+    message: CSRF protection detected
+    severity: INFO
+    metadata:
+      facet_slot: security.csrf
+      leaf_id: "40"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: csrf({ ... })
+          - pattern: csurf({ ... })
+          - pattern: $APP.use(csrf(...))
+
+  - id: py.csrf.protection
+    languages: [python]
+    message: CSRF protection detected
+    severity: INFO
+    metadata:
+      facet_slot: security.csrf
+      leaf_id: "40"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: CSRFProtect($APP)
+          - pattern: |
+              @csrf_exempt
+              def $FUNC(...): ...
+
+  # ==========================================================================
+  # TLS/SSL Configuration
+  # ==========================================================================
+
+  - id: js.tls.config
+    languages: [javascript, typescript]
+    message: TLS/SSL configuration detected
+    severity: INFO
+    metadata:
+      facet_slot: security.tls
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: https.createServer($OPTIONS, ...)
+          - pattern: tls.createSecureContext(...)
+
+  - id: go.tls.config
+    languages: [go]
+    message: TLS/SSL configuration detected
+    severity: INFO
+    metadata:
+      facet_slot: security.tls
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: tls.Config{ ... }
+          - pattern: http.ListenAndServeTLS(...)
+
+  - id: rust.tls.config
+    languages: [rust]
+    message: TLS configuration detected
+    severity: INFO
+    metadata:
+      facet_slot: security.tls
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: rustls::ServerConfig::builder()
+          - pattern: TlsAcceptor::from(...)
+
+  # ==========================================================================
+  # PHP Cryptography
+  # ==========================================================================
+
+  - id: php.openssl.encrypt
+    languages: [php]
+    message: OpenSSL encryption detected
+    severity: INFO
+    metadata:
+      facet_slot: security.encryption
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: openssl_encrypt($DATA, ...)
+          - pattern: openssl_decrypt($DATA, ...)
+          - pattern: openssl_cipher_iv_length($METHOD)
+          - pattern: openssl_random_pseudo_bytes($LENGTH)
+
+  - id: php.laravel.crypt
+    languages: [php]
+    message: Laravel Crypt facade detected
+    severity: INFO
+    metadata:
+      facet_slot: security.encryption
+      leaf_id: "39"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Crypt::encrypt($DATA)
+          - pattern: Crypt::decrypt($DATA)
+          - pattern: Crypt::encryptString($DATA)
+          - pattern: Crypt::decryptString($DATA)
+
+  - id: php.hash.function
+    languages: [php]
+    message: PHP hash function detected
+    severity: INFO
+    metadata:
+      facet_slot: security.encryption
+      leaf_id: "39"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: hash($ALGO, $DATA, ...)
+          - pattern: hash_hmac($ALGO, $DATA, $KEY, ...)
+          - pattern: md5($DATA)
+          - pattern: sha1($DATA)

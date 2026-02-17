@@ -1,0 +1,593 @@
+rules:
+  # ==========================================================================
+  # JavaScript/TypeScript Unit Testing
+  # ==========================================================================
+
+  - id: js.jest.test
+    languages: [javascript, typescript]
+    message: Jest test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: test($NAME, ...)
+          - pattern: it($NAME, ...)
+          - pattern: describe($NAME, ...)
+          - pattern: test.each(...)($NAME, ...)
+          - pattern: it.each(...)($NAME, ...)
+
+  - id: js.jest.expect
+    languages: [javascript, typescript]
+    message: Jest assertion detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: expect($VALUE).$MATCHER(...)
+          - pattern: expect($VALUE).not.$MATCHER(...)
+          - pattern: expect($VALUE).resolves.$MATCHER(...)
+          - pattern: expect($VALUE).rejects.$MATCHER(...)
+
+  - id: js.jest.mock
+    languages: [javascript, typescript]
+    message: Jest mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: jest.mock($MODULE, ...)
+          - pattern: jest.fn(...)
+          - pattern: jest.spyOn($OBJ, $METHOD)
+          - pattern: jest.clearAllMocks()
+          - pattern: jest.resetAllMocks()
+
+  - id: js.mocha.test
+    languages: [javascript, typescript]
+    message: Mocha test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: describe($NAME, function() { ... })
+          - pattern: it($NAME, function() { ... })
+          - pattern: before(function() { ... })
+          - pattern: after(function() { ... })
+          - pattern: beforeEach(function() { ... })
+          - pattern: afterEach(function() { ... })
+
+  - id: js.chai.assert
+    languages: [javascript, typescript]
+    message: Chai assertion detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: expect($VALUE).to.$MATCHER
+          - pattern: assert.$METHOD($VALUE, ...)
+          - pattern: should.$MATCHER
+
+  - id: js.sinon.mock
+    languages: [javascript, typescript]
+    message: Sinon mock/stub detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: sinon.stub($OBJ, $METHOD)
+          - pattern: sinon.mock($OBJ)
+          - pattern: sinon.spy($OBJ, $METHOD)
+          - pattern: sinon.fake(...)
+          - pattern: sinon.createSandbox()
+
+  - id: ts.vitest.test
+    languages: [typescript]
+    message: Vitest test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: "import { ... } from 'vitest'"
+          - pattern: vi.fn(...)
+          - pattern: vi.mock($MODULE, ...)
+          - pattern: vi.spyOn($OBJ, $METHOD)
+
+  # ==========================================================================
+  # Python Unit Testing
+  # ==========================================================================
+
+  - id: py.pytest.test
+    languages: [python]
+    message: Pytest test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    pattern-either:
+      - pattern-regex: "def test_\\w+\\s*\\("
+      - pattern-regex: "async def test_\\w+\\s*\\("
+      - pattern: "@pytest.mark.$MARKER"
+      - pattern: pytest.raises($EXCEPTION)
+
+  - id: py.pytest.fixture
+    languages: [python]
+    message: Pytest fixture detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @pytest.fixture
+              def $FUNC(...): ...
+          - pattern: |
+              @pytest.fixture(...)
+              def $FUNC(...): ...
+
+  - id: py.pytest.parametrize
+    languages: [python]
+    message: Pytest parametrize detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          @pytest.mark.parametrize($PARAMS, $VALUES)
+          def $FUNC(...): ...
+
+  - id: py.unittest.test
+    languages: [python]
+    message: Python unittest detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS(unittest.TestCase):
+                  ...
+          - pattern: self.assertEqual($A, $B)
+          - pattern: self.assertTrue($VALUE)
+          - pattern: self.assertFalse($VALUE)
+          - pattern: self.assertRaises($EXCEPTION)
+
+  - id: py.mock.patch
+    languages: [python]
+    message: Python mock/patch detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @patch($TARGET)
+              def $FUNC(...): ...
+          - pattern: |
+              @patch.object($TARGET, $ATTR)
+              def $FUNC(...): ...
+          - pattern: MagicMock(...)
+          - pattern: Mock(...)
+          - pattern: patch($TARGET)
+
+  - id: py.hypothesis.test
+    languages: [python]
+    message: Hypothesis property-based test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @given(...)
+              def $FUNC(...): ...
+          - pattern: |
+              @settings(...)
+              def $FUNC(...): ...
+
+  # ==========================================================================
+  # Go Unit Testing
+  # ==========================================================================
+
+  - id: go.testing.test
+    languages: [go]
+    message: Go test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    pattern-either:
+      - pattern-regex: "func Test\\w+\\(t \\*testing\\.T\\)"
+      - pattern-regex: "func Benchmark\\w+\\(b \\*testing\\.B\\)"
+      - pattern: t.Run($NAME, ...)
+      - pattern: t.Error(...)
+      - pattern: t.Errorf(...)
+      - pattern: t.Fatal(...)
+      - pattern: t.Fatalf(...)
+
+  - id: go.testify.assert
+    languages: [go]
+    message: Testify assertion detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: assert.Equal($T, $EXPECTED, $ACTUAL)
+          - pattern: assert.NoError($T, $ERR)
+          - pattern: assert.Nil($T, $VALUE)
+          - pattern: assert.NotNil($T, $VALUE)
+          - pattern: require.Equal($T, $EXPECTED, $ACTUAL)
+          - pattern: require.NoError($T, $ERR)
+
+  - id: go.testify.mock
+    languages: [go]
+    message: Testify mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $MOCK.On($METHOD, ...).Return(...)
+          - pattern: $MOCK.AssertExpectations($T)
+          - pattern: $MOCK.AssertCalled($T, $METHOD, ...)
+
+  - id: go.gomock.mock
+    languages: [go]
+    message: GoMock mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: gomock.NewController($T)
+          - pattern: $MOCK.EXPECT().$METHOD(...).Return(...)
+          - pattern: $CTRL.Finish()
+
+  # ==========================================================================
+  # Java Unit Testing
+  # ==========================================================================
+
+  - id: java.junit.test
+    languages: [java]
+    message: JUnit test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @Test
+              void $METHOD() { ... }
+          - pattern: |
+              @Test
+              public void $METHOD() { ... }
+          - pattern: |
+              @BeforeEach
+              void $METHOD() { ... }
+          - pattern: |
+              @AfterEach
+              void $METHOD() { ... }
+          - pattern: |
+              @ParameterizedTest
+              void $METHOD(...) { ... }
+
+  - id: java.junit.assert
+    languages: [java]
+    message: JUnit assertion detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: assertEquals($EXPECTED, $ACTUAL)
+          - pattern: assertTrue($VALUE)
+          - pattern: assertFalse($VALUE)
+          - pattern: assertNull($VALUE)
+          - pattern: assertNotNull($VALUE)
+          - pattern: assertThrows($EXCEPTION, ...)
+
+  - id: java.mockito.mock
+    languages: [java]
+    message: Mockito mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Mockito.mock($CLASS)
+          - pattern: Mockito.when($CALL).thenReturn($VALUE)
+          - pattern: Mockito.verify($MOCK).$METHOD(...)
+          - pattern: |
+              @Mock
+              $TYPE $FIELD;
+          - pattern: |
+              @InjectMocks
+              $TYPE $FIELD;
+
+  - id: java.assertj.assert
+    languages: [java]
+    message: AssertJ assertion detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: assertThat($VALUE).$MATCHER(...)
+          - pattern: Assertions.assertThat($VALUE)
+
+  # ==========================================================================
+  # Rust Unit Testing
+  # ==========================================================================
+
+  - id: rust.test.unit
+    languages: [rust]
+    message: Rust unit test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              #[test]
+              fn $NAME() { ... }
+          - pattern: |
+              #[tokio::test]
+              async fn $NAME() { ... }
+          - pattern: assert!($VALUE)
+          - pattern: assert_eq!($A, $B)
+          - pattern: assert_ne!($A, $B)
+
+  - id: rust.test.module
+    languages: [rust]
+    message: Rust test module detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          #[cfg(test)]
+          mod tests { ... }
+
+  - id: rust.mockall.mock
+    languages: [rust]
+    message: Mockall mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    pattern-either:
+      - pattern: "#[automock]"
+      - pattern-regex: "mock!\\s*\\{"
+      - pattern-regex: "\\.expect_\\w+\\("
+
+  # ==========================================================================
+  # C# Unit Testing
+  # ==========================================================================
+
+  - id: csharp.xunit.test
+    languages: [csharp]
+    message: xUnit test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              [Fact]
+              public void $METHOD() { ... }
+          - pattern: |
+              [Theory]
+              public void $METHOD(...) { ... }
+          - pattern: Assert.Equal($EXPECTED, $ACTUAL)
+          - pattern: Assert.True($VALUE)
+          - pattern: Assert.Throws<$EXCEPTION>(...)
+
+  - id: csharp.nunit.test
+    languages: [csharp]
+    message: NUnit test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              [Test]
+              public void $METHOD() { ... }
+          - pattern: |
+              [TestCase(...)]
+              public void $METHOD(...) { ... }
+          - pattern: Assert.That($VALUE, $CONSTRAINT)
+
+  - id: csharp.moq.mock
+    languages: [csharp]
+    message: Moq mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new Mock<$TYPE>()
+          - pattern: $MOCK.Setup($EXPR).Returns($VALUE)
+          - pattern: $MOCK.Verify($EXPR)
+          - pattern: $MOCK.Object
+
+  # ==========================================================================
+  # Kotlin Unit Testing
+  # ==========================================================================
+
+  - id: kotlin.junit.test
+    languages: [kotlin]
+    message: Kotlin JUnit test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @Test
+              fun $METHOD() { ... }
+          - pattern: assertEquals($EXPECTED, $ACTUAL)
+          - pattern: assertTrue($VALUE)
+          - pattern: assertThrows<$TYPE> { ... }
+
+  - id: kotlin.kotest.test
+    languages: [kotlin]
+    message: Kotest test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $VALUE shouldBe $EXPECTED
+          - pattern: $VALUE shouldNotBe $EXPECTED
+          - pattern: $VALUE.shouldBeNull()
+          - pattern: $VALUE.shouldNotBeNull()
+
+  - id: kotlin.mockk.mock
+    languages: [kotlin]
+    message: MockK mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: mockk<$TYPE>()
+          - pattern: every { $EXPR } returns $VALUE
+          - pattern: verify { $EXPR }
+          - pattern: coEvery { $EXPR } returns $VALUE
+
+  # ==========================================================================
+  # PHP Unit Testing
+  # ==========================================================================
+
+  - id: php.phpunit.test
+    languages: [php]
+    message: PHPUnit test class detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS extends TestCase { ... }
+          - pattern: |
+              class $CLASS extends PHPUnit\Framework\TestCase { ... }
+
+  - id: php.phpunit.assertion
+    languages: [php]
+    message: PHPUnit assertion detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: $THIS->assertTrue($VALUE)
+          - pattern: $THIS->assertFalse($VALUE)
+          - pattern: $THIS->assertEquals($EXPECTED, $ACTUAL)
+          - pattern: $THIS->assertSame($EXPECTED, $ACTUAL)
+          - pattern: $THIS->assertNull($VALUE)
+          - pattern: $THIS->assertNotNull($VALUE)
+          - pattern: $THIS->assertCount($COUNT, $ARRAY)
+          - pattern: $THIS->assertInstanceOf($CLASS, $OBJECT)
+          - pattern: $THIS->expectException($EXCEPTION)
+
+  - id: php.laravel.test
+    languages: [php]
+    message: Laravel feature test detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.unit
+      leaf_id: "50"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $THIS->get($URL)
+          - pattern: $THIS->post($URL, ...)
+          - pattern: $THIS->put($URL, ...)
+          - pattern: $THIS->patch($URL, ...)
+          - pattern: $THIS->delete($URL)
+          - pattern: $THIS->actingAs($USER)
+          - pattern: $THIS->assertStatus($CODE)
+          - pattern: $THIS->assertJson($DATA)
+
+  - id: php.mockery.mock
+    languages: [php]
+    message: Mockery mock detected
+    severity: INFO
+    metadata:
+      facet_slot: testing.mocking
+      leaf_id: "51"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Mockery::mock($CLASS)
+          - pattern: $MOCK->shouldReceive($METHOD)
+          - pattern: $MOCK->andReturn($VALUE)
+          - pattern: Mockery::close()

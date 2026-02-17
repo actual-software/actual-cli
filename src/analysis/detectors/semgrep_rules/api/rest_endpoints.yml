@@ -1,0 +1,415 @@
+rules:
+  # ==========================================================================
+  # Express (JavaScript/TypeScript)
+  # ==========================================================================
+
+  - id: js.express.route
+    languages: [javascript, typescript]
+    message: Express route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+      category: service_boundary
+    patterns:
+      - pattern-either:
+          - pattern: $APP.get($PATH, ...)
+          - pattern: $APP.post($PATH, ...)
+          - pattern: $APP.put($PATH, ...)
+          - pattern: $APP.delete($PATH, ...)
+          - pattern: $APP.patch($PATH, ...)
+
+  - id: js.fastify.route
+    languages: [javascript, typescript]
+    message: Fastify route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $FASTIFY.get($PATH, ...)
+          - pattern: $FASTIFY.post($PATH, ...)
+          - pattern: "$FASTIFY.route({ method: $METHOD, ... })"
+
+  # ==========================================================================
+  # NestJS (TypeScript)
+  # ==========================================================================
+
+  - id: ts.nestjs.controller.method
+    languages: [typescript]
+    message: NestJS controller method detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @Get($PATH)
+              $METHOD(...) { ... }
+          - pattern: |
+              @Post($PATH)
+              $METHOD(...) { ... }
+          - pattern: |
+              @Put($PATH)
+              $METHOD(...) { ... }
+          - pattern: |
+              @Delete($PATH)
+              $METHOD(...) { ... }
+          - pattern: |
+              @Patch($PATH)
+              $METHOD(...) { ... }
+
+  - id: ts.nestjs.controller
+    languages: [typescript]
+    message: NestJS controller detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          @Controller($PATH)
+          class $CLASS { ... }
+
+  # ==========================================================================
+  # FastAPI (Python)
+  # ==========================================================================
+
+  - id: py.fastapi.route
+    languages: [python]
+    message: FastAPI route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @$APP.get($PATH)
+              def $FUNC(...): ...
+          - pattern: |
+              @$APP.post($PATH)
+              def $FUNC(...): ...
+          - pattern: |
+              @$APP.put($PATH)
+              def $FUNC(...): ...
+          - pattern: |
+              @$APP.delete($PATH)
+              def $FUNC(...): ...
+          - pattern: |
+              @$ROUTER.get($PATH)
+              async def $FUNC(...): ...
+          - pattern: |
+              @$ROUTER.post($PATH)
+              async def $FUNC(...): ...
+
+  # ==========================================================================
+  # Flask (Python)
+  # ==========================================================================
+
+  - id: py.flask.route
+    languages: [python]
+    message: Flask route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern: |
+          @$APP.route($PATH, ...)
+          def $FUNC(...): ...
+
+  # ==========================================================================
+  # Django (Python)
+  # ==========================================================================
+
+  - id: py.django.view
+    languages: [python]
+    message: Django view detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.85"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $VIEW(View):
+                  ...
+          - pattern: |
+              class $VIEW(APIView):
+                  ...
+
+  # ==========================================================================
+  # Gin (Go)
+  # ==========================================================================
+
+  - id: go.gin.route
+    languages: [go]
+    message: Gin route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $ROUTER.GET($PATH, ...)
+          - pattern: $ROUTER.POST($PATH, ...)
+          - pattern: $ROUTER.PUT($PATH, ...)
+          - pattern: $ROUTER.DELETE($PATH, ...)
+          - pattern: $ROUTER.PATCH($PATH, ...)
+
+  - id: go.echo.route
+    languages: [go]
+    message: Echo route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $E.GET($PATH, ...)
+          - pattern: $E.POST($PATH, ...)
+          - pattern: $E.PUT($PATH, ...)
+          - pattern: $E.DELETE($PATH, ...)
+
+  - id: go.chi.route
+    languages: [go]
+    message: Chi route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $ROUTER.Get($PATH, ...)
+          - pattern: $ROUTER.Post($PATH, ...)
+          - pattern: $ROUTER.Put($PATH, ...)
+          - pattern: $ROUTER.Delete($PATH, ...)
+
+  # ==========================================================================
+  # Spring (Java)
+  # ==========================================================================
+
+  - id: java.spring.rest.controller
+    languages: [java]
+    message: Spring REST controller detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @RestController
+              class $CLASS { ... }
+          - pattern: |
+              @Controller
+              class $CLASS { ... }
+
+  - id: java.spring.request.mapping
+    languages: [java]
+    message: Spring request mapping detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @GetMapping($PATH)
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              @PostMapping($PATH)
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              @PutMapping($PATH)
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              @DeleteMapping($PATH)
+              $RET $METHOD(...) { ... }
+
+  # ==========================================================================
+  # Actix-web (Rust)
+  # ==========================================================================
+
+  - id: rust.actix.handler
+    languages: [rust]
+    message: Actix-web handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              #[get($PATH)]
+              async fn $FUNC(...) -> $RET { ... }
+          - pattern: |
+              #[post($PATH)]
+              async fn $FUNC(...) -> $RET { ... }
+          - pattern: |
+              #[put($PATH)]
+              async fn $FUNC(...) -> $RET { ... }
+          - pattern: |
+              #[delete($PATH)]
+              async fn $FUNC(...) -> $RET { ... }
+
+  - id: rust.axum.route
+    languages: [rust]
+    message: Axum route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: Router::new()
+          - pattern: get($HANDLER)
+          - pattern: post($HANDLER)
+
+  # ==========================================================================
+  # ASP.NET (C#)
+  # ==========================================================================
+
+  - id: csharp.aspnet.controller
+    languages: [csharp]
+    message: ASP.NET controller action detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              [HttpGet($PATH)]
+              public $RET $METHOD(...) { ... }
+          - pattern: |
+              [HttpPost($PATH)]
+              public $RET $METHOD(...) { ... }
+          - pattern: |
+              [HttpPut($PATH)]
+              public $RET $METHOD(...) { ... }
+          - pattern: |
+              [HttpDelete($PATH)]
+              public $RET $METHOD(...) { ... }
+
+  - id: csharp.aspnet.apicontroller
+    languages: [csharp]
+    message: ASP.NET API controller detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern: |
+          [ApiController]
+          class $CLASS : ControllerBase { ... }
+
+  - id: csharp.aspnet.minimal_api
+    languages: [csharp]
+    message: ASP.NET Minimal API route detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: $APP.MapGet($PATH, ...)
+          - pattern: $APP.MapPost($PATH, ...)
+          - pattern: $APP.MapPut($PATH, ...)
+          - pattern: $APP.MapDelete($PATH, ...)
+          - pattern: $APP.MapPatch($PATH, ...)
+          - pattern: $APP.MapMethods($PATH, $METHODS, ...)
+          - pattern: $APP.MapGroup($PATH)
+
+  # ==========================================================================
+  # Ktor (Kotlin)
+  # ==========================================================================
+
+  - id: kotlin.ktor.route
+    languages: [kotlin]
+    message: Ktor route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: get($PATH) { ... }
+          - pattern: post($PATH) { ... }
+          - pattern: put($PATH) { ... }
+          - pattern: delete($PATH) { ... }
+
+  - id: kotlin.spring.controller
+    languages: [kotlin]
+    message: Spring Kotlin controller detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @GetMapping($PATH)
+              fun $METHOD(...): $RET { ... }
+          - pattern: |
+              @PostMapping($PATH)
+              fun $METHOD(...): $RET { ... }
+
+  # ==========================================================================
+  # Laravel (PHP)
+  # ==========================================================================
+
+  - id: php.laravel.route
+    languages: [php]
+    message: Laravel route handler detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: Route::get($PATH, ...)
+          - pattern: Route::post($PATH, ...)
+          - pattern: Route::put($PATH, ...)
+          - pattern: Route::patch($PATH, ...)
+          - pattern: Route::delete($PATH, ...)
+          - pattern: Route::options($PATH, ...)
+          - pattern: Route::any($PATH, ...)
+          - pattern: Route::match($METHODS, $PATH, ...)
+          - pattern: Route::resource($NAME, ...)
+          - pattern: Route::apiResource($NAME, ...)
+
+  - id: php.laravel.controller
+    languages: [php]
+    message: Laravel controller detected
+    severity: INFO
+    metadata:
+      facet_slot: boundaries.service_definitions
+      leaf_id: "23"
+      confidence: "0.9"
+    patterns:
+      - pattern: |
+          class $CLASS extends Controller { ... }

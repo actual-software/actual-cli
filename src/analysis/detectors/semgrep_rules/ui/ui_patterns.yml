@@ -1,0 +1,88 @@
+rules:
+  # ==========================================================================
+  # Rendering Model (leaf_id: 52)
+  # ==========================================================================
+
+  - id: csharp.ui.mvc_view
+    languages: [csharp]
+    message: MVC rendering detected
+    severity: INFO
+    metadata:
+      facet_slot: ui.rendering_model
+      leaf_id: "52"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: return View(...)
+          - pattern: return PartialView(...)
+
+  - id: php.ui.view_render
+    languages: [php]
+    message: Server-side rendering detected
+    severity: INFO
+    metadata:
+      facet_slot: ui.rendering_model
+      leaf_id: "52"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\breturn\\s+view\\b"
+          - pattern-regex: "\\bInertia::render\\b"
+
+  # ==========================================================================
+  # Design System & Theming (leaf_id: 53)
+  # ==========================================================================
+
+  - id: csharp.ui.theming
+    languages: [csharp]
+    message: UI theming detected
+    severity: INFO
+    metadata:
+      facet_slot: ui.theming_strategy
+      leaf_id: "53"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: new MudTheme(...)
+          - pattern: ThemeProvider
+
+  - id: php.ui.blade_layouts
+    languages: [php]
+    message: Blade layout/theming detected
+    severity: INFO
+    metadata:
+      facet_slot: ui.design_system
+      leaf_id: "53"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "@extends\\((\"|')?layouts\\."
+
+  # ==========================================================================
+  # Interaction Patterns (leaf_id: 54)
+  # ==========================================================================
+
+  - id: csharp.ui.interactions
+    languages: [csharp]
+    message: Interactive UI patterns detected
+    severity: INFO
+    metadata:
+      facet_slot: ui.interactions
+      leaf_id: "54"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: EventCallback $CB
+          - pattern: OnClick
+
+  - id: php.ui.livewire
+    languages: [php]
+    message: Livewire/interactive UI detected
+    severity: INFO
+    metadata:
+      facet_slot: ui.interactions
+      leaf_id: "54"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\bLivewire::"
+          - pattern-regex: "@livewire"

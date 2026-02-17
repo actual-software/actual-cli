@@ -1,0 +1,255 @@
+rules:
+  # ==========================================================================
+  # GraphQL Resolvers - JavaScript/TypeScript
+  # ==========================================================================
+
+  - id: js.graphql.resolver
+    languages: [javascript, typescript]
+    message: GraphQL resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              {
+                Query: { ... }
+              }
+          - pattern: |
+              {
+                Mutation: { ... }
+              }
+
+  - id: js.apollo.server
+    languages: [javascript, typescript]
+    message: Apollo Server detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: new ApolloServer(...)
+          - pattern: ApolloServer({ ... })
+
+  - id: ts.typegraphql.resolver
+    languages: [typescript]
+    message: TypeGraphQL resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @Resolver()
+              class $CLASS { ... }
+          - pattern: |
+              @Query()
+              $METHOD(...) { ... }
+          - pattern: |
+              @Mutation()
+              $METHOD(...) { ... }
+
+  # ==========================================================================
+  # GraphQL - Python
+  # ==========================================================================
+
+  - id: py.strawberry.resolver
+    languages: [python]
+    message: Strawberry GraphQL resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @strawberry.type
+              class $CLASS:
+                  ...
+          - pattern: |
+              @strawberry.mutation
+              def $FUNC(...): ...
+          - pattern: |
+              @strawberry.field
+              def $FUNC(...): ...
+
+  - id: py.graphene.resolver
+    languages: [python]
+    message: Graphene resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS(graphene.ObjectType):
+                  ...
+          - pattern: |
+              class $CLASS(graphene.Mutation):
+                  ...
+
+  - id: py.ariadne.resolver
+    languages: [python]
+    message: Ariadne GraphQL resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @query_type.field($FIELD)
+              def $FUNC(...): ...
+          - pattern: |
+              @mutation_type.field($FIELD)
+              def $FUNC(...): ...
+
+  # ==========================================================================
+  # GraphQL - Go
+  # ==========================================================================
+
+  - id: go.gqlgen.resolver
+    languages: [go]
+    message: gqlgen resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              func ($R *$RESOLVER) $METHOD(...) ($RET, error) { ... }
+          - pattern: graphql.MustParseSchema(...)
+
+  - id: go.graphqlgo.resolver
+    languages: [go]
+    message: graphql-go resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: graphql.NewSchema(...)
+          - pattern: "&graphql.Field{...}"
+
+  # ==========================================================================
+  # GraphQL - Java
+  # ==========================================================================
+
+  - id: java.graphql.resolver
+    languages: [java]
+    message: GraphQL Java resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              class $CLASS implements GraphQLQueryResolver { ... }
+          - pattern: |
+              class $CLASS implements GraphQLMutationResolver { ... }
+          - pattern: GraphQL.newGraphQL(...)
+
+  - id: java.dgs.resolver
+    languages: [java]
+    message: Netflix DGS resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              @DgsComponent
+              class $CLASS { ... }
+          - pattern: |
+              @DgsQuery
+              $RET $METHOD(...) { ... }
+          - pattern: |
+              @DgsMutation
+              $RET $METHOD(...) { ... }
+
+  # ==========================================================================
+  # GraphQL - Rust
+  # ==========================================================================
+
+  - id: rust.juniper.resolver
+    languages: [rust]
+    message: Juniper GraphQL resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: "#[graphql_object]"
+          - pattern: juniper::execute(...)
+
+  - id: rust.asyncgraphql.resolver
+    languages: [rust]
+    message: async-graphql resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: "#[Object]"
+          - pattern: "#[derive(SimpleObject)]"
+
+  # ==========================================================================
+  # GraphQL - C#
+  # ==========================================================================
+
+  - id: csharp.hotchocolate.resolver
+    languages: [csharp]
+    message: Hot Chocolate GraphQL resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.95"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              [QueryType]
+              class $CLASS { ... }
+          - pattern: |
+              [MutationType]
+              class $CLASS { ... }
+          - pattern: AddGraphQLServer()
+
+  # ==========================================================================
+  # GraphQL - Kotlin
+  # ==========================================================================
+
+  - id: kotlin.graphqlkotlin.resolver
+    languages: [kotlin]
+    message: graphql-kotlin resolver detected
+    severity: INFO
+    metadata:
+      facet_slot: api.public.protocols
+      leaf_id: "25"
+      confidence: "0.9"
+    patterns:
+      - pattern-either:
+          - pattern: "fun $FUNC(...): $TYPE"
+          - pattern: "suspend fun $FUNC(...): $TYPE"

@@ -1,0 +1,31 @@
+rules:
+  # ==========================================================================
+  # Internal APIs (leaf_id: 26)
+  # ==========================================================================
+
+  - id: csharp.internal.rpc
+    languages: [csharp]
+    message: Internal RPC/HTTP client integration detected
+    severity: INFO
+    metadata:
+      facet_slot: api.internal.integration_style
+      leaf_id: "26"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: Refit.RestService.For<$IFACE>(...)
+          - pattern: GrpcChannel.ForAddress(...)
+          - pattern: HttpClientFactory.CreateClient(...)
+
+  - id: php.internal.http_client
+    languages: [php]
+    message: Internal HTTP client integration detected
+    severity: INFO
+    metadata:
+      facet_slot: api.internal.integration_style
+      leaf_id: "26"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\bnew\\s+GuzzleHttp\\\\Client\\b"
+          - pattern-regex: "\\bSymfony\\\\Component\\\\HttpClient\\\\HttpClient::create\\b"

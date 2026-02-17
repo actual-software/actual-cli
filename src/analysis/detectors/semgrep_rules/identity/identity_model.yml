@@ -1,0 +1,59 @@
+rules:
+  # ==========================================================================
+  # Identity Data Model (leaf_id: 34)
+  # ==========================================================================
+
+  - id: csharp.identity.entities
+    languages: [csharp]
+    message: Identity entity detected
+    severity: INFO
+    metadata:
+      facet_slot: identity.entities
+      leaf_id: "34"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: class User { ... }
+          - pattern: class Role { ... }
+          - pattern: class Permission { ... }
+          - pattern: class IdentityUser { ... }
+
+  - id: csharp.identity.multitenancy
+    languages: [csharp]
+    message: Multi-tenancy entity detected
+    severity: INFO
+    metadata:
+      facet_slot: identity.multi_tenancy_strategy
+      leaf_id: "34"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: class Tenant { ... }
+          - pattern: class Organization { ... }
+
+  - id: php.identity.entities
+    languages: [php]
+    message: Identity entity detected
+    severity: INFO
+    metadata:
+      facet_slot: identity.entities
+      leaf_id: "34"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: class User extends $BASE { ... }
+          - pattern: class Role extends $BASE { ... }
+          - pattern: class Permission extends $BASE { ... }
+
+  - id: php.identity.multitenancy
+    languages: [php]
+    message: Multi-tenancy entity detected
+    severity: INFO
+    metadata:
+      facet_slot: identity.multi_tenancy_strategy
+      leaf_id: "34"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: class Tenant extends $BASE { ... }
+          - pattern: class Organization extends $BASE { ... }

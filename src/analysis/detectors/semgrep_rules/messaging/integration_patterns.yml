@@ -1,0 +1,19 @@
+rules:
+  # ==========================================================================
+  # Integration Patterns (leaf_id: 27)
+  # ==========================================================================
+
+  - id: php.queue.integration
+    languages: [php]
+    message: Messaging/queue integration detected
+    severity: INFO
+    metadata:
+      facet_slot: integration.messaging_tech
+      leaf_id: "27"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: Queue::push(...)
+          - pattern: Queue::later(...)
+          - pattern: \PhpAmqpLib\Connection\AMQPStreamConnection(...)
+          - pattern: KafkaProducer(...)

@@ -1,0 +1,26 @@
+rules:
+  # ==========================================================================
+  # Internal Platforms (leaf_id: 21)
+  # ==========================================================================
+
+  - id: csharp.internal.platform
+    languages: [csharp]
+    message: Internal platform SDK usage detected
+    severity: INFO
+    metadata:
+      facet_slot: platform.internal.sdk_or_mcp
+      leaf_id: "21"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "using\\s+[A-Za-z0-9_.]*(Platform|Internal|Sdk|Mcp)[A-Za-z0-9_.]*;"
+
+  - id: php.internal.platform
+    languages: [php]
+    message: Internal platform SDK usage detected
+    severity: INFO
+    metadata:
+      facet_slot: platform.internal.sdk_or_mcp
+      leaf_id: "21"
+      confidence: "0.7"
+    patterns:
+      - pattern-regex: "use\\s+[A-Za-z0-9_\\\\]*(Platform|Internal|Sdk|Mcp)[A-Za-z0-9_\\\\]*;"

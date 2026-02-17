@@ -1,0 +1,30 @@
+rules:
+  # ==========================================================================
+  # Compliance & Auditing (leaf_id: 61)
+  # ==========================================================================
+
+  - id: csharp.compliance.audit
+    languages: [csharp]
+    message: Audit logging detected
+    severity: INFO
+    metadata:
+      facet_slot: governance.compliance
+      leaf_id: "61"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: AuditLog(...)
+          - pattern: $AUDIT.Log(...)
+
+  - id: php.compliance.audit
+    languages: [php]
+    message: Audit logging detected
+    severity: INFO
+    metadata:
+      facet_slot: governance.compliance
+      leaf_id: "61"
+      confidence: "0.7"
+    patterns:
+      - pattern-either:
+          - pattern: "Audit::log(...)"
+          - pattern: $AUDIT->log(...)

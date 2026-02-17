@@ -1,0 +1,70 @@
+rules:
+  # ==========================================================================
+  # Application Frameworks (leaf_id: 19)
+  # ==========================================================================
+
+  - id: csharp.aspnet.framework
+    languages: [csharp]
+    message: ASP.NET Core framework detected
+    severity: INFO
+    metadata:
+      facet_slot: framework.app.detected
+      leaf_id: "19"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: using Microsoft.AspNetCore;
+          - pattern: using Microsoft.AspNetCore.Mvc;
+          - pattern: WebApplication.CreateBuilder(...)
+
+  - id: csharp.blazor.framework
+    languages: [csharp]
+    message: Blazor framework detected
+    severity: INFO
+    metadata:
+      facet_slot: framework.app.detected
+      leaf_id: "19"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: using Microsoft.AspNetCore.Components;
+          - pattern: RenderFragment $NAME
+
+  - id: php.laravel.framework
+    languages: [php]
+    message: Laravel framework detected
+    severity: INFO
+    metadata:
+      facet_slot: framework.app.detected
+      leaf_id: "19"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\buse\\s+Illuminate\\\\[A-Za-z0-9_\\\\]+;"
+          - pattern: app()->make(...)
+
+  - id: php.symfony.framework
+    languages: [php]
+    message: Symfony framework detected
+    severity: INFO
+    metadata:
+      facet_slot: framework.app.detected
+      leaf_id: "19"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\buse\\s+Symfony\\\\Component\\\\[A-Za-z0-9_\\\\]+;"
+          - pattern-regex: "\\bnew\\s+Symfony\\\\Component\\\\HttpFoundation\\\\Request\\b"
+
+  - id: php.slim.framework
+    languages: [php]
+    message: Slim framework detected
+    severity: INFO
+    metadata:
+      facet_slot: framework.app.detected
+      leaf_id: "19"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern-regex: "\\bSlim\\\\App\\b"
+          - pattern: AppFactory::create()
