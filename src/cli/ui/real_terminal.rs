@@ -15,6 +15,8 @@ use crate::claude::subprocess::CliClaudeRunner;
 use crate::cli::args::SyncArgs;
 use crate::cli::commands::auth::check_auth;
 use crate::cli::commands::sync::{resolve_cwd, run_sync};
+use dialoguer::Confirm as DialoguerConfirm;
+
 use crate::cli::ui::file_confirm::TerminalIO;
 use crate::config::paths::config_path;
 use crate::error::ActualError;
@@ -50,6 +52,15 @@ impl TerminalIO for RealTerminal {
 
     fn write_line(&self, text: &str) {
         let _ = self.term.write_line(text);
+    }
+
+    fn confirm(&self, prompt: &str) -> Result<bool, ActualError> {
+        DialoguerConfirm::new()
+            .with_prompt(prompt)
+            .default(false)
+            .interact_opt()
+            .map_err(|e| ActualError::ConfigError(format!("confirmation failed: {e}")))
+            .map(|opt| opt.unwrap_or(false))
     }
 }
 
