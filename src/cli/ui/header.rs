@@ -39,7 +39,7 @@ pub fn render_header_bar(width: usize, version: &str, auth: Option<&AuthDisplay>
     let right = format_auth_status(auth);
 
     let left_len = left.len();
-    let right_len = console::strip_ansi_codes(&right).len();
+    let right_len = console::measure_text_width(&right);
 
     // Pad between left and right; if the line is too narrow, just concatenate.
     let gap = width.saturating_sub(left_len + right_len);
