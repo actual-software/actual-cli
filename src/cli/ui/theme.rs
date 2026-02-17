@@ -1,3 +1,17 @@
+//! Theme helpers for consistent CLI styling.
+//!
+//! All style functions return [`StyledObject`] which respects `NO_COLOR` on stdout.
+//! When writing to **stderr** (banners, progress, errors), call `.for_stderr()`
+//! on the returned value so that `NO_COLOR` / `CLICOLOR` detection uses the
+//! correct stream:
+//!
+//! ```ignore
+//! // stdout (default):
+//! println!("{}", theme::accent("OK"));
+//! // stderr:
+//! eprintln!("{}", theme::accent("OK").for_stderr());
+//! ```
+
 use console::{style, Emoji, StyledObject};
 
 // ─── Emoji constants with ASCII fallbacks ───
@@ -52,6 +66,21 @@ pub fn hint<D: std::fmt::Display>(val: D) -> StyledObject<D> {
 /// Format the "Error:" prefix in red bold.
 pub fn error_prefix() -> StyledObject<&'static str> {
     style("Error:").red().bold()
+}
+
+/// Brand accent (green) using the closest 256-color match to #00FB7E.
+pub fn accent<D: std::fmt::Display>(val: D) -> StyledObject<D> {
+    style(val).color256(48)
+}
+
+/// Secondary brand accent (teal) using the closest 256-color match to #179CA9.
+pub fn accent_secondary<D: std::fmt::Display>(val: D) -> StyledObject<D> {
+    style(val).color256(37)
+}
+
+/// Style for panel borders — dim for subtlety.
+pub fn border<D: std::fmt::Display>(val: D) -> StyledObject<D> {
+    style(val).dim()
 }
 
 #[cfg(test)]
@@ -122,5 +151,20 @@ mod tests {
             rendered.contains("Error:"),
             "expected 'Error:' in: {rendered}"
         );
+    }
+
+    #[test]
+    fn accent_produces_non_empty_output() {
+        assert!(!format!("{}", accent("ok")).is_empty());
+    }
+
+    #[test]
+    fn accent_secondary_produces_non_empty_output() {
+        assert!(!format!("{}", accent_secondary("ok")).is_empty());
+    }
+
+    #[test]
+    fn border_produces_non_empty_output() {
+        assert!(!format!("{}", border("ok")).is_empty());
     }
 }
