@@ -1249,6 +1249,22 @@ dependencies {
     }
 
     #[test]
+    fn test_go_mod_require_whitespace_before_closing_paren() {
+        // Covers the branch where strip_suffix(')') succeeds but the
+        // remaining content is only whitespace, so split_whitespace().next()
+        // returns None (line 298 / the implicit else of `if let Some(module)`).
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.21\n\nrequire ( \t )\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+    }
+
+    #[test]
     fn test_strip_python_version_specifier() {
         assert_eq!(
             strip_python_version_specifier("flask>=2.0"),
