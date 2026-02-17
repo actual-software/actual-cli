@@ -148,13 +148,19 @@ fn format_value(value: &serde_json::Value) -> String {
 pub fn build_canonical_ir(file_key: &str, language: &str, matches: &[ToolMatch]) -> CanonicalIR {
     let buckets = aggregate_matches_by_leaf(matches);
 
-    // Sort leaf_ids numerically (parse as u64, fall back to max for non-numeric).
-    // Secondary lexicographic sort ensures determinism when non-numeric IDs collide at u64::MAX.
+    // Sort leaf_ids: numeric IDs first (ascending), then non-numeric IDs lexicographically.
+    // Uses Option<u64> to distinguish parsed numerics from non-numeric fallbacks,
+    // avoiding ambiguity if a leaf_id is literally u64::MAX.
     let mut sorted_leaf_ids: Vec<&String> = buckets.keys().collect();
     sorted_leaf_ids.sort_by(|a, b| {
-        let ka = a.parse::<u64>().unwrap_or(u64::MAX);
-        let kb = b.parse::<u64>().unwrap_or(u64::MAX);
-        ka.cmp(&kb).then_with(|| a.cmp(b))
+        let ka = a.parse::<u64>().ok();
+        let kb = b.parse::<u64>().ok();
+        match (ka, kb) {
+            (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.cmp(b),
+        }
     });
 
     // Build facets_by_leaf_id map and IR text simultaneously.
@@ -654,6 +660,28 @@ mod tests {
         let pos_beta = ir1.ir_text.find("LEAF[beta]").unwrap();
         assert!(pos_3 < pos_alpha);
         assert!(pos_alpha < pos_beta);
+    }
+
+    #[test]
+    fn test_u64_max_leaf_id_sorts_correctly() {
+        // A leaf_id that is literally u64::MAX should sort as a numeric value,
+        // not collide with non-numeric IDs.
+        let max_str = u64::MAX.to_string();
+        let matches = vec![
+            make_match("r1", "s", &max_str, serde_json::json!("max"), 0.9),
+            make_match("r2", "s", "alpha", serde_json::json!("a"), 0.9),
+            make_match("r3", "s", "5", serde_json::json!("five"), 0.9),
+        ];
+        let ir = build_canonical_ir("f.rs", "rust", &matches);
+        // Numeric 5 first, then numeric u64::MAX, then non-numeric "alpha".
+        let pos_5 = ir.ir_text.find("LEAF[5]").unwrap();
+        let pos_max = ir.ir_text.find(&format!("LEAF[{max_str}]")).unwrap();
+        let pos_alpha = ir.ir_text.find("LEAF[alpha]").unwrap();
+        assert!(pos_5 < pos_max, "5 should sort before u64::MAX");
+        assert!(
+            pos_max < pos_alpha,
+            "u64::MAX (numeric) should sort before non-numeric"
+        );
     }
 
     #[test]
