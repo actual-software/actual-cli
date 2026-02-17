@@ -24,7 +24,6 @@ const DATA_MARKUP_LANGUAGES: &[LanguageType] = &[
     LanguageType::Protobuf,
     LanguageType::Dockerfile,
     LanguageType::MsBuild,
-    LanguageType::Qcl,
 ];
 
 /// Maps a tokei `LanguageType` to the project's `Language` enum.
@@ -118,7 +117,7 @@ pub fn detect_languages(path: &Path) -> Result<Vec<(Language, usize)>> {
 ///
 /// assert_eq!(normalize_language("ts"), Some("typescript"));
 /// assert_eq!(normalize_language("py"), Some("python"));
-/// assert_eq!(normalize_language("rust"), None); // not an alias (unrecognized inputs also return None)
+/// assert_eq!(normalize_language("rust"), None); // canonical — not an alias for something else
 /// ```
 pub fn normalize_language(value: &str) -> Option<&'static str> {
     match value.to_lowercase().as_str() {
