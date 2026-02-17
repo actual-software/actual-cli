@@ -686,20 +686,34 @@ mod tests {
 
     #[test]
     fn test_non_numeric_before_numeric_sorts_after() {
-        // Explicitly exercise the (None, Some(_)) => Greater branch in the
-        // leaf_id comparator by providing exactly one non-numeric and one
-        // numeric leaf_id.
+        // Use 4 leaf IDs (2 non-numeric, 2 numeric) so the sort algorithm
+        // must invoke the comparator in both directions, exercising both
+        // (Some(_), None) => Less  (line 160) and
+        // (None, Some(_)) => Greater (line 161).
         let matches = vec![
-            make_match("r1", "s", "zzz", serde_json::json!("a"), 0.9),
-            make_match("r2", "s", "1", serde_json::json!("b"), 0.9),
+            make_match("r1", "s", "alpha", serde_json::json!("a"), 0.9),
+            make_match("r2", "s", "2", serde_json::json!("b"), 0.9),
+            make_match("r3", "s", "beta", serde_json::json!("c"), 0.9),
+            make_match("r4", "s", "1", serde_json::json!("d"), 0.9),
         ];
         let ir = build_canonical_ir("f.rs", "rust", &matches);
         let pos_1 = ir.ir_text.find("LEAF[1]").unwrap();
-        let pos_zzz = ir.ir_text.find("LEAF[zzz]").unwrap();
+        let pos_2 = ir.ir_text.find("LEAF[2]").unwrap();
+        let pos_alpha = ir.ir_text.find("LEAF[alpha]").unwrap();
+        let pos_beta = ir.ir_text.find("LEAF[beta]").unwrap();
+        // Numeric IDs sort before non-numeric IDs.
         assert!(
-            pos_1 < pos_zzz,
-            "numeric 1 should sort before non-numeric zzz"
+            pos_1 < pos_alpha,
+            "numeric 1 should sort before non-numeric alpha"
         );
+        assert!(
+            pos_2 < pos_alpha,
+            "numeric 2 should sort before non-numeric alpha"
+        );
+        // Within numeric IDs, sort numerically.
+        assert!(pos_1 < pos_2, "1 should sort before 2");
+        // Within non-numeric IDs, sort lexicographically.
+        assert!(pos_alpha < pos_beta, "alpha should sort before beta");
     }
 
     #[test]
