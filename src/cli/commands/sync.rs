@@ -112,7 +112,9 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     };
 
     // 4. Filter by --project if specified
-    let analysis = filter_projects(analysis, &args.projects)?;
+    let analysis = filter_projects(analysis, &args.projects).inspect_err(|_| {
+        pipeline.finish_remaining();
+    })?;
 
     // 5. Confirmation (unless --force)
     if args.force {
