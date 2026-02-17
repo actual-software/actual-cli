@@ -19,7 +19,7 @@ use crate::cli::commands::auth::check_auth;
 use crate::cli::commands::sync::{resolve_cwd, run_sync};
 use dialoguer::Confirm as DialoguerConfirm;
 
-use crate::cli::ui::file_confirm::TerminalIO;
+use crate::cli::ui::terminal::TerminalIO;
 use crate::config::paths::config_path;
 use crate::error::ActualError;
 
