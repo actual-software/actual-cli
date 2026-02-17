@@ -361,10 +361,12 @@ fn parse_pom_xml(project_dir: &Path, deps: &mut HashSet<String>) {
             .map(|m| m.as_str());
 
         if let Some(group) = group_id {
-            deps.insert(group.to_string());
-        }
-        if let Some(artifact) = artifact_id {
-            deps.insert(artifact.to_string());
+            deps.insert(group.to_string()); // Keep for framework detection
+            if let Some(artifact) = artifact_id {
+                deps.insert(format!("{group}:{artifact}")); // Combined coordinate
+            }
+        } else if let Some(artifact) = artifact_id {
+            deps.insert(artifact.to_string()); // Fallback: artifact-only when no group
         }
     }
 }
@@ -412,9 +414,8 @@ fn parse_build_gradle(project_dir: &Path, deps: &mut HashSet<String>) {
             // Format: group:artifact:version — extract artifact
             let parts: Vec<&str> = coord.split(':').collect();
             if parts.len() >= 2 {
-                deps.insert(parts[1].to_string());
-                // Also insert the groupId for Java/Kotlin framework matching
-                deps.insert(parts[0].to_string());
+                deps.insert(parts[0].to_string()); // groupId for framework detection
+                deps.insert(format!("{}:{}", parts[0], parts[1])); // Combined coordinate
             }
         }
     }
@@ -702,7 +703,7 @@ dependencies {
             .contains(&"org.springframework.boot".to_string()));
         assert!(info
             .dependencies
-            .contains(&"spring-boot-starter-web".to_string()));
+            .contains(&"org.springframework.boot:spring-boot-starter-web".to_string()));
     }
 
     #[test]
@@ -721,7 +722,9 @@ dependencies {
 
         let info = parse_dependencies(dir.path());
         assert!(info.dependencies.contains(&"io.ktor".to_string()));
-        assert!(info.dependencies.contains(&"ktor-server-core".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"io.ktor:ktor-server-core".to_string()));
     }
 
     #[test]
@@ -776,7 +779,7 @@ dependencies {
             .contains(&"org.springframework.boot".to_string()));
         assert!(info
             .dependencies
-            .contains(&"spring-boot-starter-web".to_string()));
+            .contains(&"org.springframework.boot:spring-boot-starter-web".to_string()));
     }
 
     #[test]
@@ -969,9 +972,15 @@ dependencies {
         .unwrap();
 
         let info = parse_dependencies(dir.path());
-        assert!(info.dependencies.contains(&"guava".to_string()));
-        assert!(info.dependencies.contains(&"lombok".to_string()));
-        assert!(info.dependencies.contains(&"postgresql".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"com.google.guava:guava".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"org.projectlombok:lombok".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"org.postgresql:postgresql".to_string()));
     }
 
     #[test]
@@ -985,7 +994,7 @@ dependencies {
         .unwrap();
 
         let info = parse_dependencies(dir.path());
-        assert!(info.dependencies.contains(&"mylib".to_string()));
+        assert!(info.dependencies.contains(&"com.example:mylib".to_string()));
         assert!(info.dependencies.contains(&"com.example".to_string()));
     }
 
@@ -1031,6 +1040,52 @@ dependencies {
 
         let info = parse_dependencies(dir.path());
         assert!(info.dependencies.contains(&"com.example".to_string()));
+    }
+
+    #[test]
+    fn test_pom_xml_combined_coordinate() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pom.xml"),
+            r#"
+<project>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+            <version>3.1.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.15.0</version>
+        </dependency>
+    </dependencies>
+</project>
+"#,
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        // Combined groupId:artifactId coordinates
+        assert!(info
+            .dependencies
+            .contains(&"org.springframework.boot:spring-boot-starter-web".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"com.fasterxml.jackson.core:jackson-databind".to_string()));
+        // groupId alone still present for backward-compatible registry lookup
+        assert!(info
+            .dependencies
+            .contains(&"org.springframework.boot".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"com.fasterxml.jackson.core".to_string()));
+        // Standalone artifactId should NOT be present
+        assert!(!info
+            .dependencies
+            .contains(&"spring-boot-starter-web".to_string()));
+        assert!(!info.dependencies.contains(&"jackson-databind".to_string()));
     }
 
     #[test]
