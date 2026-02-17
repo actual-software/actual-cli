@@ -127,11 +127,19 @@ mod tests {
 
     fn make_test_output(file_count: usize) -> TailoringOutput {
         let files: Vec<FileOutput> = (1..=file_count)
-            .map(|i| FileOutput {
-                path: format!("path/file{i}.md"),
-                content: format!("content of file {i}"),
-                reasoning: format!("reason for file {i}"),
-                adr_ids: vec![format!("adr-{i:03}")],
+            .map(|i| {
+                // First file gets 1 ADR (singular), rest get 2 (plural)
+                let adr_ids = if i == 1 {
+                    vec![format!("adr-{i:03}")]
+                } else {
+                    vec![format!("adr-{i:03}"), format!("adr-{i:03}-extra")]
+                };
+                FileOutput {
+                    path: format!("path/file{i}.md"),
+                    content: format!("content of file {i}"),
+                    reasoning: format!("reason for file {i}"),
+                    adr_ids,
+                }
             })
             .collect();
 
