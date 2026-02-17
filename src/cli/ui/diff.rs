@@ -100,20 +100,19 @@ pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<Strin
     let mut shown = 0;
 
     for change in diff.iter_all_changes() {
+        if shown >= MAX_DIFF_LINES {
+            break;
+        }
         match change.tag() {
             ChangeTag::Delete => {
-                if shown < MAX_DIFF_LINES {
-                    let line = change.value().trim_end_matches('\n');
-                    let _ = writeln!(output, "    {}", style(format!("- {line}")).red());
-                    shown += 1;
-                }
+                let line = change.value().trim_end_matches('\n');
+                let _ = writeln!(output, "    {}", style(format!("- {line}")).red());
+                shown += 1;
             }
             ChangeTag::Insert => {
-                if shown < MAX_DIFF_LINES {
-                    let line = change.value().trim_end_matches('\n');
-                    let _ = writeln!(output, "    {}", style(format!("+ {line}")).green());
-                    shown += 1;
-                }
+                let line = change.value().trim_end_matches('\n');
+                let _ = writeln!(output, "    {}", style(format!("+ {line}")).green());
+                shown += 1;
             }
             ChangeTag::Equal => {}
         }
