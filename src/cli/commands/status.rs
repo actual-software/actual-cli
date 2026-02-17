@@ -54,18 +54,23 @@ fn run_status(
     config_exists: bool,
     cwd: &Path,
 ) {
+    let stderr_width = console::Term::stderr()
+        .size_checked()
+        .map(|(_, cols)| cols as usize)
+        .unwrap_or(80)
+        .min(90);
     let width = console::Term::stdout()
         .size_checked()
         .map(|(_, cols)| cols as usize)
         .unwrap_or(80)
         .min(90);
 
-    // Banner + header bar
+    // Banner + header bar (written to stderr)
     print_banner(false);
     let auth = try_detect_auth();
     eprint!(
         "{}",
-        render_header_bar(width, env!("CARGO_PKG_VERSION"), auth.as_ref())
+        render_header_bar(stderr_width, env!("CARGO_PKG_VERSION"), auth.as_ref())
     );
 
     // Config panel
