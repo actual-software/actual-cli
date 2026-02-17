@@ -125,9 +125,7 @@ impl SyncPipeline {
     /// output is consistent regardless of whether `start()` was called first.
     pub fn success(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bars.get(phase as usize) {
-            let finished_style =
-                ProgressStyle::with_template("  {msg}").expect("invalid finished template");
-            bar.set_style(finished_style);
+            bar.set_style(Self::finished_style());
             bar.finish_with_message(format!("{} {message}", style(SUCCESS_SYMBOL).green()));
         }
     }
@@ -138,9 +136,7 @@ impl SyncPipeline {
     /// output is consistent regardless of whether `start()` was called first.
     pub fn error(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bars.get(phase as usize) {
-            let finished_style =
-                ProgressStyle::with_template("  {msg}").expect("invalid finished template");
-            bar.set_style(finished_style);
+            bar.set_style(Self::finished_style());
             bar.finish_with_message(format!("{} {message}", style(ERROR_SYMBOL).red()));
         }
     }
@@ -151,11 +147,14 @@ impl SyncPipeline {
     /// output is consistent regardless of whether `start()` was called first.
     pub fn warn(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bars.get(phase as usize) {
-            let finished_style =
-                ProgressStyle::with_template("  {msg}").expect("invalid finished template");
-            bar.set_style(finished_style);
+            bar.set_style(Self::finished_style());
             bar.finish_with_message(format!("{} {message}", style(WARN_SYMBOL).yellow()));
         }
+    }
+
+    /// Style used when a phase has completed (success, error, or warn).
+    fn finished_style() -> ProgressStyle {
+        ProgressStyle::with_template("  {msg}").expect("invalid finished template")
     }
 
     /// Mark all unfinished phases as skipped.
