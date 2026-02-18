@@ -13,8 +13,8 @@ use crate::config::types::Config;
 use crate::error::ActualError;
 use crate::generation::markers;
 
-pub fn exec(args: &StatusArgs) -> i32 {
-    super::handle_result(load_and_run(args))
+pub fn exec(args: &StatusArgs) -> Result<(), ActualError> {
+    load_and_run(args)
 }
 
 fn load_and_run(args: &StatusArgs) -> Result<(), ActualError> {
@@ -246,6 +246,7 @@ fn format_verbose_section(cfg: &Config, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::commands::handle_result;
     use crate::config::types::{CachedAnalysis, TelemetryConfig};
     use crate::testutil::ENV_MUTEX;
     use std::collections::HashMap;
@@ -375,7 +376,7 @@ mod tests {
     fn test_exec_returns_zero() {
         with_temp_config(|| {
             let args = StatusArgs { verbose: false };
-            let code = exec(&args);
+            let code = handle_result(exec(&args));
             assert_eq!(code, 0);
         });
     }
@@ -384,7 +385,7 @@ mod tests {
     fn test_exec_verbose_returns_zero() {
         with_temp_config(|| {
             let args = StatusArgs { verbose: true };
-            let code = exec(&args);
+            let code = handle_result(exec(&args));
             assert_eq!(code, 0);
         });
     }
@@ -396,7 +397,7 @@ mod tests {
         // Set ACTUAL_CONFIG to empty string which will cause config_path to fail
         std::env::set_var("ACTUAL_CONFIG", "");
         let args = StatusArgs { verbose: false };
-        let code = exec(&args);
+        let code = handle_result(exec(&args));
         assert_ne!(code, 0);
         restore_env("ACTUAL_CONFIG", saved);
     }

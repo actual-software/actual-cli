@@ -60,8 +60,13 @@ fn walk_for_claude_md(dir: &Path, results: &mut Vec<PathBuf>) {
     }
 }
 
-/// Convert a command result to an exit code, printing any error.
-pub(crate) fn handle_result(result: Result<(), ActualError>) -> i32 {
+/// Convert a command result to an exit code, printing any error to stderr.
+///
+/// Renders a styled error panel (including an optional hint) and returns the
+/// numeric exit code from [`ActualError::exit_code`].  This is the single
+/// place where error output is formatted, so callers never need to print
+/// errors themselves.
+pub fn handle_result(result: Result<(), ActualError>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
