@@ -743,10 +743,16 @@ mod tests {
     }
 
     // ---- scanner creation tests ----
-    // Note: new() delegates to with_name("semgrep") internally. The Ok path is
-    // covered by test_with_name_finds_existing_binary (using "sh" as proxy binary)
-    // and the Err path by test_with_name_fails_for_nonexistent_binary, so no
-    // separate test for the delegation is needed.
+
+    #[test]
+    fn test_new_delegates_to_with_name() {
+        // new() delegates to with_name("semgrep"). Both calls must agree on
+        // success/failure in the same environment (semgrep may or may not be installed).
+        let result_new = SemgrepScanner::new(std::time::Duration::from_secs(30));
+        let result_with_name =
+            SemgrepScanner::with_name("semgrep", std::time::Duration::from_secs(30));
+        assert_eq!(result_new.is_ok(), result_with_name.is_ok());
+    }
 
     #[test]
     fn test_with_name_finds_existing_binary() {
