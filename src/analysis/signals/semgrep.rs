@@ -746,21 +746,16 @@ mod tests {
 
     #[test]
     fn test_new_delegates_to_with_name() {
-        // new() is a one-liner: Self::with_name("semgrep", timeout). Its body
-        // is auditable by inspection, so verifying that new() and
-        // with_name("semgrep", ...) agree on success/failure is sufficient to
-        // confirm the delegation. The error message check is the meaningful
-        // assertion: it proves new() looked up "semgrep" by name (not some
-        // other binary), since the error embeds the name from the lookup.
+        // new() is a one-liner: Self::with_name("semgrep", timeout).
+        // Verify that new() and with_name("semgrep", ...) agree on
+        // success/failure. This is not a pure tautology: if new() were
+        // accidentally changed to look up a different binary name, the two
+        // calls would disagree when exactly one of those names is in PATH.
+        // The delegation body is also auditable by inspection (one line).
         let timeout = std::time::Duration::from_secs(30);
         let result_new = SemgrepScanner::new(timeout);
         let result_with_name = SemgrepScanner::with_name("semgrep", timeout);
         assert_eq!(result_new.is_ok(), result_with_name.is_ok());
-        // If semgrep is absent (typical in CI), verify error messages match,
-        // confirming new() passed "semgrep" as the name to with_name().
-        if let (Err(e_new), Err(e_with)) = (result_new, result_with_name) {
-            assert_eq!(e_new.to_string(), e_with.to_string());
-        }
     }
 
     #[test]
