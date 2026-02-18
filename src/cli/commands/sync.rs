@@ -463,13 +463,30 @@ fn filter_projects(
 /// Compute a stable repo key by hashing the git origin URL.
 ///
 /// Falls back to hashing the root directory path if not a git repo or
-/// if the remote URL cannot be determined.
+/// if the remote URL cannot be determined. Applies a 5-second timeout to
+/// the git subprocess; on timeout, silently falls back to the path hash.
 fn compute_repo_key(root_dir: &Path) -> String {
-    let input = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(root_dir)
-        .output()
+    compute_repo_key_with_timeout(root_dir, std::time::Duration::from_secs(5))
+}
+
+fn compute_repo_key_with_timeout(root_dir: &Path, timeout: std::time::Duration) -> String {
+    use std::sync::mpsc;
+
+    let root_dir_buf = root_dir.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let output = std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&root_dir_buf)
+            .output();
+        let _ = tx.send(output);
+    });
+
+    let input = rx
+        .recv_timeout(timeout)
         .ok()
+        .and_then(|r| r.ok())
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| root_dir.to_string_lossy().to_string());
@@ -2071,6 +2088,17 @@ mod tests {
         let key1 = compute_repo_key(dir1.path());
         let key2 = compute_repo_key(dir2.path());
         assert_ne!(key1, key2, "different dirs should produce different keys");
+    }
+
+    #[test]
+    fn test_compute_repo_key_timeout_falls_back_to_path_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        // Duration::ZERO guarantees immediate timeout — always takes the fallback path
+        let result = compute_repo_key_with_timeout(dir.path(), std::time::Duration::ZERO);
+        assert_eq!(result.len(), 64, "expected 64-char SHA256 hex string");
+        // Deterministic: same dir → same hash
+        let result2 = compute_repo_key_with_timeout(dir.path(), std::time::Duration::ZERO);
+        assert_eq!(result, result2);
     }
 
     // ── raw_adrs_to_output tests ──
