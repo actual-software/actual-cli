@@ -439,6 +439,67 @@ mod tests {
     }
 
     #[test]
+    fn test_write_fails_when_root_dir_does_not_exist() {
+        let nonexistent = Path::new("/tmp/__nonexistent_actual_cli_test_dir__");
+        let files = vec![FileOutput {
+            path: "CLAUDE.md".to_string(),
+            content: "content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(nonexistent, &files);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed action when root dir does not exist"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(
+            err_msg.contains("Failed to canonicalize root directory"),
+            "expected root canonicalize error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_layer2_symlink_escape_fails() {
+        use std::os::unix::fs::symlink;
+
+        let outer_dir = tempfile::tempdir().expect("failed to create outer temp dir");
+        let inner_dir = tempfile::tempdir().expect("failed to create inner temp dir");
+
+        // Create a symlink inside inner_dir that points outside (to outer_dir)
+        let symlink_path = inner_dir.path().join("escape");
+        symlink(outer_dir.path(), &symlink_path).expect("failed to create symlink");
+
+        let files = vec![FileOutput {
+            path: "escape/CLAUDE.md".to_string(),
+            content: "malicious content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(inner_dir.path(), &files);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed action for symlink escape"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(
+            err_msg.contains("path escapes root directory"),
+            "expected 'path escapes root directory' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
     fn test_write_result_and_action_clone() {
         // Exercise Clone for WriteResult with all WriteAction variants
         let cases = vec![
