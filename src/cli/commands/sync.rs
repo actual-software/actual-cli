@@ -2755,6 +2755,45 @@ mod tests {
         assert!(result.is_err(), "expected tailoring to fail");
     }
 
+    // ── mock runner success path coverage ──
+
+    /// Valid `TailoringOutput` JSON that the mock runner can return successfully.
+    const VALID_TAILORING_JSON: &str = "{\"files\":[{\"path\":\"CLAUDE.md\",\"content\":\"Rules.\",\"reasoning\":\"Root rules\",\"adr_ids\":[\"adr-001\"]}],\"skipped_adrs\":[],\"summary\":{\"total_input\":1,\"applicable\":1,\"not_applicable\":0,\"files_generated\":1}}";
+
+    #[test]
+    fn test_mock_runner_run_tailoring_success_path() {
+        // Exercises MockRunner::run_tailoring when json parses successfully
+        // (the Ok(parsed) branch that is otherwise unreachable in other tests).
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_TAILORING_JSON);
+        let args = SyncArgs {
+            dry_run: true, // dry-run so we don't write files
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: false, // triggers tailoring path
+            max_budget_usd: None,
+            output_format: None,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+        );
+        assert!(
+            result.is_ok(),
+            "expected success with valid tailoring JSON: {result:?}"
+        );
+    }
+
     // ── compute_tailoring_cache_key tests ──
 
     /// Build a minimal test [`Adr`] with the given id and policies for cache key tests.
