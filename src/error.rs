@@ -83,6 +83,7 @@ mod tests {
     fn test_exit_codes() {
         assert_eq!(ActualError::ClaudeNotFound.exit_code(), 2);
         assert_eq!(ActualError::ClaudeNotAuthenticated.exit_code(), 2);
+        assert_eq!(ActualError::CodexNotFound.exit_code(), 2);
         assert_eq!(
             ActualError::ClaudeSubprocessFailed {
                 message: "fail".to_string(),
@@ -137,6 +138,13 @@ mod tests {
         assert!(
             msg.contains("not installed"),
             "expected 'not installed' in: {msg}"
+        );
+
+        let msg = ActualError::CodexNotFound.to_string();
+        assert!(msg.contains("not found"), "expected 'not found' in: {msg}");
+        assert!(
+            msg.contains("@openai/codex"),
+            "expected '@openai/codex' in: {msg}"
         );
 
         let msg = ActualError::ClaudeNotAuthenticated.to_string();
@@ -223,6 +231,14 @@ mod tests {
         assert_eq!(
             ActualError::ClaudeNotFound.hint(),
             Some("npm install -g @anthropic-ai/claude-code")
+        );
+    }
+
+    #[test]
+    fn test_hint_codex_not_found() {
+        assert_eq!(
+            ActualError::CodexNotFound.hint(),
+            Some("npm install -g @openai/codex")
         );
     }
 
