@@ -37,8 +37,9 @@ mod tests {
         let analysis_file = dir.join("analysis_response.json");
         std::fs::write(&auth_file, auth_json).unwrap();
         std::fs::write(&analysis_file, analysis_json).unwrap();
-        let auth_path = auth_file.to_str().unwrap();
-        let analysis_path = analysis_file.to_str().unwrap();
+        // Escape paths so they are safe inside single-quoted shell strings.
+        let auth_path = shell_single_quote_escape(auth_file.to_str().unwrap());
+        let analysis_path = shell_single_quote_escape(analysis_file.to_str().unwrap());
         let script = dir.join("fake-claude");
         let content = format!(
             "#!/bin/sh\n\
@@ -79,8 +80,9 @@ mod tests {
         let analysis_file = dir.join("analysis_response.json");
         std::fs::write(&auth_file, auth_json).unwrap();
         std::fs::write(&analysis_file, analysis_json).unwrap();
-        let auth_path = auth_file.to_str().unwrap();
-        let analysis_path = analysis_file.to_str().unwrap();
+        // Escape paths so they are safe inside single-quoted shell strings.
+        let auth_path = shell_single_quote_escape(auth_file.to_str().unwrap());
+        let analysis_path = shell_single_quote_escape(analysis_file.to_str().unwrap());
         let script = dir.join("fake-claude");
         let content = format!(
             "#!/bin/sh\n\
