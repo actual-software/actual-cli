@@ -12,7 +12,7 @@
 /// Example: `it's` becomes `it'\''s`, which when wrapped as `'it'\''s'`
 /// yields the string `it's` in the shell.
 #[cfg(unix)]
-fn shell_single_quote_escape(s: &str) -> String {
+pub fn shell_single_quote_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
