@@ -8,22 +8,49 @@ actual [OPTIONS] [COMMAND]
 
 ### Primary Command: `actual sync`
 
-The main workflow. Analyzes the repo, fetches ADRs, tailors them, and writes `CLAUDE.md`.
+The main workflow. Analyzes the repo, fetches ADRs, tailors them, and writes the output file.
 
 ```
 actual sync [OPTIONS]
 
 Options:
-  --dry-run           Show summary of what would change (combine with --full for complete output)
-  --full              With --dry-run, output the full rendered CLAUDE.md to stdout
-  --force             Skip user confirmation (still respects rejection memory)
-  --reset-rejections  Clear remembered ADR rejections and show all ADRs again
-  --project <PATH>    Target a specific sub-project in a monorepo (can be repeated)
-  --model <MODEL>     Override Claude Code model (e.g., "sonnet", "opus")
-  --api-url <URL>     Override the ADR bank API endpoint
-  --verbose           Show detailed progress and Claude Code output
-  --no-tailor         Skip the local tailoring step; use ADRs as-is from the bank
+  --dry-run                 Show summary of what would change (combine with --full for complete output)
+  --full                    With --dry-run, output the full rendered file to stdout
+  --force                   Skip user confirmation (still respects rejection memory)
+  --reset-rejections        Clear remembered ADR rejections and show all ADRs again
+  --project <PATH>          Target a specific sub-project in a monorepo (can be repeated)
+  --model <MODEL>           Override Claude Code model (e.g., "sonnet", "opus")
+  --api-url <URL>           Override the ADR bank API endpoint
+  --verbose                 Show detailed progress and Claude Code output
+  --no-tailor               Skip the local tailoring step; use ADRs as-is from the bank
+  --output-format <FORMAT>  Output file format (default: claude-md)
+                            Values: claude-md, agents-md, cursor-rules
 ```
+
+#### Output Format Compatibility
+
+| Format         | Tool / IDE       | File(s) written                        |
+|----------------|------------------|----------------------------------------|
+| `claude-md`    | Claude Code      | `CLAUDE.md`                            |
+| `agents-md`    | Codex CLI        | `AGENTS.md`                            |
+| `cursor-rules` | Cursor IDE       | `.cursor/rules/actual-policies.mdc`    |
+
+The default is `claude-md`.  To change it for a single run:
+
+```sh
+actual sync --output-format agents-md
+actual sync --output-format cursor-rules
+```
+
+To change it permanently (persisted in `~/.actualai/actual/config.yaml`):
+
+```sh
+actual config set output_format agents-md
+```
+
+Only one format is active per `actual sync` run.  Teams that need multiple output
+files (e.g., both `CLAUDE.md` and `AGENTS.md`) should run `actual sync` twice with
+different `--output-format` values, or configure separate CI jobs targeting each format.
 
 ### Utility Commands
 
