@@ -254,10 +254,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         std::fs::write(dir.path().join("CLAUDE.md"), "Claude rules").unwrap();
         let files = find_output_files(dir.path(), &OutputFormat::CursorRules);
-        assert!(
-            files.is_empty(),
-            "CursorRules format should not find CLAUDE.md"
-        );
+        assert_eq!(files.len(), 0);
     }
 
     #[test]
@@ -265,10 +262,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         std::fs::write(dir.path().join("AGENTS.md"), "Agent rules").unwrap();
         let files = find_output_files(dir.path(), &OutputFormat::CursorRules);
-        assert!(
-            files.is_empty(),
-            "CursorRules format should not find AGENTS.md"
-        );
+        assert_eq!(files.len(), 0);
     }
 
     #[test]
@@ -306,12 +300,10 @@ mod tests {
     fn test_find_output_files_cursor_rules_both_root_and_subproject() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         // Root-level .cursor/rules/actual-policies.mdc
-        std::fs::create_dir_all(dir.path().join(".cursor").join("rules")).unwrap();
+        let cursor_rules = dir.path().join(".cursor").join("rules");
+        std::fs::create_dir_all(&cursor_rules).unwrap();
         std::fs::write(
-            dir.path()
-                .join(".cursor")
-                .join("rules")
-                .join("actual-policies.mdc"),
+            cursor_rules.join("actual-policies.mdc"),
             "Root cursor rules",
         )
         .unwrap();
