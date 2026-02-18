@@ -170,13 +170,26 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     pipeline.start(SyncPhase::Fetch, "Fetching ADRs...");
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| ActualError::InternalError(format!("Failed to create async runtime: {e}")))?;
-    let response = rt.block_on(async {
-        let retry_config = RetryConfig::default();
-        tokio::select! {
-            result = with_retry(&retry_config, || client.post_match(&request)) => result,
-            _ = tokio::signal::ctrl_c() => Err(ActualError::UserCancelled),
-        }
+
+    let root_dir_owned = root_dir.to_path_buf();
+    let (response, existing_paths) = rt.block_on(async {
+        let api_future = async {
+            let retry_config = RetryConfig::default();
+            tokio::select! {
+                result = with_retry(&retry_config, || client.post_match(&request)) => result,
+                _ = tokio::signal::ctrl_c() => Err(ActualError::UserCancelled),
+            }
+        };
+
+        let fs_future =
+            tokio::task::spawn_blocking(move || find_existing_claude_md(&root_dir_owned));
+
+        tokio::join!(api_future, fs_future)
     });
+
+    // Unwrap the spawn_blocking JoinHandle
+    let existing_paths = existing_paths
+        .map_err(|e| ActualError::InternalError(format!("CLAUDE.md discovery task failed: {e}")))?;
 
     let response = match response {
         Ok(r) => {
@@ -213,7 +226,6 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     }
 
     // 2d. Tailor or skip (--no-tailor), with caching
-    let existing_paths = find_existing_claude_md(root_dir);
 
     // Compute cache key from all tailoring inputs (None for non-git repos)
     let mut adr_ids: Vec<String> = filtered_adrs.iter().map(|a| a.id.clone()).collect();
