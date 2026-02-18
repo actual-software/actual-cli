@@ -808,4 +808,27 @@ mod tests {
                 .unwrap_or_else(|e| panic!("from_str({s}) failed after as_str: {e}"));
         }
     }
+
+    #[test]
+    fn test_set_and_get_output_format_claude_md() {
+        let mut config = Config::default();
+        set(&mut config, "output_format", "claude-md").unwrap();
+        assert_eq!(get(&config, "output_format").unwrap(), "claude-md");
+    }
+
+    #[test]
+    fn test_get_unset_output_format() {
+        let config = Config::default();
+        let err = get(&config, "output_format").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_invalid_output_format() {
+        let mut config = Config::default();
+        let err = set(&mut config, "output_format", "cursor-rules").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid value"), "got: {msg}");
+    }
 }
