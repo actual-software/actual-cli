@@ -94,8 +94,9 @@ mod tests {
     }
 
     /// Integration test: only runs when `claude` is actually on PATH.
-    /// Run with: cargo test --features integration
+    /// Run with: cargo test --features integration -- --ignored
     #[test]
+    #[ignore = "requires Claude Code to be installed on PATH"]
     #[cfg(feature = "integration")]
     fn test_find_claude_binary_on_path() {
         std::env::remove_var("CLAUDE_BINARY");
