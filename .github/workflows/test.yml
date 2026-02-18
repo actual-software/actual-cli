@@ -48,7 +48,7 @@ jobs:
 
       - name: Run tests
         run: |
-          cargo test --workspace 2>&1 | tee test-output.txt
+          cargo test --workspace --features integration 2>&1 | tee test-output.txt
           TEST_EXIT=${PIPESTATUS[0]}
           echo "test_exit=$TEST_EXIT" >> $GITHUB_ENV
           exit $TEST_EXIT
