@@ -49,7 +49,22 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_timeout_secs: Option<u64>,
 
-    /// Output file format (default: claude-md).
+    /// Output file format (default: `claude-md`).
+    ///
+    /// Supported values:
+    /// - `claude-md`    — write `CLAUDE.md` (Claude Code)
+    /// - `agents-md`    — write `AGENTS.md` (Codex CLI)
+    /// - `cursor-rules` — write `.cursor/rules/actual-policies.mdc` (Cursor IDE)
+    ///
+    /// Set via CLI: `actual sync --output-format agents-md`
+    /// Set persistently: `actual config set output_format agents-md`
+    ///
+    /// Only one format is active per sync run.  Teams that need multiple output
+    /// files (e.g., both `CLAUDE.md` and `AGENTS.md`) should run `actual sync`
+    /// twice with different `--output-format` values, or configure separate CI
+    /// jobs.  A future `output_formats: Vec<String>` field may be added to
+    /// support this natively; if so, `output_format` (singular) will be read
+    /// with a deprecation warning and users will be asked to migrate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_format: Option<OutputFormat>,
 
@@ -189,6 +204,62 @@ mod tests {
         assert_eq!(config.api_url, None);
         assert_eq!(config.telemetry, None);
         assert_eq!(config.concurrency, None);
+    }
+
+    /// Round-trip test: output_format = claude-md serializes and deserializes correctly.
+    #[test]
+    fn test_round_trip_output_format_claude_md() {
+        let config = Config {
+            output_format: Some(OutputFormat::ClaudeMd),
+            ..Config::default()
+        };
+        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        assert!(
+            yaml.contains("claude-md"),
+            "YAML must contain 'claude-md': {yaml}"
+        );
+        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        assert_eq!(config, deserialized);
+    }
+
+    /// Round-trip test: output_format = agents-md serializes and deserializes correctly.
+    #[test]
+    fn test_round_trip_output_format_agents_md() {
+        let config = Config {
+            output_format: Some(OutputFormat::AgentsMd),
+            ..Config::default()
+        };
+        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        assert!(
+            yaml.contains("agents-md"),
+            "YAML must contain 'agents-md': {yaml}"
+        );
+        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        assert_eq!(config, deserialized);
+    }
+
+    /// Round-trip test: output_format = cursor-rules serializes and deserializes correctly.
+    #[test]
+    fn test_round_trip_output_format_cursor_rules() {
+        let config = Config {
+            output_format: Some(OutputFormat::CursorRules),
+            ..Config::default()
+        };
+        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        assert!(
+            yaml.contains("cursor-rules"),
+            "YAML must contain 'cursor-rules': {yaml}"
+        );
+        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        assert_eq!(config, deserialized);
+    }
+
+    /// Partial YAML with output_format set deserializes correctly.
+    #[test]
+    fn test_partial_yaml_with_output_format() {
+        let yaml = "output_format: agents-md\n";
+        let config: Config = serde_yaml::from_str(yaml).expect("deserialize partial YAML");
+        assert_eq!(config.output_format, Some(OutputFormat::AgentsMd));
     }
 
     /// Round-trip test with CachedTailoring included.
