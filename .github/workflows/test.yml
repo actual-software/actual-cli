@@ -216,6 +216,12 @@ jobs:
           name: e2e-output
         continue-on-error: true
 
+      - name: Prepare failure details
+        run: |
+          if [[ ! -f e2e-output.txt ]]; then
+            echo "E2E output not available (job may have failed before producing output)" > e2e-output.txt
+          fi
+
       - uses: poiley/bdgha@v2
         with:
           mode: create

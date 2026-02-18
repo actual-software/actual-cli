@@ -277,6 +277,10 @@ scenario_sync_realistic_project() {
     local managed_start managed_end managed_len
     managed_start="$(echo "$content" | grep -n '<!-- managed:actual-start -->' | cut -d: -f1 | head -1)"
     managed_end="$(echo "$content" | grep -n '<!-- managed:actual-end -->' | cut -d: -f1 | head -1)"
+    if [[ -z "$managed_start" || -z "$managed_end" ]]; then
+        fail "sync_realistic: managed-start or managed-end marker not found"
+        return
+    fi
     managed_len=$((managed_end - managed_start))
     if [[ "$managed_len" -gt 20 ]]; then
         ok "sync_realistic: managed section spans $managed_len lines (substantial)"
