@@ -25,8 +25,9 @@ Thumbs.db
 .audit/
 .check/
 
-# Coverage reports (downloaded CI artifacts)
+# Coverage reports (downloaded CI artifacts and local generation)
 coverage-report/
+lcov.info
 
 # Environment
 .env
