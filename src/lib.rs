@@ -9,6 +9,8 @@ pub mod generation;
 pub mod tailoring;
 pub mod telemetry;
 
+pub use cli::commands::handle_result;
+
 #[cfg(test)]
 pub(crate) mod testutil;
 
@@ -17,7 +19,7 @@ pub use error::ActualError;
 // Re-export CLI types for backward compatibility with tests
 pub use cli::args::{Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs, StatusArgs, SyncArgs};
 
-pub fn run(cli: Cli) -> i32 {
+pub fn run(cli: Cli) -> Result<(), ActualError> {
     match &cli.command {
         Command::Sync(args) => cli::commands::sync::exec(args),
         Command::Status(args) => cli::commands::status::exec(args),
