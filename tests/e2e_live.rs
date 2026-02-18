@@ -434,12 +434,8 @@ fn live_dry_run_no_files() {
 }
 
 #[test]
+#[ignore = "requires LIVE_E2E_TAILOR=1; run with --ignored and set LIVE_E2E_TAILOR=1"]
 fn live_sync_with_tailoring() {
-    if std::env::var("LIVE_E2E_TAILOR").as_deref() != Ok("1") {
-        eprintln!("Skipping live_sync_with_tailoring: set LIVE_E2E_TAILOR=1 to enable");
-        return;
-    }
-
     require_claude_auth();
 
     let tmp = tempdir().unwrap();
