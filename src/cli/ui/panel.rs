@@ -102,7 +102,7 @@ impl Panel {
         self
     }
 
-    /// Add a footer line rendered above the bottom border.
+    /// Add a full-width content line (conventionally used as the last row before the bottom border).
     pub fn footer(mut self, text: &str) -> Self {
         self.rows.push(PanelRow::Line(text.to_string()));
         self
