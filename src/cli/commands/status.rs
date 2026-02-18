@@ -4,7 +4,7 @@ use crate::api::DEFAULT_API_URL;
 use crate::branding::banner::print_banner;
 use crate::claude::binary::find_claude_binary;
 use crate::cli::args::StatusArgs;
-use crate::cli::commands::auth::check_auth;
+use crate::cli::commands::auth::check_auth_with_timeout;
 use crate::cli::ui::header::{render_header_bar, AuthDisplay};
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::theme;
@@ -39,16 +39,10 @@ fn resolve_cwd() -> PathBuf {
 /// times out (3 seconds), or any other error occurs. The status command
 /// should never fail or hang because of auth detection.
 fn try_detect_auth() -> Option<AuthDisplay> {
-    use std::sync::mpsc;
     use std::time::Duration;
 
     let binary = find_claude_binary().ok()?;
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(check_auth(&binary));
-    });
-    rx.recv_timeout(Duration::from_secs(3))
-        .ok()?
+    check_auth_with_timeout(&binary, Duration::from_secs(3))
         .ok()
         .map(|status| AuthDisplay {
             authenticated: status.logged_in,
