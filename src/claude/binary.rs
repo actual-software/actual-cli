@@ -98,7 +98,7 @@ mod tests {
     #[test]
     #[cfg(feature = "integration")]
     fn test_find_claude_binary_on_path() {
-        env::remove_var("CLAUDE_BINARY");
+        std::env::remove_var("CLAUDE_BINARY");
         let result = find_claude_binary();
         assert!(
             result.is_ok(),
