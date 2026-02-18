@@ -3,8 +3,16 @@ use crate::config::types::Config;
 use crate::error::ActualError;
 use crate::telemetry::metrics::SyncMetrics;
 
-// This is a write-only telemetry ingestion key, safe to embed in source.
-// It can only be used to submit telemetry data, not to read or query it.
+/// Public write-only telemetry key — safe to embed in client binaries.
+///
+/// This key is scoped exclusively to submitting counter metrics via
+/// `POST /counter/record`. It does not grant read, admin, or any other
+/// access to the telemetry service. Embedding it in the compiled binary
+/// is intentional and carries the same risk profile as a public Segment
+/// write key or a Mixpanel project token.
+///
+/// If this key is rotated, update it here and redeploy. No other files
+/// reference this constant.
 const SERVICE_KEY: &str = "ak_telemetry_prod_actual_cli";
 
 /// Send collected sync metrics to the telemetry endpoint.
