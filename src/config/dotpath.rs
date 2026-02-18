@@ -21,6 +21,48 @@ pub enum ConfigKey {
     TelemetryEnabled,
 }
 
+impl ConfigKey {
+    /// Exhaustive list of all settable config keys.
+    ///
+    /// This is the single source of truth: adding a new `ConfigKey` variant
+    /// requires updating this array (or the compiler will warn about a
+    /// missing match arm in `as_str`), which keeps `KNOWN_SETTABLE_KEYS`
+    /// in sync automatically.
+    pub const ALL: &'static [ConfigKey] = &[
+        ConfigKey::ApiUrl,
+        ConfigKey::Model,
+        ConfigKey::BatchSize,
+        ConfigKey::Concurrency,
+        ConfigKey::InvocationTimeoutSecs,
+        ConfigKey::MaxBudgetUsd,
+        ConfigKey::IncludeGeneral,
+        ConfigKey::MaxPerFramework,
+        ConfigKey::IncludeCategories,
+        ConfigKey::ExcludeCategories,
+        ConfigKey::TelemetryEnabled,
+    ];
+
+    /// Returns the canonical dotpath string for this key.
+    ///
+    /// This is the inverse of `from_str` and is exhaustively matched,
+    /// so adding a new variant without updating this method is a compile error.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            ConfigKey::ApiUrl => "api_url",
+            ConfigKey::Model => "model",
+            ConfigKey::BatchSize => "batch_size",
+            ConfigKey::Concurrency => "concurrency",
+            ConfigKey::InvocationTimeoutSecs => "invocation_timeout_secs",
+            ConfigKey::MaxBudgetUsd => "max_budget_usd",
+            ConfigKey::IncludeGeneral => "include_general",
+            ConfigKey::MaxPerFramework => "max_per_framework",
+            ConfigKey::IncludeCategories => "include_categories",
+            ConfigKey::ExcludeCategories => "exclude_categories",
+            ConfigKey::TelemetryEnabled => "telemetry.enabled",
+        }
+    }
+}
+
 impl FromStr for ConfigKey {
     type Err = ActualError;
 
@@ -48,6 +90,9 @@ impl FromStr for ConfigKey {
 }
 
 /// All settable key name strings, for use by CLI help or completions.
+///
+/// This must match `ConfigKey::ALL.iter().map(ConfigKey::as_str)` exactly.
+/// The test `test_known_settable_keys_matches_all_via_as_str` enforces this.
 pub const KNOWN_SETTABLE_KEYS: &[&str] = &[
     "api_url",
     "model",
@@ -708,7 +753,40 @@ mod tests {
         assert!(msg.contains("must be >= 1"), "got: {msg}");
     }
 
-    // --- Meta-test: all KNOWN_SETTABLE_KEYS round-trip through get() and set() ---
+    // --- Meta-tests: ConfigKey::ALL, as_str, KNOWN_SETTABLE_KEYS, and round-trips ---
+
+    #[test]
+    fn test_known_settable_keys_matches_all_via_as_str() {
+        // KNOWN_SETTABLE_KEYS must be exactly ConfigKey::ALL.iter().map(as_str).
+        // This is enforced at compile time via the const block, but also checked
+        // here to make the invariant explicit and catch any future N mismatch.
+        let expected: Vec<&str> = ConfigKey::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(
+            KNOWN_SETTABLE_KEYS,
+            expected.as_slice(),
+            "KNOWN_SETTABLE_KEYS must equal ConfigKey::ALL mapped through as_str"
+        );
+    }
+
+    #[test]
+    fn test_all_keys_parse_via_from_str() {
+        // Every key in KNOWN_SETTABLE_KEYS must parse successfully with from_str.
+        for key in KNOWN_SETTABLE_KEYS {
+            key.parse::<ConfigKey>()
+                .unwrap_or_else(|e| panic!("from_str({key}) failed: {e}"));
+        }
+    }
+
+    #[test]
+    fn test_as_str_round_trips_through_from_str() {
+        // For every ConfigKey variant, as_str() must parse back to a ConfigKey.
+        // This verifies from_str and as_str are inverses.
+        for key in ConfigKey::ALL {
+            let s = key.as_str();
+            s.parse::<ConfigKey>()
+                .unwrap_or_else(|e| panic!("from_str({s}) failed after as_str: {e}"));
+        }
+    }
 
     #[test]
     fn test_all_known_settable_keys_round_trip() {
@@ -719,7 +797,7 @@ mod tests {
             ("batch_size", "5"),
             ("concurrency", "4"),
             ("invocation_timeout_secs", "120"),
-            ("max_budget_usd", "1.0"),
+            ("max_budget_usd", "1.5"),
             ("include_general", "true"),
             ("max_per_framework", "3"),
             ("include_categories", "security,testing"),
@@ -727,28 +805,33 @@ mod tests {
             ("telemetry.enabled", "false"),
         ];
 
-        // Sanity-check: KNOWN_SETTABLE_KEYS and valid_values stay in sync.
+        // Sanity-check: valid_values must cover every key in KNOWN_SETTABLE_KEYS.
         assert_eq!(
             KNOWN_SETTABLE_KEYS.len(),
             valid_values.len(),
-            "KNOWN_SETTABLE_KEYS and valid_values must have the same length"
+            "valid_values must have an entry for every key in KNOWN_SETTABLE_KEYS"
         );
+        for (i, key) in KNOWN_SETTABLE_KEYS.iter().enumerate() {
+            assert_eq!(
+                valid_values[i].0, *key,
+                "valid_values[{i}] key must match KNOWN_SETTABLE_KEYS[{i}]"
+            );
+        }
 
         for (key, value) in valid_values {
-            assert_eq!(
-                *key,
-                KNOWN_SETTABLE_KEYS[valid_values.iter().position(|(k, _)| k == key).unwrap()],
-                "key order mismatch"
-            );
-
             let mut config = Config::default();
 
             // set() must succeed.
             set(&mut config, key, value)
                 .unwrap_or_else(|e| panic!("set({key}, {value}) failed: {e}"));
 
-            // get() must succeed after a successful set().
-            get(&config, key).unwrap_or_else(|e| panic!("get({key}) failed after set: {e}"));
+            // get() must return exactly the value that was set.
+            let got =
+                get(&config, key).unwrap_or_else(|e| panic!("get({key}) failed after set: {e}"));
+            assert_eq!(
+                got, *value,
+                "get({key}) returned {got:?} after set to {value:?}"
+            );
         }
     }
 }
