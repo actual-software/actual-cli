@@ -1,5 +1,21 @@
 #![allow(dead_code)]
 
+// ── Shell escaping helpers ───────────────────────────────────────────
+
+/// Escape a string so it is safe to embed inside a shell single-quoted string.
+///
+/// In POSIX shell, single-quoted strings cannot contain a literal single
+/// quote. The idiomatic escape is to end the single-quoted segment, emit a
+/// backslash-escaped (or double-quoted) single quote, then re-open the
+/// single-quoted segment: `'` → `'\''`.
+///
+/// Example: `it's` becomes `it'\''s`, which when wrapped as `'it'\''s'`
+/// yields the string `it's` in the shell.
+#[cfg(unix)]
+fn shell_single_quote_escape(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
 // ── Standard JSON constants ──────────────────────────────────────────
 
 pub const AUTH_OK: &str =
@@ -21,19 +37,22 @@ pub fn create_fake_claude_binary(
 ) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = dir.join("fake-claude");
+    let auth = shell_single_quote_escape(auth_json);
+    let analysis = shell_single_quote_escape(analysis_json);
     let script_content = format!(
         "#!/bin/sh\n\
          if [ \"$1\" = \"auth\" ]; then\n\
-         printf '%s\\n' '{}'\n\
+         printf '%s\\n' '{auth}'\n\
          exit 0\n\
          elif [ \"$1\" = \"--print\" ]; then\n\
-         printf '%s\\n' '{}'\n\
+         printf '%s\\n' '{analysis}'\n\
          exit 0\n\
          else\n\
          echo \"unexpected args: $@\" >&2\n\
          exit 1\n\
          fi\n",
-        auth_json, analysis_json,
+        auth = auth,
+        analysis = analysis,
     );
     std::fs::write(&script, script_content).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -51,6 +70,9 @@ pub fn create_fake_claude_binary_with_tailoring(
 ) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = dir.join("fake-claude");
+    let auth = shell_single_quote_escape(auth_json);
+    let analysis = shell_single_quote_escape(analysis_json);
+    let tailoring = shell_single_quote_escape(tailoring_json);
     let script_content = format!(
         "#!/bin/sh\n\
          if [ \"$1\" = \"auth\" ]; then\n\
@@ -68,9 +90,9 @@ pub fn create_fake_claude_binary_with_tailoring(
          echo \"unexpected args: $@\" >&2\n\
          exit 1\n\
          fi\n",
-        auth = auth_json,
-        tailoring = tailoring_json,
-        analysis = analysis_json,
+        auth = auth,
+        tailoring = tailoring,
+        analysis = analysis,
     );
     std::fs::write(&script, script_content).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -87,7 +109,10 @@ pub fn create_fake_claude_binary_capturing(
 ) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = dir.join("fake-claude");
-    let capture_str = capture_file.to_str().unwrap();
+    let auth = shell_single_quote_escape(auth_json);
+    let analysis = shell_single_quote_escape(analysis_json);
+    // Escape the capture path so it is safe inside single quotes.
+    let capture = shell_single_quote_escape(capture_file.to_str().unwrap());
     let script_content = format!(
         "#!/bin/sh\n\
          if [ \"$1\" = \"auth\" ]; then\n\
@@ -101,9 +126,9 @@ pub fn create_fake_claude_binary_capturing(
          echo \"unexpected args: $@\" >&2\n\
          exit 1\n\
          fi\n",
-        auth = auth_json,
-        capture = capture_str,
-        analysis = analysis_json,
+        auth = auth,
+        capture = capture,
+        analysis = analysis,
     );
     std::fs::write(&script, script_content).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -126,7 +151,11 @@ pub fn create_fake_claude_binary_capturing_with_tailoring(
 ) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let script = dir.join("fake-claude");
-    let capture_str = capture_file.to_str().unwrap();
+    let auth = shell_single_quote_escape(auth_json);
+    let analysis = shell_single_quote_escape(analysis_json);
+    let tailoring = shell_single_quote_escape(tailoring_json);
+    // Escape the capture path so it is safe inside single quotes.
+    let capture = shell_single_quote_escape(capture_file.to_str().unwrap());
     // Use printf with \0 delimiters between args and a clear invocation separator
     let script_content = format!(
         r#"#!/bin/sh
@@ -151,10 +180,10 @@ else
   exit 1
 fi
 "#,
-        auth = auth_json,
-        capture = capture_str,
-        tailoring = tailoring_json,
-        analysis = analysis_json,
+        auth = auth,
+        capture = capture,
+        tailoring = tailoring,
+        analysis = analysis,
     );
     std::fs::write(&script, script_content).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
