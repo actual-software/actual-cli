@@ -125,7 +125,7 @@ jobs:
   live-e2e:
     name: Live E2E
     needs: [sync-beads, test]
-    if: always() && needs.sync-beads.result != 'cancelled' && needs.test.result == 'success' && github.event_name == 'pull_request'
+    if: always() && needs.sync-beads.result != 'cancelled' && needs.test.result == 'success' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -169,6 +169,7 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ACTUAL_E2E_API_URL: https://api-service.api.staging.actual.ai
+        shell: bash
         run: |
           bash scripts/e2e.sh target/release/actual 2>&1 | tee e2e-output.txt
           E2E_EXIT=${PIPESTATUS[0]}
