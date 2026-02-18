@@ -5,7 +5,7 @@ use tokio::sync::Semaphore;
 
 use crate::analysis::types::Project;
 use crate::api::types::Adr;
-use crate::claude::ClaudeRunner;
+use crate::claude::TailoringRunner;
 use crate::error::ActualError;
 use crate::generation::merge::merge_outputs;
 use crate::generation::OutputFormat;
@@ -41,7 +41,7 @@ pub struct ConcurrentTailoringConfig<'a> {
 /// If `progress_tx` is `Some`, a [`TailoringEvent`] is sent for each project
 /// as it starts and completes (or fails). Send errors are silently ignored —
 /// the receiver may be dropped if the caller is no longer interested in events.
-pub async fn tailor_all_projects<R: ClaudeRunner>(
+pub async fn tailor_all_projects<R: TailoringRunner>(
     runner: &R,
     projects: &[Project],
     adrs: &[Adr],
@@ -93,7 +93,7 @@ pub async fn tailor_all_projects<R: ClaudeRunner>(
 /// Sends [`TailoringEvent::ProjectStarted`] before work begins and either
 /// [`TailoringEvent::ProjectCompleted`] or [`TailoringEvent::ProjectFailed`]
 /// when the project finishes. Send errors are silently ignored.
-async fn tailor_single_project<R: ClaudeRunner>(
+async fn tailor_single_project<R: TailoringRunner>(
     runner: &R,
     project: &Project,
     adrs: &[Adr],
@@ -244,11 +244,14 @@ mod tests {
         }
     }
 
-    impl ClaudeRunner for ConcurrentMockRunner {
-        async fn run<T: serde::de::DeserializeOwned + Send>(
+    impl TailoringRunner for ConcurrentMockRunner {
+        async fn run_tailoring(
             &self,
-            _args: &[String],
-        ) -> Result<T, ActualError> {
+            _prompt: &str,
+            _schema: &str,
+            _model_override: Option<&str>,
+            _max_budget_usd: Option<f64>,
+        ) -> Result<TailoringOutput, ActualError> {
             let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
             self.tracker.record(self.delay).await;
             let mut responses = self.responses.lock().unwrap();
