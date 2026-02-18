@@ -42,8 +42,6 @@ enum PanelRow {
     },
     /// Horizontal separator: `├───┤`.
     Separator,
-    /// Footer summary line rendered above the bottom border.
-    Footer(String),
 }
 
 /// A box-drawn panel with optional title and mixed content rows.
@@ -106,7 +104,7 @@ impl Panel {
 
     /// Add a footer line rendered above the bottom border.
     pub fn footer(mut self, text: &str) -> Self {
-        self.rows.push(PanelRow::Footer(text.to_string()));
+        self.rows.push(PanelRow::Line(text.to_string()));
         self
     }
 
@@ -158,17 +156,6 @@ impl Panel {
                         theme::border("├"),
                         theme::border(fill),
                         theme::border("┤")
-                    );
-                }
-                PanelRow::Footer(text) => {
-                    let line = Self::fit_content(text, inner);
-                    let _ = writeln!(
-                        out,
-                        "{} {}{} {}",
-                        theme::border("│"),
-                        line,
-                        Self::padding(inner, Self::visual_width(text).min(inner)),
-                        theme::border("│"),
                     );
                 }
             }
@@ -325,7 +312,7 @@ impl Panel {
 
         for row in &self.rows {
             match row {
-                PanelRow::Line(text) | PanelRow::Footer(text) => {
+                PanelRow::Line(text) => {
                     let _ = writeln!(out, "{text}");
                 }
                 PanelRow::KeyValue {
