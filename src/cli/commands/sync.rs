@@ -261,7 +261,10 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     };
 
     let output = if let Some(cached) = cached_output {
-        pipeline.skip(SyncPhase::Tailor, "Using cached tailoring result");
+        pipeline.skip(
+            SyncPhase::Tailor,
+            tailoring_cache_skip_msg(cached.summary.applicable),
+        );
         cached
     } else if args.no_tailor {
         pipeline.skip(SyncPhase::Tailor, "Tailoring skipped (--no-tailor)");
@@ -347,6 +350,19 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         pipeline.start_time(),
     )?;
     Ok(())
+}
+
+/// Return the pipeline skip message for a tailoring cache hit.
+///
+/// Distinguishes between a cached result with no applicable ADRs (deterministic
+/// empty output) and one that produced actual files, so users can tell at a
+/// glance why tailoring was skipped.
+fn tailoring_cache_skip_msg(applicable: usize) -> &'static str {
+    if applicable == 0 {
+        "No ADRs applicable to this project (cached)"
+    } else {
+        "Using cached tailoring result"
+    }
 }
 
 /// Apply a single [`TailoringEvent`] to the progress pipeline.
@@ -3028,6 +3044,200 @@ mod tests {
         assert!(
             second_time > first_time,
             "force should update cache timestamp: {first_time} vs {second_time}"
+        );
+    }
+
+    // ── tailoring_cache_skip_msg unit tests ──
+
+    #[test]
+    fn test_tailoring_cache_skip_msg_zero_applicable() {
+        assert_eq!(
+            tailoring_cache_skip_msg(0),
+            "No ADRs applicable to this project (cached)",
+            "expected 0-applicable message"
+        );
+    }
+
+    #[test]
+    fn test_tailoring_cache_skip_msg_nonzero_applicable() {
+        assert_eq!(
+            tailoring_cache_skip_msg(1),
+            "Using cached tailoring result",
+            "expected with-files message for applicable=1"
+        );
+        assert_eq!(
+            tailoring_cache_skip_msg(42),
+            "Using cached tailoring result",
+            "expected with-files message for applicable=42"
+        );
+    }
+
+    // ── tailoring cache hit message integration tests ──
+
+    /// Verify that when the tailoring cache contains a result with 0 applicable
+    /// ADRs, the second run uses the cache and completes successfully without
+    /// writing any files.
+    #[test]
+    fn test_tailoring_cache_hit_zero_applicable_message() {
+        // Hold ENV_MUTEX to serialize with tests that modify PATH (e.g. the
+        // fake-git timeout test).  git calls in init_git_repo and get_git_head
+        // must see the real git binary.
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Use empty ADR server so raw_adrs_to_output produces applicable=0
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let cfg_path = dir.path().join("config.yaml");
+
+        // First run: force + no_tailor + empty ADR response → cache stores applicable=0
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
+
+        // Verify that cache was stored and applicable == 0
+        let loaded = load_from(&cfg_path).unwrap();
+        let cached_tailoring = loaded.cached_tailoring.as_ref().unwrap();
+        let cached_output: TailoringOutput =
+            serde_yaml::from_value(cached_tailoring.tailoring.clone()).unwrap();
+        assert_eq!(
+            cached_output.summary.applicable, 0,
+            "expected 0 applicable ADRs in cache after empty-ADR run"
+        );
+        let first_key = cached_tailoring.cache_key.clone();
+
+        // Second run: force=false → should hit the cache (applicable=0 path)
+        // Provide "y" for project confirmation; no file selection needed (0 files)
+        let server2 = mock_api_server();
+        let term2 = MockTerminal::new(vec!["y"]);
+        let args2 = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: false,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server2.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
+        assert!(
+            result.is_ok(),
+            "expected cache-hit run with 0 applicable to succeed: {result:?}"
+        );
+
+        // Cache key must be unchanged (confirming cache was hit, not regenerated)
+        let loaded2 = load_from(&cfg_path).unwrap();
+        let second_key = loaded2.cached_tailoring.as_ref().unwrap().cache_key.clone();
+        assert_eq!(
+            first_key, second_key,
+            "cache key should be unchanged on 0-applicable cache hit"
+        );
+
+        // No CLAUDE.md should be written since there are 0 applicable ADRs
+        assert!(
+            !dir.path().join("CLAUDE.md").exists(),
+            "expected no CLAUDE.md for 0-applicable cached output"
+        );
+    }
+
+    /// Verify that when the tailoring cache contains a result with >0 applicable
+    /// ADRs, the second run uses the cache and writes the files as expected.
+    #[test]
+    fn test_tailoring_cache_hit_with_files_message() {
+        // Hold ENV_MUTEX to serialize with tests that modify PATH (e.g. the
+        // fake-git timeout test).  git calls in init_git_repo and get_git_head
+        // must see the real git binary.
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Use the ADR server so raw_adrs_to_output produces applicable=1
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let cfg_path = dir.path().join("config.yaml");
+
+        // First run: force + no_tailor + ADR response → cache stores applicable=1
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
+
+        // Verify that cache was stored and applicable > 0
+        let loaded = load_from(&cfg_path).unwrap();
+        let cached_tailoring = loaded.cached_tailoring.as_ref().unwrap();
+        let cached_output: TailoringOutput =
+            serde_yaml::from_value(cached_tailoring.tailoring.clone()).unwrap();
+        assert!(
+            cached_output.summary.applicable > 0,
+            "expected >0 applicable ADRs in cache"
+        );
+        let first_key = cached_tailoring.cache_key.clone();
+
+        // Remove the written CLAUDE.md so the second run can re-write it
+        let _ = std::fs::remove_file(dir.path().join("CLAUDE.md"));
+
+        // Second run: force=false → should hit the cache (with-files path)
+        let server2 = mock_api_server_with_adrs();
+        let term2 = MockTerminal::new(vec!["y"]).with_selection(Some(vec![0]));
+        let args2 = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: false,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server2.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
+        assert!(
+            result.is_ok(),
+            "expected cache-hit run with files to succeed: {result:?}"
+        );
+
+        // Cache key must be unchanged (confirming cache was hit, not regenerated)
+        let loaded2 = load_from(&cfg_path).unwrap();
+        let second_key = loaded2.cached_tailoring.as_ref().unwrap().cache_key.clone();
+        assert_eq!(
+            first_key, second_key,
+            "cache key should be unchanged on with-files cache hit"
+        );
+
+        // CLAUDE.md should be written from the cached output
+        assert!(
+            dir.path().join("CLAUDE.md").exists(),
+            "expected CLAUDE.md to be written from cached output with files"
         );
     }
 
