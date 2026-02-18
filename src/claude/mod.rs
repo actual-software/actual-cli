@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod binary;
+pub mod cursor_runner;
 pub mod obfuscation;
 pub mod openai_api;
 pub mod options;
