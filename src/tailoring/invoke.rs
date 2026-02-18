@@ -77,6 +77,24 @@ fn build_args(
     args
 }
 
+/// Returns `true` if `path` is a valid output file path for the given `format`.
+///
+/// - `ClaudeMd`: path must end with `"CLAUDE.md"`
+/// - `AgentsMd`: path must end with `"AGENTS.md"`
+/// - `CursorRules`: path must end with `".cursor/rules/actual-policies.mdc"`
+///   (or equal it, which is the same thing for relative paths)
+fn is_valid_output_path(path: &str, format: &OutputFormat) -> bool {
+    use crate::generation::format::CURSOR_RULES_PATH;
+    match format {
+        OutputFormat::CursorRules => {
+            // Accept the exact relative path or a subdirectory variant like
+            // "apps/web/.cursor/rules/actual-policies.mdc".
+            path.ends_with(CURSOR_RULES_PATH)
+        }
+        _ => path.ends_with(format.filename()),
+    }
+}
+
 /// Validate the tailoring output against the input ADR set.
 ///
 /// - Errors on empty content or invalid file paths (these are fatal).
@@ -94,7 +112,7 @@ pub(crate) fn validate_and_filter_output(
                 file.path
             )));
         }
-        if !file.path.ends_with(expected_filename) {
+        if !is_valid_output_path(&file.path, format) {
             return Err(ActualError::TailoringValidationError(format!(
                 "file path '{}' does not end with {expected_filename}",
                 file.path
@@ -661,6 +679,162 @@ mod tests {
             msg.contains("AGENTS.md"),
             "expected 'AGENTS.md' in error for agents-md format, got: {msg}"
         );
+        assert!(matches!(err, ActualError::TailoringValidationError(_)));
+    }
+
+    // ── CursorRules format validation tests ──
+
+    #[tokio::test]
+    async fn test_cursor_rules_format_accepts_mdc_path() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: ".cursor/rules/actual-policies.mdc".to_string(),
+                content: "# Rules\n\nUse Tailwind.".to_string(),
+                reasoning: "Cursor rules".to_string(),
+                adr_ids: vec!["adr-001".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockClaudeRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::CursorRules,
+        )
+        .await;
+
+        let output = result.unwrap();
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, ".cursor/rules/actual-policies.mdc");
+    }
+
+    #[tokio::test]
+    async fn test_cursor_rules_format_accepts_subdir_mdc_path() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "apps/web/.cursor/rules/actual-policies.mdc".to_string(),
+                content: "# Rules\n\nUse React.".to_string(),
+                reasoning: "Web cursor rules".to_string(),
+                adr_ids: vec!["adr-001".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockClaudeRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::CursorRules,
+        )
+        .await;
+
+        let output = result.unwrap();
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(
+            output.files[0].path,
+            "apps/web/.cursor/rules/actual-policies.mdc"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cursor_rules_format_rejects_claude_md_path() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "CLAUDE.md".to_string(),
+                content: "# Rules".to_string(),
+                reasoning: "Wrong format".to_string(),
+                adr_ids: vec!["adr-001".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockClaudeRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::CursorRules,
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(".cursor/rules/actual-policies.mdc"),
+            "expected cursor rules path in error, got: {msg}"
+        );
+        assert!(matches!(err, ActualError::TailoringValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_cursor_rules_format_rejects_agents_md_path() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "AGENTS.md".to_string(),
+                content: "# Rules".to_string(),
+                reasoning: "Wrong format".to_string(),
+                adr_ids: vec!["adr-001".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockClaudeRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::CursorRules,
+        )
+        .await;
+
+        let err = result.unwrap_err();
         assert!(matches!(err, ActualError::TailoringValidationError(_)));
     }
 }

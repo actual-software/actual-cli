@@ -2,6 +2,7 @@ use std::path::Path;
 
 use super::markers;
 use super::merge;
+use crate::generation::OutputFormat;
 use crate::tailoring::types::FileOutput;
 
 /// The action taken for a single file write.
@@ -28,19 +29,26 @@ pub struct WriteResult {
     pub error: Option<String>,
 }
 
-/// Write multiple CLAUDE.md files to disk.
+/// Write multiple output files to disk.
 ///
 /// For each file in `files`:
-/// 1. Determine if root (`path` has no directory separator — just "CLAUDE.md")
+/// 1. Determine if root (`path` has no directory separator — just `"CLAUDE.md"`,
+///    `"AGENTS.md"`, or `".cursor/rules/actual-policies.mdc"`)
 /// 2. Read existing content from `root_dir.join(path)`, if file exists
 /// 3. Compute next version via `markers::next_version(existing)`
-/// 4. Merge via `merge::merge_content(existing, content, version, is_root, adr_ids)`
+/// 4. Merge via `merge::merge_content(existing, content, version, is_root, adr_ids, root_header)`
 /// 5. Create parent directories with `std::fs::create_dir_all`
 /// 6. Write the file with `std::fs::write`
 /// 7. Collect `WriteResult`
 ///
+/// The `format` parameter controls what header is prepended to new root-level files.
+///
 /// Individual file failures do NOT abort the batch — errors are collected per file.
-pub fn write_files(root_dir: &Path, files: &[FileOutput]) -> Vec<WriteResult> {
+pub fn write_files(
+    root_dir: &Path,
+    files: &[FileOutput],
+    format: &OutputFormat,
+) -> Vec<WriteResult> {
     let canonical_root = match root_dir.canonicalize() {
         Ok(p) => p,
         Err(e) => {
@@ -73,10 +81,14 @@ pub fn write_files(root_dir: &Path, files: &[FileOutput]) -> Vec<WriteResult> {
                 };
             }
 
-            // Determine if root file (no directory component)
-            let is_root = Path::new(&file.path)
-                .parent()
-                .is_none_or(|p| p == Path::new(""));
+            // Determine if root file.  For ClaudeMd/AgentsMd a root file has no
+            // directory component.  For CursorRules the path includes a subdirectory
+            // (`.cursor/rules/actual-policies.mdc`) but it is still the canonical
+            // "root" output that should receive the format-specific preamble.
+            let is_root = file.path == format.filename()
+                || Path::new(&file.path)
+                    .parent()
+                    .is_none_or(|p| p == Path::new(""));
 
             // Read existing content
             let existing_content = std::fs::read_to_string(&full_path).ok();
@@ -92,9 +104,16 @@ pub fn write_files(root_dir: &Path, files: &[FileOutput]) -> Vec<WriteResult> {
             // Compute version
             let version = markers::next_version(existing_ref);
 
-            // Merge content
-            let result =
-                merge::merge_content(existing_ref, &file.content, version, is_root, &file.adr_ids);
+            // Merge content — pass the format-specific root header so new root files
+            // get the correct preamble (e.g. "# Project Guidelines" vs YAML frontmatter).
+            let result = merge::merge_content(
+                existing_ref,
+                &file.content,
+                version,
+                is_root,
+                &file.adr_ids,
+                format.root_header(),
+            );
 
             // Create parent directories (full_path always has a parent since it's root_dir.join(path))
             let parent = full_path.parent().expect("joined path always has a parent");
@@ -144,6 +163,7 @@ pub fn write_files(root_dir: &Path, files: &[FileOutput]) -> Vec<WriteResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generation::OutputFormat;
 
     #[test]
     fn test_write_root_claude_md() {
@@ -155,7 +175,7 @@ mod tests {
             adr_ids: vec!["adr-001".to_string()],
         }];
 
-        let results = write_files(dir.path(), &files);
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
         assert_eq!(results.len(), 1, "expected 1 result");
         assert_eq!(results[0].path, "CLAUDE.md");
@@ -193,7 +213,7 @@ mod tests {
             adr_ids: vec!["adr-002".to_string()],
         }];
 
-        let results = write_files(dir.path(), &files);
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
         assert_eq!(results.len(), 1, "expected 1 result");
         assert_eq!(results[0].path, "apps/web/CLAUDE.md");
@@ -245,7 +265,7 @@ mod tests {
             adr_ids: vec!["adr-001".to_string(), "adr-003".to_string()],
         }];
 
-        let results = write_files(dir.path(), &files);
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
         assert_eq!(results.len(), 1, "expected 1 result");
         assert_eq!(
@@ -304,7 +324,7 @@ mod tests {
             },
         ];
 
-        let results = write_files(dir.path(), &files);
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
         assert_eq!(results.len(), 3);
 
@@ -350,7 +370,7 @@ mod tests {
             adr_ids: vec![],
         }];
 
-        let results = write_files(dir.path(), &files);
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -384,7 +404,7 @@ mod tests {
             adr_ids: vec![],
         }];
 
-        let results = write_files(dir.path(), &files);
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -414,7 +434,7 @@ mod tests {
             adr_ids: vec![],
         }];
 
-        let results = write_files(dir.path(), &files);
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -440,7 +460,7 @@ mod tests {
             adr_ids: vec![],
         }];
 
-        let results = write_files(nonexistent, &files);
+        let results = write_files(nonexistent, &files, &OutputFormat::ClaudeMd);
 
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -475,7 +495,7 @@ mod tests {
             adr_ids: vec![],
         }];
 
-        let results = write_files(inner_dir.path(), &files);
+        let results = write_files(inner_dir.path(), &files, &OutputFormat::ClaudeMd);
 
         assert_eq!(results.len(), 1);
         assert_eq!(
@@ -522,5 +542,81 @@ mod tests {
             assert_eq!(cloned.version, result.version);
             assert_eq!(cloned.error, result.error);
         }
+    }
+
+    // ── CursorRules format tests ──
+
+    #[test]
+    fn test_write_cursor_rules_creates_mdc_with_frontmatter() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let files = vec![FileOutput {
+            path: ".cursor/rules/actual-policies.mdc".to_string(),
+            content: "Use Tailwind for all styling.".to_string(),
+            reasoning: "Cursor rules".to_string(),
+            adr_ids: vec!["adr-001".to_string()],
+        }];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::CursorRules);
+
+        assert_eq!(results.len(), 1, "expected 1 result");
+        assert_eq!(results[0].path, ".cursor/rules/actual-policies.mdc");
+        assert_eq!(
+            results[0].action,
+            WriteAction::Created,
+            "expected Created action for new cursor rules file"
+        );
+        assert_eq!(results[0].version, 1, "expected version 1 for new file");
+        assert!(results[0].error.is_none(), "expected no error");
+
+        // Verify .cursor/rules/ directory was created
+        assert!(
+            dir.path().join(".cursor/rules").is_dir(),
+            "expected .cursor/rules directory to be created"
+        );
+
+        let written = std::fs::read_to_string(dir.path().join(".cursor/rules/actual-policies.mdc"))
+            .expect("failed to read written file");
+
+        // Must start with YAML frontmatter
+        assert!(
+            written.starts_with("---\n"),
+            "cursor rules file must start with YAML front-matter delimiter, got: {written}"
+        );
+        assert!(
+            written.contains("alwaysApply: true"),
+            "cursor rules file must contain alwaysApply: true"
+        );
+        assert!(
+            markers::has_managed_section(&written),
+            "cursor rules file should have managed section"
+        );
+        assert!(
+            written.contains("Use Tailwind for all styling."),
+            "cursor rules file should contain managed content"
+        );
+    }
+
+    #[test]
+    fn test_write_agents_md_root_has_project_guidelines_header() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let files = vec![FileOutput {
+            path: "AGENTS.md".to_string(),
+            content: "Follow Python conventions.".to_string(),
+            reasoning: "Root rules".to_string(),
+            adr_ids: vec!["adr-001".to_string()],
+        }];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::AgentsMd);
+
+        assert_eq!(results.len(), 1, "expected 1 result");
+        assert!(results[0].error.is_none(), "expected no error");
+
+        let written = std::fs::read_to_string(dir.path().join("AGENTS.md"))
+            .expect("failed to read written file");
+        assert!(
+            written.contains("# Project Guidelines"),
+            "AGENTS.md root file should have Project Guidelines header, got: {written}"
+        );
+        assert!(markers::has_managed_section(&written));
     }
 }
