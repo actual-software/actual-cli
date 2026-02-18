@@ -470,12 +470,7 @@ fn parse_build_gradle(project_dir: &Path, deps: &mut HashSet<String>) {
                 .or_else(|| cap.get(3))
                 .expect("regex guarantees at least one group matches")
                 .as_str();
-            // Format: group:artifact:version — emit groupId and group:artifact
-            let parts: Vec<&str> = coord.split(':').collect();
-            if parts.len() >= 2 {
-                deps.insert(parts[0].to_string()); // groupId for framework detection
-                deps.insert(format!("{}:{}", parts[0], parts[1])); // Combined coordinate
-            }
+            insert_gradle_coord(coord, deps);
         }
     }
 }
