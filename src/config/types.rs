@@ -43,6 +43,10 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency: Option<usize>,
 
+    /// Per-project tailoring timeout in seconds (default: 600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_timeout_secs: Option<u64>,
+
     /// Telemetry settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetryConfig>,
@@ -121,6 +125,7 @@ mod tests {
             max_budget_usd: Some(0.50),
             batch_size: Some(20),
             concurrency: Some(5),
+            invocation_timeout_secs: Some(300),
             telemetry: Some(TelemetryConfig {
                 enabled: Some(false),
             }),
