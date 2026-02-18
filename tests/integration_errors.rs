@@ -32,23 +32,34 @@ mod tests {
         analysis_json: &str,
     ) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
+        // Write JSON to files to avoid shell quoting issues with special characters.
+        let auth_file = dir.join("auth_response.json");
+        let analysis_file = dir.join("analysis_response.json");
+        std::fs::write(&auth_file, auth_json).unwrap();
+        std::fs::write(&analysis_file, analysis_json).unwrap();
+        let auth_path = auth_file.to_str().unwrap();
+        let analysis_path = analysis_file.to_str().unwrap();
         let script = dir.join("fake-claude");
         let content = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"auth\" ]; then\n\
-             printf '%s\\n' '{auth_json}'\n\
+             cat '{auth_path}'\n\
+             printf '\\n'\n\
              exit 0\n\
              elif [ \"$1\" = \"--print\" ]; then\n\
              if echo \"$@\" | grep -q \"skipped_adrs\"; then\n\
              echo 'tailoring subprocess crashed' >&2\n\
              exit 1\n\
              else\n\
-             printf '%s\\n' '{analysis_json}'\n\
+             cat '{analysis_path}'\n\
+             printf '\\n'\n\
              exit 0\n\
              fi\n\
              fi\n\
              echo 'unexpected invocation' >&2\n\
              exit 1\n",
+            auth_path = auth_path,
+            analysis_path = analysis_path,
         );
         std::fs::write(&script, content).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -63,23 +74,34 @@ mod tests {
         analysis_json: &str,
     ) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
+        // Write JSON to files to avoid shell quoting issues with special characters.
+        let auth_file = dir.join("auth_response.json");
+        let analysis_file = dir.join("analysis_response.json");
+        std::fs::write(&auth_file, auth_json).unwrap();
+        std::fs::write(&analysis_file, analysis_json).unwrap();
+        let auth_path = auth_file.to_str().unwrap();
+        let analysis_path = analysis_file.to_str().unwrap();
         let script = dir.join("fake-claude");
         let content = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"auth\" ]; then\n\
-             printf '%s\\n' '{auth_json}'\n\
+             cat '{auth_path}'\n\
+             printf '\\n'\n\
              exit 0\n\
              elif [ \"$1\" = \"--print\" ]; then\n\
              if echo \"$@\" | grep -q \"skipped_adrs\"; then\n\
              printf '%s\\n' 'not valid json'\n\
              exit 0\n\
              else\n\
-             printf '%s\\n' '{analysis_json}'\n\
+             cat '{analysis_path}'\n\
+             printf '\\n'\n\
              exit 0\n\
              fi\n\
              fi\n\
              echo 'unexpected invocation' >&2\n\
              exit 1\n",
+            auth_path = auth_path,
+            analysis_path = analysis_path,
         );
         std::fs::write(&script, content).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
