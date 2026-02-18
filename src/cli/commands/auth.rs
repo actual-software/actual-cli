@@ -65,19 +65,11 @@ pub fn check_auth_with_timeout(
         let _ = tx.send(check_auth(&binary_path));
     });
 
-    match rx.recv_timeout(timeout) {
-        Ok(result) => result,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ActualError::ClaudeTimeout {
+    rx.recv_timeout(timeout)
+        .map_err(|_| ActualError::ClaudeTimeout {
             // Round up so sub-second timeouts display as "1s" rather than "0s".
             seconds: timeout.as_secs_f64().ceil() as u64,
-        }),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err(ActualError::ClaudeSubprocessFailed {
-                message: "claude auth check thread panicked unexpectedly".to_string(),
-                stderr: String::new(),
-            })
-        }
-    }
+        })?
 }
 
 fn run_auth_with_binary(binary_path: &Path) -> Result<(), ActualError> {
