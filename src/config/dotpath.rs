@@ -747,17 +747,8 @@ mod tests {
             set(&mut config, key, value)
                 .unwrap_or_else(|e| panic!("set({key}, {value}) failed: {e}"));
 
-            // get() must return either the value or a "not set" error — never "unknown".
-            match get(&config, key) {
-                Ok(_) => {}
-                Err(e) => {
-                    let msg = e.to_string();
-                    assert!(
-                        msg.contains("not set"),
-                        "get({key}) returned unexpected error after set: {msg}"
-                    );
-                }
-            }
+            // get() must succeed after a successful set().
+            get(&config, key).unwrap_or_else(|e| panic!("get({key}) failed after set: {e}"));
         }
     }
 }
