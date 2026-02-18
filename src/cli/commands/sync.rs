@@ -241,7 +241,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         args.model.as_deref(),
     ));
 
-    // Try cache (unless --force or non-git repo)
+    // Try cache (unless --force)
     let cached_output = if !args.force {
         tailoring_cache_key
             .as_deref()
@@ -594,6 +594,9 @@ fn compute_tailoring_cache_key(
             hasher.update(mp.as_bytes());
             hasher.update(b"\x00");
         }
+        // ADR boundary marker: prevents two distinct ADR sets from producing
+        // the same byte stream (e.g. ["a", "b"] + ["c"] vs ["a"] + ["b", "c"]).
+        hasher.update(b"\xff");
     }
 
     hasher.update(if no_tailor {
@@ -2705,20 +2708,6 @@ mod tests {
         );
         assert_eq!(key1, key2, "same inputs should produce same key");
         assert_eq!(key1.len(), 64, "should be a 64-char hex SHA-256");
-    }
-
-    #[test]
-    fn test_tailoring_cache_key_head_change_does_not_invalidate() {
-        // Identical ADR content + project structure → same key regardless of git HEAD.
-        let adrs = vec![make_cache_test_adr("adr-001", vec!["use snake_case"])];
-        let key1 = compute_tailoring_cache_key(&adrs, false, &[".".to_string()], "", None);
-        // Simulate a different HEAD by calling again — the function no longer
-        // accepts a head_commit arg, so the key must be identical.
-        let key2 = compute_tailoring_cache_key(&adrs, false, &[".".to_string()], "", None);
-        assert_eq!(
-            key1, key2,
-            "cache key must not change when only the git HEAD changes"
-        );
     }
 
     #[test]
