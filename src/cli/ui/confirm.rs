@@ -1,6 +1,7 @@
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::{Language, Project, RepoAnalysis};
 use crate::cli::ui::terminal::TerminalIO;
+use crate::error::ActualError;
 
 use super::panel::Panel;
 use super::theme;
@@ -104,7 +105,7 @@ pub fn format_project_summary(analysis: &RepoAnalysis, width: usize) -> String {
 pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
     term: &dyn TerminalIO,
-) -> ConfirmAction {
+) -> Result<ConfirmAction, ActualError> {
     let width = console::Term::stdout()
         .size_checked()
         .map(|(_, cols)| cols as usize)
@@ -114,8 +115,9 @@ pub fn prompt_project_confirmation(
     term.write_line(&summary);
 
     match term.confirm("Accept project configuration?") {
-        Ok(true) => ConfirmAction::Accept,
-        Ok(false) | Err(_) => ConfirmAction::Reject,
+        Ok(true) => Ok(ConfirmAction::Accept),
+        Ok(false) => Ok(ConfirmAction::Reject),
+        Err(e) => Err(e),
     }
 }
 
@@ -478,7 +480,7 @@ mod tests {
     fn prompt_accept() {
         let analysis = make_single_project_analysis();
         let term = MockTerminal::new(vec!["y"]);
-        let result = prompt_project_confirmation(&analysis, &term);
+        let result = prompt_project_confirmation(&analysis, &term).unwrap();
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -486,7 +488,7 @@ mod tests {
     fn prompt_accept_yes() {
         let analysis = make_single_project_analysis();
         let term = MockTerminal::new(vec!["yes"]);
-        let result = prompt_project_confirmation(&analysis, &term);
+        let result = prompt_project_confirmation(&analysis, &term).unwrap();
         assert_eq!(result, ConfirmAction::Accept);
     }
 
@@ -494,7 +496,7 @@ mod tests {
     fn prompt_reject() {
         let analysis = make_single_project_analysis();
         let term = MockTerminal::new(vec!["n"]);
-        let result = prompt_project_confirmation(&analysis, &term);
+        let result = prompt_project_confirmation(&analysis, &term).unwrap();
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -502,7 +504,7 @@ mod tests {
     fn prompt_reject_no() {
         let analysis = make_single_project_analysis();
         let term = MockTerminal::new(vec!["no"]);
-        let result = prompt_project_confirmation(&analysis, &term);
+        let result = prompt_project_confirmation(&analysis, &term).unwrap();
         assert_eq!(result, ConfirmAction::Reject);
     }
 
@@ -511,24 +513,27 @@ mod tests {
         let analysis = make_single_project_analysis();
         // Unrecognized input defaults to false → Reject
         let term = MockTerminal::new(vec!["x"]);
-        let result = prompt_project_confirmation(&analysis, &term);
+        let result = prompt_project_confirmation(&analysis, &term).unwrap();
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
-    fn prompt_io_error_returns_reject() {
+    fn prompt_io_error_propagates_error() {
         let analysis = make_single_project_analysis();
-        // Empty inputs causes read_line to return Err → Reject
+        // Empty inputs causes read_line to return Err → propagated as Err
         let term = MockTerminal::new(vec![]);
         let result = prompt_project_confirmation(&analysis, &term);
-        assert_eq!(result, ConfirmAction::Reject);
+        assert!(
+            result.is_err(),
+            "expected Err when terminal confirm fails, got: {result:?}"
+        );
     }
 
     #[test]
     fn prompt_writes_summary_to_output() {
         let analysis = make_single_project_analysis();
         let term = MockTerminal::new(vec!["y"]);
-        prompt_project_confirmation(&analysis, &term);
+        prompt_project_confirmation(&analysis, &term).unwrap();
         let output = term.output_text();
         assert!(
             output.contains("my-cli"),
