@@ -129,12 +129,7 @@ fn build_file_tree(root: &Path) -> String {
         .git_exclude(true)
         .build();
 
-    for result in walker {
-        let entry = match result {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
+    for entry in walker.filter_map(|r| r.ok()) {
         let path = entry.path();
 
         // Skip root itself.
@@ -163,10 +158,8 @@ fn build_file_tree(root: &Path) -> String {
             }
         }
 
-        let relative = match path.strip_prefix(root) {
-            Ok(r) => r.to_path_buf(),
-            Err(_) => continue,
-        };
+        // Walker always yields paths under root, so strip_prefix succeeds.
+        let relative = path.strip_prefix(root).unwrap_or(path).to_path_buf();
 
         let depth = relative.components().count();
         let name = path
@@ -319,14 +312,10 @@ fn find_entrypoints(root: &Path, max: usize) -> Vec<(String, PathBuf)> {
         .git_exclude(true)
         .build();
 
-    for result in walker {
+    for entry in walker.filter_map(|r| r.ok()) {
         if found.len() >= max {
             break;
         }
-        let entry = match result {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
         let path = entry.path();
         if path == root || path.is_dir() {
             continue;
@@ -395,34 +384,15 @@ mod tests {
     fn test_bundle_context_basic() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
         create_file(root, "Cargo.toml", "[package]\nname = \"test\"");
         create_file(root, "src/main.rs", "fn main() {}");
         create_file(root, "node_modules/foo.js", "module.exports = {};");
 
         let ctx = bundle_context(root).unwrap();
 
-        // File tree should contain Cargo.toml and src/
-        assert!(
-            ctx.file_tree.contains("Cargo.toml"),
-            "file_tree should contain 'Cargo.toml', got: {}",
-            ctx.file_tree
-        );
-
-        // File tree should NOT contain node_modules
-        assert!(
-            !ctx.file_tree.contains("node_modules"),
-            "file_tree should NOT contain 'node_modules', got: {}",
-            ctx.file_tree
-        );
-
-        // key_files should include Cargo.toml
-        let has_cargo_toml = ctx.key_files.iter().any(|(name, _)| name == "Cargo.toml");
-        assert!(
-            has_cargo_toml,
-            "key_files should include Cargo.toml, got: {:?}",
-            ctx.key_files.iter().map(|(n, _)| n).collect::<Vec<_>>()
-        );
+        assert!(ctx.file_tree.contains("Cargo.toml"));
+        assert!(!ctx.file_tree.contains("node_modules"));
+        assert!(ctx.key_files.iter().any(|(name, _)| name == "Cargo.toml"));
     }
 
     // Test 2: tree excludes node_modules, target, .git
@@ -430,7 +400,6 @@ mod tests {
     fn test_file_tree_excludes_dirs() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
         create_file(root, "node_modules/x.js", "// js");
         create_file(root, "target/debug/foo", "binary");
         create_file(root, ".git/config", "[core]");
@@ -438,32 +407,11 @@ mod tests {
 
         let tree = build_file_tree(root);
 
-        assert!(
-            !tree.contains("node_modules"),
-            "tree should not contain 'node_modules', got: {}",
-            tree
-        );
-        assert!(
-            !tree.contains("x.js"),
-            "tree should not contain 'x.js' (inside node_modules), got: {}",
-            tree
-        );
-        assert!(
-            !tree.contains("target"),
-            "tree should not contain 'target', got: {}",
-            tree
-        );
-        assert!(
-            !tree.contains(".git"),
-            "tree should not contain '.git', got: {}",
-            tree
-        );
-        // src/lib.rs should appear
-        assert!(
-            tree.contains("lib.rs"),
-            "tree should contain 'lib.rs', got: {}",
-            tree
-        );
+        assert!(!tree.contains("node_modules"));
+        assert!(!tree.contains("x.js"));
+        assert!(!tree.contains("target"));
+        assert!(!tree.contains(".git"));
+        assert!(tree.contains("lib.rs"));
     }
 
     // Test 3: key file content is truncated at 200 lines
@@ -471,47 +419,26 @@ mod tests {
     fn test_key_file_truncation() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
-        // Write a Cargo.toml with 300 lines
         let long_content: String = (1..=300).map(|i| format!("# line {}\n", i)).collect();
         create_file(root, "Cargo.toml", &long_content);
 
         let ctx = bundle_context(root).unwrap();
-
         let cargo_entry = ctx
             .key_files
             .iter()
             .find(|(name, _)| name == "Cargo.toml")
-            .expect("Cargo.toml should be in key_files");
+            .expect("Cargo.toml in key_files");
 
-        let line_count = cargo_entry.1.lines().count();
-        // Should be 200 content lines + 1 truncation note line
-        assert!(
-            line_count <= MAX_FILE_LINES + 1,
-            "key file should have at most {} lines, got: {}",
-            MAX_FILE_LINES + 1,
-            line_count
-        );
-        assert!(
-            cargo_entry.1.contains("truncated at 200 lines"),
-            "truncation note should be present, got: {}",
-            cargo_entry.1
-        );
+        assert!(cargo_entry.1.lines().count() <= MAX_FILE_LINES + 1);
+        assert!(cargo_entry.1.contains("truncated at 200 lines"));
     }
 
     // Test 4: missing project dir returns an error (not a panic)
     #[test]
     fn test_missing_dir_returns_error() {
-        let path = Path::new("/nonexistent/path/that/does/not/exist");
-        let result = bundle_context(path);
-        assert!(
-            result.is_err(),
-            "expected an error for missing directory, got Ok"
-        );
-        match result.unwrap_err() {
-            ActualError::IoError(_) => {} // expected
-            other => panic!("expected ActualError::IoError, got: {:?}", other),
-        }
+        let result = bundle_context(Path::new("/nonexistent/path/that/does/not/exist"));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::IoError(_)));
     }
 
     // Test 5: file tree truncates at 200 entries
@@ -519,28 +446,15 @@ mod tests {
     fn test_file_tree_truncates_at_200() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
-        // Create 250 files
         for i in 0..250 {
             create_file(root, &format!("file_{:03}.txt", i), "content");
         }
 
         let tree = build_file_tree(root);
 
-        assert!(
-            tree.contains("more files (truncated)"),
-            "tree should contain truncation notice for 250 files, got: {}",
-            tree
-        );
-
-        // Count actual file lines (non-truncation-note lines)
+        assert!(tree.contains("more files (truncated)"));
         let file_lines: Vec<&str> = tree.lines().filter(|l| !l.contains("truncated")).collect();
-        assert!(
-            file_lines.len() <= MAX_TREE_ENTRIES,
-            "tree should show at most {} entries, got: {}",
-            MAX_TREE_ENTRIES,
-            file_lines.len()
-        );
+        assert!(file_lines.len() <= MAX_TREE_ENTRIES);
     }
 
     // Test 6: bundle_context returns error when path is a file, not a directory
@@ -551,11 +465,8 @@ mod tests {
         fs::write(&file_path, "hello").unwrap();
 
         let result = bundle_context(&file_path);
-        assert!(result.is_err(), "expected error for file path, got Ok");
-        match result.unwrap_err() {
-            ActualError::IoError(_) => {}
-            other => panic!("expected ActualError::IoError, got: {:?}", other),
-        }
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::IoError(_)));
     }
 
     // Test 7: lock files are excluded from the file tree
@@ -563,75 +474,53 @@ mod tests {
     fn test_file_tree_excludes_lock_files() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
         create_file(root, "Cargo.lock", "# lock file");
         create_file(root, "package-lock.json", "{}");
         create_file(root, "src/main.rs", "fn main() {}");
 
         let tree = build_file_tree(root);
 
-        assert!(
-            !tree.contains("Cargo.lock"),
-            "tree should not contain 'Cargo.lock', got: {}",
-            tree
-        );
-        assert!(
-            tree.contains("main.rs"),
-            "tree should contain 'main.rs', got: {}",
-            tree
-        );
+        assert!(!tree.contains("Cargo.lock"));
+        assert!(tree.contains("main.rs"));
     }
 
-    // Test 8: file tree shows directories with trailing slash and subdirectories with indent
+    // Test 8: file tree shows directories with trailing slash
     #[test]
     fn test_file_tree_shows_dirs_with_slash() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
         create_file(root, "src/lib.rs", "// lib");
 
         let tree = build_file_tree(root);
 
-        // Directory should appear with trailing slash
-        assert!(
-            tree.contains("src/"),
-            "tree should show directories with '/', got: {}",
-            tree
-        );
-        // Nested file should be indented
-        assert!(
-            tree.contains("lib.rs"),
-            "tree should contain nested file 'lib.rs', got: {}",
-            tree
-        );
+        assert!(tree.contains("src/"));
+        assert!(tree.contains("lib.rs"));
     }
 
     // Test 9: has_excluded_extension returns false for files without extension
     #[test]
     fn test_has_excluded_extension_no_ext() {
-        let path = Path::new("Makefile");
-        assert!(!has_excluded_extension(path));
+        assert!(!has_excluded_extension(Path::new("Makefile")));
     }
 
     // Test 10: has_excluded_extension returns true for .lock files
     #[test]
     fn test_has_excluded_extension_lock() {
-        let path = Path::new("Cargo.lock");
-        assert!(has_excluded_extension(path));
+        assert!(has_excluded_extension(Path::new("Cargo.lock")));
     }
 
     // Test 11: is_excluded_dir returns false for non-excluded directories
     #[test]
     fn test_is_excluded_dir_false_for_non_excluded() {
-        let root = Path::new("/some/root");
-        let path = Path::new("/some/root/src/main.rs");
-        assert!(!is_excluded_dir(path, root));
+        assert!(!is_excluded_dir(
+            Path::new("/some/root/src/main.rs"),
+            Path::new("/some/root")
+        ));
     }
 
     // Test 12: is_likely_text_file returns false for known binary extensions
     #[test]
     fn test_is_likely_text_file_binary_extension() {
-        // PNG file extension should be treated as binary without reading
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("image.png");
         fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
@@ -652,7 +541,6 @@ mod tests {
     fn test_is_likely_text_file_binary_content() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("binary_file.dat2");
-        // Write mostly null bytes (clearly binary)
         let binary_data: Vec<u8> = vec![0u8; 200];
         fs::write(&path, &binary_data).unwrap();
         assert!(!is_likely_text_file(&path));
@@ -663,17 +551,10 @@ mod tests {
     fn test_key_files_includes_config_files() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
         create_file(root, "tsconfig.json", r#"{"compilerOptions": {}}"#);
 
         let key_files = collect_key_files(root);
-
-        let has_tsconfig = key_files.iter().any(|(name, _)| name == "tsconfig.json");
-        assert!(
-            has_tsconfig,
-            "key_files should include tsconfig.json, got: {:?}",
-            key_files.iter().map(|(n, _)| n).collect::<Vec<_>>()
-        );
+        assert!(key_files.iter().any(|(name, _)| name == "tsconfig.json"));
     }
 
     // Test 16: collect_key_files finds entrypoints (main.rs in src/)
@@ -681,17 +562,10 @@ mod tests {
     fn test_key_files_finds_entrypoints() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
         create_file(root, "src/main.rs", "fn main() { println!(\"hello\"); }");
 
         let key_files = collect_key_files(root);
-
-        let has_main = key_files.iter().any(|(name, _)| name.contains("main.rs"));
-        assert!(
-            has_main,
-            "key_files should include src/main.rs entrypoint, got: {:?}",
-            key_files.iter().map(|(n, _)| n).collect::<Vec<_>>()
-        );
+        assert!(key_files.iter().any(|(name, _)| name.contains("main.rs")));
     }
 
     // Test 17: budget limits total key file content
@@ -699,23 +573,13 @@ mod tests {
     fn test_key_files_budget_limit() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
-        // Create a Cargo.toml that is just under 32KB
         let large_content: String = "x".repeat(MAX_TOTAL_BYTES - 10);
         create_file(root, "Cargo.toml", &large_content);
-        // package.json would exceed the budget — should be skipped
         create_file(root, "package.json", r#"{"name": "test"}"#);
 
         let key_files = collect_key_files(root);
-
-        // Total content should not exceed MAX_TOTAL_BYTES
         let total: usize = key_files.iter().map(|(_, c)| c.len()).sum();
-        assert!(
-            total <= MAX_TOTAL_BYTES,
-            "total key file content ({} bytes) should not exceed budget ({} bytes)",
-            total,
-            MAX_TOTAL_BYTES
-        );
+        assert!(total <= MAX_TOTAL_BYTES);
     }
 
     // Test 18: find_entrypoints caps results at max
@@ -723,33 +587,27 @@ mod tests {
     fn test_find_entrypoints_cap() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
-        // Create 7 main.rs files in different subdirs
         for i in 0..7 {
             create_file(root, &format!("pkg{}/main.rs", i), "fn main() {}");
         }
 
         let found = find_entrypoints(root, 3);
-        assert!(
-            found.len() <= 3,
-            "find_entrypoints should cap at 3, got: {}",
-            found.len()
-        );
+        assert!(found.len() <= 3);
     }
 
     // Test 19: is_excluded_dir strips prefix correctly for nested paths
     #[test]
     fn test_is_excluded_dir_nested() {
-        let root = Path::new("/project");
-        let path = Path::new("/project/node_modules/foo/bar.js");
-        assert!(is_excluded_dir(path, root));
+        assert!(is_excluded_dir(
+            Path::new("/project/node_modules/foo/bar.js"),
+            Path::new("/project")
+        ));
     }
 
     // Test 20: read_file_truncated returns None for unreadable files
     #[test]
     fn test_read_file_truncated_nonexistent() {
-        let result = read_file_truncated(Path::new("/nonexistent/file.txt"));
-        assert!(result.is_none());
+        assert!(read_file_truncated(Path::new("/nonexistent/file.txt")).is_none());
     }
 
     // Test 21: read_file_truncated returns full content for short files
@@ -759,9 +617,7 @@ mod tests {
         let path = tmp.path().join("short.txt");
         fs::write(&path, "line1\nline2\n").unwrap();
 
-        let result = read_file_truncated(&path);
-        assert!(result.is_some());
-        let content = result.unwrap();
+        let content = read_file_truncated(&path).unwrap();
         assert!(!content.contains("truncated"));
     }
 
@@ -770,34 +626,20 @@ mod tests {
     fn test_file_tree_excludes_dist_and_build() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
         create_file(root, "dist/bundle.js", "/* bundled */");
         create_file(root, "build/output.js", "/* built */");
         create_file(root, "src/app.ts", "export {}");
 
         let tree = build_file_tree(root);
 
-        assert!(
-            !tree.contains("dist"),
-            "tree should not contain 'dist', got: {}",
-            tree
-        );
-        assert!(
-            !tree.contains("build"),
-            "tree should not contain 'build', got: {}",
-            tree
-        );
-        assert!(
-            tree.contains("app.ts"),
-            "tree should contain 'app.ts', got: {}",
-            tree
-        );
+        assert!(!tree.contains("dist"));
+        assert!(!tree.contains("build"));
+        assert!(tree.contains("app.ts"));
     }
 
     // Test 23: tree entry ordering — dirs before files
     #[test]
     fn test_tree_entry_ordering() {
-        // Test the Ord/PartialOrd impl for TreeEntry
         let dir_entry = TreeEntry {
             is_dir: true,
             name: "zzz".to_string(),
@@ -810,10 +652,8 @@ mod tests {
             depth: 1,
             relative_path: PathBuf::from("aaa"),
         };
-        // Directories should sort before files regardless of name
         assert!(dir_entry < file_entry);
         assert!(file_entry > dir_entry);
-        // partial_cmp should agree
         assert_eq!(
             dir_entry.partial_cmp(&file_entry),
             Some(std::cmp::Ordering::Less)
@@ -825,19 +665,208 @@ mod tests {
     fn test_config_files_skipped_when_budget_zero() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-
-        // Fill budget exactly with a Cargo.toml of MAX_TOTAL_BYTES bytes
         let content = "x".repeat(MAX_TOTAL_BYTES);
         create_file(root, "Cargo.toml", &content);
         create_file(root, "tsconfig.json", r#"{"compilerOptions": {}}"#);
 
         let key_files = collect_key_files(root);
+        assert!(!key_files.iter().any(|(name, _)| name == "tsconfig.json"));
+    }
 
-        // tsconfig.json should not be included because budget was exhausted
-        let has_tsconfig = key_files.iter().any(|(name, _)| name == "tsconfig.json");
-        assert!(
-            !has_tsconfig,
-            "tsconfig.json should be excluded when budget is exhausted"
+    // Test 25: is_excluded_dir returns false when path is not under root (prefix strip fails)
+    #[test]
+    fn test_is_excluded_dir_path_not_under_root() {
+        // path is not a prefix of root, so strip_prefix returns Err, and we fall back to path
+        let result = is_excluded_dir(Path::new("/other/node_modules/foo"), Path::new("/project"));
+        // The path components include "node_modules" so it should be excluded
+        assert!(result);
+    }
+
+    // Test 26: is_likely_text_file returns false when file is not readable
+    #[test]
+    fn test_is_likely_text_file_unreadable() {
+        // Non-existent file returns false
+        assert!(!is_likely_text_file(Path::new("/nonexistent/ghost.xyz")));
+    }
+
+    // Test 27: manifest file content exceeding budget is skipped (break branch)
+    #[test]
+    fn test_manifest_exceeds_budget_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Cargo.toml that is larger than MAX_TOTAL_BYTES
+        let huge_content = "x".repeat(MAX_TOTAL_BYTES + 100);
+        create_file(root, "Cargo.toml", &huge_content);
+
+        let key_files = collect_key_files(root);
+        // Cargo.toml is too large to fit in budget, so no key files should be collected
+        assert!(key_files.is_empty());
+    }
+
+    // Test 28: config file content exceeding remaining budget is skipped
+    #[test]
+    fn test_config_exceeds_remaining_budget_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Fill most of the budget with Cargo.toml
+        let partial_content = "x".repeat(MAX_TOTAL_BYTES - 5);
+        create_file(root, "Cargo.toml", &partial_content);
+        // tsconfig.json with content > 5 bytes should not fit
+        create_file(
+            root,
+            "tsconfig.json",
+            r#"{"compilerOptions": {"strict": true}}"#,
         );
+
+        let key_files = collect_key_files(root);
+        assert!(!key_files.iter().any(|(name, _)| name == "tsconfig.json"));
+    }
+
+    // Test 29: binary file in directory is excluded from file tree
+    #[test]
+    fn test_file_tree_excludes_binary_files() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Create a binary file (all null bytes, no extension)
+        let binary_path = root.join("binary_blob.dat2");
+        fs::write(&binary_path, vec![0u8; 200]).unwrap();
+        create_file(root, "readme.txt", "Hello");
+
+        let tree = build_file_tree(root);
+
+        assert!(!tree.contains("binary_blob.dat2"));
+        assert!(tree.contains("readme.txt"));
+    }
+
+    // Test 30: entrypoints are skipped when budget is exhausted by manifests
+    #[test]
+    fn test_entrypoints_skipped_when_budget_exhausted() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Fill budget exactly with Cargo.toml (budget becomes 0 after adding it)
+        let exact_content = "x".repeat(MAX_TOTAL_BYTES);
+        create_file(root, "Cargo.toml", &exact_content);
+        // Create an entrypoint that should not be collected because budget is 0
+        create_file(root, "src/main.rs", "fn main() {}");
+
+        let key_files = collect_key_files(root);
+        // Cargo.toml fits exactly; main.rs should NOT be added (budget = 0)
+        assert!(key_files.iter().any(|(name, _)| name == "Cargo.toml"));
+        assert!(!key_files.iter().any(|(name, _)| name.contains("main.rs")));
+    }
+
+    // Test 31: entrypoint content exceeds remaining budget during iteration
+    #[test]
+    fn test_entrypoint_exceeds_remaining_budget_during_iteration() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Leave only a tiny remaining budget after Cargo.toml
+        let partial = "x".repeat(MAX_TOTAL_BYTES - 5);
+        create_file(root, "Cargo.toml", &partial);
+        // main.rs content > 5 bytes
+        create_file(
+            root,
+            "src/main.rs",
+            "fn main() { println!(\"hello world\"); }",
+        );
+
+        let key_files = collect_key_files(root);
+        // Cargo.toml is added, but main.rs content > remaining budget so it is not
+        assert!(key_files.iter().any(|(name, _)| name == "Cargo.toml"));
+        assert!(!key_files.iter().any(|(name, _)| name.contains("main.rs")));
+    }
+
+    // Test 32: multiple entrypoints — first fits, second exhausts budget to zero mid-loop
+    #[test]
+    fn test_entrypoint_budget_zero_mid_loop() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Leave exactly 15 bytes of budget after Cargo.toml
+        let partial = "x".repeat(MAX_TOTAL_BYTES - 15);
+        create_file(root, "Cargo.toml", &partial);
+        // First entrypoint fits (10 bytes) and exhausts budget to 5
+        create_file(root, "src/main.rs", "0123456789");
+        // Second entrypoint won't fit (it's > 5 bytes)
+        create_file(root, "app/app.py", "01234567890123456789");
+
+        let key_files = collect_key_files(root);
+        assert!(key_files.iter().any(|(name, _)| name == "Cargo.toml"));
+        // We don't strictly assert on main.rs inclusion since walker order is not guaranteed,
+        // but the total must remain within budget.
+        let total: usize = key_files.iter().map(|(_, c)| c.len()).sum();
+        assert!(total <= MAX_TOTAL_BYTES);
+    }
+
+    // Test 33: is_likely_text_file with a file that has no extension (covers closing brace path)
+    #[test]
+    fn test_is_likely_text_file_no_extension_text_content() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("Makefile");
+        fs::write(&path, "all:\n\techo hello\n").unwrap();
+        // File has no extension, goes to binary-content check, should be true
+        assert!(is_likely_text_file(&path));
+    }
+
+    // Test 34: manifest file with binary content causes read_file_truncated to return None
+    // This covers line 270: `}` closing `if let Some(content)` in the manifest loop
+    #[test]
+    fn test_manifest_binary_content_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Write Cargo.toml with non-UTF8 bytes — read_to_string will fail, returning None
+        fs::write(root.join("Cargo.toml"), b"\xff\xfe invalid utf8 \x00\x01").unwrap();
+
+        let key_files = collect_key_files(root);
+        // Cargo.toml should NOT be included (binary content → None from read_file_truncated)
+        assert!(!key_files.iter().any(|(name, _)| name == "Cargo.toml"));
+    }
+
+    // Test 35: config file with binary content causes None branch in config loop (covers line 287)
+    #[test]
+    fn test_config_binary_content_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Write tsconfig.json with non-UTF8 bytes
+        fs::write(
+            root.join("tsconfig.json"),
+            b"\xff\xfe invalid utf8 \x00\x01",
+        )
+        .unwrap();
+
+        let key_files = collect_key_files(root);
+        // tsconfig.json should NOT be included
+        assert!(!key_files.iter().any(|(name, _)| name == "tsconfig.json"));
+    }
+
+    // Test 36: budget=0 mid-loop in entrypoints (covers line 296 break)
+    #[test]
+    fn test_entrypoint_budget_zero_after_first_entry() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Leave 10 bytes of budget after Cargo.toml
+        let partial = "x".repeat(MAX_TOTAL_BYTES - 10);
+        create_file(root, "Cargo.toml", &partial);
+        // First entrypoint fills budget to exactly 0 (10 bytes)
+        create_file(root, "pkg0/main.rs", "0123456789");
+        // Second entrypoint — budget is 0, should hit break at line 296
+        create_file(root, "pkg1/main.rs", "fn main() {}");
+
+        let key_files = collect_key_files(root);
+        let total: usize = key_files.iter().map(|(_, c)| c.len()).sum();
+        assert!(total <= MAX_TOTAL_BYTES);
+    }
+
+    // Test 37: entrypoint file with binary content causes None branch in entrypoints loop (covers line 304)
+    #[test]
+    fn test_entrypoint_binary_content_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Create a main.rs that is actually binary (non-UTF8)
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), b"\xff\xfe invalid utf8 \x00\x01").unwrap();
+
+        let key_files = collect_key_files(root);
+        // main.rs should NOT be included (binary content → None from read_file_truncated)
+        assert!(!key_files.iter().any(|(name, _)| name.contains("main.rs")));
     }
 }
