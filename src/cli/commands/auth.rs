@@ -68,7 +68,8 @@ pub fn check_auth_with_timeout(
     match rx.recv_timeout(timeout) {
         Ok(result) => result,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(ActualError::ClaudeTimeout {
-            seconds: timeout.as_secs(),
+            // Round up so sub-second timeouts display as "1s" rather than "0s".
+            seconds: timeout.as_secs_f64().ceil() as u64,
         }),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             Err(ActualError::ClaudeSubprocessFailed {
