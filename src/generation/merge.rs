@@ -650,10 +650,6 @@ mod tests {
         let result = merge_content(None, "content", 1, true, &[], Some(CURSOR_FRONTMATTER));
         let frontmatter_end = CURSOR_FRONTMATTER.len();
         let after_frontmatter = &result.content[frontmatter_end..];
-        assert!(
-            after_frontmatter.starts_with("\n\n"),
-            "expected \\n\\n between frontmatter and managed section, got: {:?}",
-            &after_frontmatter[..after_frontmatter.len().min(20)]
-        );
+        assert!(after_frontmatter.starts_with("\n\n"));
     }
 }
