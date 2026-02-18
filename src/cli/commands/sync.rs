@@ -81,7 +81,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     } else {
         pipeline.warn(
             SyncPhase::Environment,
-            "Not a git repository (caching disabled)",
+            "Not a git repository (analysis caching disabled)",
         );
     }
 
@@ -494,7 +494,7 @@ fn compute_repo_key_with_timeout(root_dir: &Path, timeout: std::time::Duration) 
 
 /// Store a tailoring result in the config cache (best-effort).
 ///
-/// Skips caching when `cache_key` is `None` (non-git repos).
+/// Skips caching when `cache_key` is `None`.
 /// Disk persistence failures are silently ignored because the cache
 /// is an optimisation — a write failure should never abort a sync.
 fn store_tailoring_cache(
