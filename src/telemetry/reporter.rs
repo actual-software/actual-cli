@@ -53,7 +53,7 @@ async fn try_report_metrics(
 mod tests {
     use super::*;
     use crate::config::types::TelemetryConfig;
-    use crate::testutil::ENV_MUTEX;
+    use crate::testutil::{EnvGuard, ENV_MUTEX};
 
     fn sample_metrics() -> SyncMetrics {
         SyncMetrics {
@@ -66,24 +66,10 @@ mod tests {
         }
     }
 
-    /// Save and clear the ACTUAL_NO_TELEMETRY env var, returning the saved value.
-    fn save_and_clear_env() -> Option<String> {
-        let saved = std::env::var("ACTUAL_NO_TELEMETRY").ok();
-        std::env::remove_var("ACTUAL_NO_TELEMETRY");
-        saved
-    }
-
-    /// Restore the ACTUAL_NO_TELEMETRY env var from a previously saved value.
-    fn restore_env(saved: Option<String>) {
-        if let Some(v) = saved {
-            std::env::set_var("ACTUAL_NO_TELEMETRY", v);
-        }
-    }
-
     #[tokio::test]
     async fn test_report_sends_post_with_auth_header() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = save_and_clear_env();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -99,14 +85,12 @@ mod tests {
 
         report_metrics(&metrics, &config, &server.url()).await;
         mock.assert_async().await;
-
-        restore_env(saved);
     }
 
     #[tokio::test]
     async fn test_try_report_returns_ok_on_success() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = save_and_clear_env();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -121,30 +105,26 @@ mod tests {
         let result = try_report_metrics(&metrics, &config, &server.url()).await;
         assert!(result.is_ok());
         mock.assert_async().await;
-
-        restore_env(saved);
     }
 
     #[tokio::test]
     async fn test_try_report_returns_err_on_network_failure() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = save_and_clear_env();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
         let metrics = sample_metrics();
         let config = Config::default();
 
         let result = try_report_metrics(&metrics, &config, "http://127.0.0.1:1").await;
         assert!(result.is_err());
-
-        restore_env(saved);
     }
 
     #[tokio::test]
     async fn test_report_opt_out_via_config() {
         // Hold the env mutex and ensure the env var is unset so the config
         // check is actually reached (tests run in parallel).
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = save_and_clear_env();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -163,16 +143,12 @@ mod tests {
 
         report_metrics(&metrics, &config, &server.url()).await;
         mock.assert_async().await;
-
-        restore_env(saved);
     }
 
     #[tokio::test]
     async fn test_report_opt_out_via_env_var() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = save_and_clear_env();
-
-        std::env::set_var("ACTUAL_NO_TELEMETRY", "1");
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -186,18 +162,12 @@ mod tests {
 
         report_metrics(&metrics, &config, &server.url()).await;
         mock.assert_async().await;
-
-        // Restore: remove the var we set, then restore any previous value
-        std::env::remove_var("ACTUAL_NO_TELEMETRY");
-        restore_env(saved);
     }
 
     #[tokio::test]
     async fn test_report_opt_out_via_env_var_true() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = save_and_clear_env();
-
-        std::env::set_var("ACTUAL_NO_TELEMETRY", "true");
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("ACTUAL_NO_TELEMETRY", "true");
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -211,17 +181,12 @@ mod tests {
 
         report_metrics(&metrics, &config, &server.url()).await;
         mock.assert_async().await;
-
-        std::env::remove_var("ACTUAL_NO_TELEMETRY");
-        restore_env(saved);
     }
 
     #[tokio::test]
     async fn test_report_opt_out_via_env_var_yes() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = save_and_clear_env();
-
-        std::env::set_var("ACTUAL_NO_TELEMETRY", "yes");
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("ACTUAL_NO_TELEMETRY", "yes");
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -235,17 +200,12 @@ mod tests {
 
         report_metrics(&metrics, &config, &server.url()).await;
         mock.assert_async().await;
-
-        std::env::remove_var("ACTUAL_NO_TELEMETRY");
-        restore_env(saved);
     }
 
     #[tokio::test]
     async fn test_report_not_opted_out_via_empty_env_var() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = save_and_clear_env();
-
-        std::env::set_var("ACTUAL_NO_TELEMETRY", "");
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("ACTUAL_NO_TELEMETRY", "");
 
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -259,22 +219,17 @@ mod tests {
 
         report_metrics(&metrics, &config, &server.url()).await;
         mock.assert_async().await;
-
-        std::env::remove_var("ACTUAL_NO_TELEMETRY");
-        restore_env(saved);
     }
 
     #[tokio::test]
     async fn test_report_network_failure_no_panic() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = save_and_clear_env();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
 
         let metrics = sample_metrics();
         let config = Config::default();
         // Point at unreachable address — should NOT panic
         report_metrics(&metrics, &config, "http://127.0.0.1:1").await;
-
-        restore_env(saved);
     }
 
     #[test]
@@ -290,37 +245,21 @@ mod tests {
     }
 
     #[test]
-    fn test_save_and_restore_env_round_trip() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+    fn test_env_guard_round_trip() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure clean state
-        std::env::remove_var("ACTUAL_NO_TELEMETRY");
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
         assert!(std::env::var("ACTUAL_NO_TELEMETRY").is_err());
 
-        // Save (None) and clear
-        let saved = save_and_clear_env();
-        assert!(saved.is_none());
+        // Set it via guard and verify
+        {
+            let _g = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+            assert_eq!(
+                std::env::var("ACTUAL_NO_TELEMETRY").ok().as_deref(),
+                Some("1")
+            );
+        } // guard drops here, restores to absent
 
-        // Set it, then save and clear
-        std::env::set_var("ACTUAL_NO_TELEMETRY", "1");
-        let saved = save_and_clear_env();
-        assert_eq!(saved.as_deref(), Some("1"));
         assert!(std::env::var("ACTUAL_NO_TELEMETRY").is_err());
-
-        // Restore it
-        restore_env(saved);
-        assert_eq!(
-            std::env::var("ACTUAL_NO_TELEMETRY").ok().as_deref(),
-            Some("1")
-        );
-
-        // Restore None (no-op)
-        restore_env(None);
-        assert_eq!(
-            std::env::var("ACTUAL_NO_TELEMETRY").ok().as_deref(),
-            Some("1")
-        );
-
-        // Clean up
-        std::env::remove_var("ACTUAL_NO_TELEMETRY");
     }
 }

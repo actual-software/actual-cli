@@ -34,8 +34,7 @@ pub fn find_claude_binary() -> Result<PathBuf, ActualError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::ENV_MUTEX;
-    use std::env;
+    use crate::testutil::{EnvGuard, ENV_MUTEX};
 
     #[test]
     fn test_error_message_contains_not_installed() {
@@ -59,14 +58,13 @@ mod tests {
 
     #[test]
     fn test_env_var_override_with_valid_path() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake_binary = dir.path().join("fake-claude");
         std::fs::File::create(&fake_binary).unwrap();
 
-        env::set_var("CLAUDE_BINARY", fake_binary.to_str().unwrap());
+        let _guard = EnvGuard::set("CLAUDE_BINARY", fake_binary.to_str().unwrap());
         let result = find_claude_binary();
-        env::remove_var("CLAUDE_BINARY");
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), fake_binary);
@@ -74,10 +72,9 @@ mod tests {
 
     #[test]
     fn test_env_var_override_with_nonexistent_path() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
         let result = find_claude_binary();
-        env::remove_var("CLAUDE_BINARY");
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ClaudeNotFound));
@@ -85,12 +82,12 @@ mod tests {
 
     #[test]
     fn test_not_found_when_binary_missing() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        env::remove_var("CLAUDE_BINARY");
-        let original_path = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", "");
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // Ensure CLAUDE_BINARY is absent so we fall through to PATH lookup,
+        // then blank PATH so `claude` cannot be found.
+        let _g1 = EnvGuard::remove("CLAUDE_BINARY");
+        let _g2 = EnvGuard::set("PATH", "");
         let result = find_claude_binary();
-        env::set_var("PATH", &original_path);
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ClaudeNotFound));

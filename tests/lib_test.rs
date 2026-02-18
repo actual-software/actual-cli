@@ -1,10 +1,8 @@
+mod common;
+
 use actual_cli::{handle_result, run, Cli, Command, ConfigAction};
 use clap::Parser;
-use std::sync::Mutex;
-
-/// Mutex to serialize tests that manipulate env vars, since env vars are
-/// process-global and tests run in parallel by default.
-static ENV_MUTEX: Mutex<()> = Mutex::new(());
+use common::{EnvGuard, ENV_MUTEX};
 
 #[test]
 fn test_cli_parse_sync() {
@@ -186,96 +184,58 @@ fn test_cli_parse_config_path() {
 fn test_run_sync_without_claude() {
     // Sync now requires Claude binary for Phase 1 env check.
     // Without it, we expect exit code 2 (ClaudeNotFound).
-    let _lock = ENV_MUTEX.lock().unwrap();
-    std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
     let cli = Cli::parse_from(["actual", "sync", "--dry-run"]);
     assert_eq!(handle_result(run(cli)), 2);
-    std::env::remove_var("CLAUDE_BINARY");
 }
 
 #[test]
 fn test_run_status() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
-    std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "status"]);
     assert_eq!(handle_result(run(cli)), 0);
-    std::env::remove_var("ACTUAL_CONFIG");
 }
 
 #[test]
 fn test_run_auth() {
-    let _lock = ENV_MUTEX.lock().unwrap();
-    std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
     let cli = Cli::parse_from(["actual", "auth"]);
     assert_eq!(handle_result(run(cli)), 2);
-    std::env::remove_var("CLAUDE_BINARY");
 }
 
 #[test]
 fn test_run_config_show() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
-    std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "config", "show"]);
     assert_eq!(handle_result(run(cli)), 0);
-    std::env::remove_var("ACTUAL_CONFIG");
 }
 
 #[test]
 fn test_run_config_set() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
-    std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "config", "set", "batch_size", "10"]);
     assert_eq!(handle_result(run(cli)), 0);
-    std::env::remove_var("ACTUAL_CONFIG");
 }
 
 #[test]
 fn test_run_config_path() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
-    std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "config", "path"]);
     assert_eq!(handle_result(run(cli)), 0);
-    std::env::remove_var("ACTUAL_CONFIG");
-}
-
-/// Create a fake Claude binary script that handles both `auth status --json`
-/// and `--print ...` (analysis) invocations.
-///
-/// - `auth status --json` → returns the given `auth_json`
-/// - `--print ...` → returns the given `analysis_json`
-#[cfg(unix)]
-fn create_fake_claude_binary(
-    dir: &std::path::Path,
-    auth_json: &str,
-    analysis_json: &str,
-) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let script = dir.join("fake-claude");
-    let script_content = format!(
-        "#!/bin/sh\n\
-         if [ \"$1\" = \"auth\" ]; then\n\
-         printf '%s\\n' '{}'\n\
-         exit 0\n\
-         elif [ \"$1\" = \"--print\" ]; then\n\
-         printf '%s\\n' '{}'\n\
-         exit 0\n\
-         else\n\
-         echo \"unexpected args: $@\" >&2\n\
-         exit 1\n\
-         fi\n",
-        auth_json, analysis_json,
-    );
-    std::fs::write(&script, script_content).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    script
 }
 
 #[test]
@@ -334,7 +294,7 @@ fn test_cli_parse_sync_inf_budget_rejected() {
 #[cfg(unix)]
 #[test]
 fn test_run_sync_force_with_fake_claude() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
 
@@ -352,19 +312,17 @@ fn test_run_sync_force_with_fake_claude() {
         )
         .create();
 
-    let auth_json = r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "test@example.com"}"#;
-    let analysis_json = r#"{"is_monorepo": false, "projects": [{"path": ".", "name": "test-app", "languages": ["rust"], "frameworks": [], "package_manager": "cargo"}]}"#;
+    let script = common::create_fake_claude_binary(
+        dir.path(),
+        common::AUTH_OK,
+        common::ANALYSIS_SINGLE_PROJECT,
+    );
 
-    let script = create_fake_claude_binary(dir.path(), auth_json, analysis_json);
-
-    std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
-    std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard_binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+    let _guard_config = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
 
     let cli = Cli::parse_from(["actual", "sync", "--force", "--api-url", &server.url()]);
     let exit_code = handle_result(run(cli));
-
-    std::env::remove_var("CLAUDE_BINARY");
-    std::env::remove_var("ACTUAL_CONFIG");
 
     assert_eq!(exit_code, 0, "sync --force with fake Claude should succeed");
 }
@@ -372,20 +330,15 @@ fn test_run_sync_force_with_fake_claude() {
 #[cfg(unix)]
 #[test]
 fn test_run_sync_not_authenticated_with_fake_claude() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
 
-    let auth_json = r#"{"loggedIn": false}"#;
-    let analysis_json = r#"{}"#; // Won't be reached
+    let script = common::create_fake_claude_binary(dir.path(), common::AUTH_FAIL, "{}");
 
-    let script = create_fake_claude_binary(dir.path(), auth_json, analysis_json);
-
-    std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+    let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
 
     let cli = Cli::parse_from(["actual", "sync", "--force"]);
     let exit_code = handle_result(run(cli));
-
-    std::env::remove_var("CLAUDE_BINARY");
 
     assert_eq!(
         exit_code, 2,
