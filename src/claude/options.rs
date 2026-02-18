@@ -171,55 +171,12 @@ mod tests {
     #[test]
     fn test_skip_permissions_only_with_readonly_tools() {
         let opts = InvocationOptions::for_tailoring(None);
-        assert!(
-            opts.skip_permissions,
-            "for_tailoring must use skip_permissions=true"
-        );
+        assert!(opts.skip_permissions);
         let forbidden = ["Bash", "Write", "Edit", "WebFetch"];
         for tool in &forbidden {
-            assert!(
-                !opts.tools.contains(tool),
-                "skip_permissions=true is unsafe when tool '{tool}' is enabled"
-            );
+            assert!(!opts.tools.contains(tool));
             for allowed in &opts.allowed_tools {
-                assert!(
-                    !allowed.starts_with(tool),
-                    "skip_permissions=true is unsafe when allowed_tool '{allowed}' \
-                     matches forbidden tool '{tool}'"
-                );
-            }
-        }
-    }
-
-    /// Verify the guard panics when a forbidden tool appears in the tools string.
-    #[test]
-    #[should_panic(expected = "skip_permissions=true is unsafe when tool 'Bash' is enabled")]
-    fn test_skip_permissions_guard_panics_on_forbidden_tools_string() {
-        let mut opts = InvocationOptions::for_tailoring(None);
-        opts.tools = "Read,Glob,Grep,Bash".to_string();
-        let forbidden = ["Bash", "Write", "Edit", "WebFetch"];
-        for tool in &forbidden {
-            assert!(
-                !opts.tools.contains(tool),
-                "skip_permissions=true is unsafe when tool '{tool}' is enabled"
-            );
-        }
-    }
-
-    /// Verify the guard panics when a forbidden tool appears in allowed_tools.
-    #[test]
-    #[should_panic(expected = "skip_permissions=true is unsafe when allowed_tool")]
-    fn test_skip_permissions_guard_panics_on_forbidden_allowed_tool() {
-        let mut opts = InvocationOptions::for_tailoring(None);
-        opts.allowed_tools.push("Bash(echo:*)".to_string());
-        let forbidden = ["Bash", "Write", "Edit", "WebFetch"];
-        for tool in &forbidden {
-            for allowed in &opts.allowed_tools {
-                assert!(
-                    !allowed.starts_with(tool),
-                    "skip_permissions=true is unsafe when allowed_tool '{allowed}' \
-                     matches forbidden tool '{tool}'"
-                );
+                assert!(!allowed.starts_with(tool));
             }
         }
     }
