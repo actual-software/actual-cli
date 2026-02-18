@@ -285,9 +285,6 @@ fn collect_key_files(root: &Path) -> Vec<(String, String)> {
     if budget > 0 {
         let entrypoints = find_entrypoints(root, MAX_ENTRYPOINTS);
         for (rel_path, path) in entrypoints {
-            if budget == 0 {
-                break;
-            }
             if let Some(content) = read_file_truncated(&path) {
                 if content.len() > budget {
                     break;
@@ -838,7 +835,7 @@ mod tests {
         assert!(!key_files.iter().any(|(name, _)| name == "tsconfig.json"));
     }
 
-    // Test 36: budget=0 mid-loop in entrypoints (covers line 296 break)
+    // Test 36: budget exhausted mid-loop in entrypoints — covers the content.len() > budget break
     #[test]
     fn test_entrypoint_budget_zero_after_first_entry() {
         let tmp = TempDir::new().unwrap();
@@ -848,7 +845,7 @@ mod tests {
         create_file(root, "Cargo.toml", &partial);
         // First entrypoint fills budget to exactly 0 (10 bytes)
         create_file(root, "pkg0/main.rs", "0123456789");
-        // Second entrypoint — budget is 0, should hit break at line 296
+        // Second entrypoint — budget is 0, content.len() > budget fires
         create_file(root, "pkg1/main.rs", "fn main() {}");
 
         let key_files = collect_key_files(root);
