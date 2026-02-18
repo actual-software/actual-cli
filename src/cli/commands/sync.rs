@@ -260,7 +260,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
             tailoring_cache_key.as_deref(),
             root_dir,
             &out,
-        )?;
+        );
         out
     } else {
         pipeline.start(SyncPhase::Tailor, "Tailoring ADRs...");
@@ -297,7 +297,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
                     tailoring_cache_key.as_deref(),
                     root_dir,
                     &output,
-                )?;
+                );
                 output
             }
             Err(e) => {
@@ -369,30 +369,34 @@ fn compute_repo_key(root_dir: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Store a tailoring result in the config cache.
+/// Store a tailoring result in the config cache (best-effort).
 ///
 /// Skips caching when `cache_key` is `None` (non-git repos).
+/// Disk persistence failures are silently ignored because the cache
+/// is an optimisation — a write failure should never abort a sync.
 fn store_tailoring_cache(
     config: &mut crate::config::types::Config,
     cfg_path: &Path,
     cache_key: Option<&str>,
     root_dir: &Path,
     output: &TailoringOutput,
-) -> Result<(), ActualError> {
+) {
     let Some(key) = cache_key else {
-        return Ok(());
+        return;
     };
-    let tailoring_value = serde_yaml::to_value(output).map_err(|e| {
-        ActualError::ConfigError(format!("Failed to serialize tailoring for cache: {e}"))
-    })?;
+    // TailoringOutput derives Serialize with only String/Vec/i64 fields,
+    // so serde_yaml::to_value is infallible.
+    let tailoring_value =
+        serde_yaml::to_value(output).expect("TailoringOutput serialization is infallible");
     config.cached_tailoring = Some(CachedTailoring {
         cache_key: key.to_string(),
         repo_path: root_dir.to_string_lossy().to_string(),
         tailoring: tailoring_value,
         tailored_at: chrono::Utc::now(),
     });
-    save_to(config, cfg_path)?;
-    Ok(())
+    // Best-effort persist: if disk write fails, the in-memory cache is
+    // still populated for subsequent operations in this process.
+    let _ = save_to(config, cfg_path);
 }
 
 /// Compute a cache key for the tailoring step by hashing all inputs
@@ -2623,8 +2627,7 @@ mod tests {
             Some("test-cache-key"),
             dir.path(),
             &output,
-        )
-        .unwrap();
+        );
 
         assert!(config.cached_tailoring.is_some());
         let cached = config.cached_tailoring.as_ref().unwrap();
@@ -2644,7 +2647,7 @@ mod tests {
         save_to(&config, &cfg_path).unwrap();
 
         let output = make_output(vec![]);
-        store_tailoring_cache(&mut config, &cfg_path, None, dir.path(), &output).unwrap();
+        store_tailoring_cache(&mut config, &cfg_path, None, dir.path(), &output);
 
         assert!(
             config.cached_tailoring.is_none(),
@@ -2666,8 +2669,7 @@ mod tests {
             Some("disk-test-key"),
             dir.path(),
             &output,
-        )
-        .unwrap();
+        );
 
         // Reload from disk and verify
         let loaded = load_from(&cfg_path).unwrap();
