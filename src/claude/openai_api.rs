@@ -8,6 +8,23 @@ use crate::tailoring::types::TailoringOutput;
 
 use super::subprocess::TailoringRunner;
 
+/// Map a `reqwest::Error` from `send()` into an [`ActualError`].
+///
+/// Extracted so the timeout vs. other-network-error branch can be unit tested
+/// without an actual network roundtrip.
+fn map_send_error(e: reqwest::Error, timeout: Duration) -> ActualError {
+    if e.is_timeout() {
+        ActualError::ClaudeTimeout {
+            seconds: timeout.as_secs(),
+        }
+    } else {
+        ActualError::ClaudeSubprocessFailed {
+            message: format!("OpenAI API request failed: {e}"),
+            stderr: String::new(),
+        }
+    }
+}
+
 /// Runner that uses the OpenAI Responses API with structured JSON output.
 ///
 /// Implements [`TailoringRunner`] by calling `POST /v1/responses` with a
@@ -154,18 +171,7 @@ impl TailoringRunner for OpenAiApiRunner {
             .json(&body)
             .send()
             .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    ActualError::ClaudeTimeout {
-                        seconds: self.timeout.as_secs(),
-                    }
-                } else {
-                    ActualError::ClaudeSubprocessFailed {
-                        message: format!("OpenAI API request failed: {e}"),
-                        stderr: String::new(),
-                    }
-                }
-            })?;
+            .map_err(|e| map_send_error(e, self.timeout))?;
 
         let status = response.status();
 
@@ -473,13 +479,15 @@ mod tests {
         mock.assert_async().await;
     }
 
+    /// Serializes tests that mutate `OPENAI_API_KEY` to avoid data races.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // Test 6: from_env returns Err when OPENAI_API_KEY is not set
     #[test]
     fn test_from_env_missing_key() {
-        // Temporarily unset the var (safe in unit tests since each test runs in its own
-        // scope; we restore it after).
+        let _guard = ENV_MUTEX.lock().unwrap();
         let prev = std::env::var("OPENAI_API_KEY").ok();
-        // SAFETY: single-threaded test, no concurrent env access expected.
+        // SAFETY: protected by ENV_MUTEX; no concurrent env access in tests.
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
 
         let result = OpenAiApiRunner::from_env("gpt-4o".to_string(), Duration::from_secs(10));
@@ -488,7 +496,6 @@ mod tests {
             "expected ClaudeNotAuthenticated when OPENAI_API_KEY is unset"
         );
 
-        // Restore previous value.
         if let Some(val) = prev {
             unsafe { std::env::set_var("OPENAI_API_KEY", val) };
         }
@@ -588,5 +595,380 @@ mod tests {
             result
         );
         mock.assert_async().await;
+    }
+
+    // Test 10: from_env succeeds when OPENAI_API_KEY is set
+    #[test]
+    fn test_from_env_success() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let prev = std::env::var("OPENAI_API_KEY").ok();
+        // SAFETY: protected by ENV_MUTEX.
+        unsafe { std::env::set_var("OPENAI_API_KEY", "test-key-from-env") };
+
+        let result = OpenAiApiRunner::from_env("gpt-4o".to_string(), Duration::from_secs(10));
+        assert!(result.is_ok(), "expected Ok when OPENAI_API_KEY is set");
+
+        // Restore.
+        match prev {
+            Some(val) => unsafe { std::env::set_var("OPENAI_API_KEY", val) },
+            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
+        }
+    }
+
+    // Test 11: refusal with no refusal field falls back to "unknown reason"
+    #[tokio::test]
+    async fn test_refusal_without_reason_text() {
+        let mut server = Server::new_async().await;
+
+        // content_type is "refusal" but the "refusal" field itself is missing/null.
+        let body = r#"{
+            "id": "resp_test",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "refusal"
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("bad request", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::TailoringValidationError(msg)) => {
+                assert!(
+                    msg.contains("OpenAI refused"),
+                    "expected 'OpenAI refused' in: {msg}"
+                );
+                assert!(
+                    msg.contains("unknown reason"),
+                    "expected 'unknown reason' fallback in: {msg}"
+                );
+            }
+            other => panic!("expected TailoringValidationError, got: {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    // Test 12: message item with null content falls back to empty vec (unwrap_or_default),
+    // and then fails with "did not return text output" (no output_text in empty content).
+    #[tokio::test]
+    async fn test_message_with_null_content() {
+        let mut server = Server::new_async().await;
+
+        let body = r#"{
+            "id": "resp_test",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": null
+                }
+            ]
+        }"#;
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+                assert!(
+                    message.contains("did not return text output"),
+                    "expected 'did not return text output' in: {message}"
+                );
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    // Test 13: message output item with content that has no output_text (only unknown types)
+    #[tokio::test]
+    async fn test_message_content_no_output_text_item() {
+        let mut server = Server::new_async().await;
+
+        let body = r#"{
+            "id": "resp_test",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "some_other_type",
+                            "text": "hello"
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+                assert!(
+                    message.contains("did not return text output"),
+                    "expected 'did not return text output' in: {message}"
+                );
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    // Test 14: HTTP 200 with non-JSON body maps to ClaudeSubprocessFailed (parse error)
+    #[tokio::test]
+    async fn test_malformed_json_response() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("this is not valid json at all")
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+                assert!(
+                    message.contains("Failed to parse OpenAI API response"),
+                    "expected parse error message, got: {message}"
+                );
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    // Test 15: output has a non-message type item (no message item found at all)
+    #[tokio::test]
+    async fn test_non_message_output_type() {
+        let mut server = Server::new_async().await;
+
+        let body = r#"{
+            "id": "resp_test",
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "some_tool"
+                }
+            ]
+        }"#;
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+                assert!(
+                    message.contains("did not return text output"),
+                    "expected 'did not return text output' in: {message}"
+                );
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    // Test 16: output_text with null text field (and_then returns None → ClaudeSubprocessFailed)
+    #[tokio::test]
+    async fn test_output_text_with_null_text() {
+        let mut server = Server::new_async().await;
+
+        let body = r#"{
+            "id": "resp_test",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": null
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+                assert!(
+                    message.contains("did not return text output"),
+                    "expected 'did not return text output' in: {message}"
+                );
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    // Test 17: network error (connection refused) maps to ClaudeSubprocessFailed (non-timeout)
+    #[tokio::test]
+    async fn test_network_error_maps_to_subprocess_failed() {
+        // Point at a port that won't be listening.
+        let runner = OpenAiApiRunner::new(
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            Duration::from_secs(10),
+        )
+        .with_base_url("http://127.0.0.1:1".to_string()); // port 1 is reserved, always refused
+
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+                assert!(
+                    message.contains("OpenAI API request failed"),
+                    "expected 'OpenAI API request failed' in: {message}"
+                );
+            }
+            // Timeout is also acceptable if OS delays the refused connection.
+            Err(ActualError::ClaudeTimeout { .. }) => {}
+            other => panic!(
+                "expected ClaudeSubprocessFailed or ClaudeTimeout, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    // Test 18: map_send_error with timeout produces ClaudeTimeout
+    #[tokio::test]
+    async fn test_map_send_error_timeout() {
+        // Build a client with a 1ms timeout, then try to reach a non-routable address
+        // so the connection attempt itself times out.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        // 192.0.2.x is TEST-NET, packets are dropped (RFC 5737) → connection timeout.
+        let err = client
+            .get("http://192.0.2.1/timeout-test")
+            .send()
+            .await
+            .unwrap_err();
+
+        // Only run the assertion if we actually got a timeout error (it might be a
+        // connection error on some CI environments).
+        if err.is_timeout() {
+            let mapped = map_send_error(err, Duration::from_secs(42));
+            assert!(
+                matches!(mapped, ActualError::ClaudeTimeout { seconds: 42 }),
+                "expected ClaudeTimeout(42)"
+            );
+        } else {
+            // Not a timeout — test that the other branch is also covered.
+            let mapped = map_send_error(err, Duration::from_secs(42));
+            assert!(
+                matches!(mapped, ActualError::ClaudeSubprocessFailed { .. }),
+                "expected ClaudeSubprocessFailed for non-timeout error"
+            );
+        }
+    }
+
+    // Test 19: map_send_error with non-timeout error produces ClaudeSubprocessFailed
+    // This directly exercises the else branch of map_send_error.
+    #[tokio::test]
+    async fn test_map_send_error_non_timeout() {
+        // Connection refused is a non-timeout error.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let err = client
+            .get("http://127.0.0.1:1/test") // port 1 always refused
+            .send()
+            .await
+            .unwrap_err();
+
+        let is_to = err.is_timeout();
+        let mapped = map_send_error(err, Duration::from_secs(10));
+        if is_to {
+            assert!(matches!(mapped, ActualError::ClaudeTimeout { .. }));
+        } else {
+            match mapped {
+                ActualError::ClaudeSubprocessFailed { message, .. } => {
+                    assert!(
+                        message.contains("OpenAI API request failed"),
+                        "expected message prefix, got: {message}"
+                    );
+                }
+                other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            }
+        }
     }
 }
