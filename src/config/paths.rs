@@ -58,17 +58,16 @@ pub fn load() -> Result<Config, ActualError> {
 /// If the file does not exist, creates it with [`Config::default()`] and returns
 /// that default. On unix, the created file has permissions `0600`.
 pub fn load_from(path: &Path) -> Result<Config, ActualError> {
-    if !path.exists() {
-        let default = Config::default();
-        save_to(&default, path)?;
-        return Ok(default);
+    match std::fs::read_to_string(path) {
+        Ok(contents) => serde_yaml::from_str(&contents)
+            .map_err(|e| config_error(format!("Failed to parse config YAML: {e}"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let default = Config::default();
+            save_to(&default, path)?;
+            Ok(default)
+        }
+        Err(e) => Err(config_error(format!("Failed to read config file: {e}"))),
     }
-
-    let contents = std::fs::read_to_string(path)
-        .map_err(|e| config_error(format!("Failed to read config file: {e}")))?;
-
-    serde_yaml::from_str(&contents)
-        .map_err(|e| config_error(format!("Failed to parse config YAML: {e}")))
 }
 
 /// Save config to disk using the default config path.
@@ -177,6 +176,16 @@ mod tests {
         let config_file = dir.path().join("config.yaml");
         assert!(!config_file.exists());
 
+        let config = load_from(&config_file).unwrap();
+        assert_eq!(config, Config::default());
+        assert!(config_file.exists());
+    }
+
+    #[test]
+    fn test_load_from_nonexistent_path_creates_default() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("subdir").join("config.yaml");
+        assert!(!config_file.exists());
         let config = load_from(&config_file).unwrap();
         assert_eq!(config, Config::default());
         assert!(config_file.exists());
