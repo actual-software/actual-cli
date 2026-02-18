@@ -22,6 +22,10 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .concurrency
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        "invocation_timeout_secs" => config
+            .invocation_timeout_secs
+            .map(|v| v.to_string())
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         "max_budget_usd" => config
             .max_budget_usd
             .map(|v| v.to_string())
@@ -95,6 +99,19 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
                 )));
             }
             config.concurrency = Some(v);
+        }
+        "invocation_timeout_secs" => {
+            let v = value.parse::<u64>().map_err(|_| {
+                ActualError::ConfigError(format!(
+                    "invalid value for {path}: expected u64, got \"{value}\""
+                ))
+            })?;
+            if v == 0 {
+                return Err(ActualError::ConfigError(format!(
+                    "invalid value for {path}: must be >= 1, got 0"
+                )));
+            }
+            config.invocation_timeout_secs = Some(v);
         }
         "max_budget_usd" => {
             let v = value.parse::<f64>().map_err(|_| {

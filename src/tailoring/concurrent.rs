@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::Semaphore;
 
@@ -23,6 +24,8 @@ pub struct ConcurrentTailoringConfig<'a> {
     pub model_override: Option<&'a str>,
     /// Optional maximum budget in USD for each invocation.
     pub max_budget_usd: Option<f64>,
+    /// Per-project timeout duration.
+    pub per_project_timeout: Duration,
 }
 
 /// Tailor ADRs for multiple projects concurrently, then merge results.
@@ -45,7 +48,17 @@ pub async fn tailor_all_projects<R: ClaudeRunner>(
         .iter()
         .map(|project| {
             let sem = semaphore.clone();
-            async move { tailor_single_project(runner, project, adrs, config, &sem).await }
+            async move {
+                let timeout_dur = config.per_project_timeout;
+                tokio::time::timeout(
+                    timeout_dur,
+                    tailor_single_project(runner, project, adrs, config, &sem),
+                )
+                .await
+                .map_err(|_| ActualError::ClaudeTimeout {
+                    seconds: timeout_dur.as_secs(),
+                })?
+            }
         })
         .collect();
 
@@ -303,6 +316,7 @@ mod tests {
             existing_claude_md_paths: "",
             model_override: None,
             max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
 
@@ -346,6 +360,7 @@ mod tests {
             existing_claude_md_paths: "",
             model_override: None,
             max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
 
@@ -390,6 +405,7 @@ mod tests {
             existing_claude_md_paths: "",
             model_override: None,
             max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
 
@@ -434,6 +450,7 @@ mod tests {
             existing_claude_md_paths: "",
             model_override: None,
             max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
 
@@ -496,6 +513,7 @@ mod tests {
             existing_claude_md_paths: "",
             model_override: None,
             max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
 
@@ -543,6 +561,7 @@ mod tests {
             existing_claude_md_paths: "",
             model_override: None,
             max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
         };
 
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
@@ -613,6 +632,7 @@ mod tests {
             existing_claude_md_paths: "existing context",
             model_override: None,
             max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
 
@@ -708,6 +728,7 @@ mod tests {
             existing_claude_md_paths: "",
             model_override: None,
             max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
 
@@ -784,6 +805,7 @@ mod tests {
             existing_claude_md_paths: "",
             model_override: None,
             max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
 
@@ -807,5 +829,64 @@ mod tests {
 
         // Verify all output files are present
         assert_eq!(output.files.len(), 4);
+    }
+
+    // --- Test 8: per-project timeout fires when project takes too long ---
+
+    #[tokio::test]
+    async fn test_per_project_timeout() {
+        tokio::time::pause();
+
+        let projects = vec![make_project("slow")];
+        let adrs = vec![make_adr("adr-001")];
+
+        let responses = vec![make_output_json(
+            "apps/slow/CLAUDE.md",
+            "Rules",
+            &["adr-001"],
+        )];
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_secs(10));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(2),
+        };
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ClaudeTimeout { seconds: 2 }),
+            "expected ClaudeTimeout, got: {err}"
+        );
+    }
+
+    // --- Test 9: project completes within timeout ---
+
+    #[tokio::test]
+    async fn test_completes_within_timeout() {
+        let projects = vec![make_project("fast")];
+        let adrs = vec![make_adr("adr-001")];
+
+        let responses = vec![make_output_json(
+            "apps/fast/CLAUDE.md",
+            "Rules",
+            &["adr-001"],
+        )];
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(10));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(60),
+        };
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        assert!(result.is_ok());
     }
 }
