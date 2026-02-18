@@ -278,6 +278,37 @@ fn create_fake_claude_binary(
     script
 }
 
+#[test]
+fn test_cli_parse_sync_negative_budget_rejected() {
+    let result = Cli::try_parse_from(["actual", "sync", "--max-budget-usd", "-5"]);
+    assert!(result.is_err(), "negative budget should be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("non-negative"),
+        "error should mention non-negative: {err}"
+    );
+}
+
+#[test]
+fn test_cli_parse_sync_zero_budget_accepted() {
+    let cli = Cli::parse_from(["actual", "sync", "--max-budget-usd", "0"]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert_eq!(args.max_budget_usd, Some(0.0));
+}
+
+#[test]
+fn test_cli_parse_sync_non_numeric_budget_rejected() {
+    let result = Cli::try_parse_from(["actual", "sync", "--max-budget-usd", "abc"]);
+    assert!(result.is_err(), "non-numeric budget should be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not a valid number"),
+        "error should mention invalid number: {err}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_run_sync_force_with_fake_claude() {

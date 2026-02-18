@@ -1,5 +1,16 @@
 use clap::{Parser, Subcommand};
 
+/// Parse and validate a budget value, rejecting negative numbers.
+fn parse_budget(s: &str) -> Result<f64, String> {
+    let val: f64 = s
+        .parse()
+        .map_err(|_| format!("'{s}' is not a valid number"))?;
+    if val < 0.0 {
+        return Err(format!("budget must be non-negative, got {val}"));
+    }
+    Ok(val)
+}
+
 /// ADR-powered CLAUDE.md generator
 #[derive(Parser, Debug)]
 #[command(name = "actual", version, about)]
@@ -60,7 +71,7 @@ pub struct SyncArgs {
     pub no_tailor: bool,
 
     /// Maximum budget per tailoring invocation (USD)
-    #[arg(long)]
+    #[arg(long, value_parser = parse_budget, allow_hyphen_values = true)]
     pub max_budget_usd: Option<f64>,
 }
 
