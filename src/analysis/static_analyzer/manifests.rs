@@ -502,7 +502,7 @@ fn regex_gradle_dependency() -> &'static regex::Regex {
 /// 3. `group`+`name`: `alias = { group = "com.example", name = "lib", ... }`
 ///
 /// Missing file or parse errors are silently skipped.
-fn parse_gradle_version_catalog(project_dir: &Path, deps: &mut HashSet<String>) {
+pub(crate) fn parse_gradle_version_catalog(project_dir: &Path, deps: &mut HashSet<String>) {
     let path = project_dir.join("gradle/libs.versions.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -1632,6 +1632,8 @@ require github.com/another/indirect v4.0.0 // indirect
 
     #[test]
     fn test_gradle_version_catalog_no_libraries_section() {
+        // Directly test the catalog parser: a file with only [versions] and no
+        // [libraries] section should add nothing to the dependency set.
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("gradle")).unwrap();
         fs::write(
@@ -1639,8 +1641,12 @@ require github.com/another/indirect v4.0.0 // indirect
             "[versions]\nktor = \"2.3.4\"\n",
         )
         .unwrap();
-        let info = parse_dependencies(dir.path());
-        assert!(info.dependencies.is_empty());
+        let mut deps = std::collections::HashSet::new();
+        parse_gradle_version_catalog(dir.path(), &mut deps);
+        assert!(
+            deps.is_empty(),
+            "expected no deps when [libraries] is absent, got: {deps:?}"
+        );
     }
 
     #[test]
