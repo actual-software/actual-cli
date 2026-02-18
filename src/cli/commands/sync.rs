@@ -543,6 +543,12 @@ fn compute_tailoring_cache_key(
     let mut sorted_adrs: Vec<&crate::api::types::Adr> = adrs.iter().collect();
     sorted_adrs.sort_by(|a, b| a.id.cmp(&b.id));
 
+    // Field-boundary bytes used below:
+    //   \x00 — value separator within a list element (prevents "ab"+"c" == "a"+"bc")
+    //   \xfe — list-field separator within an ADR (prevents policies/instructions
+    //           ambiguity: ["a"]+[] == []+["a"] without a separator)
+    //   \xff — ADR separator between successive ADRs in the outer loop (prevents
+    //           ["a","b"]+["c"] == ["a"]+["b","c"] across ADR boundaries)
     for adr in sorted_adrs {
         hasher.update(adr.id.as_bytes());
         hasher.update(b"\x00");
@@ -557,6 +563,7 @@ fn compute_tailoring_cache_key(
             hasher.update(policy.as_bytes());
             hasher.update(b"\x00");
         }
+        hasher.update(b"\xfe"); // end of policies list
 
         let mut instructions = adr.instructions.clone().unwrap_or_default();
         instructions.sort();
@@ -564,6 +571,7 @@ fn compute_tailoring_cache_key(
             hasher.update(instruction.as_bytes());
             hasher.update(b"\x00");
         }
+        hasher.update(b"\xfe"); // end of instructions list
 
         // AdrCategory: hash its id, name, and path fields.
         hasher.update(adr.category.id.as_bytes());
@@ -580,12 +588,15 @@ fn compute_tailoring_cache_key(
             hasher.update(lang.as_bytes());
             hasher.update(b"\x00");
         }
+        hasher.update(b"\xfe"); // end of languages list
+
         let mut frameworks = adr.applies_to.frameworks.clone();
         frameworks.sort();
         for fw in &frameworks {
             hasher.update(fw.as_bytes());
             hasher.update(b"\x00");
         }
+        hasher.update(b"\xfe"); // end of frameworks list
 
         // matched_projects (sorted).
         let mut matched = adr.matched_projects.clone();
