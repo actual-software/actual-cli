@@ -1,3 +1,4 @@
+pub mod anthropic_api;
 pub mod auth;
 pub mod binary;
 pub mod cursor_runner;
@@ -8,6 +9,7 @@ pub mod prompts;
 pub mod schemas;
 pub mod subprocess;
 
+pub use anthropic_api::AnthropicApiRunner;
 pub use openai_api::OpenAiApiRunner;
 pub use options::InvocationOptions;
 pub use subprocess::{ClaudeRunner, CliClaudeRunner, TailoringRunner};
