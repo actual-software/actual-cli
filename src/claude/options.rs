@@ -164,6 +164,33 @@ mod tests {
         assert!(args.contains(&"--allow-dangerously-skip-permissions".to_string()));
     }
 
+    /// Guard: `skip_permissions = true` must never be combined with tools that
+    /// can execute code or mutate files.  If this test fails it means a
+    /// developer added a dangerous tool to a profile that bypasses all
+    /// permission checks — that would silently allow arbitrary code execution.
+    #[test]
+    fn test_skip_permissions_only_with_readonly_tools() {
+        let opts = InvocationOptions::for_tailoring(None);
+        if opts.skip_permissions {
+            let forbidden = ["Bash", "Write", "Edit", "WebFetch"];
+            for tool in &forbidden {
+                assert!(
+                    !opts.tools.contains(tool),
+                    "skip_permissions=true is unsafe when tool '{tool}' is enabled; \
+                     remove the tool or set skip_permissions=false"
+                );
+                for allowed in &opts.allowed_tools {
+                    assert!(
+                        !allowed.starts_with(tool),
+                        "skip_permissions=true is unsafe when allowed_tool '{allowed}' \
+                         matches forbidden tool '{tool}'; \
+                         remove the entry or set skip_permissions=false"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_skip_permissions_false_omits_flag() {
         let mut opts = InvocationOptions::for_tailoring(None);
