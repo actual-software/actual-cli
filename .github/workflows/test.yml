@@ -217,7 +217,7 @@ jobs:
       - uses: poiley/bdgha@v2
         with:
           mode: create
-          failure-type: test_failure
+          failure-type: live_e2e_failure
           failure-summary: "Live E2E tests failed - see artifacts for details"
           failure-details-file: live-e2e-output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -238,5 +238,5 @@ jobs:
       - uses: poiley/bdgha@v2
         with:
           mode: cleanup
-          failure-type: test_failure
+          failure-type: live_e2e_failure
           github-token: ${{ secrets.GITHUB_TOKEN }}
