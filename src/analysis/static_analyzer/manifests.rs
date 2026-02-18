@@ -1669,6 +1669,25 @@ require github.com/another/indirect v4.0.0 // indirect
     }
 
     #[test]
+    fn test_gradle_version_catalog_non_string_non_table_value_skipped() {
+        // Library entry that is neither a String nor a Table (e.g., an integer)
+        // exercises the `_ => {}` branch and should be silently skipped.
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("gradle")).unwrap();
+        fs::write(
+            dir.path().join("gradle/libs.versions.toml"),
+            "[libraries]\nbad-entry = 42\ngood-entry = \"com.example:lib:1.0\"\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        // The integer entry is skipped; the string entry is parsed normally.
+        assert!(info.dependencies.contains(&"com.example".to_string()));
+        assert!(info.dependencies.contains(&"com.example:lib".to_string()));
+        // Ensure no garbage from the integer entry
+        assert_eq!(info.dependencies.len(), 2);
+    }
+
+    #[test]
     fn test_gradle_version_catalog_combined_with_build_gradle() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("gradle")).unwrap();
