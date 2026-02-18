@@ -100,6 +100,9 @@ impl SemgrepScanner {
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         if stdout.trim().is_empty() {
+            if output.success {
+                return Ok(vec![]);
+            }
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.to_ascii_lowercase().contains("login") {
                 bail!(
@@ -108,10 +111,7 @@ impl SemgrepScanner {
                      stderr: {stderr}"
                 );
             }
-            if !output.success {
-                bail!("semgrep failed with no JSON output. stderr: {stderr}",);
-            }
-            return Ok(vec![]);
+            bail!("semgrep failed with no JSON output. stderr: {stderr}");
         }
 
         let parsed: serde_json::Value =
@@ -702,17 +702,17 @@ mod tests {
     }
 
     #[test]
-    fn test_process_output_login_on_success_still_errors() {
-        // Even if exit code is success, empty stdout with login in stderr
+    fn test_process_output_login_on_success_is_ok() {
+        // When semgrep exits successfully (exit 0) with empty stdout,
+        // "login" in stderr should NOT cause an error — the command succeeded.
         let output = CommandOutput {
             stdout: Vec::new(),
             stderr: b"login required".to_vec(),
             success: true,
         };
         let file_map = HashMap::new();
-        let result = SemgrepScanner::process_output(&output, &file_map);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("login"));
+        let result = SemgrepScanner::process_output(&output, &file_map).unwrap();
+        assert!(result.is_empty());
     }
 
     #[test]
