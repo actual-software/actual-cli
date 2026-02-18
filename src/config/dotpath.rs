@@ -819,6 +819,13 @@ mod tests {
     }
 
     #[test]
+    fn test_set_and_get_output_format_cursor_rules() {
+        let mut config = Config::default();
+        set(&mut config, "output_format", "cursor-rules").unwrap();
+        assert_eq!(get(&config, "output_format").unwrap(), "cursor-rules");
+    }
+
+    #[test]
     fn test_get_unset_output_format() {
         let config = Config::default();
         let err = get(&config, "output_format").unwrap_err();

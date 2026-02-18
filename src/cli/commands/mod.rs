@@ -172,6 +172,18 @@ mod tests {
     // ── find_output_files tests ──
 
     #[test]
+    fn test_find_output_files_cursor_rules_nonexistent_dir_returns_empty() {
+        // Tests the Err(_) => return path in walk_for_cursor_rules when the
+        // directory cannot be read (e.g. does not exist).
+        let nonexistent = std::path::PathBuf::from("/tmp/actual_cli_nonexistent_test_dir_xyz");
+        let files = find_output_files(&nonexistent, &OutputFormat::CursorRules);
+        assert!(
+            files.is_empty(),
+            "should return empty results for non-existent directory"
+        );
+    }
+
+    #[test]
     fn test_find_output_files_agents_md_discovers_agents_md() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         std::fs::write(dir.path().join("AGENTS.md"), "Agent rules").unwrap();
