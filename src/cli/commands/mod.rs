@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
+use crate::generation::OutputFormat;
 
 pub mod auth;
 pub mod config;
@@ -27,18 +28,24 @@ pub(crate) const SKIP_DIRS: &[&str] = &[
     "build",
 ];
 
-/// Recursively find all files named `CLAUDE.md` under the given root directory.
+/// Recursively find all output files matching the given [`OutputFormat`] under
+/// the given root directory.
 ///
 /// Skips all hidden directories (names starting with `.`) and the non-hidden
 /// directories listed in [`SKIP_DIRS`].
-pub(crate) fn find_claude_md_files(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn find_output_files(root: &Path, format: &OutputFormat) -> Vec<PathBuf> {
     let mut results = Vec::new();
-    walk_for_claude_md(root, &mut results);
+    walk_for_output_files(root, format.filename(), &mut results);
     results.sort();
     results
 }
 
-fn walk_for_claude_md(dir: &Path, results: &mut Vec<PathBuf>) {
+/// Backwards-compatible alias: find all `CLAUDE.md` files (default format).
+pub(crate) fn find_claude_md_files(root: &Path) -> Vec<PathBuf> {
+    find_output_files(root, &OutputFormat::ClaudeMd)
+}
+
+fn walk_for_output_files(dir: &Path, filename: &str, results: &mut Vec<PathBuf>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(_) => return,
@@ -53,8 +60,8 @@ fn walk_for_claude_md(dir: &Path, results: &mut Vec<PathBuf>) {
             if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
                 continue;
             }
-            walk_for_claude_md(&path, results);
-        } else if name_str == "CLAUDE.md" {
+            walk_for_output_files(&path, filename, results);
+        } else if name_str == filename {
             results.push(path);
         }
     }
@@ -111,5 +118,50 @@ mod tests {
     fn test_handle_result_config_error() {
         let code = handle_result(Err(ActualError::ConfigError("bad".to_string())));
         assert_eq!(code, 1);
+    }
+
+    // ── find_output_files tests ──
+
+    #[test]
+    fn test_find_output_files_agents_md_discovers_agents_md() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        std::fs::write(dir.path().join("AGENTS.md"), "Agent rules").unwrap();
+        let files = find_output_files(dir.path(), &OutputFormat::AgentsMd);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_name().unwrap(), "AGENTS.md");
+    }
+
+    #[test]
+    fn test_find_output_files_agents_md_does_not_discover_claude_md() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        std::fs::write(dir.path().join("CLAUDE.md"), "Claude rules").unwrap();
+        let files = find_output_files(dir.path(), &OutputFormat::AgentsMd);
+        assert!(
+            files.is_empty(),
+            "AgentsMd format should not find CLAUDE.md"
+        );
+    }
+
+    #[test]
+    fn test_find_output_files_claude_md_discovers_claude_md() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        std::fs::write(dir.path().join("CLAUDE.md"), "Claude rules").unwrap();
+        let files = find_output_files(dir.path(), &OutputFormat::ClaudeMd);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file_name().unwrap(), "CLAUDE.md");
+    }
+
+    #[test]
+    fn test_find_output_files_nested_agents_md() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        std::fs::create_dir_all(dir.path().join("apps").join("web")).unwrap();
+        std::fs::write(
+            dir.path().join("apps").join("web").join("AGENTS.md"),
+            "Web agent rules",
+        )
+        .unwrap();
+        let files = find_output_files(dir.path(), &OutputFormat::AgentsMd);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_string_lossy().contains("AGENTS.md"));
     }
 }

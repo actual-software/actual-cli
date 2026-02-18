@@ -25,6 +25,7 @@ use crate::config::types::CachedTailoring;
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::writer::{write_files, WriteAction, WriteResult};
+use crate::generation::OutputFormat;
 use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfig};
 use crate::tailoring::filter::pre_filter_rejected;
 use crate::tailoring::types::{FileOutput, TailoringEvent, TailoringOutput, TailoringSummary};
@@ -172,6 +173,13 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         .map_err(|e| ActualError::InternalError(format!("Failed to create async runtime: {e}")))?;
 
     let root_dir_owned = root_dir.to_path_buf();
+    // Resolve the effective output format: CLI flag takes precedence over config.
+    let output_format = if args.output_format != OutputFormat::default() {
+        args.output_format.clone()
+    } else {
+        config.output_format.clone().unwrap_or_default()
+    };
+    let output_format_for_fs = output_format.clone();
     let (response, existing_paths) = rt.block_on(async {
         let api_future = async {
             let retry_config = RetryConfig::default();
@@ -181,8 +189,9 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
             }
         };
 
-        let fs_future =
-            tokio::task::spawn_blocking(move || find_existing_claude_md(&root_dir_owned));
+        let fs_future = tokio::task::spawn_blocking(move || {
+            find_existing_output_files(&root_dir_owned, &output_format_for_fs)
+        });
 
         tokio::join!(api_future, fs_future)
     });
@@ -264,7 +273,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         cached
     } else if args.no_tailor {
         pipeline.skip(SyncPhase::Tailor, "Tailoring skipped (--no-tailor)");
-        let out = raw_adrs_to_output(&filtered_adrs);
+        let out = raw_adrs_to_output(&filtered_adrs, &output_format);
         store_tailoring_cache(
             &mut config,
             cfg_path,
@@ -288,6 +297,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
             per_project_timeout: Duration::from_secs(
                 config.invocation_timeout_secs.unwrap_or(600).max(1),
             ),
+            output_format: &output_format,
         };
 
         let (progress_tx, mut progress_rx) =
@@ -649,22 +659,24 @@ fn compute_tailoring_cache_key(
 ///
 /// Groups ADRs by their `matched_projects` field. Each group produces a
 /// `FileOutput` whose content is the ADR policies/instructions formatted as
-/// markdown. ADRs with no `matched_projects` are assigned to root `CLAUDE.md`.
-fn raw_adrs_to_output(adrs: &[crate::api::types::Adr]) -> TailoringOutput {
+/// markdown. ADRs with no `matched_projects` are assigned to the root output
+/// file (e.g. `CLAUDE.md` or `AGENTS.md` depending on `format`).
+fn raw_adrs_to_output(adrs: &[crate::api::types::Adr], format: &OutputFormat) -> TailoringOutput {
+    let filename = format.filename();
     let mut project_adrs: HashMap<String, Vec<&crate::api::types::Adr>> = HashMap::new();
 
     for adr in adrs {
         if adr.matched_projects.is_empty() {
             project_adrs
-                .entry("CLAUDE.md".to_string())
+                .entry(filename.to_string())
                 .or_default()
                 .push(adr);
         } else {
             for project_path in &adr.matched_projects {
                 let file_path = if project_path == "." {
-                    "CLAUDE.md".to_string()
+                    filename.to_string()
                 } else {
-                    format!("{project_path}/CLAUDE.md")
+                    format!("{project_path}/{filename}")
                 };
                 project_adrs.entry(file_path).or_default().push(adr);
             }
@@ -721,11 +733,11 @@ fn raw_adrs_to_output(adrs: &[crate::api::types::Adr]) -> TailoringOutput {
     }
 }
 
-/// Scan the repository for existing CLAUDE.md files and return their
-/// contents concatenated as a string, for use as context during tailoring.
-fn find_existing_claude_md(root_dir: &Path) -> String {
-    let files = super::find_claude_md_files(root_dir);
-    // `find_claude_md_files` returns paths in sorted order, and `filter_map`
+/// Scan the repository for existing output files (CLAUDE.md or AGENTS.md depending on format)
+/// and return their contents concatenated as a string, for use as context during tailoring.
+fn find_existing_output_files(root_dir: &Path, format: &OutputFormat) -> String {
+    let files = super::find_output_files(root_dir, format);
+    // `find_output_files` returns paths in sorted order, and `filter_map`
     // preserves that order, so no additional sort is needed here.
     let results: Vec<String> = files
         .iter()
@@ -740,6 +752,12 @@ fn find_existing_claude_md(root_dir: &Path) -> String {
         })
         .collect();
     results.join("\n\n")
+}
+
+/// Backwards-compatible alias: scan for CLAUDE.md files (default format).
+#[allow(dead_code)]
+fn find_existing_claude_md(root_dir: &Path) -> String {
+    find_existing_output_files(root_dir, &OutputFormat::ClaudeMd)
 }
 
 /// Execute the confirm + write phase of the sync pipeline.
@@ -1472,6 +1490,7 @@ mod tests {
             verbose: false,
             no_tailor,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         }
     }
 
@@ -1487,6 +1506,7 @@ mod tests {
             verbose: false,
             no_tailor: false,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         }
     }
 
@@ -1847,6 +1867,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         let result = run_sync(
             &args,
@@ -2222,7 +2243,7 @@ mod tests {
 
     #[test]
     fn test_raw_adrs_to_output_empty() {
-        let output = raw_adrs_to_output(&[]);
+        let output = raw_adrs_to_output(&[], &OutputFormat::ClaudeMd);
         assert!(output.files.is_empty());
         assert_eq!(output.summary.total_input, 0);
         assert_eq!(output.summary.applicable, 0);
@@ -2232,7 +2253,7 @@ mod tests {
     #[test]
     fn test_raw_adrs_to_output_single_adr_no_projects() {
         let adrs = vec![make_test_adr("adr-001", "Test ADR", vec![])];
-        let output = raw_adrs_to_output(&adrs);
+        let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "CLAUDE.md");
         assert!(output.files[0].content.contains("Test ADR"));
@@ -2246,7 +2267,7 @@ mod tests {
     #[test]
     fn test_raw_adrs_to_output_adr_with_project() {
         let adrs = vec![make_test_adr("adr-001", "Web Rules", vec!["apps/web"])];
-        let output = raw_adrs_to_output(&adrs);
+        let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "apps/web/CLAUDE.md");
     }
@@ -2254,7 +2275,7 @@ mod tests {
     #[test]
     fn test_raw_adrs_to_output_adr_with_dot_project() {
         let adrs = vec![make_test_adr("adr-001", "Root Rules", vec!["."])];
-        let output = raw_adrs_to_output(&adrs);
+        let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "CLAUDE.md");
     }
@@ -2266,7 +2287,7 @@ mod tests {
             make_test_adr("adr-002", "API ADR", vec!["services/api"]),
             make_test_adr("adr-003", "Shared ADR", vec![]),
         ];
-        let output = raw_adrs_to_output(&adrs);
+        let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 3);
         let paths: Vec<&str> = output.files.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"CLAUDE.md"));
@@ -2280,7 +2301,7 @@ mod tests {
     fn test_raw_adrs_to_output_adr_without_instructions() {
         let mut adr = make_test_adr("adr-001", "Test ADR", vec![]);
         adr.instructions = None;
-        let output = raw_adrs_to_output(&[adr]);
+        let output = raw_adrs_to_output(&[adr], &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 1);
         assert!(output.files[0].content.contains("Policy for Test ADR"));
         // With instructions=None, the instruction line should not appear
@@ -2295,7 +2316,7 @@ mod tests {
     fn test_raw_adrs_to_output_adr_with_empty_instructions() {
         let mut adr = make_test_adr("adr-001", "Test ADR", vec![]);
         adr.instructions = Some(vec![]);
-        let output = raw_adrs_to_output(&[adr]);
+        let output = raw_adrs_to_output(&[adr], &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 1);
         assert!(output.files[0].content.contains("Policy for Test ADR"));
         // With empty instructions vec, no instruction lines should appear
@@ -2304,6 +2325,32 @@ mod tests {
             !content.contains("Instruction for"),
             "expected no instruction lines"
         );
+    }
+
+    // ── raw_adrs_to_output format tests ──
+
+    #[test]
+    fn test_raw_adrs_to_output_agents_md_format_root() {
+        let adrs = vec![make_test_adr("adr-001", "Test ADR", vec![])];
+        let output = raw_adrs_to_output(&adrs, &OutputFormat::AgentsMd);
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "AGENTS.md");
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_agents_md_format_with_project() {
+        let adrs = vec![make_test_adr("adr-001", "Web Rules", vec!["apps/web"])];
+        let output = raw_adrs_to_output(&adrs, &OutputFormat::AgentsMd);
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "apps/web/AGENTS.md");
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_agents_md_format_dot_project() {
+        let adrs = vec![make_test_adr("adr-001", "Root Rules", vec!["."])];
+        let output = raw_adrs_to_output(&adrs, &OutputFormat::AgentsMd);
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "AGENTS.md");
     }
 
     // ── find_existing_claude_md tests ──
@@ -2512,6 +2559,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         let result = run_sync(
             &args,
@@ -2552,6 +2600,7 @@ mod tests {
             verbose: true,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         // This should succeed and print verbose output to stderr
         let result = run_sync(
@@ -2593,6 +2642,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
@@ -2655,6 +2705,7 @@ mod tests {
             verbose: true,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
         // adr-001 is rejected, so no ADRs remain → "No files to write."
@@ -2680,6 +2731,7 @@ mod tests {
             verbose: false,
             no_tailor: false, // Triggers tailoring path
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         let result = run_sync(
             &args,
@@ -3063,6 +3115,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3093,6 +3146,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
 
         // Provide "y" for project confirmation and select all files
@@ -3136,6 +3190,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3159,6 +3214,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         run_sync(&args2, dir.path(), &cfg_path, &term2, &runner).unwrap();
 
@@ -3230,6 +3286,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3259,6 +3316,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
         assert!(
@@ -3312,6 +3370,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3343,6 +3402,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            output_format: OutputFormat::ClaudeMd,
         };
         let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
         assert!(
