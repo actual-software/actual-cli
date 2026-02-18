@@ -28,6 +28,7 @@ pub fn parse_dependencies(project_dir: &Path) -> DependencyInfo {
     parse_gemfile(project_dir, &mut deps);
     parse_pom_xml(project_dir, &mut deps);
     parse_build_gradle(project_dir, &mut deps);
+    parse_gradle_version_catalog(project_dir, &mut deps);
     parse_package_swift(project_dir, &mut deps);
 
     let mut dependencies: Vec<String> = deps.into_iter().collect();
@@ -483,11 +484,68 @@ fn regex_gradle_dependency() -> &'static regex::Regex {
     // Also matches other configurations like api, compileOnly, runtimeOnly, testImplementation, etc.
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
-            r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|kapt|annotationProcessor)\s*(?:\(\s*"([^"]+)"\s*\)|'([^']+)'|\(\s*'([^']+)'\s*\))"#,
+            r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|kapt|annotationProcessor|classpath)\s*(?:\(\s*"([^"]+)"\s*\)|'([^']+)'|\(\s*'([^']+)'\s*\))"#,
         )
         .unwrap()
     });
     &RE
+}
+
+// ── gradle/libs.versions.toml (Gradle Version Catalog) ───────────────
+
+/// Parse `gradle/libs.versions.toml` (Gradle Version Catalog) for library
+/// coordinates. Handles three declaration forms in the `[libraries]` section:
+///
+/// 1. Inline string:  `alias = "group:artifact:version"`
+/// 2. `module` key:   `alias = { module = "group:artifact", version.ref = "x" }`
+/// 3. `group`+`name`: `alias = { group = "com.example", name = "lib", ... }`
+///
+/// Missing file or parse errors are silently skipped.
+fn parse_gradle_version_catalog(project_dir: &Path, deps: &mut HashSet<String>) {
+    let path = project_dir.join("gradle/libs.versions.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let table: toml::Table = match content.parse() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    let libraries = match table.get("libraries").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return,
+    };
+
+    for (_alias, value) in libraries {
+        match value {
+            toml::Value::String(s) => {
+                insert_gradle_coord(s, deps);
+            }
+            toml::Value::Table(t) => {
+                if let Some(toml::Value::String(module)) = t.get("module") {
+                    insert_gradle_coord(module, deps);
+                } else if let (Some(toml::Value::String(group)), Some(toml::Value::String(name))) =
+                    (t.get("group"), t.get("name"))
+                {
+                    let coord = format!("{group}:{name}");
+                    insert_gradle_coord(&coord, deps);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Insert a `group:artifact[:version]` coordinate into `deps`, emitting both
+/// the bare groupId and the combined `group:artifact` coordinate.
+fn insert_gradle_coord(coord: &str, deps: &mut HashSet<String>) {
+    let parts: Vec<&str> = coord.split(':').collect();
+    if parts.len() >= 2 {
+        deps.insert(parts[0].to_string());
+        deps.insert(format!("{}:{}", parts[0], parts[1]));
+    }
 }
 
 // ── Package.swift ────────────────────────────────────────────────────
@@ -1505,5 +1563,130 @@ require github.com/another/indirect v4.0.0 // indirect
         assert!(!info
             .dependencies
             .contains(&"github.com/another/indirect".to_string()));
+    }
+
+    #[test]
+    fn test_gradle_version_catalog_module_form() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("gradle")).unwrap();
+        fs::write(
+            dir.path().join("gradle/libs.versions.toml"),
+            "[versions]\nktor = \"2.3.4\"\n\n[libraries]\nktor-server-core = { module = \"io.ktor:ktor-server-core\", version.ref = \"ktor\" }\nktor-server-netty = { module = \"io.ktor:ktor-server-netty\", version.ref = \"ktor\" }\n",
+        ).unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.contains(&"io.ktor".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"io.ktor:ktor-server-core".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"io.ktor:ktor-server-netty".to_string()));
+    }
+
+    #[test]
+    fn test_gradle_version_catalog_inline_string_form() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("gradle")).unwrap();
+        fs::write(
+            dir.path().join("gradle/libs.versions.toml"),
+            "[libraries]\nguava = \"com.google.guava:guava:31.1-jre\"\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.contains(&"com.google.guava".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"com.google.guava:guava".to_string()));
+    }
+
+    #[test]
+    fn test_gradle_version_catalog_group_name_form() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("gradle")).unwrap();
+        fs::write(
+            dir.path().join("gradle/libs.versions.toml"),
+            "[versions]\nkotlin = \"1.9.0\"\n\n[libraries]\nkotlin-stdlib = { group = \"org.jetbrains.kotlin\", name = \"kotlin-stdlib\", version.ref = \"kotlin\" }\n",
+        ).unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"org.jetbrains.kotlin".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"org.jetbrains.kotlin:kotlin-stdlib".to_string()));
+    }
+
+    #[test]
+    fn test_gradle_version_catalog_missing_file_returns_empty() {
+        let dir = tempdir().unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_gradle_version_catalog_invalid_toml_returns_empty() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("gradle")).unwrap();
+        fs::write(
+            dir.path().join("gradle/libs.versions.toml"),
+            "[[[invalid toml",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_gradle_version_catalog_no_libraries_section() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("gradle")).unwrap();
+        fs::write(
+            dir.path().join("gradle/libs.versions.toml"),
+            "[versions]\nktor = \"2.3.4\"\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_build_gradle_classpath_configuration() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("build.gradle"),
+            "buildscript {\n    dependencies {\n        classpath 'com.android.tools.build:gradle:8.1.0'\n        classpath(\"org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.0\")\n    }\n}\n",
+        ).unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"com.android.tools.build".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"com.android.tools.build:gradle".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"org.jetbrains.kotlin".to_string()));
+    }
+
+    #[test]
+    fn test_gradle_version_catalog_combined_with_build_gradle() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("gradle")).unwrap();
+        fs::write(
+            dir.path().join("build.gradle.kts"),
+            "dependencies {\n    implementation(\"com.squareup.okhttp3:okhttp:4.11.0\")\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("gradle/libs.versions.toml"),
+            "[libraries]\nktor-server-core = { module = \"io.ktor:ktor-server-core\", version.ref = \"ktor\" }\n",
+        ).unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"io.ktor:ktor-server-core".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"com.squareup.okhttp3:okhttp".to_string()));
     }
 }
