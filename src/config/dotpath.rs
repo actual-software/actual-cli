@@ -71,25 +71,43 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             config.model = Some(value.to_string());
         }
         "batch_size" => {
-            config.batch_size = Some(value.parse::<usize>().map_err(|_| {
+            let v = value.parse::<usize>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected usize, got \"{value}\""
                 ))
-            })?);
+            })?;
+            if v < 1 {
+                return Err(ActualError::ConfigError(format!(
+                    "{path} must be at least 1, got {v}"
+                )));
+            }
+            config.batch_size = Some(v);
         }
         "concurrency" => {
-            config.concurrency = Some(value.parse::<usize>().map_err(|_| {
+            let v = value.parse::<usize>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected usize, got \"{value}\""
                 ))
-            })?);
+            })?;
+            if v < 1 {
+                return Err(ActualError::ConfigError(format!(
+                    "{path} must be at least 1, got {v}"
+                )));
+            }
+            config.concurrency = Some(v);
         }
         "max_budget_usd" => {
-            config.max_budget_usd = Some(value.parse::<f64>().map_err(|_| {
+            let v = value.parse::<f64>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected f64, got \"{value}\""
                 ))
-            })?);
+            })?;
+            if !v.is_finite() || v <= 0.0 {
+                return Err(ActualError::ConfigError(format!(
+                    "{path} must be a positive finite number, got {v}"
+                )));
+            }
+            config.max_budget_usd = Some(v);
         }
         "include_general" => {
             config.include_general = Some(value.parse::<bool>().map_err(|_| {
@@ -99,11 +117,17 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             })?);
         }
         "max_per_framework" => {
-            config.max_per_framework = Some(value.parse::<u32>().map_err(|_| {
+            let v = value.parse::<u32>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected u32, got \"{value}\""
                 ))
-            })?);
+            })?;
+            if v < 1 {
+                return Err(ActualError::ConfigError(format!(
+                    "{path} must be at least 1, got {v}"
+                )));
+            }
+            config.max_per_framework = Some(v);
         }
         "include_categories" => {
             config.include_categories =
@@ -441,5 +465,92 @@ mod tests {
         let err = get(&config, "exclude_categories").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    // --- Semantic validation tests ---
+
+    #[test]
+    fn test_set_batch_size_zero_rejected() {
+        let mut config = Config::default();
+        let err = set(&mut config, "batch_size", "0").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must be at least 1"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_batch_size_one_accepted() {
+        let mut config = Config::default();
+        set(&mut config, "batch_size", "1").unwrap();
+        assert_eq!(config.batch_size, Some(1));
+    }
+
+    #[test]
+    fn test_set_concurrency_zero_rejected() {
+        let mut config = Config::default();
+        let err = set(&mut config, "concurrency", "0").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must be at least 1"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_concurrency_one_accepted() {
+        let mut config = Config::default();
+        set(&mut config, "concurrency", "1").unwrap();
+        assert_eq!(config.concurrency, Some(1));
+    }
+
+    #[test]
+    fn test_set_max_per_framework_zero_rejected() {
+        let mut config = Config::default();
+        let err = set(&mut config, "max_per_framework", "0").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must be at least 1"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_max_per_framework_one_accepted() {
+        let mut config = Config::default();
+        set(&mut config, "max_per_framework", "1").unwrap();
+        assert_eq!(config.max_per_framework, Some(1));
+    }
+
+    #[test]
+    fn test_set_max_budget_usd_negative_rejected() {
+        let mut config = Config::default();
+        let err = set(&mut config, "max_budget_usd", "-5.0").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be a positive finite number"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_set_max_budget_usd_zero_rejected() {
+        let mut config = Config::default();
+        let err = set(&mut config, "max_budget_usd", "0").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be a positive finite number"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_set_max_budget_usd_infinity_rejected() {
+        let mut config = Config::default();
+        let err = set(&mut config, "max_budget_usd", "inf").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be a positive finite number"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_set_max_budget_usd_small_positive_accepted() {
+        let mut config = Config::default();
+        set(&mut config, "max_budget_usd", "0.01").unwrap();
+        assert_eq!(config.max_budget_usd, Some(0.01));
     }
 }
