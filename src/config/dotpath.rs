@@ -626,4 +626,38 @@ mod tests {
         set(&mut config, "exclude_categories", " , , ").unwrap();
         assert!(config.exclude_categories.is_none());
     }
+
+    // --- invocation_timeout_secs tests ---
+
+    #[test]
+    fn test_set_and_get_invocation_timeout_secs() {
+        let mut config = Config::default();
+        set(&mut config, "invocation_timeout_secs", "300").unwrap();
+        assert_eq!(get(&config, "invocation_timeout_secs").unwrap(), "300");
+        assert_eq!(config.invocation_timeout_secs, Some(300));
+    }
+
+    #[test]
+    fn test_get_unset_invocation_timeout_secs() {
+        let config = Config::default();
+        let err = get(&config, "invocation_timeout_secs").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_invalid_invocation_timeout_secs() {
+        let mut config = Config::default();
+        let err = set(&mut config, "invocation_timeout_secs", "abc").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid value"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_zero_invocation_timeout_secs() {
+        let mut config = Config::default();
+        let err = set(&mut config, "invocation_timeout_secs", "0").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must be >= 1"), "got: {msg}");
+    }
 }
