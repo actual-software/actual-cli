@@ -79,8 +79,8 @@ pub struct SyncArgs {
     pub max_budget_usd: Option<f64>,
 
     /// Output file format: write CLAUDE.md (default) or AGENTS.md
-    #[arg(long, value_enum, default_value = "claude-md")]
-    pub output_format: OutputFormat,
+    #[arg(long, value_enum)]
+    pub output_format: Option<OutputFormat>,
 }
 
 /// Arguments for the `status` command
