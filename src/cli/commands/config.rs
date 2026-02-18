@@ -4,8 +4,8 @@ use crate::cli::args::{ConfigAction, ConfigArgs};
 use crate::config;
 use crate::error::ActualError;
 
-pub fn exec(args: &ConfigArgs) -> i32 {
-    super::handle_result(run(args))
+pub fn exec(args: &ConfigArgs) -> Result<(), ActualError> {
+    run(args)
 }
 
 fn run(args: &ConfigArgs) -> Result<(), ActualError> {
@@ -48,6 +48,7 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
 mod tests {
     use super::*;
     use crate::cli::args::ConfigSetArgs;
+    use crate::cli::commands::handle_result;
     use crate::testutil::ENV_MUTEX;
     use tempfile::tempdir;
 
@@ -83,7 +84,7 @@ mod tests {
             let args = ConfigArgs {
                 action: ConfigAction::Path,
             };
-            assert_eq!(exec(&args), 0);
+            assert_eq!(handle_result(exec(&args)), 0);
         });
     }
 
@@ -93,7 +94,7 @@ mod tests {
             let args = ConfigArgs {
                 action: ConfigAction::Show,
             };
-            assert_eq!(exec(&args), 0);
+            assert_eq!(handle_result(exec(&args)), 0);
         });
     }
 
@@ -106,7 +107,7 @@ mod tests {
                     value: "25".to_string(),
                 }),
             };
-            assert_eq!(exec(&args), 0);
+            assert_eq!(handle_result(exec(&args)), 0);
         });
     }
 
@@ -116,7 +117,7 @@ mod tests {
             let args = ConfigArgs {
                 action: ConfigAction::Show,
             };
-            let code = exec(&args);
+            let code = handle_result(exec(&args));
             assert_ne!(code, 0);
         });
     }
@@ -130,7 +131,7 @@ mod tests {
                     value: "10".to_string(),
                 }),
             };
-            let code = exec(&args);
+            let code = handle_result(exec(&args));
             assert_ne!(code, 0);
         });
     }
@@ -144,7 +145,7 @@ mod tests {
                     value: "value".to_string(),
                 }),
             };
-            assert_ne!(exec(&args), 0);
+            assert_ne!(handle_result(exec(&args)), 0);
         });
     }
 

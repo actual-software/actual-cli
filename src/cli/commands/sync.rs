@@ -44,8 +44,8 @@ pub struct SyncResult {
 /// `sync_wiring.rs` (which is excluded from coverage) so that the only
 /// generic instantiation of `run_sync` in `sync.rs` is `MockRunner` from
 /// unit tests.
-pub fn exec(args: &SyncArgs) -> i32 {
-    super::handle_result(super::sync_wiring::sync_run(args))
+pub fn exec(args: &SyncArgs) -> Result<(), crate::error::ActualError> {
+    super::sync_wiring::sync_run(args)
 }
 
 /// Resolve the current working directory, falling back to `"."` if
@@ -726,6 +726,7 @@ fn report_write_results(
 mod tests {
     use super::*;
     use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
+    use crate::cli::commands::handle_result;
     use crate::cli::ui::test_utils::MockTerminal;
     use crate::error::ActualError;
     use crate::generation::markers;
@@ -1552,7 +1553,7 @@ mod tests {
         let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
         std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
         let args = make_sync_args(true, false, false, false, "http://unused");
-        let code = exec(&args);
+        let code = handle_result(exec(&args));
         std::env::remove_var("CLAUDE_BINARY");
         assert_eq!(code, 2, "expected exit code 2 (ClaudeNotFound)");
     }

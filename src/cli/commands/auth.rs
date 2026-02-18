@@ -5,8 +5,8 @@ use crate::claude::binary::find_claude_binary;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
 
-pub fn exec() -> i32 {
-    super::handle_result(run_auth())
+pub fn exec() -> Result<(), ActualError> {
+    run_auth()
 }
 
 fn run_auth() -> Result<(), ActualError> {
@@ -84,6 +84,7 @@ fn print_auth_status(status: &ClaudeAuthStatus) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::commands::handle_result;
     use crate::testutil::ENV_MUTEX;
 
     #[cfg(unix)]
@@ -229,7 +230,7 @@ mod tests {
     fn test_exec_binary_not_found() {
         let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
-        let code = exec();
+        let code = handle_result(exec());
         std::env::remove_var("CLAUDE_BINARY");
         assert_eq!(code, 2);
     }
@@ -245,7 +246,7 @@ mod tests {
             0,
         );
         std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
-        let code = exec();
+        let code = handle_result(exec());
         std::env::remove_var("CLAUDE_BINARY");
         assert_eq!(code, 0);
     }
@@ -257,7 +258,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = create_fake_binary(dir.path(), r#"{"loggedIn": false}"#, 0);
         std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
-        let code = exec();
+        let code = handle_result(exec());
         std::env::remove_var("CLAUDE_BINARY");
         assert_eq!(code, 2);
     }
@@ -302,7 +303,7 @@ mod tests {
         std::fs::write(&not_executable, "not a script").unwrap();
         // File exists but is NOT executable — goes through exec -> run_auth -> run_auth_with_binary
         std::env::set_var("CLAUDE_BINARY", not_executable.to_str().unwrap());
-        let code = exec();
+        let code = handle_result(exec());
         std::env::remove_var("CLAUDE_BINARY");
         assert_eq!(code, 1);
     }

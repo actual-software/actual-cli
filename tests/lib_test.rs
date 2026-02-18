@@ -1,4 +1,4 @@
-use actual_cli::*;
+use actual_cli::{handle_result, run, Cli, Command, ConfigAction};
 use clap::Parser;
 use std::sync::Mutex;
 
@@ -189,7 +189,7 @@ fn test_run_sync_without_claude() {
     let _lock = ENV_MUTEX.lock().unwrap();
     std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
     let cli = Cli::parse_from(["actual", "sync", "--dry-run"]);
-    assert_eq!(run(cli), 2);
+    assert_eq!(handle_result(run(cli)), 2);
     std::env::remove_var("CLAUDE_BINARY");
 }
 
@@ -200,7 +200,7 @@ fn test_run_status() {
     let config_file = dir.path().join("config.yaml");
     std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "status"]);
-    assert_eq!(run(cli), 0);
+    assert_eq!(handle_result(run(cli)), 0);
     std::env::remove_var("ACTUAL_CONFIG");
 }
 
@@ -209,7 +209,7 @@ fn test_run_auth() {
     let _lock = ENV_MUTEX.lock().unwrap();
     std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
     let cli = Cli::parse_from(["actual", "auth"]);
-    assert_eq!(run(cli), 2);
+    assert_eq!(handle_result(run(cli)), 2);
     std::env::remove_var("CLAUDE_BINARY");
 }
 
@@ -220,7 +220,7 @@ fn test_run_config_show() {
     let config_file = dir.path().join("config.yaml");
     std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "config", "show"]);
-    assert_eq!(run(cli), 0);
+    assert_eq!(handle_result(run(cli)), 0);
     std::env::remove_var("ACTUAL_CONFIG");
 }
 
@@ -231,7 +231,7 @@ fn test_run_config_set() {
     let config_file = dir.path().join("config.yaml");
     std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "config", "set", "batch_size", "10"]);
-    assert_eq!(run(cli), 0);
+    assert_eq!(handle_result(run(cli)), 0);
     std::env::remove_var("ACTUAL_CONFIG");
 }
 
@@ -242,7 +242,7 @@ fn test_run_config_path() {
     let config_file = dir.path().join("config.yaml");
     std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
     let cli = Cli::parse_from(["actual", "config", "path"]);
-    assert_eq!(run(cli), 0);
+    assert_eq!(handle_result(run(cli)), 0);
     std::env::remove_var("ACTUAL_CONFIG");
 }
 
@@ -361,7 +361,7 @@ fn test_run_sync_force_with_fake_claude() {
     std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
 
     let cli = Cli::parse_from(["actual", "sync", "--force", "--api-url", &server.url()]);
-    let exit_code = run(cli);
+    let exit_code = handle_result(run(cli));
 
     std::env::remove_var("CLAUDE_BINARY");
     std::env::remove_var("ACTUAL_CONFIG");
@@ -383,7 +383,7 @@ fn test_run_sync_not_authenticated_with_fake_claude() {
     std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
 
     let cli = Cli::parse_from(["actual", "sync", "--force"]);
-    let exit_code = run(cli);
+    let exit_code = handle_result(run(cli));
 
     std::env::remove_var("CLAUDE_BINARY");
 
