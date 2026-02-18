@@ -746,12 +746,23 @@ mod tests {
 
     #[test]
     fn test_new_delegates_to_with_name() {
-        // new() delegates to with_name("semgrep"). Both calls must agree on
-        // success/failure in the same environment (semgrep may or may not be installed).
-        let result_new = SemgrepScanner::new(std::time::Duration::from_secs(30));
-        let result_with_name =
-            SemgrepScanner::with_name("semgrep", std::time::Duration::from_secs(30));
-        assert_eq!(result_new.is_ok(), result_with_name.is_ok());
+        // new() is a one-liner: Self::with_name("semgrep", timeout).
+        // Verify this by checking the observable outcome against what
+        // with_name("semgrep", ...) produces:
+        // - If semgrep is absent (typical in CI): both return Err with the
+        //   same error message, confirming new() looked up "semgrep" by name.
+        // - If semgrep is installed: both return Ok with the same binary path.
+        let timeout = std::time::Duration::from_secs(30);
+        match SemgrepScanner::with_name("semgrep", timeout) {
+            Err(e) => {
+                let err = SemgrepScanner::new(timeout).err().unwrap();
+                assert_eq!(err.to_string(), e.to_string());
+            }
+            Ok(expected) => {
+                let scanner = SemgrepScanner::new(timeout).ok().unwrap();
+                assert_eq!(scanner.semgrep_bin, expected.semgrep_bin);
+            }
+        }
     }
 
     #[test]
