@@ -18,8 +18,6 @@ set -euo pipefail
 
 ACTUAL_BIN="$(cd "$(dirname "${1:?Usage: $0 <path-to-actual-binary>}")" && pwd)/$(basename "$1")"
 API_URL="${ACTUAL_E2E_API_URL:-https://api-service.api.staging.actual.ai}"
-PASS=0
-FAIL=0
 RESULTS_FILE="$(mktemp)"
 trap 'rm -f "$RESULTS_FILE"' EXIT
 
@@ -40,12 +38,18 @@ run_scenario() {
     echo ""
     echo "Scenario: $name"
 
+    local scenario_exit=0
     (
         cd "$dir"
         "$setup_fn" "$dir"
-    )
+    ) || scenario_exit=$?
 
     rm -rf "$dir"
+
+    if [[ "$scenario_exit" -ne 0 ]]; then
+        echo "FAIL" >> "$RESULTS_FILE"
+        echo "  [FAIL] $name: scenario aborted with exit $scenario_exit"
+    fi
 }
 
 # Initialize a bare git repo in the given directory.
