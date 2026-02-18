@@ -7,13 +7,13 @@ use crate::api::types::Adr;
 use crate::claude::ClaudeRunner;
 use crate::error::ActualError;
 use crate::generation::merge::merge_outputs;
-use crate::tailoring::batch::{batch_context_summary, create_batches};
+use crate::tailoring::batch::create_batches;
 use crate::tailoring::invoke::{invoke_tailoring, serialize_json};
 use crate::tailoring::types::TailoringOutput;
 
 /// Configuration for concurrent project tailoring.
 pub struct ConcurrentTailoringConfig<'a> {
-    /// Maximum number of projects to process concurrently.
+    /// Maximum number of concurrent Claude invocations.
     pub concurrency: usize,
     /// Maximum number of ADRs per batch sent to a single invocation.
     pub batch_size: usize,
@@ -39,15 +39,13 @@ pub async fn tailor_all_projects<R: ClaudeRunner>(
 ) -> Result<TailoringOutput, ActualError> {
     let semaphore = Arc::new(Semaphore::new(config.concurrency));
 
-    // Create one future per project. The semaphore limits how many run concurrently.
+    // Create one future per project. The semaphore is passed through so each
+    // batch invocation acquires a permit, limiting total concurrent Claude calls.
     let futures: Vec<_> = projects
         .iter()
         .map(|project| {
             let sem = semaphore.clone();
-            async move {
-                let _permit = sem.acquire().await.expect("semaphore should not be closed");
-                tailor_single_project(runner, project, adrs, config).await
-            }
+            async move { tailor_single_project(runner, project, adrs, config, &sem).await }
         })
         .collect();
 
@@ -56,42 +54,41 @@ pub async fn tailor_all_projects<R: ClaudeRunner>(
     Ok(merge_outputs(outputs))
 }
 
-/// Process a single project: batch its ADRs, invoke tailoring for each batch,
-/// and merge all batch outputs into a single per-project result.
+/// Process a single project: batch its ADRs, invoke tailoring for each batch
+/// in parallel (bounded by the shared semaphore), and merge all batch outputs
+/// into a single per-project result.
 async fn tailor_single_project<R: ClaudeRunner>(
     runner: &R,
     project: &Project,
     adrs: &[Adr],
     config: &ConcurrentTailoringConfig<'_>,
+    semaphore: &Semaphore,
 ) -> Result<TailoringOutput, ActualError> {
     let project_json = serialize_json(project, "project")?;
     let batches = create_batches(adrs, config.batch_size);
 
-    let mut previous_outputs: Vec<TailoringOutput> = Vec::new();
+    let futures: Vec<_> = batches
+        .iter()
+        .map(|batch_adrs| async {
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("semaphore should not be closed");
+            invoke_tailoring(
+                runner,
+                batch_adrs,
+                &project_json,
+                config.existing_claude_md_paths,
+                config.model_override,
+                config.max_budget_usd,
+            )
+            .await
+        })
+        .collect();
 
-    for batch_adrs in &batches {
-        let context = batch_context_summary(&previous_outputs);
-        let claude_md_context = if context.is_empty() {
-            config.existing_claude_md_paths.to_string()
-        } else {
-            format!("{}\n\n{context}", config.existing_claude_md_paths)
-        };
+    let outputs = futures::future::try_join_all(futures).await?;
 
-        let output = invoke_tailoring(
-            runner,
-            batch_adrs,
-            &project_json,
-            &claude_md_context,
-            config.model_override,
-            config.max_budget_usd,
-        )
-        .await;
-        let output = output?;
-
-        previous_outputs.push(output);
-    }
-
-    Ok(merge_outputs(previous_outputs))
+    Ok(merge_outputs(outputs))
 }
 
 #[cfg(test)]
@@ -558,12 +555,12 @@ mod tests {
         );
     }
 
-    // --- Test 7: multi-batch per project passes context to later batches ---
+    // --- Test 7: multi-batch per project runs batches in parallel ---
 
     #[tokio::test]
-    async fn test_multi_batch_passes_context() {
+    async fn test_multi_batch_parallel_merge() {
         let projects = vec![make_project("a")];
-        // 3 ADRs in different categories with batch_size=1 → 3 batches
+        // 2 ADRs in different categories with batch_size=1 → 2 batches
         let adr1 = Adr {
             id: "adr-001".to_string(),
             title: "ADR 001".to_string(),
@@ -608,10 +605,10 @@ mod tests {
             make_output_json("apps/a/CLAUDE.md", "Batch 2 rules", &["adr-002"]),
         ];
 
-        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(10));
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(50));
 
         let config = ConcurrentTailoringConfig {
-            concurrency: 1,
+            concurrency: 2,
             batch_size: 1,
             existing_claude_md_paths: "existing context",
             model_override: None,
@@ -629,5 +626,186 @@ mod tests {
 
         // Both batches should have been called
         assert_eq!(runner.call_count.load(Ordering::SeqCst), 2);
+
+        // Verify parallel execution: with concurrency=2, both batches should overlap
+        let max_concurrent = runner.tracker.max_concurrent();
+        assert!(
+            max_concurrent >= 2,
+            "expected at least 2 concurrent batch calls, got {max_concurrent}"
+        );
+    }
+
+    // --- Test 8: multi-batch parallel execution with 3 batches ---
+
+    #[tokio::test]
+    async fn test_multi_batch_parallel_execution() {
+        let projects = vec![make_project("a")];
+        // 3 ADRs in 3 different categories, batch_size=1 → 3 batches
+        let adr1 = Adr {
+            id: "adr-001".to_string(),
+            title: "ADR 001".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-a".to_string(),
+                name: "Category A".to_string(),
+                path: "Category A".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adr2 = Adr {
+            id: "adr-002".to_string(),
+            title: "ADR 002".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-b".to_string(),
+                name: "Category B".to_string(),
+                path: "Category B".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adr3 = Adr {
+            id: "adr-003".to_string(),
+            title: "ADR 003".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-c".to_string(),
+                name: "Category C".to_string(),
+                path: "Category C".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adrs = vec![adr1, adr2, adr3];
+
+        let responses = vec![
+            make_output_json("CLAUDE.md", "Batch 1 rules", &["adr-001"]),
+            make_output_json("apps/a/CLAUDE.md", "Batch 2 rules", &["adr-002"]),
+            make_output_json("libs/CLAUDE.md", "Batch 3 rules", &["adr-003"]),
+        ];
+
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(50));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 3,
+            batch_size: 1,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+        };
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+
+        let output = result.unwrap();
+
+        // Verify all 3 batch outputs merged
+        assert_eq!(output.files.len(), 3);
+        assert_eq!(runner.call_count.load(Ordering::SeqCst), 3);
+
+        // Verify parallel execution: with concurrency=3, at least 2 should overlap
+        let max_concurrent = runner.tracker.max_concurrent();
+        assert!(
+            max_concurrent >= 2,
+            "expected at least 2 concurrent batch calls, got {max_concurrent}"
+        );
+    }
+
+    // --- Test 9: semaphore limits total concurrent calls across projects and batches ---
+
+    #[tokio::test]
+    async fn test_semaphore_limits_total_calls() {
+        // 2 projects, each with 2 batches (batch_size=1, 2 ADRs in different categories)
+        // concurrency=2 → max 2 concurrent Claude calls across all projects and batches
+        let projects = vec![make_project("a"), make_project("b")];
+        let adr1 = Adr {
+            id: "adr-001".to_string(),
+            title: "ADR 001".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-a".to_string(),
+                name: "Category A".to_string(),
+                path: "Category A".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adr2 = Adr {
+            id: "adr-002".to_string(),
+            title: "ADR 002".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-b".to_string(),
+                name: "Category B".to_string(),
+                path: "Category B".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adrs = vec![adr1, adr2];
+
+        // 2 projects × 2 batches = 4 total Claude calls
+        let responses = vec![
+            make_output_json("apps/a/CLAUDE.md", "A batch 1", &["adr-001"]),
+            make_output_json("apps/a/sub/CLAUDE.md", "A batch 2", &["adr-002"]),
+            make_output_json("apps/b/CLAUDE.md", "B batch 1", &["adr-001"]),
+            make_output_json("apps/b/sub/CLAUDE.md", "B batch 2", &["adr-002"]),
+        ];
+
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(50));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 2,
+            batch_size: 1,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+        };
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+
+        let output = result.unwrap();
+
+        // All 4 calls should have been made
+        assert_eq!(runner.call_count.load(Ordering::SeqCst), 4);
+
+        // Semaphore should limit to at most 2 concurrent calls
+        let max_concurrent = runner.tracker.max_concurrent();
+        assert!(
+            max_concurrent <= 2,
+            "expected max 2 concurrent calls, got {max_concurrent}"
+        );
+
+        // With 4 tasks and concurrency=2, at least 2 should run concurrently
+        assert!(
+            max_concurrent >= 2,
+            "expected at least 2 concurrent calls, got {max_concurrent}"
+        );
+
+        // Verify all output files are present
+        assert_eq!(output.files.len(), 4);
     }
 }

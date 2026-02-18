@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use crate::api::types::Adr;
-use crate::tailoring::types::TailoringOutput;
 
 /// Group ADRs into batches by category, respecting `batch_size` limits.
 ///
@@ -48,39 +47,10 @@ pub fn create_batches(adrs: &[Adr], batch_size: usize) -> Vec<Vec<Adr>> {
     batches
 }
 
-/// Produce a human-readable summary of what previous batches produced.
-///
-/// This context string is passed to later batches so the LLM knows what files
-/// and ADR placements were already decided. Returns an empty string when
-/// `previous_outputs` is empty.
-pub fn batch_context_summary(previous_outputs: &[TailoringOutput]) -> String {
-    if previous_outputs.is_empty() {
-        return String::new();
-    }
-
-    let mut lines: Vec<String> = Vec::new();
-    let mut total_files: usize = 0;
-
-    lines.push("Previous batches produced the following files:".to_string());
-
-    for (i, output) in previous_outputs.iter().enumerate() {
-        lines.push(format!("  Batch {}:", i + 1));
-        for file in &output.files {
-            lines.push(format!("    - {} ({} ADRs)", file.path, file.adr_ids.len()));
-        }
-        total_files += output.files.len();
-    }
-
-    lines.push(format!("Total files so far: {total_files}"));
-
-    lines.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::types::{AdrCategory, AppliesTo};
-    use crate::tailoring::types::{FileOutput, TailoringSummary};
 
     fn make_adr(id: &str, category_id: &str, category_name: &str) -> Adr {
         Adr {
@@ -154,47 +124,6 @@ mod tests {
 
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 5);
-    }
-
-    #[test]
-    fn test_batch_context_summary() {
-        let output = TailoringOutput {
-            files: vec![
-                FileOutput {
-                    path: "CLAUDE.md".to_string(),
-                    content: "root rules".to_string(),
-                    reasoning: "root".to_string(),
-                    adr_ids: vec!["adr-001".to_string(), "adr-002".to_string()],
-                },
-                FileOutput {
-                    path: "apps/web/CLAUDE.md".to_string(),
-                    content: "web rules".to_string(),
-                    reasoning: "web".to_string(),
-                    adr_ids: vec!["adr-003".to_string()],
-                },
-            ],
-            skipped_adrs: vec![],
-            summary: TailoringSummary {
-                total_input: 3,
-                applicable: 3,
-                not_applicable: 0,
-                files_generated: 2,
-            },
-        };
-
-        let summary = batch_context_summary(&[output]);
-
-        assert!(summary.contains("CLAUDE.md"));
-        assert!(summary.contains("apps/web/CLAUDE.md"));
-        assert!(summary.contains("2 ADRs"));
-        assert!(summary.contains("1 ADRs"));
-        assert!(summary.contains("Total files so far: 2"));
-    }
-
-    #[test]
-    fn test_batch_context_summary_empty() {
-        let summary = batch_context_summary(&[]);
-        assert!(summary.is_empty());
     }
 
     #[test]
