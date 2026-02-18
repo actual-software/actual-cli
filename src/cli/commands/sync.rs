@@ -44,7 +44,7 @@ pub struct SyncResult {
 /// `sync_wiring.rs` (which is excluded from coverage) so that the only
 /// generic instantiation of `run_sync` in `sync.rs` is `MockRunner` from
 /// unit tests.
-pub fn exec(args: &SyncArgs) -> Result<(), crate::error::ActualError> {
+pub fn exec(args: &SyncArgs) -> Result<(), ActualError> {
     super::sync_wiring::sync_run(args)
 }
 
