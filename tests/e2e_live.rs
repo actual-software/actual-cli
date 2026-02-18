@@ -9,6 +9,16 @@ use tempfile::tempdir;
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+/// The staging API URL used for live E2E tests.
+///
+/// The production API's ADR bank is not yet populated, so tests must target
+/// staging which has ADR data. Override with `ACTUAL_E2E_API_URL` if needed.
+const STAGING_API_URL: &str = "https://api-service.api.staging.actual.ai";
+
+fn e2e_api_url() -> String {
+    std::env::var("ACTUAL_E2E_API_URL").unwrap_or_else(|_| STAGING_API_URL.to_string())
+}
+
 /// Preflight: skip all tests if Claude Code is not installed/authenticated.
 fn require_claude_auth() {
     let output = process::Command::new("claude")
@@ -27,184 +37,178 @@ fn require_claude_auth() {
     }
 }
 
-fn create_minimal_rust_project(dir: &std::path::Path) {
+/// Create a minimal TypeScript/Express project.
+///
+/// TypeScript + Express reliably matches ADRs from the staging API bank.
+fn create_minimal_ts_project(dir: &std::path::Path) {
     fs::write(
-        dir.join("Cargo.toml"),
-        r#"[package]
-name = "test-project"
-version = "0.1.0"
-edition = "2021"
+        dir.join("package.json"),
+        r#"{
+  "name": "test-project",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^4.18.0",
+    "typescript": "^5.0.0"
+  }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tsconfig.json"),
+        r#"{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "strict": true,
+    "outDir": "dist"
+  }
+}
 "#,
     )
     .unwrap();
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(
-        dir.join("src/main.rs"),
-        "fn main() { println!(\"hello\"); }\n",
-    )
-    .unwrap();
-}
+        dir.join("src/index.ts"),
+        r#"import express from 'express';
 
-fn create_realistic_rust_project(dir: &std::path::Path) {
-    fs::write(
-        dir.join("Cargo.toml"),
-        r#"[package]
-name = "sample-cli-app"
-version = "0.1.0"
-edition = "2021"
+const app = express();
+app.use(express.json());
 
-[dependencies]
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
-tracing = "0.1"
-tracing-subscriber = "0.3"
+app.get('/health', (_req, res) => {
+  res.json({ ok: true });
+});
+
+app.listen(3000, () => {
+  console.log('Server running on port 3000');
+});
 "#,
     )
     .unwrap();
-
-    fs::create_dir_all(dir.join("src/api")).unwrap();
-
-    fs::write(
-        dir.join("src/main.rs"),
-        r#"mod api;
-mod config;
-mod error;
-
-use clap::Parser;
-
-#[derive(Parser)]
-#[command(name = "sample-cli")]
-struct Cli {
-    #[arg(short, long)]
-    config: Option<String>,
-    #[arg(short, long, default_value = "false")]
-    verbose: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    tracing_subscriber::fmt::init();
-    let cfg = config::AppConfig::load(cli.config.as_deref())?;
-    let client = api::ApiClient::new(&cfg.api_url);
-    let result = client.fetch_data().await?;
-    println!("{result}");
-    Ok(())
+/// Create a realistic TypeScript/Next.js project with multiple source files.
+///
+/// A richer fixture helps ensure the ADR count assertions hold against the
+/// staging API.
+fn create_realistic_ts_project(dir: &std::path::Path) {
+    fs::write(
+        dir.join("package.json"),
+        r#"{
+  "name": "sample-nextjs-app",
+  "version": "1.0.0",
+  "dependencies": {
+    "next": "^15.0.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "typescript": "^5.0.0",
+    "zod": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "jest": "^29.0.0"
+  }
 }
 "#,
     )
     .unwrap();
-
     fs::write(
-        dir.join("src/config.rs"),
-        r#"use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-pub struct AppConfig {
-    pub api_url: String,
-    pub timeout_secs: u64,
-    pub retry_count: u32,
-}
-
-impl AppConfig {
-    pub fn load(path: Option<&str>) -> anyhow::Result<Self> {
-        let path = path.unwrap_or("config.toml");
-        let content = std::fs::read_to_string(path)?;
-        let config: AppConfig = serde_json::from_str(&content)?;
-        Ok(config)
-    }
+        dir.join("tsconfig.json"),
+        r#"{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "jsx": "preserve"
+  }
 }
 "#,
     )
     .unwrap();
-
     fs::write(
-        dir.join("src/api/mod.rs"),
-        r#"mod client;
-pub use client::ApiClient;
+        dir.join("next.config.ts"),
+        r#"import type { NextConfig } from 'next';
+
+const config: NextConfig = {
+  reactStrictMode: true,
+};
+
+export default config;
 "#,
     )
     .unwrap();
-
+    fs::create_dir_all(dir.join("app")).unwrap();
     fs::write(
-        dir.join("src/api/client.rs"),
-        r#"use reqwest::Client;
-
-pub struct ApiClient {
-    client: Client,
-    base_url: String,
-}
-
-impl ApiClient {
-    pub fn new(base_url: &str) -> Self {
-        Self {
-            client: Client::new(),
-            base_url: base_url.to_string(),
-        }
-    }
-
-    pub async fn fetch_data(&self) -> anyhow::Result<String> {
-        let resp = self.client
-            .get(&format!("{}/data", self.base_url))
-            .send()
-            .await?
-            .text()
-            .await?;
-        Ok(resp)
-    }
+        dir.join("app/page.tsx"),
+        r#"export default function HomePage() {
+  return <main><h1>Hello World</h1></main>;
 }
 "#,
     )
     .unwrap();
-
     fs::write(
-        dir.join("src/error.rs"),
-        r#"use std::fmt;
-
-#[derive(Debug)]
-pub enum AppError {
-    Config(String),
-    Api(String),
-    Io(std::io::Error),
-}
-
-impl fmt::Display for AppError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AppError::Config(msg) => write!(f, "config error: {msg}"),
-            AppError::Api(msg) => write!(f, "API error: {msg}"),
-            AppError::Io(e) => write!(f, "IO error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for AppError {}
-
-impl From<std::io::Error> for AppError {
-    fn from(e: std::io::Error) -> Self {
-        AppError::Io(e)
-    }
+        dir.join("app/layout.tsx"),
+        r#"export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
 }
 "#,
     )
     .unwrap();
+    fs::create_dir_all(dir.join("app/api/users")).unwrap();
+    fs::write(
+        dir.join("app/api/users/route.ts"),
+        r#"import { NextResponse } from 'next/server';
+import { z } from 'zod';
 
+const UserSchema = z.object({
+  name: z.string().min(1),
+  email: z.string().email(),
+});
+
+export async function POST(req: Request) {
+  const body = await req.json();
+  const result = UserSchema.safeParse(body);
+  if (!result.success) {
+    return NextResponse.json({ errors: result.error.flatten() }, { status: 400 });
+  }
+  return NextResponse.json({ user: result.data }, { status: 201 });
+}
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("lib")).unwrap();
+    fs::write(
+        dir.join("lib/db.ts"),
+        r#"// Database client module
+export async function query<T>(sql: string, params: unknown[]): Promise<T[]> {
+  // Placeholder for database queries
+  void sql;
+  void params;
+  return [];
+}
+"#,
+    )
+    .unwrap();
     fs::create_dir_all(dir.join("tests")).unwrap();
     fs::write(
-        dir.join("tests/integration_test.rs"),
-        r#"#[test]
-fn it_works() {
-    assert_eq!(2 + 2, 4);
-}
+        dir.join("tests/api.test.ts"),
+        r#"describe('API routes', () => {
+  it('returns 201 for valid user', () => {
+    expect(true).toBe(true);
+  });
+});
 "#,
     )
     .unwrap();
-
-    fs::write(dir.join(".gitignore"), "/target\n").unwrap();
+    fs::write(dir.join(".gitignore"), "node_modules\n.next\ndist\n").unwrap();
 }
 
 fn init_git_repo(dir: &std::path::Path) {
@@ -248,11 +252,17 @@ fn live_sync_no_tailor() {
 
     let tmp = tempdir().unwrap();
     let dir = tmp.path();
-    create_minimal_rust_project(dir);
+    create_minimal_ts_project(dir);
     init_git_repo(dir);
 
     actual_cmd()
-        .args(["sync", "--force", "--no-tailor", "--model", "haiku"])
+        .args([
+            "sync",
+            "--force",
+            "--no-tailor",
+            "--api-url",
+            &e2e_api_url(),
+        ])
         .current_dir(dir)
         .timeout(std::time::Duration::from_secs(120))
         .assert()
@@ -288,11 +298,17 @@ fn live_sync_realistic_project() {
 
     let tmp = tempdir().unwrap();
     let dir = tmp.path();
-    create_realistic_rust_project(dir);
+    create_realistic_ts_project(dir);
     init_git_repo(dir);
 
     actual_cmd()
-        .args(["sync", "--force", "--no-tailor", "--model", "haiku"])
+        .args([
+            "sync",
+            "--force",
+            "--no-tailor",
+            "--api-url",
+            &e2e_api_url(),
+        ])
         .current_dir(dir)
         .timeout(std::time::Duration::from_secs(120))
         .assert()
@@ -319,8 +335,8 @@ fn live_sync_realistic_project() {
         "missing adr-ids metadata"
     );
 
-    // A realistic project with tokio/serde/clap/reqwest should match significantly
-    // more ADRs than the minimal hello-world project
+    // A realistic Next.js project should match significantly more ADRs than the
+    // minimal express project
     let heading_count = content.matches("## ").count();
     assert!(
         heading_count >= 3,
@@ -356,12 +372,18 @@ fn live_resync_preserves_user_content() {
 
     let tmp = tempdir().unwrap();
     let dir = tmp.path();
-    create_minimal_rust_project(dir);
+    create_minimal_ts_project(dir);
     init_git_repo(dir);
 
     // First sync
     actual_cmd()
-        .args(["sync", "--force", "--no-tailor", "--model", "haiku"])
+        .args([
+            "sync",
+            "--force",
+            "--no-tailor",
+            "--api-url",
+            &e2e_api_url(),
+        ])
         .current_dir(dir)
         .timeout(std::time::Duration::from_secs(120))
         .assert()
@@ -375,7 +397,13 @@ fn live_resync_preserves_user_content() {
 
     // Second sync
     actual_cmd()
-        .args(["sync", "--force", "--no-tailor", "--model", "haiku"])
+        .args([
+            "sync",
+            "--force",
+            "--no-tailor",
+            "--api-url",
+            &e2e_api_url(),
+        ])
         .current_dir(dir)
         .timeout(std::time::Duration::from_secs(120))
         .assert()
@@ -410,7 +438,7 @@ fn live_dry_run_no_files() {
 
     let tmp = tempdir().unwrap();
     let dir = tmp.path();
-    create_minimal_rust_project(dir);
+    create_minimal_ts_project(dir);
     init_git_repo(dir);
 
     actual_cmd()
@@ -419,8 +447,8 @@ fn live_dry_run_no_files() {
             "--force",
             "--no-tailor",
             "--dry-run",
-            "--model",
-            "haiku",
+            "--api-url",
+            &e2e_api_url(),
         ])
         .current_dir(dir)
         .timeout(std::time::Duration::from_secs(120))
@@ -440,7 +468,7 @@ fn live_sync_with_tailoring() {
 
     let tmp = tempdir().unwrap();
     let dir = tmp.path();
-    create_minimal_rust_project(dir);
+    create_minimal_ts_project(dir);
     init_git_repo(dir);
 
     actual_cmd()
@@ -449,6 +477,8 @@ fn live_sync_with_tailoring() {
             "--force",
             "--model",
             "haiku",
+            "--api-url",
+            &e2e_api_url(),
             "--max-budget-usd",
             "0.25",
         ])
