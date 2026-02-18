@@ -2090,17 +2090,35 @@ mod tests {
         assert_ne!(key1, key2, "different dirs should produce different keys");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_compute_repo_key_timeout_falls_back_to_path_hash() {
+        use std::os::unix::fs::PermissionsExt;
+        // Place a fake "git" binary that sleeps for 30s on PATH so the
+        // recv_timeout fires before it responds, forcing the path-hash fallback.
+        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake_git = bin_dir.path().join("git");
+        std::fs::write(&fake_git, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin_dir.path().display(), original_path),
+        );
         let dir = tempfile::tempdir().unwrap();
-        // Use 1 nanosecond — vanishingly short, so the git subprocess will never
-        // complete before recv_timeout fires, forcing the path-hash fallback.
-        // Duration::ZERO would behave like try_recv() and could race if the OS
-        // schedules the spawned thread first.
-        let result = compute_repo_key_with_timeout(dir.path(), std::time::Duration::from_nanos(1));
+        let result =
+            compute_repo_key_with_timeout(dir.path(), std::time::Duration::from_millis(100));
+        std::env::set_var("PATH", &original_path);
         assert_eq!(result.len(), 64, "expected 64-char SHA256 hex string");
-        // Deterministic: same dir → same hash
-        let result2 = compute_repo_key_with_timeout(dir.path(), std::time::Duration::from_nanos(1));
+        // Deterministic: same dir → same hash (using the path-hash fallback)
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin_dir.path().display(), original_path),
+        );
+        let result2 =
+            compute_repo_key_with_timeout(dir.path(), std::time::Duration::from_millis(100));
+        std::env::set_var("PATH", &original_path);
         assert_eq!(result, result2);
     }
 
