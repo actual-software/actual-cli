@@ -1,65 +1,121 @@
+use std::str::FromStr;
+
 use crate::config::types::{Config, TelemetryConfig};
 use crate::error::ActualError;
+
+/// All config keys that can be read and written via `get()` / `set()`.
+///
+/// Adding a new key here forces handling in both `get()` and `set()` at
+/// compile time, preventing the two match blocks from drifting.
+pub enum ConfigKey {
+    ApiUrl,
+    Model,
+    BatchSize,
+    Concurrency,
+    InvocationTimeoutSecs,
+    MaxBudgetUsd,
+    IncludeGeneral,
+    MaxPerFramework,
+    IncludeCategories,
+    ExcludeCategories,
+    TelemetryEnabled,
+}
+
+impl FromStr for ConfigKey {
+    type Err = ActualError;
+
+    fn from_str(path: &str) -> Result<Self, Self::Err> {
+        match path {
+            "api_url" => Ok(ConfigKey::ApiUrl),
+            "model" => Ok(ConfigKey::Model),
+            "batch_size" => Ok(ConfigKey::BatchSize),
+            "concurrency" => Ok(ConfigKey::Concurrency),
+            "invocation_timeout_secs" => Ok(ConfigKey::InvocationTimeoutSecs),
+            "max_budget_usd" => Ok(ConfigKey::MaxBudgetUsd),
+            "include_general" => Ok(ConfigKey::IncludeGeneral),
+            "max_per_framework" => Ok(ConfigKey::MaxPerFramework),
+            "include_categories" => Ok(ConfigKey::IncludeCategories),
+            "exclude_categories" => Ok(ConfigKey::ExcludeCategories),
+            "telemetry.enabled" => Ok(ConfigKey::TelemetryEnabled),
+            "rejected_adrs" | "cached_analysis" => Err(ActualError::ConfigError(format!(
+                "complex config key, use config file directly: {path}"
+            ))),
+            _ => Err(ActualError::ConfigError(format!(
+                "unknown config key: {path}"
+            ))),
+        }
+    }
+}
+
+/// All settable key name strings, for use by CLI help or completions.
+pub const KNOWN_SETTABLE_KEYS: &[&str] = &[
+    "api_url",
+    "model",
+    "batch_size",
+    "concurrency",
+    "invocation_timeout_secs",
+    "max_budget_usd",
+    "include_general",
+    "max_per_framework",
+    "include_categories",
+    "exclude_categories",
+    "telemetry.enabled",
+];
 
 /// Get a config value by dotpath, returning its string representation.
 ///
 /// Returns an error if the path is unknown or the value is not set.
 pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
-    match path {
-        "api_url" => config
+    let key = path.parse::<ConfigKey>()?;
+    match key {
+        ConfigKey::ApiUrl => config
             .api_url
             .clone()
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "model" => config
+        ConfigKey::Model => config
             .model
             .clone()
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "batch_size" => config
+        ConfigKey::BatchSize => config
             .batch_size
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "concurrency" => config
+        ConfigKey::Concurrency => config
             .concurrency
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "invocation_timeout_secs" => config
+        ConfigKey::InvocationTimeoutSecs => config
             .invocation_timeout_secs
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "max_budget_usd" => config
+        ConfigKey::MaxBudgetUsd => config
             .max_budget_usd
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "include_general" => config
+        ConfigKey::IncludeGeneral => config
             .include_general
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "max_per_framework" => config
+        ConfigKey::MaxPerFramework => config
             .max_per_framework
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "include_categories" => config
+        ConfigKey::IncludeCategories => config
             .include_categories
             .as_ref()
             .map(|v| v.join(","))
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "exclude_categories" => config
+        ConfigKey::ExcludeCategories => config
             .exclude_categories
             .as_ref()
             .map(|v| v.join(","))
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "telemetry.enabled" => config
+        ConfigKey::TelemetryEnabled => config
             .telemetry
             .as_ref()
             .and_then(|t| t.enabled)
             .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        "rejected_adrs" | "cached_analysis" => Err(ActualError::ConfigError(format!(
-            "complex config key, use config file directly: {path}"
-        ))),
-        _ => Err(ActualError::ConfigError(format!(
-            "unknown config key: {path}"
-        ))),
     }
 }
 
@@ -67,14 +123,15 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
 ///
 /// Returns an error if the path is unknown or the value cannot be parsed.
 pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualError> {
-    match path {
-        "api_url" => {
+    let key = path.parse::<ConfigKey>()?;
+    match key {
+        ConfigKey::ApiUrl => {
             config.api_url = Some(value.to_string());
         }
-        "model" => {
+        ConfigKey::Model => {
             config.model = Some(value.to_string());
         }
-        "batch_size" => {
+        ConfigKey::BatchSize => {
             let v = value.parse::<usize>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected usize, got \"{value}\""
@@ -87,7 +144,7 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             }
             config.batch_size = Some(v);
         }
-        "concurrency" => {
+        ConfigKey::Concurrency => {
             let v = value.parse::<usize>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected usize, got \"{value}\""
@@ -100,7 +157,7 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             }
             config.concurrency = Some(v);
         }
-        "invocation_timeout_secs" => {
+        ConfigKey::InvocationTimeoutSecs => {
             let v = value.parse::<u64>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected u64, got \"{value}\""
@@ -113,7 +170,7 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             }
             config.invocation_timeout_secs = Some(v);
         }
-        "max_budget_usd" => {
+        ConfigKey::MaxBudgetUsd => {
             let v = value.parse::<f64>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected f64, got \"{value}\""
@@ -126,14 +183,14 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             }
             config.max_budget_usd = Some(v);
         }
-        "include_general" => {
+        ConfigKey::IncludeGeneral => {
             config.include_general = Some(value.parse::<bool>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected bool, got \"{value}\""
                 ))
             })?);
         }
-        "max_per_framework" => {
+        ConfigKey::MaxPerFramework => {
             let v = value.parse::<u32>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected u32, got \"{value}\""
@@ -146,7 +203,7 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             }
             config.max_per_framework = Some(v);
         }
-        "include_categories" => {
+        ConfigKey::IncludeCategories => {
             let cats: Vec<String> = value
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -154,7 +211,7 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
                 .collect();
             config.include_categories = if cats.is_empty() { None } else { Some(cats) };
         }
-        "exclude_categories" => {
+        ConfigKey::ExcludeCategories => {
             let cats: Vec<String> = value
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -162,7 +219,7 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
                 .collect();
             config.exclude_categories = if cats.is_empty() { None } else { Some(cats) };
         }
-        "telemetry.enabled" => {
+        ConfigKey::TelemetryEnabled => {
             let enabled = value.parse::<bool>().map_err(|_| {
                 ActualError::ConfigError(format!(
                     "invalid value for {path}: expected bool, got \"{value}\""
@@ -176,16 +233,6 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
                     });
                 }
             }
-        }
-        "rejected_adrs" | "cached_analysis" => {
-            return Err(ActualError::ConfigError(format!(
-                "complex config key, use config file directly: {path}"
-            )));
-        }
-        _ => {
-            return Err(ActualError::ConfigError(format!(
-                "unknown config key: {path}"
-            )));
         }
     }
     Ok(())
@@ -659,5 +706,58 @@ mod tests {
         let err = set(&mut config, "invocation_timeout_secs", "0").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("must be >= 1"), "got: {msg}");
+    }
+
+    // --- Meta-test: all KNOWN_SETTABLE_KEYS round-trip through get() and set() ---
+
+    #[test]
+    fn test_all_known_settable_keys_round_trip() {
+        // A valid value for each key in KNOWN_SETTABLE_KEYS (same order).
+        let valid_values: &[(&str, &str)] = &[
+            ("api_url", "https://example.com"),
+            ("model", "claude-3"),
+            ("batch_size", "5"),
+            ("concurrency", "4"),
+            ("invocation_timeout_secs", "120"),
+            ("max_budget_usd", "1.0"),
+            ("include_general", "true"),
+            ("max_per_framework", "3"),
+            ("include_categories", "security,testing"),
+            ("exclude_categories", "deprecated"),
+            ("telemetry.enabled", "false"),
+        ];
+
+        // Sanity-check: KNOWN_SETTABLE_KEYS and valid_values stay in sync.
+        assert_eq!(
+            KNOWN_SETTABLE_KEYS.len(),
+            valid_values.len(),
+            "KNOWN_SETTABLE_KEYS and valid_values must have the same length"
+        );
+
+        for (key, value) in valid_values {
+            assert_eq!(
+                *key,
+                KNOWN_SETTABLE_KEYS[valid_values.iter().position(|(k, _)| k == key).unwrap()],
+                "key order mismatch"
+            );
+
+            let mut config = Config::default();
+
+            // set() must succeed.
+            set(&mut config, key, value)
+                .unwrap_or_else(|e| panic!("set({key}, {value}) failed: {e}"));
+
+            // get() must return either the value or a "not set" error — never "unknown".
+            match get(&config, key) {
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("not set"),
+                        "get({key}) returned unexpected error after set: {msg}"
+                    );
+                }
+            }
+        }
     }
 }
