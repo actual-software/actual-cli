@@ -5,6 +5,10 @@ pub enum ActualError {
     #[error("Claude Code is not installed")]
     ClaudeNotFound,
 
+    /// The Codex CLI binary was not found.
+    #[error("Codex CLI (codex) not found. Install with: npm install -g @openai/codex")]
+    CodexNotFound,
+
     #[error("Claude Code is not authenticated")]
     ClaudeNotAuthenticated,
 
@@ -49,7 +53,7 @@ impl ActualError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::UserCancelled => 4,
-            Self::ClaudeNotFound | Self::ClaudeNotAuthenticated => 2,
+            Self::ClaudeNotFound | Self::ClaudeNotAuthenticated | Self::CodexNotFound => 2,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
             Self::IoError(_) => 5,
             _ => 1,
@@ -60,6 +64,7 @@ impl ActualError {
     pub fn hint(&self) -> Option<&str> {
         match self {
             Self::ClaudeNotFound => Some("npm install -g @anthropic-ai/claude-code"),
+            Self::CodexNotFound => Some("npm install -g @openai/codex"),
             Self::ClaudeNotAuthenticated => Some("claude auth login"),
             Self::ConfigError(_) => Some("Check ~/.config/actual/config.yaml"),
             Self::ClaudeTimeout { .. } => {
