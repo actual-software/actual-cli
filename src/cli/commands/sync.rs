@@ -2829,6 +2829,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_tailoring_cache_key_differs_on_adr_instructions() {
+        // ADR with instructions vs without — exercises the instructions hash path.
+        let adr_no_instructions = crate::api::types::Adr {
+            id: "adr-001".to_string(),
+            title: "Title".to_string(),
+            context: None,
+            policies: vec![],
+            instructions: None,
+            category: crate::api::types::AdrCategory {
+                id: "cat-1".to_string(),
+                name: "Cat".to_string(),
+                path: "cat".to_string(),
+            },
+            applies_to: crate::api::types::AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let mut adr_with_instructions = adr_no_instructions.clone();
+        adr_with_instructions.instructions = Some(vec!["do this".to_string()]);
+
+        let key1 = compute_tailoring_cache_key(&[adr_no_instructions], false, &[], "", None);
+        let key2 = compute_tailoring_cache_key(&[adr_with_instructions], false, &[], "", None);
+        assert_ne!(
+            key1, key2,
+            "different instructions should produce different key"
+        );
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_differs_on_adr_frameworks() {
+        // ADR with frameworks vs without — exercises the frameworks hash path.
+        let adr_no_frameworks = crate::api::types::Adr {
+            id: "adr-001".to_string(),
+            title: "Title".to_string(),
+            context: None,
+            policies: vec![],
+            instructions: None,
+            category: crate::api::types::AdrCategory {
+                id: "cat-1".to_string(),
+                name: "Cat".to_string(),
+                path: "cat".to_string(),
+            },
+            applies_to: crate::api::types::AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let mut adr_with_frameworks = adr_no_frameworks.clone();
+        adr_with_frameworks.applies_to.frameworks = vec!["actix-web".to_string()];
+
+        let key1 = compute_tailoring_cache_key(&[adr_no_frameworks], false, &[], "", None);
+        let key2 = compute_tailoring_cache_key(&[adr_with_frameworks], false, &[], "", None);
+        assert_ne!(
+            key1, key2,
+            "different frameworks should produce different key"
+        );
+    }
+
     // ── store_tailoring_cache tests ──
 
     #[test]
