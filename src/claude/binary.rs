@@ -99,7 +99,8 @@ mod tests {
     #[ignore = "requires Claude Code to be installed on PATH"]
     #[cfg(feature = "integration")]
     fn test_find_claude_binary_on_path() {
-        std::env::remove_var("CLAUDE_BINARY");
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("CLAUDE_BINARY");
         let result = find_claude_binary();
         assert!(
             result.is_ok(),
