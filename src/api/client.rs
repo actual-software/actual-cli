@@ -99,16 +99,28 @@ impl ActualApiClient {
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {service_key}"))
-            .header("Content-Type", "application/json")
             .json(request)
             .send()
             .await
             .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        Self::handle_response_no_body(response).await
+    }
 
-        if response.status().is_success() {
+    async fn handle_response_no_body(response: reqwest::Response) -> Result<(), ActualError> {
+        let status = response.status();
+        if status.is_success() {
             Ok(())
+        } else if status.is_client_error() {
+            match response.json::<ApiErrorResponse>().await {
+                Ok(error_response) => Err(ActualError::ApiResponseError {
+                    code: error_response.error.code,
+                    message: error_response.error.message,
+                }),
+                Err(e) => Err(ActualError::ApiError(format!(
+                    "HTTP {status}: failed to parse error response: {e}"
+                ))),
+            }
         } else {
-            let status = response.status();
             let body = response.text().await.unwrap_or_default();
             Err(ActualError::ApiError(format!("HTTP {status}: {body}")))
         }
@@ -952,5 +964,49 @@ mod tests {
         let result = client.post_telemetry(&request, "test-key").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_post_telemetry_api_error_response() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{"error": {"code": "UNAUTHORIZED", "message": "Invalid service key", "details": null}}"#;
+
+        let mock = server
+            .mock("POST", "/counter/record")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let request = TelemetryRequest { metrics: vec![] };
+        let result = client.post_telemetry(&request, "bad-key").await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiResponseError { ref code, ref message } if code == "UNAUTHORIZED" && message == "Invalid service key")
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_telemetry_client_error_unparseable_body() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/counter/record")
+            .with_status(400)
+            .with_body("not valid json")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let request = TelemetryRequest { metrics: vec![] };
+        let result = client.post_telemetry(&request, "test-key").await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("400") && msg.contains("failed to parse error response"))
+        );
+        mock.assert_async().await;
     }
 }
