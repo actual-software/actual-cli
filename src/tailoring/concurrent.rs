@@ -10,7 +10,7 @@ use crate::error::ActualError;
 use crate::generation::merge::merge_outputs;
 use crate::tailoring::batch::create_batches;
 use crate::tailoring::invoke::{invoke_tailoring, serialize_json};
-use crate::tailoring::types::TailoringOutput;
+use crate::tailoring::types::{TailoringEvent, TailoringOutput};
 
 /// Configuration for concurrent project tailoring.
 pub struct ConcurrentTailoringConfig<'a> {
@@ -34,11 +34,16 @@ pub struct ConcurrentTailoringConfig<'a> {
 /// Each project is processed independently: its ADRs are batched, each batch
 /// is run through `invoke_tailoring`, and the per-project batch results are
 /// merged. Finally, all per-project outputs are merged into a single result.
+///
+/// If `progress_tx` is `Some`, a [`TailoringEvent`] is sent for each project
+/// as it starts and completes (or fails). Send errors are silently ignored —
+/// the receiver may be dropped if the caller is no longer interested in events.
 pub async fn tailor_all_projects<R: ClaudeRunner>(
     runner: &R,
     projects: &[Project],
     adrs: &[Adr],
     config: &ConcurrentTailoringConfig<'_>,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<TailoringEvent>>,
 ) -> Result<TailoringOutput, ActualError> {
     let semaphore = Arc::new(Semaphore::new(config.concurrency));
 
@@ -48,11 +53,12 @@ pub async fn tailor_all_projects<R: ClaudeRunner>(
         .iter()
         .map(|project| {
             let sem = semaphore.clone();
+            let tx = progress_tx.clone();
             async move {
                 let timeout_dur = config.per_project_timeout;
                 tokio::time::timeout(
                     timeout_dur,
-                    tailor_single_project(runner, project, adrs, config, &sem),
+                    tailor_single_project(runner, project, adrs, config, &sem, tx),
                 )
                 .await
                 .map_err(|_| ActualError::ClaudeTimeout {
@@ -70,13 +76,24 @@ pub async fn tailor_all_projects<R: ClaudeRunner>(
 /// Process a single project: batch its ADRs, invoke tailoring for each batch
 /// in parallel (bounded by the shared semaphore), and merge all batch outputs
 /// into a single per-project result.
+///
+/// Sends [`TailoringEvent::ProjectStarted`] before work begins and either
+/// [`TailoringEvent::ProjectCompleted`] or [`TailoringEvent::ProjectFailed`]
+/// when the project finishes. Send errors are silently ignored.
 async fn tailor_single_project<R: ClaudeRunner>(
     runner: &R,
     project: &Project,
     adrs: &[Adr],
     config: &ConcurrentTailoringConfig<'_>,
     semaphore: &Semaphore,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<TailoringEvent>>,
 ) -> Result<TailoringOutput, ActualError> {
+    if let Some(tx) = &progress_tx {
+        let _ = tx.send(TailoringEvent::ProjectStarted {
+            project_name: project.name.clone(),
+        });
+    }
+
     let project_json = serialize_json(project, "project")?;
     let batches = create_batches(adrs, config.batch_size);
 
@@ -99,9 +116,30 @@ async fn tailor_single_project<R: ClaudeRunner>(
         })
         .collect();
 
-    let outputs = futures::future::try_join_all(futures).await?;
+    let result = futures::future::try_join_all(futures).await;
 
-    Ok(merge_outputs(outputs))
+    match result {
+        Ok(outputs) => {
+            let merged = merge_outputs(outputs);
+            if let Some(tx) = &progress_tx {
+                let _ = tx.send(TailoringEvent::ProjectCompleted {
+                    project_name: project.name.clone(),
+                    files_generated: merged.summary.files_generated,
+                    adrs_applied: merged.summary.applicable,
+                });
+            }
+            Ok(merged)
+        }
+        Err(e) => {
+            if let Some(tx) = &progress_tx {
+                let _ = tx.send(TailoringEvent::ProjectFailed {
+                    project_name: project.name.clone(),
+                    error: e.to_string(),
+                });
+            }
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -318,7 +356,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
         let output = result.unwrap();
 
@@ -362,7 +400,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
         let output = result.unwrap();
         assert_eq!(output.files.len(), 1);
@@ -407,7 +445,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
         let output = result.unwrap();
         let paths: Vec<&str> = output.files.iter().map(|f| f.path.as_str()).collect();
@@ -452,7 +490,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
         let output = result.unwrap();
 
@@ -515,7 +553,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
         let err = result.unwrap_err();
         let err_display = err.to_string();
@@ -564,7 +602,7 @@ mod tests {
             per_project_timeout: Duration::from_secs(600),
         };
 
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
         assert!(result.is_err(), "expected an error from the first project");
 
         let calls = runner.call_count.load(Ordering::SeqCst);
@@ -634,7 +672,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
         let output = result.unwrap();
 
@@ -730,7 +768,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
         let output = result.unwrap();
 
@@ -807,7 +845,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
         let output = result.unwrap();
 
@@ -831,7 +869,7 @@ mod tests {
         assert_eq!(output.files.len(), 4);
     }
 
-    // --- Test 8: per-project timeout fires when project takes too long ---
+    // --- Test 10: per-project timeout fires when project takes too long ---
 
     #[tokio::test]
     async fn test_per_project_timeout() {
@@ -855,7 +893,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(2),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
         let err = result.unwrap_err();
         assert!(
@@ -864,29 +902,157 @@ mod tests {
         );
     }
 
-    // --- Test 9: project completes within timeout ---
+    // --- Test 11: progress events are sent correctly on success ---
 
     #[tokio::test]
-    async fn test_completes_within_timeout() {
-        let projects = vec![make_project("fast")];
+    async fn test_progress_events_on_success() {
+        let projects = vec![make_project("alpha"), make_project("beta")];
         let adrs = vec![make_adr("adr-001")];
 
+        let responses = vec![
+            make_output_json("apps/alpha/CLAUDE.md", "Alpha rules", &["adr-001"]),
+            make_output_json("apps/beta/CLAUDE.md", "Beta rules", &["adr-001"]),
+        ];
+
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(10));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 2,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, Some(tx)).await;
+        assert!(result.is_ok(), "expected success");
+
+        // Drop sender side is already dropped (moved into the fn). Drain events.
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        // Should have one Started + one Completed per project (2 each = 4 total)
+        let started: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TailoringEvent::ProjectStarted { .. }))
+            .collect();
+        let completed: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TailoringEvent::ProjectCompleted { .. }))
+            .collect();
+        let failed: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TailoringEvent::ProjectFailed { .. }))
+            .collect();
+
+        assert_eq!(started.len(), 2, "expected 2 ProjectStarted events");
+        assert_eq!(completed.len(), 2, "expected 2 ProjectCompleted events");
+        assert_eq!(failed.len(), 0, "expected no ProjectFailed events");
+
+        // ProjectCompleted events should carry correct file/adr counts
+        for event in &completed {
+            if let TailoringEvent::ProjectCompleted {
+                project_name,
+                files_generated,
+                adrs_applied,
+            } = event
+            {
+                assert!(
+                    project_name == "alpha" || project_name == "beta",
+                    "unexpected project name: {project_name}"
+                );
+                assert_eq!(*files_generated, 1, "expected 1 file for {project_name}");
+                assert_eq!(*adrs_applied, 1, "expected 1 adr for {project_name}");
+            }
+        }
+    }
+
+    // --- Test 12: progress events include ProjectFailed on error ---
+
+    #[tokio::test]
+    async fn test_progress_events_on_error() {
+        let projects = vec![make_project("good"), make_project("bad")];
+        let adrs = vec![make_adr("adr-001")];
+
+        let responses = vec![
+            MockResponse::Json(make_output_json(
+                "apps/good/CLAUDE.md",
+                "Good rules",
+                &["adr-001"],
+            )),
+            MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+                message: "crashed".to_string(),
+                stderr: String::new(),
+            }),
+        ];
+
+        let runner = ConcurrentMockRunner::with_responses(responses, Duration::from_millis(10));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 2,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, Some(tx)).await;
+        assert!(result.is_err(), "expected error to propagate");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        // There should be at least one ProjectFailed event
+        let failed: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TailoringEvent::ProjectFailed { .. }))
+            .collect();
+        assert!(
+            !failed.is_empty(),
+            "expected at least one ProjectFailed event"
+        );
+
+        // The failed event should carry the error message
+        for event in &failed {
+            if let TailoringEvent::ProjectFailed { error, .. } = event {
+                assert!(
+                    error.contains("crashed"),
+                    "expected error message in: {error}"
+                );
+            }
+        }
+    }
+
+    // --- Test 13: progress_tx = None works without panicking ---
+
+    #[tokio::test]
+    async fn test_no_progress_sender_is_noop() {
+        let projects = vec![make_project("solo")];
+        let adrs = vec![make_adr("adr-001")];
         let responses = vec![make_output_json(
-            "apps/fast/CLAUDE.md",
+            "apps/solo/CLAUDE.md",
             "Rules",
             &["adr-001"],
         )];
-        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(10));
-
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(5));
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
             existing_claude_md_paths: "",
             model_override: None,
             max_budget_usd: None,
-            per_project_timeout: Duration::from_secs(60),
+            per_project_timeout: Duration::from_secs(600),
         };
-        let result = tailor_all_projects(&runner, &projects, &adrs, &config).await;
+        // Should complete without panic
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
         assert!(result.is_ok());
     }
 }
