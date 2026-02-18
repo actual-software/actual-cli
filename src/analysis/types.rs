@@ -23,7 +23,8 @@ pub struct Project {
 /// Programming language detected in a project.
 ///
 /// Deserialization is case-insensitive: `"Rust"`, `"rust"`, and `"RUST"` all
-/// map to [`Language::Rust`]. Unknown strings map to [`Language::Other`].
+/// map to [`Language::Rust`]. Unknown strings map to [`Language::Other`] with
+/// the original name preserved (e.g. `"Haskell"` → `Language::Other("haskell")`).
 /// Serialization always produces lowercase (e.g. `"typescript"`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Language {
@@ -42,12 +43,12 @@ pub enum Language {
     CSharp,
     Scala,
     Elixir,
-    Other,
+    Other(String),
 }
 
 impl Language {
     /// Lowercase string representation used for both serialization and display.
-    fn as_str(&self) -> &'static str {
+    fn as_str(&self) -> &str {
         match self {
             Language::TypeScript => "typescript",
             Language::JavaScript => "javascript",
@@ -64,7 +65,7 @@ impl Language {
             Language::CSharp => "csharp",
             Language::Scala => "scala",
             Language::Elixir => "elixir",
-            Language::Other => "other",
+            Language::Other(s) => s.as_str(),
         }
     }
 
@@ -72,6 +73,7 @@ impl Language {
     ///
     /// Handles the same aliases as [`normalize_language`](crate::analysis::static_analyzer::languages::normalize_language)
     /// to ensure consistent behavior across deserialization and normalization.
+    /// Unknown strings are preserved (lowercased) in [`Language::Other`].
     fn from_str_insensitive(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "typescript" | "ts" | "tsx" => Language::TypeScript,
@@ -89,7 +91,7 @@ impl Language {
             "csharp" | "c#" | "c_sharp" | "c-sharp" | "cs" => Language::CSharp,
             "scala" => Language::Scala,
             "elixir" => Language::Elixir,
-            _ => Language::Other,
+            _ => Language::Other(s.to_lowercase()),
         }
     }
 }
@@ -335,7 +337,7 @@ mod tests {
             Language::CSharp,
             Language::Scala,
             Language::Elixir,
-            Language::Other,
+            Language::Other("haskell".to_string()),
         ];
         for lang in all_languages {
             let display = lang.to_string();
@@ -410,10 +412,42 @@ mod tests {
     #[test]
     fn language_unknown_maps_to_other() {
         let lang: Language = serde_json::from_str("\"haskell\"").unwrap();
-        assert_eq!(lang, Language::Other);
+        assert_eq!(lang, Language::Other("haskell".to_string()));
 
         let lang: Language = serde_json::from_str("\"Zig\"").unwrap();
-        assert_eq!(lang, Language::Other);
+        assert_eq!(lang, Language::Other("zig".to_string()));
+    }
+
+    #[test]
+    fn language_other_preserves_name() {
+        // Unknown language names are preserved (lowercased) in Language::Other
+        let lang: Language = serde_json::from_str("\"Haskell\"").unwrap();
+        assert_eq!(lang, Language::Other("haskell".to_string()));
+        assert_eq!(lang.to_string(), "haskell");
+
+        let lang: Language = serde_json::from_str("\"Elixir\"").unwrap();
+        // Elixir IS a known language, should not be Other
+        assert_eq!(lang, Language::Elixir);
+    }
+
+    #[test]
+    fn language_other_display_shows_name() {
+        // Display should show the actual language name, not "other"
+        let lang = Language::Other("haskell".to_string());
+        assert_eq!(lang.to_string(), "haskell");
+
+        let lang = Language::Other("zig".to_string());
+        assert_eq!(lang.to_string(), "zig");
+    }
+
+    #[test]
+    fn language_other_round_trip() {
+        // Language::Other(String) should round-trip correctly
+        let lang = Language::Other("haskell".to_string());
+        let json = serde_json::to_string(&lang).unwrap();
+        assert_eq!(json, "\"haskell\"");
+        let deserialized: Language = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, lang);
     }
 
     #[test]
@@ -511,7 +545,7 @@ mod tests {
             Language::CSharp,
             Language::Scala,
             Language::Elixir,
-            Language::Other,
+            Language::Other("haskell".to_string()),
         ];
         for lang in &all_languages {
             let json = serde_json::to_string(lang).unwrap();
