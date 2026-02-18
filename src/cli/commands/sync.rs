@@ -21,6 +21,7 @@ use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
 use crate::config::paths::{load_from, save_to};
 use crate::config::rejections::{clear_rejections, get_rejections};
+use crate::config::types::CachedTailoring;
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::writer::{write_files, WriteAction, WriteResult};
@@ -211,12 +212,56 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         });
     }
 
-    // 2d. Tailor or skip (--no-tailor)
+    // 2d. Tailor or skip (--no-tailor), with caching
     let existing_paths = find_existing_claude_md(root_dir);
 
-    let output = if args.no_tailor {
+    // Compute cache key from all tailoring inputs (None for non-git repos)
+    let mut adr_ids: Vec<String> = filtered_adrs.iter().map(|a| a.id.clone()).collect();
+    adr_ids.sort();
+    let mut project_paths: Vec<String> = analysis.projects.iter().map(|p| p.path.clone()).collect();
+    project_paths.sort();
+    let head_commit = get_git_head(root_dir);
+
+    let tailoring_cache_key = head_commit.as_deref().map(|hc| {
+        compute_tailoring_cache_key(
+            hc,
+            &adr_ids,
+            args.no_tailor,
+            &project_paths,
+            &existing_paths,
+            args.model.as_deref(),
+        )
+    });
+
+    // Try cache (unless --force or non-git repo)
+    let cached_output = if !args.force {
+        tailoring_cache_key
+            .as_deref()
+            .and_then(|key| {
+                config
+                    .cached_tailoring
+                    .as_ref()
+                    .filter(|c| c.cache_key == key)
+            })
+            .and_then(|c| serde_yaml::from_value::<TailoringOutput>(c.tailoring.clone()).ok())
+    } else {
+        None
+    };
+
+    let output = if let Some(cached) = cached_output {
+        pipeline.skip(SyncPhase::Tailor, "Using cached tailoring result");
+        cached
+    } else if args.no_tailor {
         pipeline.skip(SyncPhase::Tailor, "Tailoring skipped (--no-tailor)");
-        raw_adrs_to_output(&filtered_adrs)
+        let out = raw_adrs_to_output(&filtered_adrs);
+        store_tailoring_cache(
+            &mut config,
+            cfg_path,
+            tailoring_cache_key.as_deref(),
+            root_dir,
+            &out,
+        )?;
+        out
     } else {
         pipeline.start(SyncPhase::Tailor, "Tailoring ADRs...");
         let tailoring_config = ConcurrentTailoringConfig {
@@ -246,6 +291,13 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
                         output.summary.applicable, output.summary.files_generated
                     ),
                 );
+                store_tailoring_cache(
+                    &mut config,
+                    cfg_path,
+                    tailoring_cache_key.as_deref(),
+                    root_dir,
+                    &output,
+                )?;
                 output
             }
             Err(e) => {
@@ -314,6 +366,71 @@ fn compute_repo_key(root_dir: &Path) -> String {
 
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Store a tailoring result in the config cache.
+///
+/// Skips caching when `cache_key` is `None` (non-git repos).
+fn store_tailoring_cache(
+    config: &mut crate::config::types::Config,
+    cfg_path: &Path,
+    cache_key: Option<&str>,
+    root_dir: &Path,
+    output: &TailoringOutput,
+) -> Result<(), ActualError> {
+    let Some(key) = cache_key else {
+        return Ok(());
+    };
+    let tailoring_value = serde_yaml::to_value(output).map_err(|e| {
+        ActualError::ConfigError(format!("Failed to serialize tailoring for cache: {e}"))
+    })?;
+    config.cached_tailoring = Some(CachedTailoring {
+        cache_key: key.to_string(),
+        repo_path: root_dir.to_string_lossy().to_string(),
+        tailoring: tailoring_value,
+        tailored_at: chrono::Utc::now(),
+    });
+    save_to(config, cfg_path)?;
+    Ok(())
+}
+
+/// Compute a cache key for the tailoring step by hashing all inputs
+/// that affect the tailoring output.
+///
+/// The key incorporates: HEAD commit, sorted ADR IDs, the no_tailor flag,
+/// sorted project paths, existing CLAUDE.md content, and model override.
+/// Any change in these inputs produces a different cache key.
+fn compute_tailoring_cache_key(
+    head_commit: &str,
+    adr_ids: &[String],
+    no_tailor: bool,
+    project_paths: &[String],
+    existing_claude_md: &str,
+    model: Option<&str>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(head_commit.as_bytes());
+    hasher.update(b"\x00");
+    for id in adr_ids {
+        hasher.update(id.as_bytes());
+        hasher.update(b"\x00");
+    }
+    hasher.update(if no_tailor {
+        &b"no_tailor"[..]
+    } else {
+        &b"tailor"[..]
+    });
+    hasher.update(b"\x00");
+    for path in project_paths {
+        hasher.update(path.as_bytes());
+        hasher.update(b"\x00");
+    }
+    hasher.update(existing_claude_md.as_bytes());
+    hasher.update(b"\x00");
+    if let Some(m) = model {
+        hasher.update(m.as_bytes());
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -2331,5 +2448,427 @@ mod tests {
             &runner,
         );
         assert!(result.is_err(), "expected tailoring to fail");
+    }
+
+    // ── compute_tailoring_cache_key tests ──
+
+    #[test]
+    fn test_tailoring_cache_key_deterministic() {
+        let key1 = compute_tailoring_cache_key(
+            "abc123",
+            &["adr-001".to_string(), "adr-002".to_string()],
+            false,
+            &[".".to_string()],
+            "existing content",
+            Some("opus"),
+        );
+        let key2 = compute_tailoring_cache_key(
+            "abc123",
+            &["adr-001".to_string(), "adr-002".to_string()],
+            false,
+            &[".".to_string()],
+            "existing content",
+            Some("opus"),
+        );
+        assert_eq!(key1, key2, "same inputs should produce same key");
+        assert_eq!(key1.len(), 64, "should be a 64-char hex SHA-256");
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_differs_on_head_commit() {
+        let key1 = compute_tailoring_cache_key(
+            "abc123",
+            &["adr-001".to_string()],
+            false,
+            &[".".to_string()],
+            "",
+            None,
+        );
+        let key2 = compute_tailoring_cache_key(
+            "def456",
+            &["adr-001".to_string()],
+            false,
+            &[".".to_string()],
+            "",
+            None,
+        );
+        assert_ne!(key1, key2, "different HEAD should produce different key");
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_differs_on_adr_ids() {
+        let key1 = compute_tailoring_cache_key(
+            "abc123",
+            &["adr-001".to_string()],
+            false,
+            &[".".to_string()],
+            "",
+            None,
+        );
+        let key2 = compute_tailoring_cache_key(
+            "abc123",
+            &["adr-001".to_string(), "adr-002".to_string()],
+            false,
+            &[".".to_string()],
+            "",
+            None,
+        );
+        assert_ne!(key1, key2, "different ADR IDs should produce different key");
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_differs_on_no_tailor() {
+        let key1 = compute_tailoring_cache_key(
+            "abc123",
+            &["adr-001".to_string()],
+            false,
+            &[".".to_string()],
+            "",
+            None,
+        );
+        let key2 = compute_tailoring_cache_key(
+            "abc123",
+            &["adr-001".to_string()],
+            true,
+            &[".".to_string()],
+            "",
+            None,
+        );
+        assert_ne!(
+            key1, key2,
+            "different no_tailor should produce different key"
+        );
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_differs_on_project_paths() {
+        let key1 = compute_tailoring_cache_key("abc123", &[], false, &[".".to_string()], "", None);
+        let key2 = compute_tailoring_cache_key(
+            "abc123",
+            &[],
+            false,
+            &[".".to_string(), "apps/web".to_string()],
+            "",
+            None,
+        );
+        assert_ne!(
+            key1, key2,
+            "different projects should produce different key"
+        );
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_differs_on_existing_claude_md() {
+        let key1 = compute_tailoring_cache_key(
+            "abc123",
+            &[],
+            false,
+            &[".".to_string()],
+            "old content",
+            None,
+        );
+        let key2 = compute_tailoring_cache_key(
+            "abc123",
+            &[],
+            false,
+            &[".".to_string()],
+            "new content",
+            None,
+        );
+        assert_ne!(
+            key1, key2,
+            "different CLAUDE.md content should produce different key"
+        );
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_differs_on_model() {
+        let key1 =
+            compute_tailoring_cache_key("abc123", &[], false, &[".".to_string()], "", Some("opus"));
+        let key2 = compute_tailoring_cache_key(
+            "abc123",
+            &[],
+            false,
+            &[".".to_string()],
+            "",
+            Some("sonnet"),
+        );
+        assert_ne!(key1, key2, "different model should produce different key");
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_none_vs_some_model() {
+        let key1 = compute_tailoring_cache_key("abc123", &[], false, &[".".to_string()], "", None);
+        let key2 =
+            compute_tailoring_cache_key("abc123", &[], false, &[".".to_string()], "", Some("opus"));
+        assert_ne!(
+            key1, key2,
+            "None vs Some model should produce different key"
+        );
+    }
+
+    // ── store_tailoring_cache tests ──
+
+    #[test]
+    fn test_store_tailoring_cache_stores_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+        let mut config = crate::config::Config::default();
+        save_to(&config, &cfg_path).unwrap();
+
+        let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
+        store_tailoring_cache(
+            &mut config,
+            &cfg_path,
+            Some("test-cache-key"),
+            dir.path(),
+            &output,
+        )
+        .unwrap();
+
+        assert!(config.cached_tailoring.is_some());
+        let cached = config.cached_tailoring.as_ref().unwrap();
+        assert_eq!(cached.cache_key, "test-cache-key");
+        assert_eq!(cached.repo_path, dir.path().to_string_lossy().as_ref());
+
+        // Verify the stored value round-trips
+        let restored: TailoringOutput = serde_yaml::from_value(cached.tailoring.clone()).unwrap();
+        assert_eq!(restored, output);
+    }
+
+    #[test]
+    fn test_store_tailoring_cache_skips_when_no_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+        let mut config = crate::config::Config::default();
+        save_to(&config, &cfg_path).unwrap();
+
+        let output = make_output(vec![]);
+        store_tailoring_cache(&mut config, &cfg_path, None, dir.path(), &output).unwrap();
+
+        assert!(
+            config.cached_tailoring.is_none(),
+            "should not store cache when key is None"
+        );
+    }
+
+    #[test]
+    fn test_store_tailoring_cache_persists_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+        let mut config = crate::config::Config::default();
+        save_to(&config, &cfg_path).unwrap();
+
+        let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
+        store_tailoring_cache(
+            &mut config,
+            &cfg_path,
+            Some("disk-test-key"),
+            dir.path(),
+            &output,
+        )
+        .unwrap();
+
+        // Reload from disk and verify
+        let loaded = load_from(&cfg_path).unwrap();
+        let cached = loaded.cached_tailoring.unwrap();
+        assert_eq!(cached.cache_key, "disk-test-key");
+    }
+
+    // ── Tailoring cache round-trip test ──
+
+    #[test]
+    fn test_tailoring_output_round_trip_through_yaml_value() {
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "CLAUDE.md".to_string(),
+                content: "# Rules\n\nDo things.".to_string(),
+                reasoning: "Root rules".to_string(),
+                adr_ids: vec!["adr-001".to_string(), "adr-002".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 2,
+                applicable: 2,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+
+        let value = serde_yaml::to_value(&output).unwrap();
+        let restored: TailoringOutput = serde_yaml::from_value(value).unwrap();
+        assert_eq!(output, restored);
+    }
+
+    #[test]
+    fn test_corrupted_tailoring_cache_falls_through() {
+        // Simulates a corrupted cache that cannot be deserialized as TailoringOutput
+        let corrupted = serde_yaml::to_value("this is not a TailoringOutput").unwrap();
+        let result = serde_yaml::from_value::<TailoringOutput>(corrupted);
+        assert!(
+            result.is_err(),
+            "corrupted value should fail deserialization"
+        );
+    }
+
+    // ── Integration: tailoring cache hit in run_sync ──
+
+    /// Create a git repo in the given directory and make an initial commit.
+    fn init_git_repo(dir: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        std::fs::write(dir.join("dummy.txt"), "content").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_run_sync_tailoring_cache_hit_skips_tailoring() {
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let cfg_path = dir.path().join("config.yaml");
+
+        // First run: force + no_tailor to populate the cache
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
+
+        // Verify cache was stored
+        let loaded = load_from(&cfg_path).unwrap();
+        assert!(
+            loaded.cached_tailoring.is_some(),
+            "expected tailoring cache to be populated after first run"
+        );
+
+        // Second run: same inputs, force=false → should use both analysis and tailoring cache
+        // Reset the files so the second run encounters the same state
+        let _ = std::fs::remove_file(dir.path().join("CLAUDE.md"));
+
+        // Pre-load the config to verify the cache key will match
+        let loaded = load_from(&cfg_path).unwrap();
+        let cached_key = loaded.cached_tailoring.as_ref().unwrap().cache_key.clone();
+
+        let server2 = mock_api_server_with_adrs();
+        let args2 = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: false,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server2.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+
+        // Provide "y" for project confirmation and select all files
+        let term2 = MockTerminal::new(vec!["y"]).with_selection(Some(vec![0]));
+        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
+        assert!(
+            result.is_ok(),
+            "expected cache hit run to succeed: {result:?}"
+        );
+
+        // Verify CLAUDE.md was written from the cached tailoring output
+        assert!(dir.path().join("CLAUDE.md").exists());
+
+        // Verify the cache key hasn't changed (confirming cache was hit, not regenerated)
+        let loaded2 = load_from(&cfg_path).unwrap();
+        let cached_key2 = loaded2.cached_tailoring.as_ref().unwrap().cache_key.clone();
+        assert_eq!(
+            cached_key, cached_key2,
+            "cache key should be unchanged on cache hit"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_force_bypasses_tailoring_cache() {
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let cfg_path = dir.path().join("config.yaml");
+
+        // First run: populate cache with no_tailor
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
+
+        let loaded = load_from(&cfg_path).unwrap();
+        let first_time = loaded.cached_tailoring.as_ref().unwrap().tailored_at;
+
+        // Wait a bit to ensure timestamp changes
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Second run: --force should bypass cache and update it
+        let server2 = mock_api_server_with_adrs();
+        let term2 = MockTerminal::new(vec![]);
+        let args2 = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true, // Bypass cache
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server2.url()),
+            verbose: false,
+            no_tailor: true,
+            max_budget_usd: None,
+        };
+        run_sync(&args2, dir.path(), &cfg_path, &term2, &runner).unwrap();
+
+        // Cache should have been updated with a newer timestamp
+        let loaded2 = load_from(&cfg_path).unwrap();
+        let second_time = loaded2.cached_tailoring.as_ref().unwrap().tailored_at;
+        assert!(
+            second_time > first_time,
+            "force should update cache timestamp: {first_time} vs {second_time}"
+        );
     }
 }
