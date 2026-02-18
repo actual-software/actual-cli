@@ -1645,11 +1645,12 @@ mod tests {
     fn test_exec_claude_not_found() {
         // exec() now calls find_claude_binary() which will fail if Claude is not found
         // Set an invalid binary path to ensure it fails predictably
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
-        std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::testutil::EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
         let args = make_sync_args(true, false, false, false, "http://unused");
         let code = handle_result(exec(&args));
-        std::env::remove_var("CLAUDE_BINARY");
         assert_eq!(code, 2, "expected exit code 2 (ClaudeNotFound)");
     }
 

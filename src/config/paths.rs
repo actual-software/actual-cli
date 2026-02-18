@@ -114,60 +114,28 @@ fn set_config_permissions(_path: &Path) -> Result<(), ActualError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::ENV_MUTEX;
+    use crate::testutil::{EnvGuard, ENV_MUTEX};
     use tempfile::tempdir;
 
-    /// Helper: save and clear both config env vars, returning saved values.
-    fn clear_env_vars() -> (Option<String>, Option<String>) {
-        let saved_config = std::env::var("ACTUAL_CONFIG").ok();
-        let saved_config_dir = std::env::var("ACTUAL_CONFIG_DIR").ok();
-        std::env::remove_var("ACTUAL_CONFIG");
-        std::env::remove_var("ACTUAL_CONFIG_DIR");
-        (saved_config, saved_config_dir)
-    }
-
-    /// Helper: restore a single env var from a saved value.
-    fn restore_env_var(name: &str, value: Option<String>) {
-        match value {
-            Some(v) => std::env::set_var(name, v),
-            None => std::env::remove_var(name),
-        }
-    }
-
-    /// Helper: restore env vars from saved values.
-    fn restore_env_vars(saved: (Option<String>, Option<String>)) {
-        restore_env_var("ACTUAL_CONFIG", saved.0);
-        restore_env_var("ACTUAL_CONFIG_DIR", saved.1);
-    }
-
     #[test]
-    fn test_restore_env_vars_with_saved_values() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        // Set both env vars so clear_env_vars saves Some(...) values
-        std::env::set_var("ACTUAL_CONFIG", "/tmp/saved_config.yaml");
-        std::env::set_var("ACTUAL_CONFIG_DIR", "/tmp/saved_dir");
-
-        let saved = clear_env_vars();
-        assert!(saved.0.is_some());
-        assert!(saved.1.is_some());
-        // Both env vars should be cleared
+    fn test_env_guard_restores_both_config_vars() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // Set both env vars
+        {
+            let _g1 = EnvGuard::set("ACTUAL_CONFIG", "/tmp/saved_config.yaml");
+            let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", "/tmp/saved_dir");
+            assert_eq!(
+                std::env::var("ACTUAL_CONFIG").unwrap(),
+                "/tmp/saved_config.yaml"
+            );
+            assert_eq!(
+                std::env::var("ACTUAL_CONFIG_DIR").unwrap(),
+                "/tmp/saved_dir"
+            );
+        }
+        // Guards dropped: both should be removed (were absent before)
         assert!(std::env::var("ACTUAL_CONFIG").is_err());
         assert!(std::env::var("ACTUAL_CONFIG_DIR").is_err());
-
-        // Restore should set them back (exercises the Some branch)
-        restore_env_vars(saved);
-        assert_eq!(
-            std::env::var("ACTUAL_CONFIG").unwrap(),
-            "/tmp/saved_config.yaml"
-        );
-        assert_eq!(
-            std::env::var("ACTUAL_CONFIG_DIR").unwrap(),
-            "/tmp/saved_dir"
-        );
-
-        // Clean up
-        std::env::remove_var("ACTUAL_CONFIG");
-        std::env::remove_var("ACTUAL_CONFIG_DIR");
     }
 
     #[test]
@@ -252,78 +220,74 @@ mod tests {
 
     #[test]
     fn test_config_dir_default() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let dir = config_dir().unwrap();
         assert!(dir.ends_with(".actualai/actual"));
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_config_dir_with_actual_config_env() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let tmp = tempdir().unwrap();
         let config_file = tmp.path().join("myconfig.yaml");
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
 
         let dir = config_dir().unwrap();
         assert_eq!(dir, tmp.path());
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_config_dir_with_actual_config_dir_env() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let tmp = tempdir().unwrap();
-        std::env::set_var("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
 
         let dir = config_dir().unwrap();
         assert_eq!(dir, tmp.path());
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_config_path_default() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let path = config_path().unwrap();
         assert!(path.ends_with(".actualai/actual/config.yaml"));
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_config_path_with_actual_config_env() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let tmp = tempdir().unwrap();
         let config_file = tmp.path().join("custom.yaml");
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
 
         let path = config_path().unwrap();
         assert_eq!(path, config_file);
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_load_and_save_via_env_var() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let tmp = tempdir().unwrap();
         let config_file = tmp.path().join("config.yaml");
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
 
         // save() should create the file at the env-var path
         let config = Config {
@@ -336,8 +300,6 @@ mod tests {
         // load() should read it back
         let loaded = load().unwrap();
         assert_eq!(loaded.model, Some("haiku".to_string()));
-
-        restore_env_vars(saved);
     }
 
     #[test]
@@ -351,20 +313,19 @@ mod tests {
 
     #[test]
     fn test_config_dir_actual_config_takes_precedence_over_config_dir() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let tmp1 = tempdir().unwrap();
         let tmp2 = tempdir().unwrap();
         let config_file = tmp1.path().join("config.yaml");
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
-        std::env::set_var("ACTUAL_CONFIG_DIR", tmp2.path().to_str().unwrap());
+        let _ga = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let _gb = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp2.path().to_str().unwrap());
 
         // ACTUAL_CONFIG should take precedence
         let dir = config_dir().unwrap();
         assert_eq!(dir, tmp1.path());
-
-        restore_env_vars(saved);
     }
 
     #[test]
@@ -423,85 +384,79 @@ mod tests {
     #[test]
     fn test_config_dir_actual_config_bare_filename() {
         // When ACTUAL_CONFIG is set to a bare filename, parent is Some("").
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", "config.yaml");
 
-        std::env::set_var("ACTUAL_CONFIG", "config.yaml");
         let dir = config_dir().unwrap();
         assert_eq!(dir, PathBuf::from(""));
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_config_dir_actual_config_empty_string() {
         // When ACTUAL_CONFIG is set to an empty string, parent() returns None.
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", "");
 
-        std::env::set_var("ACTUAL_CONFIG", "");
         let err = config_dir().unwrap_err();
         assert!(err
             .to_string()
             .contains("ACTUAL_CONFIG has no parent directory"));
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_load_via_env_var_absent_creates_default() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let tmp = tempdir().unwrap();
         let config_file = tmp.path().join("new_config.yaml");
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
 
         // load() with env var pointing to nonexistent file should auto-create
         let config = load().unwrap();
         assert_eq!(config, Config::default());
         assert!(config_file.exists());
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_config_path_with_config_dir_env() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let tmp = tempdir().unwrap();
-        std::env::set_var("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
 
         let path = config_path().unwrap();
         assert_eq!(path, tmp.path().join("config.yaml"));
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_config_dir_no_home_directory() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let err = config_dir_with_home(None).unwrap_err();
         assert!(err
             .to_string()
             .contains("Unable to determine home directory"));
-
-        restore_env_vars(saved);
     }
 
     #[test]
     fn test_config_dir_with_home_provided() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = clear_env_vars();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
 
         let home = PathBuf::from("/fake/home");
         let dir = config_dir_with_home(Some(home)).unwrap();
         assert_eq!(dir, PathBuf::from("/fake/home/.actualai/actual"));
-
-        restore_env_vars(saved);
     }
 
     #[test]
