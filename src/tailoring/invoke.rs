@@ -8,6 +8,7 @@ use crate::claude::schemas::TAILORING_OUTPUT_SCHEMA;
 use crate::claude::ClaudeRunner;
 use crate::claude::InvocationOptions;
 use crate::error::ActualError;
+use crate::generation::OutputFormat;
 use crate::tailoring::types::TailoringOutput;
 
 /// Invoke Claude to tailor ADRs for the given project context.
@@ -18,27 +19,29 @@ pub async fn invoke_tailoring<R: ClaudeRunner>(
     runner: &R,
     adrs: &[Adr],
     projects_json: &str,
-    existing_claude_md_paths: &str,
+    existing_output_paths: &str,
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
+    format: &OutputFormat,
 ) -> Result<TailoringOutput, ActualError> {
     let adr_json = serialize_json(adrs, "ADRs")?;
     let args = build_args(
         &adr_json,
         projects_json,
-        existing_claude_md_paths,
+        existing_output_paths,
         model_override,
         max_budget_usd,
+        format,
     );
     let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
 
     // First attempt
     match runner.run::<TailoringOutput>(&args).await {
-        Ok(output) => validate_and_filter_output(output, &valid_ids),
+        Ok(output) => validate_and_filter_output(output, &valid_ids, format),
         Err(ActualError::ClaudeOutputParse(_)) => {
             // Retry once on JSON parse failure
             let output: TailoringOutput = runner.run(&args).await?;
-            validate_and_filter_output(output, &valid_ids)
+            validate_and_filter_output(output, &valid_ids, format)
         }
         Err(e) => Err(e),
     }
@@ -57,15 +60,16 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
 fn build_args(
     adr_json: &str,
     projects_json: &str,
-    existing_claude_md_paths: &str,
+    existing_output_paths: &str,
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
+    format: &OutputFormat,
 ) -> Vec<String> {
     let mut opts = InvocationOptions::for_tailoring(model_override);
     opts.json_schema = Some(TAILORING_OUTPUT_SCHEMA.to_string());
     opts.max_budget_usd = max_budget_usd;
 
-    let prompt = tailoring_prompt(projects_json, existing_claude_md_paths, adr_json);
+    let prompt = tailoring_prompt(projects_json, existing_output_paths, adr_json, format);
 
     let mut args = opts.to_args();
     args.push("-p".to_string());
@@ -77,10 +81,12 @@ fn build_args(
 ///
 /// - Errors on empty content or invalid file paths (these are fatal).
 /// - Filters out unknown ADR IDs with a warning (defense-in-depth against LLM hallucination).
-fn validate_and_filter_output(
+pub(crate) fn validate_and_filter_output(
     mut output: TailoringOutput,
     valid_ids: &HashSet<&str>,
+    format: &OutputFormat,
 ) -> Result<TailoringOutput, ActualError> {
+    let expected_filename = format.filename();
     for file in &mut output.files {
         if file.content.is_empty() {
             return Err(ActualError::TailoringValidationError(format!(
@@ -88,9 +94,9 @@ fn validate_and_filter_output(
                 file.path
             )));
         }
-        if !file.path.ends_with("CLAUDE.md") {
+        if !file.path.ends_with(expected_filename) {
             return Err(ActualError::TailoringValidationError(format!(
-                "file path '{}' does not end with CLAUDE.md",
+                "file path '{}' does not end with {expected_filename}",
                 file.path
             )));
         }
@@ -126,6 +132,7 @@ fn validate_and_filter_output(
 mod tests {
     use super::*;
     use crate::api::types::{AdrCategory, AppliesTo};
+    use crate::generation::OutputFormat;
     use crate::tailoring::types::{FileOutput, TailoringSummary};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
@@ -225,7 +232,16 @@ mod tests {
         let json = valid_output_json(&["adr-001", "adr-002"]);
         let runner = MockClaudeRunner::single(&json);
 
-        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+        )
+        .await;
 
         let output = result.unwrap();
         assert_eq!(output.files.len(), 1);
@@ -256,7 +272,16 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         let runner = MockClaudeRunner::single(&json);
 
-        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+        )
+        .await;
 
         let err = result.unwrap_err();
         let msg = err.to_string();
@@ -288,7 +313,16 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         let runner = MockClaudeRunner::single(&json);
 
-        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+        )
+        .await;
 
         let err = result.unwrap_err();
         let msg = err.to_string();
@@ -317,7 +351,16 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         let runner = MockClaudeRunner::single(&json);
 
-        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+        )
+        .await;
 
         let output = result.unwrap();
         // The invalid ID should be filtered out, leaving only the valid one
@@ -345,7 +388,16 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         let runner = MockClaudeRunner::single(&json);
 
-        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+        )
+        .await;
 
         let output = result.unwrap();
         assert!(output.files[0].adr_ids.is_empty());
@@ -358,7 +410,16 @@ mod tests {
         let runner =
             MockClaudeRunner::from_json_strings(vec!["not valid json".to_string(), valid_json]);
 
-        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+        )
+        .await;
 
         let output = result.unwrap();
         assert_eq!(output.files.len(), 1);
@@ -400,7 +461,7 @@ mod tests {
     #[test]
     fn test_build_args_with_valid_input() {
         let adr_json = r#"[{"id":"adr-001"},{"id":"adr-002"}]"#;
-        let args = build_args(adr_json, "{}", "", None, None);
+        let args = build_args(adr_json, "{}", "", None, None, &OutputFormat::ClaudeMd);
 
         // Should contain at least the "-p" flag and a prompt
         assert!(
@@ -440,7 +501,16 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         let runner = MockClaudeRunner::single(&json);
 
-        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+        )
+        .await;
 
         let err = result.unwrap_err();
         let msg = err.to_string();
@@ -461,10 +531,136 @@ mod tests {
             },
         )]);
 
-        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+        )
+        .await;
 
         let err = result.unwrap_err();
         assert!(matches!(err, ActualError::ClaudeSubprocessFailed { .. }));
         assert_eq!(runner.call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // ── format-aware validate_and_filter_output tests ──
+
+    #[tokio::test]
+    async fn test_agents_md_format_accepts_agents_md_path() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "AGENTS.md".to_string(),
+                content: "# Rules".to_string(),
+                reasoning: "Root level rules".to_string(),
+                adr_ids: vec!["adr-001".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockClaudeRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::AgentsMd,
+        )
+        .await;
+
+        let output = result.unwrap();
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "AGENTS.md");
+    }
+
+    #[tokio::test]
+    async fn test_agents_md_format_accepts_subdir_agents_md_path() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "subdir/AGENTS.md".to_string(),
+                content: "# Rules".to_string(),
+                reasoning: "Subdir rules".to_string(),
+                adr_ids: vec!["adr-001".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockClaudeRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::AgentsMd,
+        )
+        .await;
+
+        let output = result.unwrap();
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "subdir/AGENTS.md");
+    }
+
+    #[tokio::test]
+    async fn test_agents_md_format_rejects_claude_md_path() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "CLAUDE.md".to_string(),
+                content: "# Rules".to_string(),
+                reasoning: "Root level rules".to_string(),
+                adr_ids: vec!["adr-001".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockClaudeRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::AgentsMd,
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("AGENTS.md"),
+            "expected 'AGENTS.md' in error for agents-md format, got: {msg}"
+        );
+        assert!(matches!(err, ActualError::TailoringValidationError(_)));
     }
 }

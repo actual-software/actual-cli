@@ -8,6 +8,7 @@ use crate::api::types::Adr;
 use crate::claude::ClaudeRunner;
 use crate::error::ActualError;
 use crate::generation::merge::merge_outputs;
+use crate::generation::OutputFormat;
 use crate::tailoring::batch::create_batches;
 use crate::tailoring::invoke::{invoke_tailoring, serialize_json};
 use crate::tailoring::types::{TailoringEvent, TailoringOutput};
@@ -18,7 +19,7 @@ pub struct ConcurrentTailoringConfig<'a> {
     pub concurrency: usize,
     /// Maximum number of ADRs per batch sent to a single invocation.
     pub batch_size: usize,
-    /// Pre-existing CLAUDE.md file paths to include as context.
+    /// Pre-existing output file paths to include as context.
     pub existing_claude_md_paths: &'a str,
     /// Optional model override for the Claude invocation.
     pub model_override: Option<&'a str>,
@@ -26,6 +27,8 @@ pub struct ConcurrentTailoringConfig<'a> {
     pub max_budget_usd: Option<f64>,
     /// Per-project timeout duration.
     pub per_project_timeout: Duration,
+    /// Output file format (CLAUDE.md vs AGENTS.md).
+    pub output_format: &'a OutputFormat,
 }
 
 /// Tailor ADRs for multiple projects concurrently, then merge results.
@@ -121,6 +124,7 @@ async fn tailor_single_project<R: ClaudeRunner>(
                 config.existing_claude_md_paths,
                 config.model_override,
                 config.max_budget_usd,
+                config.output_format,
             )
             .await
         })
@@ -157,6 +161,7 @@ mod tests {
     use super::*;
     use crate::analysis::types::{Framework, FrameworkCategory, Language};
     use crate::api::types::{AdrCategory, AppliesTo};
+    use crate::generation::OutputFormat;
     use crate::tailoring::types::{FileOutput, SkippedAdr, TailoringSummary};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
@@ -365,6 +370,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -409,6 +415,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -454,6 +461,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -499,6 +507,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -562,6 +571,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -610,6 +620,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
 
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
@@ -681,6 +692,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -777,6 +789,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -854,6 +867,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -902,6 +916,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(2),
+            output_format: &OutputFormat::ClaudeMd,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -935,6 +950,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(2),
+            output_format: &OutputFormat::ClaudeMd,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
@@ -992,6 +1008,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1068,6 +1085,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1119,6 +1137,7 @@ mod tests {
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
         };
         // Should complete without panic
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;

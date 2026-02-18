@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use crate::config::types::{Config, TelemetryConfig};
 use crate::error::ActualError;
+use crate::generation::OutputFormat;
 
 /// Generates the `ConfigKey` enum, `ALL` slice, `as_str()`, and `FromStr`
 /// from a single source of truth.
@@ -70,6 +71,7 @@ define_config_keys! {
     (IncludeCategories,     "include_categories"),
     (ExcludeCategories,     "exclude_categories"),
     (TelemetryEnabled,      "telemetry.enabled"),
+    (OutputFormatKey,       "output_format"),
 }
 
 /// Get a config value by dotpath, returning its string representation.
@@ -125,6 +127,14 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .as_ref()
             .and_then(|t| t.enabled)
             .map(|v| v.to_string())
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::OutputFormatKey => config
+            .output_format
+            .as_ref()
+            .map(|f| match f {
+                OutputFormat::ClaudeMd => "claude-md".to_string(),
+                OutputFormat::AgentsMd => "agents-md".to_string(),
+            })
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
     }
 }
@@ -243,6 +253,18 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
                     });
                 }
             }
+        }
+        ConfigKey::OutputFormatKey => {
+            let fmt = match value {
+                "claude-md" => OutputFormat::ClaudeMd,
+                "agents-md" => OutputFormat::AgentsMd,
+                _ => {
+                    return Err(ActualError::ConfigError(format!(
+                        "invalid value for {path}: expected \"claude-md\" or \"agents-md\", got \"{value}\""
+                    )));
+                }
+            };
+            config.output_format = Some(fmt);
         }
     }
     Ok(())
@@ -741,6 +763,7 @@ mod tests {
             ("include_categories", "security,testing"),
             ("exclude_categories", "deprecated"),
             ("telemetry.enabled", "false"),
+            ("output_format", "agents-md"),
         ];
 
         // Sanity-check: valid_values must cover every variant in ConfigKey::ALL.
