@@ -295,7 +295,6 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
             tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
 
         let result = rt.block_on(async {
-            let mut completed = 0usize;
             let tailor_fut = tailor_all_projects(
                 runner,
                 &analysis.projects,
@@ -303,25 +302,14 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
                 &tailoring_config,
                 Some(progress_tx),
             );
-            tokio::pin!(tailor_fut);
-
-            loop {
-                tokio::select! {
-                    result = &mut tailor_fut => {
-                        // Drain any remaining events before breaking
-                        while let Ok(event) = progress_rx.try_recv() {
-                            apply_tailoring_event(event, &pipeline, &mut completed, project_count);
-                        }
-                        break result;
-                    }
-                    Some(event) = progress_rx.recv() => {
-                        apply_tailoring_event(event, &pipeline, &mut completed, project_count);
-                    }
-                    _ = tokio::signal::ctrl_c() => {
-                        break Err(ActualError::UserCancelled);
-                    }
-                }
-            }
+            run_tailoring_with_cancel(
+                tailor_fut,
+                &mut progress_rx,
+                &pipeline,
+                project_count,
+                tokio::signal::ctrl_c(),
+            )
+            .await
         });
         match result {
             Ok(output) => {
@@ -391,6 +379,46 @@ fn apply_tailoring_event(
             pipeline.println(&format!("  \u{2716} {project_name}: {error}"));
         }
         TailoringEvent::ProjectStarted { .. } => {}
+    }
+}
+
+/// Drive the tailoring future to completion while processing progress events,
+/// with support for cancellation via a caller-supplied future.
+///
+/// This is extracted from `run_sync` so the ctrl_c cancellation branch can be
+/// reached by tests (which pass `std::future::ready(())` as `cancel`) without
+/// requiring an actual OS signal.
+async fn run_tailoring_with_cancel<F, C>(
+    tailor_fut: F,
+    progress_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TailoringEvent>,
+    pipeline: &SyncPipeline,
+    project_count: usize,
+    cancel: C,
+) -> Result<TailoringOutput, ActualError>
+where
+    F: std::future::Future<Output = Result<TailoringOutput, ActualError>>,
+    C: std::future::Future<Output = std::io::Result<()>>,
+{
+    tokio::pin!(tailor_fut);
+    tokio::pin!(cancel);
+    let mut completed = 0usize;
+
+    loop {
+        tokio::select! {
+            result = &mut tailor_fut => {
+                // Drain any remaining events before breaking
+                while let Ok(event) = progress_rx.try_recv() {
+                    apply_tailoring_event(event, pipeline, &mut completed, project_count);
+                }
+                break result;
+            }
+            Some(event) = progress_rx.recv() => {
+                apply_tailoring_event(event, pipeline, &mut completed, project_count);
+            }
+            _ = &mut cancel => {
+                break Err(ActualError::UserCancelled);
+            }
+        }
     }
 }
 
@@ -3038,5 +3066,28 @@ mod tests {
             1,
         );
         assert_eq!(completed, 0);
+    }
+
+    // ── run_tailoring_with_cancel tests ──
+
+    /// Verify that when the cancel future fires immediately the loop returns
+    /// `UserCancelled` without waiting for the tailor future to complete.
+    #[tokio::test]
+    async fn test_run_tailoring_with_cancel_returns_user_cancelled() {
+        let pipeline = SyncPipeline::new(true);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        drop(tx); // close sender so recv returns None
+
+        // A tailor future that never completes
+        let tailor_fut = std::future::pending::<Result<TailoringOutput, ActualError>>();
+        // A cancel future that fires immediately
+        let cancel = std::future::ready(Ok::<(), std::io::Error>(()));
+
+        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &pipeline, 0, cancel).await;
+
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "expected UserCancelled, got {result:?}"
+        );
     }
 }
