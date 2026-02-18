@@ -165,6 +165,7 @@ jobs:
       - name: Run live E2E tests
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          ACTUAL_E2E_API_URL: https://api-service.api.staging.actual.ai
         run: |
           cargo test --workspace --features live-e2e 2>&1 | tee live-e2e-output.txt
           TEST_EXIT=${PIPESTATUS[0]}
