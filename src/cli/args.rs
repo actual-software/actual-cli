@@ -78,8 +78,19 @@ pub struct SyncArgs {
     #[arg(long, value_parser = parse_budget, allow_hyphen_values = true)]
     pub max_budget_usd: Option<f64>,
 
-    /// Output file format: write CLAUDE.md (default) or AGENTS.md
-    #[arg(long, value_enum)]
+    /// Output file format to generate.
+    ///
+    /// Supported values:
+    ///   claude-md    — write CLAUDE.md (default, for Claude Code)
+    ///   agents-md    — write AGENTS.md (for Codex CLI and compatible tools)
+    ///   cursor-rules — write .cursor/rules/actual-policies.mdc (for Cursor IDE)
+    ///
+    /// Examples:
+    ///   actual sync --output-format agents-md
+    ///   actual sync --output-format cursor-rules
+    ///
+    /// Can also be set permanently via: actual config set output_format agents-md
+    #[arg(long, value_enum, value_name = "FORMAT")]
     pub output_format: Option<OutputFormat>,
 }
 
