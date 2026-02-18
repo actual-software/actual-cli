@@ -107,26 +107,18 @@ pub fn write_files(root_dir: &Path, files: &[FileOutput]) -> Vec<WriteResult> {
                 };
             }
 
-            // Layer 2: post-create canonicalization check (defense in depth)
-            match parent.canonicalize() {
-                Ok(canonical_parent) => {
-                    if !canonical_parent.starts_with(&canonical_root) {
-                        return WriteResult {
-                            path: file.path.clone(),
-                            action: WriteAction::Failed,
-                            version: 0,
-                            error: Some("path escapes root directory".to_string()),
-                        };
-                    }
-                }
-                Err(e) => {
-                    return WriteResult {
-                        path: file.path.clone(),
-                        action: WriteAction::Failed,
-                        version: 0,
-                        error: Some(format!("Failed to canonicalize parent directory: {e}")),
-                    };
-                }
+            // Layer 2: post-create canonicalization check (defense in depth).
+            // A canonicalize failure after create_dir_all is treated as a path-escape.
+            let canonical_parent = parent
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::new());
+            if !canonical_parent.starts_with(&canonical_root) {
+                return WriteResult {
+                    path: file.path.clone(),
+                    action: WriteAction::Failed,
+                    version: 0,
+                    error: Some("path escapes root directory".to_string()),
+                };
             }
 
             // Write file
