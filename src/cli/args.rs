@@ -31,7 +31,7 @@ pub struct SyncArgs {
     #[arg(long, requires = "dry_run")]
     pub full: bool,
 
-    /// Skip user confirmation and force fresh analysis (bypass cache)
+    /// Skip user confirmation and force fresh analysis and tailoring (bypass all caches)
     #[arg(long)]
     pub force: bool,
 
