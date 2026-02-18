@@ -5,8 +5,10 @@ use crate::error::ActualError;
 
 /// All config keys that can be read and written via `get()` / `set()`.
 ///
-/// Adding a new key here forces handling in both `get()` and `set()` at
-/// compile time, preventing the two match blocks from drifting.
+/// Adding a new variant to this enum forces updates to `get()`, `set()`, and
+/// `as_str()` at compile time (exhaustive match), preventing those match
+/// blocks from drifting. However, `ALL` is manually maintained — the compiler
+/// does not enforce that every variant appears there; tests cover that gap.
 pub enum ConfigKey {
     ApiUrl,
     Model,
