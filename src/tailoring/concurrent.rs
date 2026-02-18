@@ -56,13 +56,23 @@ pub async fn tailor_all_projects<R: ClaudeRunner>(
             let tx = progress_tx.clone();
             async move {
                 let timeout_dur = config.per_project_timeout;
+                let project_name = project.name.clone();
+                let tx2 = tx.clone();
                 tokio::time::timeout(
                     timeout_dur,
                     tailor_single_project(runner, project, adrs, config, &sem, tx),
                 )
                 .await
-                .map_err(|_| ActualError::ClaudeTimeout {
-                    seconds: timeout_dur.as_secs(),
+                .map_err(|_| {
+                    if let Some(ref t) = tx2 {
+                        let _ = t.send(TailoringEvent::ProjectFailed {
+                            project_name: project_name.clone(),
+                            error: format!("timed out after {}s", timeout_dur.as_secs()),
+                        });
+                    }
+                    ActualError::ClaudeTimeout {
+                        seconds: timeout_dur.as_secs(),
+                    }
                 })?
             }
         })
@@ -900,6 +910,65 @@ mod tests {
             matches!(err, ActualError::ClaudeTimeout { seconds: 2 }),
             "expected ClaudeTimeout, got: {err}"
         );
+    }
+
+    // --- Test 10b: timeout emits ProjectFailed event ---
+
+    #[tokio::test]
+    async fn test_per_project_timeout_emits_project_failed() {
+        tokio::time::pause();
+
+        let projects = vec![make_project("slow")];
+        let adrs = vec![make_adr("adr-001")];
+
+        let responses = vec![make_output_json(
+            "apps/slow/CLAUDE.md",
+            "Rules",
+            &["adr-001"],
+        )];
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_secs(10));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(2),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, Some(tx)).await;
+
+        // Confirm timeout error
+        assert!(
+            matches!(result, Err(ActualError::ClaudeTimeout { seconds: 2 })),
+            "expected ClaudeTimeout"
+        );
+
+        // Collect all events
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+
+        // Must have a ProjectFailed event for "slow"
+        let failed: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TailoringEvent::ProjectFailed { .. }))
+            .collect();
+        assert_eq!(failed.len(), 1, "expected exactly 1 ProjectFailed event");
+        if let TailoringEvent::ProjectFailed {
+            project_name,
+            error,
+        } = &failed[0]
+        {
+            assert_eq!(project_name, "slow");
+            assert!(
+                error.contains("timed out"),
+                "expected timeout message in error, got: {error}"
+            );
+        }
     }
 
     // --- Test 11: progress events are sent correctly on success ---

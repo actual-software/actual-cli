@@ -3090,4 +3090,37 @@ mod tests {
             "expected UserCancelled, got {result:?}"
         );
     }
+
+    /// Verify that buffered events are drained from the channel when the tailor
+    /// future completes before all events have been received through `recv`.
+    #[tokio::test]
+    async fn test_run_tailoring_with_cancel_drains_buffered_events_on_completion() {
+        let pipeline = SyncPipeline::new(true);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+
+        // Pre-buffer a completed event so it sits in the channel before the
+        // future resolves.  The select loop will pick up the tailor result
+        // first (ready future), then the drain loop must consume this event.
+        tx.send(TailoringEvent::ProjectCompleted {
+            project_name: "app".to_string(),
+            files_generated: 1,
+            adrs_applied: 1,
+        })
+        .unwrap();
+        drop(tx);
+
+        let output = make_output(vec![]);
+        let tailor_fut = std::future::ready(Ok::<TailoringOutput, ActualError>(output));
+        // cancel never fires
+        let cancel = std::future::pending::<std::io::Result<()>>();
+
+        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &pipeline, 1, cancel).await;
+
+        assert!(result.is_ok(), "expected Ok result, got {result:?}");
+        // Channel must be fully drained — no events left
+        assert!(
+            rx.try_recv().is_err(),
+            "expected channel to be empty after drain"
+        );
+    }
 }
