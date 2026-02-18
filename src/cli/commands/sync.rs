@@ -170,7 +170,11 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| ActualError::InternalError(format!("Failed to create async runtime: {e}")))?;
     let response = rt.block_on(async {
-        with_retry(&RetryConfig::default(), || client.post_match(&request)).await
+        let retry_config = RetryConfig::default();
+        tokio::select! {
+            result = with_retry(&retry_config, || client.post_match(&request)) => result,
+            _ = tokio::signal::ctrl_c() => Err(ActualError::UserCancelled),
+        }
     });
 
     let response = match response {
@@ -222,12 +226,17 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
             model_override: args.model.as_deref(),
             max_budget_usd: args.max_budget_usd.or(config.max_budget_usd),
         };
-        let result = rt.block_on(tailor_all_projects(
-            runner,
-            &analysis.projects,
-            &filtered_adrs,
-            &tailoring_config,
-        ));
+        let result = rt.block_on(async {
+            tokio::select! {
+                result = tailor_all_projects(
+                    runner,
+                    &analysis.projects,
+                    &filtered_adrs,
+                    &tailoring_config,
+                ) => result,
+                _ = tokio::signal::ctrl_c() => Err(ActualError::UserCancelled),
+            }
+        });
         match result {
             Ok(output) => {
                 pipeline.success(
