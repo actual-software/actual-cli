@@ -118,11 +118,29 @@ pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualErr
         });
     }
 
-    // Note: detect_monorepo always returns at least one project (the root "."),
-    // so `projects` is never empty here. No AnalysisEmpty check needed.
+    assemble_analysis(mono_info.is_monorepo, projects, working_dir)
+}
+
+/// Assemble a [`RepoAnalysis`] from already-built project list, applying the
+/// `AnalysisEmpty` guard and path normalization.
+///
+/// Extracted as a separate function so the defensive guard can be unit-tested
+/// without going through full monorepo detection.
+fn assemble_analysis(
+    is_monorepo: bool,
+    projects: Vec<Project>,
+    working_dir: &Path,
+) -> Result<RepoAnalysis, ActualError> {
+    // Defensive guard: detect_monorepo always returns at least one project
+    // (the root "."), so this branch is unreachable in practice. However, if
+    // the contract ever changes, we fail fast with a clear error rather than
+    // returning a confusing empty analysis.
+    if projects.is_empty() {
+        return Err(ActualError::AnalysisEmpty);
+    }
 
     let mut analysis = RepoAnalysis {
-        is_monorepo: mono_info.is_monorepo,
+        is_monorepo,
         projects,
     };
 
@@ -474,5 +492,46 @@ version = "0.1.0"
             .frameworks
             .iter()
             .any(|f| f.name == "nextjs"));
+    }
+
+    // -- assemble_analysis / AnalysisEmpty guard tests --
+
+    #[test]
+    fn test_assemble_analysis_empty_projects_returns_analysis_empty() {
+        // Verify the defensive guard: passing an empty project list to
+        // assemble_analysis must return ActualError::AnalysisEmpty.
+        // In normal operation detect_monorepo always provides at least one
+        // project, so this path is unreachable — but the guard ensures we
+        // fail fast with a clear error if that contract is ever violated.
+        let dir = tempfile::tempdir().unwrap();
+        let result = assemble_analysis(false, vec![], dir.path());
+        assert!(result.is_err(), "expected Err(AnalysisEmpty) but got Ok");
+        assert!(
+            matches!(result.unwrap_err(), ActualError::AnalysisEmpty),
+            "expected ActualError::AnalysisEmpty"
+        );
+    }
+
+    #[test]
+    fn test_assemble_analysis_non_empty_projects_succeeds() {
+        // Verify that assemble_analysis passes through when given valid projects.
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![],
+            frameworks: vec![],
+            package_manager: None,
+            description: None,
+        };
+        let result = assemble_analysis(false, vec![project], dir.path());
+        assert!(
+            result.is_ok(),
+            "expected Ok but got Err: {:?}",
+            result.err()
+        );
+        let analysis = result.unwrap();
+        assert_eq!(analysis.projects.len(), 1);
+        assert!(!analysis.is_monorepo);
     }
 }
