@@ -22,12 +22,17 @@ pub enum ConfigKey {
 }
 
 impl ConfigKey {
-    /// Exhaustive list of all settable config keys.
+    /// Manually-maintained list of all settable config keys.
     ///
-    /// This is the single source of truth: adding a new `ConfigKey` variant
-    /// requires updating this array (or the compiler will warn about a
-    /// missing match arm in `as_str`), which keeps `KNOWN_SETTABLE_KEYS`
-    /// in sync automatically.
+    /// `ALL` must be kept in sync with the enum variants by hand. The compiler
+    /// does not enforce that every variant appears here. However, the test
+    /// `test_as_str_round_trips_through_from_str` iterates `ALL` and verifies
+    /// each entry round-trips through `as_str` → `from_str`, and the test
+    /// `test_all_keys_set_and_get_round_trip` exercises `set`/`get` for each
+    /// entry, so omitting a variant is caught at test time.
+    ///
+    /// Consumers that need a `&[&str]` slice of key names can build it from
+    /// this array: `ConfigKey::ALL.iter().map(ConfigKey::as_str).collect()`.
     pub const ALL: &'static [ConfigKey] = &[
         ConfigKey::ApiUrl,
         ConfigKey::Model,
@@ -88,24 +93,6 @@ impl FromStr for ConfigKey {
         }
     }
 }
-
-/// All settable key name strings, for use by CLI help or completions.
-///
-/// This must match `ConfigKey::ALL.iter().map(ConfigKey::as_str)` exactly.
-/// The test `test_known_settable_keys_matches_all_via_as_str` enforces this.
-pub const KNOWN_SETTABLE_KEYS: &[&str] = &[
-    "api_url",
-    "model",
-    "batch_size",
-    "concurrency",
-    "invocation_timeout_secs",
-    "max_budget_usd",
-    "include_general",
-    "max_per_framework",
-    "include_categories",
-    "exclude_categories",
-    "telemetry.enabled",
-];
 
 /// Get a config value by dotpath, returning its string representation.
 ///
@@ -753,34 +740,12 @@ mod tests {
         assert!(msg.contains("must be >= 1"), "got: {msg}");
     }
 
-    // --- Meta-tests: ConfigKey::ALL, as_str, KNOWN_SETTABLE_KEYS, and round-trips ---
-
-    #[test]
-    fn test_known_settable_keys_matches_all_via_as_str() {
-        // KNOWN_SETTABLE_KEYS must be exactly ConfigKey::ALL.iter().map(as_str).
-        // This is enforced at compile time via the const block, but also checked
-        // here to make the invariant explicit and catch any future N mismatch.
-        let expected: Vec<&str> = ConfigKey::ALL.iter().map(|k| k.as_str()).collect();
-        assert_eq!(
-            KNOWN_SETTABLE_KEYS,
-            expected.as_slice(),
-            "KNOWN_SETTABLE_KEYS must equal ConfigKey::ALL mapped through as_str"
-        );
-    }
-
-    #[test]
-    fn test_all_keys_parse_via_from_str() {
-        // Every key in KNOWN_SETTABLE_KEYS must parse successfully with from_str.
-        for key in KNOWN_SETTABLE_KEYS {
-            key.parse::<ConfigKey>()
-                .unwrap_or_else(|e| panic!("from_str({key}) failed: {e}"));
-        }
-    }
+    // --- Meta-tests: ConfigKey::ALL, as_str, from_str, and set/get round-trips ---
 
     #[test]
     fn test_as_str_round_trips_through_from_str() {
-        // For every ConfigKey variant, as_str() must parse back to a ConfigKey.
-        // This verifies from_str and as_str are inverses.
+        // For every ConfigKey variant in ALL, as_str() must parse back via from_str.
+        // This verifies from_str and as_str are inverses and catches omissions in ALL.
         for key in ConfigKey::ALL {
             let s = key.as_str();
             s.parse::<ConfigKey>()
@@ -789,8 +754,9 @@ mod tests {
     }
 
     #[test]
-    fn test_all_known_settable_keys_round_trip() {
-        // A valid value for each key in KNOWN_SETTABLE_KEYS (same order).
+    fn test_all_keys_set_and_get_round_trip() {
+        // A valid value for each variant in ConfigKey::ALL (same order).
+        // When a new variant is added to ALL, this list must also be updated.
         let valid_values: &[(&str, &str)] = &[
             ("api_url", "https://example.com"),
             ("model", "claude-3"),
@@ -805,16 +771,17 @@ mod tests {
             ("telemetry.enabled", "false"),
         ];
 
-        // Sanity-check: valid_values must cover every key in KNOWN_SETTABLE_KEYS.
+        // Sanity-check: valid_values must cover every variant in ConfigKey::ALL.
         assert_eq!(
-            KNOWN_SETTABLE_KEYS.len(),
+            ConfigKey::ALL.len(),
             valid_values.len(),
-            "valid_values must have an entry for every key in KNOWN_SETTABLE_KEYS"
+            "valid_values must have an entry for every variant in ConfigKey::ALL"
         );
-        for (i, key) in KNOWN_SETTABLE_KEYS.iter().enumerate() {
+        for (i, key) in ConfigKey::ALL.iter().enumerate() {
             assert_eq!(
-                valid_values[i].0, *key,
-                "valid_values[{i}] key must match KNOWN_SETTABLE_KEYS[{i}]"
+                valid_values[i].0,
+                key.as_str(),
+                "valid_values[{i}] key must match ConfigKey::ALL[{i}].as_str()"
             );
         }
 
