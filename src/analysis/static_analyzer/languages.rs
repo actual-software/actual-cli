@@ -46,7 +46,7 @@ fn map_language_type(lang_type: LanguageType) -> Language {
         LanguageType::CSharp => Language::CSharp,
         LanguageType::Scala => Language::Scala,
         LanguageType::Elixir => Language::Elixir,
-        _ => Language::Other,
+        _ => Language::Other(lang_type.name().to_lowercase()),
     }
 }
 
@@ -79,12 +79,12 @@ pub fn detect_languages(path: &Path) -> Vec<(Language, usize)> {
         *loc_map.entry(language).or_default() += code_lines;
     }
 
-    // Build result vec, separating Other from the rest
+    // Build result vec, separating Other variants from the rest and aggregating their LOC
     let mut other_loc = 0usize;
     let mut results: Vec<(Language, usize)> = Vec::new();
 
     for (lang, loc) in loc_map {
-        if lang == Language::Other {
+        if matches!(lang, Language::Other(_)) {
             other_loc += loc;
         } else {
             results.push((lang, loc));
@@ -94,9 +94,10 @@ pub fn detect_languages(path: &Path) -> Vec<(Language, usize)> {
     // Sort by LOC descending
     results.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // Append aggregated Other at the end
+    // Append aggregated Other at the end (using a placeholder name since multiple
+    // unknown languages are merged together)
     if other_loc > 0 {
-        results.push((Language::Other, other_loc));
+        results.push((Language::Other("other".to_string()), other_loc));
     }
 
     results
@@ -238,9 +239,18 @@ mod tests {
 
     #[test]
     fn test_map_unknown_to_other() {
-        assert_eq!(map_language_type(LanguageType::Haskell), Language::Other);
-        assert_eq!(map_language_type(LanguageType::Lua), Language::Other);
-        assert_eq!(map_language_type(LanguageType::Perl), Language::Other);
+        assert_eq!(
+            map_language_type(LanguageType::Haskell),
+            Language::Other("haskell".to_string())
+        );
+        assert_eq!(
+            map_language_type(LanguageType::Lua),
+            Language::Other("lua".to_string())
+        );
+        assert_eq!(
+            map_language_type(LanguageType::Perl),
+            Language::Other("perl".to_string())
+        );
     }
 
     // --- normalize_language tests ---
@@ -545,7 +555,7 @@ mod tests {
         // Both should be aggregated into a single Other entry
         let other_entries: Vec<_> = result
             .iter()
-            .filter(|(l, _)| *l == Language::Other)
+            .filter(|(l, _)| matches!(l, Language::Other(_)))
             .collect();
         assert_eq!(other_entries.len(), 1);
         // The aggregated LOC should be > 0
@@ -599,6 +609,10 @@ mod tests {
 
         // Other should be the last entry regardless of LOC
         let last = result.last().unwrap();
-        assert_eq!(last.0, Language::Other);
+        assert!(
+            matches!(last.0, Language::Other(_)),
+            "Expected Other variant, got {:?}",
+            last.0
+        );
     }
 }
