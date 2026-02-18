@@ -525,13 +525,25 @@ version = "0.1.0"
             description: None,
         };
         let result = assemble_analysis(false, vec![project], dir.path());
-        assert!(
-            result.is_ok(),
-            "expected Ok but got Err: {:?}",
-            result.err()
-        );
         let analysis = result.unwrap();
         assert_eq!(analysis.projects.len(), 1);
         assert!(!analysis.is_monorepo);
+    }
+
+    #[test]
+    fn test_assemble_analysis_monorepo_flag_preserved() {
+        // Verify that the is_monorepo flag is correctly propagated.
+        let dir = tempfile::tempdir().unwrap();
+        let project = Project {
+            path: "packages/web".to_string(),
+            name: "web".to_string(),
+            languages: vec![],
+            frameworks: vec![],
+            package_manager: None,
+            description: None,
+        };
+        let result = assemble_analysis(true, vec![project], dir.path());
+        let analysis = result.unwrap();
+        assert!(analysis.is_monorepo);
     }
 }
