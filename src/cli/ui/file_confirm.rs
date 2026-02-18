@@ -43,7 +43,17 @@ pub fn confirm_files(
 
     match term.select_files("Select files to write", &items, &defaults)? {
         Some(indices) => {
-            let result: Vec<FileOutput> = indices.into_iter().map(|i| files[i].clone()).collect();
+            let result: Vec<FileOutput> = indices
+                .into_iter()
+                .map(|i| {
+                    files.get(i).cloned().ok_or_else(|| {
+                        ActualError::InternalError(format!(
+                            "file selection index {i} out of bounds (max {})",
+                            files.len()
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(result)
         }
         None => Err(ActualError::UserCancelled),
@@ -232,5 +242,31 @@ mod tests {
         let term = MockTerminal::with_selection_only(Some(vec![]));
         let result = term.read_line("prompt");
         assert!(matches!(result, Err(ActualError::UserCancelled)));
+    }
+
+    // ── bounds checking tests ──
+
+    #[test]
+    fn test_confirm_files_out_of_bounds_index_returns_error() {
+        let output = make_test_output(2);
+        let term = MockTerminal::with_selection_only(Some(vec![5]));
+        let result = confirm_files(&output, false, &term);
+        assert!(matches!(result, Err(ActualError::InternalError(_))));
+    }
+
+    #[test]
+    fn test_confirm_files_boundary_index_at_len_returns_error() {
+        let output = make_test_output(2);
+        let term = MockTerminal::with_selection_only(Some(vec![0, 2]));
+        let result = confirm_files(&output, false, &term);
+        assert!(matches!(result, Err(ActualError::InternalError(_))));
+    }
+
+    #[test]
+    fn test_confirm_files_mixed_valid_and_oob_indices_returns_error() {
+        let output = make_test_output(3);
+        let term = MockTerminal::with_selection_only(Some(vec![1, 99]));
+        let result = confirm_files(&output, false, &term);
+        assert!(matches!(result, Err(ActualError::InternalError(_))));
     }
 }
