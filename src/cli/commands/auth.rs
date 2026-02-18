@@ -17,35 +17,13 @@ fn run_auth() -> Result<(), ActualError> {
 /// Check Claude Code authentication status using the given binary path.
 ///
 /// Runs `claude auth status --json`, parses the response, and returns the
-/// status. This is reusable from other commands (e.g., `sync`).
-///
-/// Applies a 10-second timeout; returns [`ActualError::ClaudeTimeout`] if the
-/// subprocess does not complete in time.
+/// status. This is a plain blocking call with no timeout — callers that need
+/// a timeout should use [`check_auth_with_timeout`] directly, or wrap this
+/// function in their own thread+channel as `status.rs` does.
 pub fn check_auth(binary_path: &Path) -> Result<ClaudeAuthStatus, ActualError> {
-    check_auth_with_timeout(binary_path, std::time::Duration::from_secs(10))
-}
-
-fn check_auth_with_timeout(
-    binary_path: &Path,
-    timeout: std::time::Duration,
-) -> Result<ClaudeAuthStatus, ActualError> {
-    use std::sync::mpsc;
-
-    let binary_path = binary_path.to_path_buf();
-    let (tx, rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let result = std::process::Command::new(&binary_path)
-            .args(["auth", "status", "--json"])
-            .output();
-        let _ = tx.send(result);
-    });
-
-    let output = rx
-        .recv_timeout(timeout)
-        .map_err(|_| ActualError::ClaudeTimeout {
-            seconds: timeout.as_secs().max(1),
-        })?
+    let output = std::process::Command::new(binary_path)
+        .args(["auth", "status", "--json"])
+        .output()
         .map_err(|e| ActualError::ClaudeSubprocessFailed {
             message: format!("failed to execute claude: {e}"),
             stderr: String::new(),
@@ -64,6 +42,34 @@ fn check_auth_with_timeout(
 
     let status: ClaudeAuthStatus = serde_json::from_slice(&output.stdout)?;
     Ok(status)
+}
+
+/// Check Claude Code authentication status with a timeout.
+///
+/// Spawns a background thread to run `claude auth status --json` and waits
+/// for it to complete within `timeout`. Returns [`ActualError::ClaudeTimeout`]
+/// if the subprocess does not respond in time.
+///
+/// Use this instead of [`check_auth`] when you need a bounded wait. Note that
+/// on timeout the background thread continues running until the subprocess
+/// exits — threads cannot be forcibly killed.
+pub fn check_auth_with_timeout(
+    binary_path: &Path,
+    timeout: std::time::Duration,
+) -> Result<ClaudeAuthStatus, ActualError> {
+    use std::sync::mpsc;
+
+    let binary_path = binary_path.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = tx.send(check_auth(&binary_path));
+    });
+
+    rx.recv_timeout(timeout)
+        .map_err(|_| ActualError::ClaudeTimeout {
+            seconds: timeout.as_secs().max(1),
+        })?
 }
 
 fn run_auth_with_binary(binary_path: &Path) -> Result<(), ActualError> {
