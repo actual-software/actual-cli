@@ -23,7 +23,7 @@ fn abbreviate_language(lang: &Language) -> &str {
         Language::CSharp => "csharp",
         Language::Scala => "scala",
         Language::Elixir => "elixir",
-        Language::Other => "other",
+        Language::Other(name) => name.as_str(),
     }
 }
 
@@ -347,7 +347,14 @@ mod tests {
         assert_eq!(abbreviate_language(&Language::CSharp), "csharp");
         assert_eq!(abbreviate_language(&Language::Scala), "scala");
         assert_eq!(abbreviate_language(&Language::Elixir), "elixir");
-        assert_eq!(abbreviate_language(&Language::Other), "other");
+        assert_eq!(
+            abbreviate_language(&Language::Other("haskell".to_string())),
+            "haskell"
+        );
+        assert_eq!(
+            abbreviate_language(&Language::Other("other".to_string())),
+            "other"
+        );
     }
 
     #[test]
