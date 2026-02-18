@@ -446,11 +446,7 @@ mod tests {
             .iter()
             .filter(|(l, _)| *l == Language::Other)
             .collect();
-        assert_eq!(
-            other_entries.len(),
-            1,
-            "Other languages should be aggregated into one entry"
-        );
+        assert_eq!(other_entries.len(), 1);
         // The aggregated LOC should be > 0
         assert!(other_entries[0].1 > 0);
     }
