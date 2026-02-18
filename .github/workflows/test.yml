@@ -181,7 +181,7 @@ jobs:
         run: |
           echo "## Live E2E Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ env.e2e_exit }}" = "0" ]; then
+          if [ "${{ job.status }}" = "success" ]; then
             PASSED=$(grep -c '\[PASS\]' e2e-output.txt 2>/dev/null || echo "0")
             echo ":white_check_mark: **All $PASSED E2E checks passed**" >> $GITHUB_STEP_SUMMARY
           else
