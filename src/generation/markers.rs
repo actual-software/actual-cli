@@ -88,13 +88,24 @@ pub fn detect_changes(old_content: Option<&str>, new_adr_ids: &[String]) -> Chan
     }
 }
 
+/// Returns the byte positions `(start_idx, end_idx)` of the START and END markers in `content`,
+/// or `None` if either marker is absent or they appear in the wrong order (end before start).
+///
+/// `start_idx` is the byte offset of the first character of `START_MARKER`.
+/// `end_idx` is the byte offset of the first character of `END_MARKER`.
+pub fn find_managed_section_bounds(content: &str) -> Option<(usize, usize)> {
+    let start_idx = content.find(START_MARKER)?;
+    let end_idx = content.find(END_MARKER)?;
+    if start_idx < end_idx {
+        Some((start_idx, end_idx))
+    } else {
+        None
+    }
+}
+
 /// Returns true when both START and END markers are present in the correct order.
 pub fn has_managed_section(content: &str) -> bool {
-    if let (Some(s), Some(e)) = (content.find(START_MARKER), content.find(END_MARKER)) {
-        s < e
-    } else {
-        false
-    }
+    find_managed_section_bounds(content).is_some()
 }
 
 /// Extracts the version number from a `<!-- version: N -->` comment in the content.
@@ -419,6 +430,48 @@ mod tests {
             !has_managed_section(&content),
             "expected false when markers are reversed"
         );
+    }
+
+    // --- find_managed_section_bounds tests ---
+
+    #[test]
+    fn test_find_managed_section_bounds_returns_correct_positions() {
+        let content = wrap_in_markers("hello", 1, &[]);
+        let (start_idx, end_idx) =
+            find_managed_section_bounds(&content).expect("should find bounds in wrapped content");
+        assert_eq!(
+            &content[start_idx..start_idx + START_MARKER.len()],
+            START_MARKER
+        );
+        assert_eq!(&content[end_idx..end_idx + END_MARKER.len()], END_MARKER);
+        assert!(start_idx < end_idx, "start must be before end");
+    }
+
+    #[test]
+    fn test_find_managed_section_bounds_returns_none_for_plain_text() {
+        assert_eq!(find_managed_section_bounds("just plain text"), None);
+    }
+
+    #[test]
+    fn test_find_managed_section_bounds_returns_none_for_reversed_markers() {
+        let content = format!("{END_MARKER}\nsome content\n{START_MARKER}");
+        assert_eq!(
+            find_managed_section_bounds(&content),
+            None,
+            "expected None when markers are reversed"
+        );
+    }
+
+    #[test]
+    fn test_find_managed_section_bounds_returns_none_only_start() {
+        let content = format!("{START_MARKER}\nsome content");
+        assert_eq!(find_managed_section_bounds(&content), None);
+    }
+
+    #[test]
+    fn test_find_managed_section_bounds_returns_none_only_end() {
+        let content = format!("some content\n{END_MARKER}");
+        assert_eq!(find_managed_section_bounds(&content), None);
     }
 
     #[test]

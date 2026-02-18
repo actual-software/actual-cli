@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 
-use super::markers::{self, END_MARKER, START_MARKER};
+use super::markers::{self, END_MARKER};
 use crate::tailoring::types::{FileOutput, SkippedAdr, TailoringOutput, TailoringSummary};
 
 /// Merge multiple [`TailoringOutput`]s into a single combined output.
@@ -125,10 +125,9 @@ pub fn merge_content(
             }
         }
         Some(existing) => {
-            if markers::has_managed_section(existing) {
+            if let Some((start_idx, end_idx)) = markers::find_managed_section_bounds(existing) {
                 // Replace content between markers (inclusive of marker lines)
-                let start_idx = existing.find(START_MARKER).unwrap();
-                let end_idx = existing.find(END_MARKER).unwrap() + END_MARKER.len();
+                let end_idx = end_idx + END_MARKER.len();
                 // Also consume the trailing newline after END_MARKER if present
                 let end_idx = if existing[end_idx..].starts_with('\n') {
                     end_idx + 1
@@ -155,6 +154,7 @@ pub fn merge_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generation::markers::START_MARKER;
 
     fn make_output(files: Vec<FileOutput>, skipped: Vec<SkippedAdr>) -> TailoringOutput {
         let applicable = files.iter().map(|f| f.adr_ids.len()).sum::<usize>();
@@ -531,6 +531,44 @@ mod tests {
             extracted.contains(original),
             "expected original content in extracted: {:?}",
             extracted
+        );
+    }
+
+    #[test]
+    fn test_existing_with_reversed_markers_appends_instead_of_replacing() {
+        // When END_MARKER appears before START_MARKER, find_managed_section_bounds returns None,
+        // so merge_content must fall through to the append path rather than replacing.
+        // We verify by checking the bounds helper and confirming the new content is appended.
+        let existing = format!("{END_MARKER}\nsome content\n{START_MARKER}\n");
+
+        // find_managed_section_bounds must return None for reversed markers.
+        assert!(
+            markers::find_managed_section_bounds(&existing).is_none(),
+            "expected None for reversed markers"
+        );
+
+        let result = merge_content(Some(&existing), "new managed", 1, false, &[]);
+
+        // The original reversed-marker content must be preserved verbatim at the start.
+        assert!(
+            result.content.starts_with(&existing),
+            "expected existing content preserved at start: {}",
+            result.content
+        );
+
+        // The new managed content must be present.
+        assert!(
+            result.content.contains("new managed"),
+            "expected new managed content in output: {}",
+            result.content
+        );
+
+        // The new managed content must appear AFTER the existing block (append, not replace).
+        let existing_end = existing.len();
+        assert!(
+            result.content[existing_end..].contains("new managed"),
+            "expected new managed content appended after existing: {}",
+            result.content
         );
     }
 }
