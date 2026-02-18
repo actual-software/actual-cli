@@ -178,18 +178,20 @@ mod tests {
         tokio::time::pause();
 
         let config = RetryConfig {
-            max_attempts: 33,
+            max_attempts: 34,
             initial_delay: Duration::from_secs(1),
             backoff_factor: 2,
         };
 
-        // All 33 attempts fail with ApiError.
+        // All 34 attempts fail with ApiError.
+        // attempt=33 computes 2^32 which overflows u32, exercising the
+        // checked_pow → None → Duration::MAX fallback path.
         // This must NOT panic (debug) or silently wrap (release).
-        let behaviors: Vec<u32> = vec![0; 33];
+        let behaviors: Vec<u32> = vec![0; 34];
         let (result, calls) = run_retry(&config, &behaviors).await;
 
         let err = result.unwrap_err();
         assert!(matches!(err, ActualError::ApiError(_)));
-        assert_eq!(calls, 33);
+        assert_eq!(calls, 34);
     }
 }
