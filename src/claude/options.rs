@@ -17,6 +17,12 @@ pub struct InvocationOptions {
     pub json_schema: Option<String>,
     /// Optional spending cap for --max-budget-usd.
     pub max_budget_usd: Option<f64>,
+    /// Whether to pass --allow-dangerously-skip-permissions.
+    ///
+    /// Profiles that use only read-only tools (e.g., tailoring) set this to
+    /// `true`. Profiles with write or exec tools must leave it `false` so that
+    /// the user is prompted for permission.
+    pub skip_permissions: bool,
 }
 
 const DEFAULT_MODEL: &str = "sonnet";
@@ -37,6 +43,7 @@ impl InvocationOptions {
             ],
             json_schema: None,
             max_budget_usd: None,
+            skip_permissions: true,
         }
     }
 
@@ -52,11 +59,15 @@ impl InvocationOptions {
             self.max_turns.to_string(),
             "--output-format".to_string(),
             "json".to_string(),
-            "--allow-dangerously-skip-permissions".to_string(),
-            "--no-session-persistence".to_string(),
-            "--tools".to_string(),
-            self.tools.clone(),
         ];
+
+        if self.skip_permissions {
+            args.push("--allow-dangerously-skip-permissions".to_string());
+        }
+
+        args.push("--no-session-persistence".to_string());
+        args.push("--tools".to_string());
+        args.push(self.tools.clone());
 
         for tool in &self.allowed_tools {
             args.push("--allowedTools".to_string());
@@ -142,8 +153,23 @@ mod tests {
         let args = opts.to_args();
 
         assert_arg_value(&args, "--output-format", "json");
-        assert!(args.contains(&"--allow-dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--no-session-persistence".to_string()));
+    }
+
+    #[test]
+    fn test_tailoring_includes_skip_permissions() {
+        let opts = InvocationOptions::for_tailoring(None);
+        assert!(opts.skip_permissions);
+        let args = opts.to_args();
+        assert!(args.contains(&"--allow-dangerously-skip-permissions".to_string()));
+    }
+
+    #[test]
+    fn test_skip_permissions_false_omits_flag() {
+        let mut opts = InvocationOptions::for_tailoring(None);
+        opts.skip_permissions = false;
+        let args = opts.to_args();
+        assert!(!args.contains(&"--allow-dangerously-skip-permissions".to_string()));
     }
 
     #[test]
@@ -166,6 +192,7 @@ mod tests {
         assert_eq!(cloned.allowed_tools, opts.allowed_tools);
         assert_eq!(cloned.json_schema, opts.json_schema);
         assert_eq!(cloned.max_budget_usd, opts.max_budget_usd);
+        assert_eq!(cloned.skip_permissions, opts.skip_permissions);
     }
 
     #[test]
