@@ -94,6 +94,15 @@ fn validate_and_filter_output(
                 file.path
             )));
         }
+        if std::path::Path::new(&file.path)
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(ActualError::TailoringValidationError(format!(
+                "file path '{}' contains path traversal components",
+                file.path
+            )));
+        }
         let invalid_ids: Vec<String> = file
             .adr_ids
             .iter()
@@ -408,6 +417,38 @@ mod tests {
             prompt.contains("adr-002"),
             "prompt should contain ADR ID adr-002"
         );
+    }
+
+    #[tokio::test]
+    async fn test_path_traversal_validation_error() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "../CLAUDE.md".to_string(),
+                content: "# Rules".to_string(),
+                reasoning: "Root level rules".to_string(),
+                adr_ids: vec!["adr-001".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockClaudeRunner::single(&json);
+
+        let result = invoke_tailoring(&runner, &adrs, "{}", "", None, None).await;
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("path traversal"),
+            "expected 'path traversal' in: {msg}"
+        );
+        assert!(matches!(err, ActualError::TailoringValidationError(_)));
     }
 
     #[tokio::test]

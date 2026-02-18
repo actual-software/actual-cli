@@ -41,10 +41,37 @@ pub struct WriteResult {
 ///
 /// Individual file failures do NOT abort the batch — errors are collected per file.
 pub fn write_files(root_dir: &Path, files: &[FileOutput]) -> Vec<WriteResult> {
+    let canonical_root = match root_dir.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            return files
+                .iter()
+                .map(|file| WriteResult {
+                    path: file.path.clone(),
+                    action: WriteAction::Failed,
+                    version: 0,
+                    error: Some(format!("Failed to canonicalize root directory: {e}")),
+                })
+                .collect();
+        }
+    };
     files
         .iter()
         .map(|file| {
             let full_path = root_dir.join(&file.path);
+
+            // Layer 1: reject paths with .. components (path traversal guard)
+            if Path::new(&file.path)
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+            {
+                return WriteResult {
+                    path: file.path.clone(),
+                    action: WriteAction::Failed,
+                    version: 0,
+                    error: Some("path traversal detected: path escapes root directory".to_string()),
+                };
+            }
 
             // Determine if root file (no directory component)
             let is_root = Path::new(&file.path)
@@ -78,6 +105,28 @@ pub fn write_files(root_dir: &Path, files: &[FileOutput]) -> Vec<WriteResult> {
                     version: 0,
                     error: Some(format!("Failed to create directory: {e}")),
                 };
+            }
+
+            // Layer 2: post-create canonicalization check (defense in depth)
+            match parent.canonicalize() {
+                Ok(canonical_parent) => {
+                    if !canonical_parent.starts_with(&canonical_root) {
+                        return WriteResult {
+                            path: file.path.clone(),
+                            action: WriteAction::Failed,
+                            version: 0,
+                            error: Some("path escapes root directory".to_string()),
+                        };
+                    }
+                }
+                Err(e) => {
+                    return WriteResult {
+                        path: file.path.clone(),
+                        action: WriteAction::Failed,
+                        version: 0,
+                        error: Some(format!("Failed to canonicalize parent directory: {e}")),
+                    };
+                }
             }
 
             // Write file
@@ -360,6 +409,32 @@ mod tests {
         assert!(
             err_msg.contains("Failed to write file"),
             "expected file write error message"
+        );
+    }
+
+    #[test]
+    fn test_write_path_traversal_fails() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let files = vec![FileOutput {
+            path: "../CLAUDE.md".to_string(),
+            content: "malicious content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(dir.path(), &files);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed action for path traversal"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(
+            err_msg.contains("path traversal"),
+            "expected 'path traversal' in error, got: {err_msg}"
         );
     }
 
