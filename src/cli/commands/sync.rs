@@ -2093,11 +2093,14 @@ mod tests {
     #[test]
     fn test_compute_repo_key_timeout_falls_back_to_path_hash() {
         let dir = tempfile::tempdir().unwrap();
-        // Duration::ZERO guarantees immediate timeout — always takes the fallback path
-        let result = compute_repo_key_with_timeout(dir.path(), std::time::Duration::ZERO);
+        // Use 1 nanosecond — vanishingly short, so the git subprocess will never
+        // complete before recv_timeout fires, forcing the path-hash fallback.
+        // Duration::ZERO would behave like try_recv() and could race if the OS
+        // schedules the spawned thread first.
+        let result = compute_repo_key_with_timeout(dir.path(), std::time::Duration::from_nanos(1));
         assert_eq!(result.len(), 64, "expected 64-char SHA256 hex string");
         // Deterministic: same dir → same hash
-        let result2 = compute_repo_key_with_timeout(dir.path(), std::time::Duration::ZERO);
+        let result2 = compute_repo_key_with_timeout(dir.path(), std::time::Duration::from_nanos(1));
         assert_eq!(result, result2);
     }
 

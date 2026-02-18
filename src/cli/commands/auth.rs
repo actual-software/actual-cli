@@ -18,8 +18,7 @@ fn run_auth() -> Result<(), ActualError> {
 ///
 /// Runs `claude auth status --json`, parses the response, and returns the
 /// status. This is a plain blocking call with no timeout — callers that need
-/// a timeout should use [`check_auth_with_timeout`] directly, or wrap this
-/// function in their own thread+channel as `status.rs` does.
+/// a bounded wait should use [`check_auth_with_timeout`] directly.
 pub fn check_auth(binary_path: &Path) -> Result<ClaudeAuthStatus, ActualError> {
     let output = std::process::Command::new(binary_path)
         .args(["auth", "status", "--json"])
