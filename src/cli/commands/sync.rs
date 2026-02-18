@@ -2096,29 +2096,25 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         // Place a fake "git" binary that sleeps for 30s on PATH so the
         // recv_timeout fires before it responds, forcing the path-hash fallback.
-        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let bin_dir = tempfile::tempdir().unwrap();
         let fake_git = bin_dir.path().join("git");
         std::fs::write(&fake_git, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
         let original_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var(
+        let _path_guard = crate::testutil::EnvGuard::set(
             "PATH",
-            format!("{}:{}", bin_dir.path().display(), original_path),
+            &format!("{}:{}", bin_dir.path().display(), original_path),
         );
         let dir = tempfile::tempdir().unwrap();
         let result =
             compute_repo_key_with_timeout(dir.path(), std::time::Duration::from_millis(100));
-        std::env::set_var("PATH", &original_path);
         assert_eq!(result.len(), 64, "expected 64-char SHA256 hex string");
         // Deterministic: same dir → same hash (using the path-hash fallback)
-        std::env::set_var(
-            "PATH",
-            format!("{}:{}", bin_dir.path().display(), original_path),
-        );
         let result2 =
             compute_repo_key_with_timeout(dir.path(), std::time::Duration::from_millis(100));
-        std::env::set_var("PATH", &original_path);
         assert_eq!(result, result2);
     }
 
