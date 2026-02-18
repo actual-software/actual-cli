@@ -605,8 +605,9 @@ fn compute_tailoring_cache_key(
             hasher.update(mp.as_bytes());
             hasher.update(b"\x00");
         }
-        // ADR boundary marker: prevents two distinct ADR sets from producing
-        // the same byte stream (e.g. ["a", "b"] + ["c"] vs ["a"] + ["b", "c"]).
+        hasher.update(b"\xfe"); // end of matched_projects list
+                                // ADR boundary marker: prevents two distinct ADR sets from producing
+                                // the same byte stream (e.g. ["a", "b"] + ["c"] vs ["a"] + ["b", "c"]).
         hasher.update(b"\xff");
     }
 
