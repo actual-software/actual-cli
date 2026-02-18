@@ -121,3 +121,121 @@ jobs:
           mode: cleanup
           failure-type: test_failure
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  live-e2e:
+    name: Live E2E
+    needs: sync-beads
+    if: always() && needs.sync-beads.result != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-live-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-live-e2e-
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Verify Claude auth
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          claude auth status --json
+          claude --version
+
+      - name: Run live E2E tests
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          cargo test --workspace --features live-e2e 2>&1 | tee live-e2e-output.txt
+          TEST_EXIT=${PIPESTATUS[0]}
+          echo "live_e2e_exit=$TEST_EXIT" >> $GITHUB_ENV
+          exit $TEST_EXIT
+
+      - name: Create test summary
+        if: always()
+        run: |
+          echo "## Live E2E Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ env.live_e2e_exit }}" = "0" ]; then
+            PASSED=$(grep -c "^test .* ok$" live-e2e-output.txt 2>/dev/null || echo "0")
+            echo ":white_check_mark: **All $PASSED live E2E tests passed**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo ":x: **Live E2E tests failed**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            grep -E "^(test .* FAILED|failures:|thread.*panicked)" live-e2e-output.txt >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "See full output" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload live E2E output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-e2e-output
+          path: live-e2e-output.txt
+
+  create-live-e2e-fix-bead:
+    name: Create Live E2E Fix Bead
+    if: always() && needs.live-e2e.result == 'failure' && github.event_name == 'pull_request'
+    needs: [sync-beads, live-e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download live E2E output
+        uses: actions/download-artifact@v4
+        with:
+          name: live-e2e-output
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: create
+          failure-type: test_failure
+          failure-summary: "Live E2E tests failed - see artifacts for details"
+          failure-details-file: live-e2e-output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup-live-e2e-fix-beads:
+    name: Cleanup Live E2E Fix Beads
+    if: always() && needs.live-e2e.result == 'success' && github.event_name == 'pull_request'
+    needs: [sync-beads, live-e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: poiley/bdgha@v2
+        with:
+          mode: cleanup
+          failure-type: test_failure
+          github-token: ${{ secrets.GITHUB_TOKEN }}
