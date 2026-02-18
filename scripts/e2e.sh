@@ -38,7 +38,9 @@ run_scenario() {
     echo ""
     echo "Scenario: $name"
 
-    local scenario_exit=0
+    local before_fail_count scenario_exit=0
+    before_fail_count=$(grep -c '^FAIL$' "$RESULTS_FILE" 2>/dev/null || echo 0)
+
     (
         cd "$dir"
         "$setup_fn" "$dir"
@@ -47,8 +49,13 @@ run_scenario() {
     rm -rf "$dir"
 
     if [[ "$scenario_exit" -ne 0 ]]; then
-        echo "FAIL" >> "$RESULTS_FILE"
-        echo "  [FAIL] $name: scenario aborted with exit $scenario_exit"
+        local after_fail_count
+        after_fail_count=$(grep -c '^FAIL$' "$RESULTS_FILE" 2>/dev/null || echo 0)
+        if [[ "$after_fail_count" -eq "$before_fail_count" ]]; then
+            # Crash with no fail() call — record the failure
+            echo "FAIL" >> "$RESULTS_FILE"
+            echo "  [FAIL] $name: scenario aborted with exit $scenario_exit (no fail() recorded)"
+        fi
     fi
 }
 
