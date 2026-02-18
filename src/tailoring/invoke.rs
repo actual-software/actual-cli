@@ -5,17 +5,16 @@ use serde::Serialize;
 use crate::api::types::Adr;
 use crate::claude::prompts::tailoring_prompt;
 use crate::claude::schemas::tailoring_output_schema;
-use crate::claude::ClaudeRunner;
-use crate::claude::InvocationOptions;
+use crate::claude::TailoringRunner;
 use crate::error::ActualError;
 use crate::generation::OutputFormat;
 use crate::tailoring::types::TailoringOutput;
 
 /// Invoke Claude to tailor ADRs for the given project context.
 ///
-/// Builds the prompt and CLI args, calls the runner, validates the output,
+/// Builds the prompt and schema, calls the runner, validates the output,
 /// and retries once on JSON parse failure.
-pub async fn invoke_tailoring<R: ClaudeRunner>(
+pub async fn invoke_tailoring<R: TailoringRunner>(
     runner: &R,
     adrs: &[Adr],
     projects_json: &str,
@@ -25,22 +24,21 @@ pub async fn invoke_tailoring<R: ClaudeRunner>(
     format: &OutputFormat,
 ) -> Result<TailoringOutput, ActualError> {
     let adr_json = serialize_json(adrs, "ADRs")?;
-    let args = build_args(
-        &adr_json,
-        projects_json,
-        existing_output_paths,
-        model_override,
-        max_budget_usd,
-        format,
-    );
+    let prompt = build_prompt(&adr_json, projects_json, existing_output_paths, format);
+    let schema = tailoring_output_schema();
     let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
 
     // First attempt
-    match runner.run::<TailoringOutput>(&args).await {
+    match runner
+        .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
+        .await
+    {
         Ok(output) => validate_and_filter_output(output, &valid_ids, format),
         Err(ActualError::ClaudeOutputParse(_)) => {
             // Retry once on JSON parse failure
-            let output: TailoringOutput = runner.run(&args).await?;
+            let output = runner
+                .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
+                .await?;
             validate_and_filter_output(output, &valid_ids, format)
         }
         Err(e) => Err(e),
@@ -56,25 +54,14 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
         .map_err(|e| ActualError::InternalError(format!("Failed to serialize {label}: {e}")))
 }
 
-/// Build the CLI argument list for the tailoring invocation.
-fn build_args(
+/// Build the tailoring prompt string from the input data.
+pub(crate) fn build_prompt(
     adr_json: &str,
     projects_json: &str,
     existing_output_paths: &str,
-    model_override: Option<&str>,
-    max_budget_usd: Option<f64>,
     format: &OutputFormat,
-) -> Vec<String> {
-    let mut opts = InvocationOptions::for_tailoring(model_override);
-    opts.json_schema = Some(tailoring_output_schema());
-    opts.max_budget_usd = max_budget_usd;
-
-    let prompt = tailoring_prompt(projects_json, existing_output_paths, adr_json, format);
-
-    let mut args = opts.to_args();
-    args.push("-p".to_string());
-    args.push(prompt);
-    args
+) -> String {
+    tailoring_prompt(projects_json, existing_output_paths, adr_json, format)
 }
 
 /// Returns `true` if `path` is a valid output file path for the given `format`.
@@ -164,12 +151,12 @@ mod tests {
 
     /// Mock runner that returns pre-configured responses in sequence.
     /// First call returns responses[0], second returns responses[1], etc.
-    struct MockClaudeRunner {
+    struct MockTailoringRunner {
         responses: Mutex<Vec<MockResponse>>,
         call_count: AtomicU32,
     }
 
-    impl MockClaudeRunner {
+    impl MockTailoringRunner {
         fn new(responses: Vec<MockResponse>) -> Self {
             Self {
                 responses: Mutex::new(responses),
@@ -186,18 +173,21 @@ mod tests {
         }
     }
 
-    impl ClaudeRunner for MockClaudeRunner {
-        async fn run<T: serde::de::DeserializeOwned + Send>(
+    impl TailoringRunner for MockTailoringRunner {
+        async fn run_tailoring(
             &self,
-            _args: &[String],
-        ) -> Result<T, ActualError> {
+            _prompt: &str,
+            _schema: &str,
+            _model_override: Option<&str>,
+            _max_budget_usd: Option<f64>,
+        ) -> Result<TailoringOutput, ActualError> {
             let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
             let mut responses = self.responses.lock().unwrap();
             // Take ownership by swapping with a placeholder
             let entry = std::mem::replace(&mut responses[idx], MockResponse::Json(String::new()));
             match entry {
                 MockResponse::Json(json) => {
-                    let parsed: T = serde_json::from_str(&json)?;
+                    let parsed: TailoringOutput = serde_json::from_str(&json)?;
                     Ok(parsed)
                 }
                 MockResponse::Error(e) => Err(e),
@@ -248,7 +238,7 @@ mod tests {
     async fn test_valid_output() {
         let adrs = vec![make_adr("adr-001"), make_adr("adr-002")];
         let json = valid_output_json(&["adr-001", "adr-002"]);
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -288,7 +278,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -329,7 +319,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -367,7 +357,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -404,7 +394,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -426,7 +416,7 @@ mod tests {
         let adrs = vec![make_adr("adr-001")];
         let valid_json = valid_output_json(&["adr-001"]);
         let runner =
-            MockClaudeRunner::from_json_strings(vec!["not valid json".to_string(), valid_json]);
+            MockTailoringRunner::from_json_strings(vec!["not valid json".to_string(), valid_json]);
 
         let result = invoke_tailoring(
             &runner,
@@ -477,17 +467,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_args_with_valid_input() {
+    fn test_build_prompt_with_valid_input() {
         let adr_json = r#"[{"id":"adr-001"},{"id":"adr-002"}]"#;
-        let args = build_args(adr_json, "{}", "", None, None, &OutputFormat::ClaudeMd);
+        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd);
 
-        // Should contain at least the "-p" flag and a prompt
-        assert!(
-            args.contains(&"-p".to_string()),
-            "args should contain -p flag"
-        );
-        // The last argument should be the prompt which contains the ADR JSON
-        let prompt = args.last().expect("args should not be empty");
+        // The prompt should contain the ADR JSON
         assert!(
             prompt.contains("adr-001"),
             "prompt should contain ADR ID adr-001"
@@ -517,7 +501,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -542,7 +526,7 @@ mod tests {
     #[tokio::test]
     async fn test_non_parse_error_not_retried() {
         let adrs = vec![make_adr("adr-001")];
-        let runner = MockClaudeRunner::new(vec![MockResponse::Error(
+        let runner = MockTailoringRunner::new(vec![MockResponse::Error(
             ActualError::ClaudeSubprocessFailed {
                 message: "process crashed".to_string(),
                 stderr: "segfault".to_string(),
@@ -586,7 +570,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -623,7 +607,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -660,7 +644,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -703,7 +687,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -740,7 +724,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -780,7 +764,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,
@@ -821,7 +805,7 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&output).unwrap();
-        let runner = MockClaudeRunner::single(&json);
+        let runner = MockTailoringRunner::single(&json);
 
         let result = invoke_tailoring(
             &runner,

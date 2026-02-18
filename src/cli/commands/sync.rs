@@ -10,7 +10,7 @@ use crate::analysis::types::RepoAnalysis;
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
 use crate::branding::banner::print_banner;
-use crate::claude::subprocess::ClaudeRunner;
+use crate::claude::subprocess::TailoringRunner;
 use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
@@ -61,7 +61,7 @@ pub(crate) fn resolve_cwd() -> std::path::PathBuf {
 /// Accepts injected `root_dir`, `term`, and `runner` so unit tests can avoid
 /// `RealTerminal` (which blocks on stdin) and control the working directory,
 /// Claude runner, and user input.
-pub(crate) fn run_sync<R: ClaudeRunner>(
+pub(crate) fn run_sync<R: TailoringRunner>(
     args: &SyncArgs,
     root_dir: &Path,
     cfg_path: &Path,
@@ -947,7 +947,6 @@ mod tests {
     use crate::error::ActualError;
     use crate::generation::markers;
     use crate::tailoring::types::{FileOutput, TailoringSummary};
-    use serde::de::DeserializeOwned;
 
     /// Valid fixture JSON matching the RepoAnalysis schema.
     const VALID_ANALYSIS_JSON: &str = r#"{
@@ -962,7 +961,7 @@ mod tests {
         }]
     }"#;
 
-    /// Mock runner that returns a predetermined JSON response.
+    /// Mock runner that returns a predetermined `TailoringOutput` JSON response.
     struct MockRunner {
         json_response: String,
     }
@@ -975,21 +974,17 @@ mod tests {
         }
     }
 
-    impl ClaudeRunner for MockRunner {
-        async fn run<T: DeserializeOwned + Send>(
+    impl TailoringRunner for MockRunner {
+        async fn run_tailoring(
             &self,
-            _args: &[String],
-        ) -> Result<T, ActualError> {
-            let parsed: T = serde_json::from_str(&self.json_response)?;
+            _prompt: &str,
+            _schema: &str,
+            _model_override: Option<&str>,
+            _max_budget_usd: Option<f64>,
+        ) -> Result<TailoringOutput, ActualError> {
+            let parsed: TailoringOutput = serde_json::from_str(&self.json_response)?;
             Ok(parsed)
         }
-    }
-
-    #[tokio::test]
-    async fn test_mock_runner_returns_ok_on_valid_json() {
-        let runner = MockRunner::new(r#"{"key": "value"}"#);
-        let result: Result<serde_json::Value, _> = runner.run(&[]).await;
-        assert!(result.is_ok());
     }
 
     fn make_output(files: Vec<FileOutput>) -> TailoringOutput {
