@@ -13,7 +13,8 @@ pub struct DependencyInfo {
 /// Parse dependencies from all recognized manifest files in `project_dir`.
 ///
 /// Scans for package.json, Cargo.toml, pyproject.toml, requirements.txt,
-/// Pipfile, go.mod, Gemfile, pom.xml, build.gradle(.kts), and Package.swift.
+/// Pipfile, go.mod, Gemfile, pom.xml, build.gradle(.kts),
+/// gradle/libs.versions.toml, and Package.swift.
 /// Missing files are silently skipped — an empty project returns empty deps.
 pub fn parse_dependencies(project_dir: &Path) -> DependencyInfo {
     let mut deps = HashSet::new();
