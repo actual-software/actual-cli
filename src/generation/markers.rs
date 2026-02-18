@@ -727,6 +727,9 @@ mod tests {
             format!("# My Notes\n\n<!-- last-synced: 1999-01-01T00:00:00Z -->\n\n{managed}\n");
         let ts = extract_last_synced(&full).expect("should find timestamp");
         assert_ne!(ts, "1999-01-01T00:00:00Z");
+        // Verify the returned timestamp is actually from the managed section
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .expect("should be a valid RFC 3339 timestamp from the managed section");
     }
 
     #[test]
