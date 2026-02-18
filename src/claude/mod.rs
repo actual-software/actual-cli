@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod binary;
+pub mod obfuscation;
 pub mod options;
 pub mod prompts;
 pub mod schemas;

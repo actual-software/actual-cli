@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::api::types::Adr;
 use crate::claude::prompts::tailoring_prompt;
-use crate::claude::schemas::TAILORING_OUTPUT_SCHEMA;
+use crate::claude::schemas::tailoring_output_schema;
 use crate::claude::ClaudeRunner;
 use crate::claude::InvocationOptions;
 use crate::error::ActualError;
@@ -66,7 +66,7 @@ fn build_args(
     format: &OutputFormat,
 ) -> Vec<String> {
     let mut opts = InvocationOptions::for_tailoring(model_override);
-    opts.json_schema = Some(TAILORING_OUTPUT_SCHEMA.to_string());
+    opts.json_schema = Some(tailoring_output_schema());
     opts.max_budget_usd = max_budget_usd;
 
     let prompt = tailoring_prompt(projects_json, existing_output_paths, adr_json, format);
