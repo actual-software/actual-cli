@@ -1,5 +1,11 @@
+use super::obfuscation::{cursor_rules_prompt_decoded, tailoring_prompt_decoded};
+
 /// Returns a tailoring prompt with the given repository context, existing output file
 /// paths, and ADR JSON array interpolated into the template.
+///
+/// The static instruction text is stored obfuscated in the binary (see `build.rs` and
+/// `src/claude/obfuscation.rs`). It is decoded at runtime and then formatted with the
+/// provided arguments.
 ///
 /// The `format` parameter controls which filename (e.g. `CLAUDE.md`, `AGENTS.md`, or
 /// `.cursor/rules/actual-policies.mdc`) is referenced inside the prompt so the LLM
@@ -29,46 +35,11 @@ fn standard_tailoring_prompt(
     format: &crate::generation::OutputFormat,
 ) -> String {
     let filename = format.filename();
-    format!(
-        "\
-You are tailoring Architecture Decision Records (ADRs) for a specific codebase
-and generating {filename} file content.
-
-## Repository Context
-{projects_json}
-
-## Existing {filename} Files
-The following {filename} files already exist in the repo (read them if you need to
-understand the current state, but only generate content for the managed section):
-{existing_output_paths}
-
-## ADRs to Tailor
-
-{adr_json_array}
-
-## Instructions
-
-1. **Tailor each ADR**: Examine the repository to verify applicability. Reference
-   actual paths, files, and patterns. Identify conflicts with existing code. Merge
-   duplicates. Keep policies concise (1-2 sentences each).
-
-2. **Skip inapplicable ADRs**: If an ADR doesn't apply (e.g., it recommends Tailwind
-   but the project uses styled-components), mark it as skipped with a reason.
-
-3. **Decide file layout**: Generate a root {filename} for general/cross-cutting rules.
-   Generate subdirectory {filename} files (e.g., apps/web/{filename}) for projects
-   that have project-specific ADRs. Only create subdirectory files when there are
-   ADRs specific to that project -- don't create empty or redundant files.
-
-4. **Format as markdown**: Generate the content that goes inside the managed section
-   markers. Use terse, actionable directive-style instructions optimized for Claude's
-   consumption. Organize content naturally -- use headings, bullet points, and inline
-   code references as appropriate.
-
-5. **Preserve intent**: Don't change the fundamental decision -- only make it more
-   specific and actionable for this codebase.
-
-Return your response as a JSON object matching the provided schema."
+    tailoring_prompt_decoded(
+        projects_json,
+        existing_output_paths,
+        adr_json_array,
+        filename,
     )
 }
 
@@ -82,48 +53,11 @@ fn cursor_rules_tailoring_prompt(
     adr_json_array: &str,
 ) -> String {
     use crate::generation::format::CURSOR_RULES_PATH;
-    format!(
-        "\
-You are tailoring Architecture Decision Records (ADRs) for a specific codebase
-and generating Cursor IDE rule files ({CURSOR_RULES_PATH}).
-
-## Repository Context
-{projects_json}
-
-## Existing Cursor Rule Files
-The following {CURSOR_RULES_PATH} files already exist in the repo (read them if you
-need to understand the current state, but only generate content for the managed section):
-{existing_output_paths}
-
-## ADRs to Tailor
-
-{adr_json_array}
-
-## Instructions
-
-1. **Tailor each ADR**: Examine the repository to verify applicability. Reference
-   actual paths, files, and patterns. Identify conflicts with existing code. Merge
-   duplicates. Keep policies concise (1-2 sentences each).
-
-2. **Skip inapplicable ADRs**: If an ADR doesn't apply (e.g., it recommends Tailwind
-   but the project uses styled-components), mark it as skipped with a reason.
-
-3. **Decide file layout**: Generate a root `{CURSOR_RULES_PATH}` for
-   general/cross-cutting rules. Generate subdirectory files (e.g.,
-   `apps/web/{CURSOR_RULES_PATH}`) for projects that have project-specific ADRs.
-   Only create subdirectory files when there are ADRs specific to that project --
-   don't create empty or redundant files.
-
-4. **Format as Cursor MDC**: Each file path must end with `{CURSOR_RULES_PATH}`.
-   Generate only the content that goes inside the managed section markers (do NOT
-   include the YAML frontmatter -- that is added automatically). Use terse,
-   actionable directive-style instructions. Organize content naturally -- use
-   headings, bullet points, and inline code references as appropriate.
-
-5. **Preserve intent**: Don't change the fundamental decision -- only make it more
-   specific and actionable for this codebase.
-
-Return your response as a JSON object matching the provided schema."
+    cursor_rules_prompt_decoded(
+        projects_json,
+        existing_output_paths,
+        adr_json_array,
+        CURSOR_RULES_PATH,
     )
 }
 
