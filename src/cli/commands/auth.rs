@@ -18,10 +18,34 @@ fn run_auth() -> Result<(), ActualError> {
 ///
 /// Runs `claude auth status --json`, parses the response, and returns the
 /// status. This is reusable from other commands (e.g., `sync`).
+///
+/// Applies a 10-second timeout; returns [`ActualError::ClaudeTimeout`] if the
+/// subprocess does not complete in time.
 pub fn check_auth(binary_path: &Path) -> Result<ClaudeAuthStatus, ActualError> {
-    let output = std::process::Command::new(binary_path)
-        .args(["auth", "status", "--json"])
-        .output()
+    check_auth_with_timeout(binary_path, std::time::Duration::from_secs(10))
+}
+
+fn check_auth_with_timeout(
+    binary_path: &Path,
+    timeout: std::time::Duration,
+) -> Result<ClaudeAuthStatus, ActualError> {
+    use std::sync::mpsc;
+
+    let binary_path = binary_path.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let result = std::process::Command::new(&binary_path)
+            .args(["auth", "status", "--json"])
+            .output();
+        let _ = tx.send(result);
+    });
+
+    let output = rx
+        .recv_timeout(timeout)
+        .map_err(|_| ActualError::ClaudeTimeout {
+            seconds: timeout.as_secs(),
+        })?
         .map_err(|e| ActualError::ClaudeSubprocessFailed {
             message: format!("failed to execute claude: {e}"),
             stderr: String::new(),
@@ -272,6 +296,21 @@ mod tests {
         let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
         let result = run_auth();
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_check_auth_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = check_auth_with_timeout(&script, std::time::Duration::from_millis(100));
+        assert!(
+            matches!(result, Err(ActualError::ClaudeTimeout { .. })),
+            "expected ClaudeTimeout, got: {result:?}"
+        );
     }
 
     #[cfg(unix)]
