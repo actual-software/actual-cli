@@ -49,33 +49,22 @@ mod tests {
     use super::*;
     use crate::cli::args::ConfigSetArgs;
     use crate::cli::commands::handle_result;
-    use crate::testutil::ENV_MUTEX;
+    use crate::testutil::{EnvGuard, ENV_MUTEX};
     use tempfile::tempdir;
 
-    fn restore_env(key: &str, saved: Option<String>) {
-        match saved {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
-
     fn with_temp_config<F: FnOnce()>(f: F) {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");
-        let saved = std::env::var("ACTUAL_CONFIG").ok();
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
         f();
-        restore_env("ACTUAL_CONFIG", saved);
     }
 
     fn with_invalid_config<F: FnOnce()>(f: F) {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = std::env::var("ACTUAL_CONFIG").ok();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Point to a path inside /dev/null which cannot be a directory
-        std::env::set_var("ACTUAL_CONFIG", "/dev/null/impossible.yaml");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", "/dev/null/impossible.yaml");
         f();
-        restore_env("ACTUAL_CONFIG", saved);
     }
 
     #[test]
@@ -252,17 +241,25 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_env_both_branches() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+    fn test_env_guard_both_branches() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let key = "ACTUAL_TEST_RESTORE_ENV";
 
-        // Exercise Some branch: restore a previously set value
-        std::env::set_var(key, "original");
-        restore_env(key, Some("restored".to_string()));
-        assert_eq!(std::env::var(key).unwrap(), "restored");
+        // Exercise set-then-restore cycle
+        {
+            let _g = EnvGuard::set(key, "original");
+            assert_eq!(std::env::var(key).unwrap(), "original");
+        }
+        // Guard dropped: variable should be removed (was absent before)
+        assert!(std::env::var(key).is_err());
 
-        // Exercise None branch: remove the variable
-        restore_env(key, None);
+        // Exercise set-over-existing then restore
+        {
+            let _g1 = EnvGuard::set(key, "first");
+            let _g2 = EnvGuard::set(key, "second");
+            assert_eq!(std::env::var(key).unwrap(), "second");
+        }
+        // Both guards dropped: variable should be removed
         assert!(std::env::var(key).is_err());
     }
 

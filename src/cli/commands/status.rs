@@ -248,7 +248,7 @@ mod tests {
     use super::*;
     use crate::cli::commands::handle_result;
     use crate::config::types::{CachedAnalysis, TelemetryConfig};
-    use crate::testutil::ENV_MUTEX;
+    use crate::testutil::{EnvGuard, ENV_MUTEX};
     use std::collections::HashMap;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -256,21 +256,12 @@ mod tests {
     // Re-import shared utilities from the parent commands module for tests.
     use super::super::{find_claude_md_files, SKIP_DIRS};
 
-    fn restore_env(key: &str, saved: Option<String>) {
-        match saved {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
-    }
-
     fn with_temp_config<F: FnOnce()>(f: F) {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");
-        let saved = std::env::var("ACTUAL_CONFIG").ok();
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
         f();
-        restore_env("ACTUAL_CONFIG", saved);
     }
 
     /// Strip ANSI codes from rendered output for assertion.
@@ -392,28 +383,34 @@ mod tests {
 
     #[test]
     fn test_exec_error_path() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = std::env::var("ACTUAL_CONFIG").ok();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Set ACTUAL_CONFIG to empty string which will cause config_path to fail
-        std::env::set_var("ACTUAL_CONFIG", "");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", "");
         let args = StatusArgs { verbose: false };
         let code = handle_result(exec(&args));
         assert_ne!(code, 0);
-        restore_env("ACTUAL_CONFIG", saved);
     }
 
     #[test]
-    fn test_restore_env_both_branches() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+    fn test_env_guard_both_branches() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let key = "ACTUAL_TEST_STATUS_RESTORE";
 
-        // Exercise Some branch: restore a previously set value
-        std::env::set_var(key, "original");
-        restore_env(key, Some("restored".to_string()));
-        assert_eq!(std::env::var(key).unwrap(), "restored");
+        // Exercise set-then-restore cycle
+        {
+            let _g = EnvGuard::set(key, "original");
+            assert_eq!(std::env::var(key).unwrap(), "original");
+        }
+        // Guard dropped: variable should be removed (was absent before)
+        assert!(std::env::var(key).is_err());
 
-        // Exercise None branch: remove the variable
-        restore_env(key, None);
+        // Exercise set-over-existing then restore
+        {
+            let _g1 = EnvGuard::set(key, "first");
+            let _g2 = EnvGuard::set(key, "second");
+            assert_eq!(std::env::var(key).unwrap(), "second");
+        }
+        // Both guards dropped: variable should be removed
         assert!(std::env::var(key).is_err());
     }
 
@@ -817,28 +814,24 @@ mod tests {
 
     #[test]
     fn test_try_detect_auth_no_binary() {
-        let _lock = ENV_MUTEX.lock().unwrap();
-        let saved = std::env::var("CLAUDE_BINARY").ok();
-        std::env::set_var("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
         let auth = try_detect_auth();
-        restore_env("CLAUDE_BINARY", saved);
         assert!(auth.is_none(), "should return None when binary not found");
     }
 
     #[cfg(unix)]
     #[test]
     fn test_try_detect_auth_authenticated() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let script = dir.path().join("fake-claude");
         let content = "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\": true, \"authMethod\": \"claude.ai\", \"email\": \"user@example.com\"}'\nexit 0\n";
         std::fs::write(&script, content).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let saved = std::env::var("CLAUDE_BINARY").ok();
-        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
         let auth = try_detect_auth();
-        restore_env("CLAUDE_BINARY", saved);
         let auth = auth.expect("should return Some for authenticated binary");
         assert!(auth.authenticated, "should be authenticated");
         assert_eq!(auth.email.as_deref(), Some("user@example.com"));
@@ -847,17 +840,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_try_detect_auth_not_authenticated() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let script = dir.path().join("fake-claude");
         let content = "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\": false}'\nexit 0\n";
         std::fs::write(&script, content).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let saved = std::env::var("CLAUDE_BINARY").ok();
-        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
         let auth = try_detect_auth();
-        restore_env("CLAUDE_BINARY", saved);
         let auth = auth.expect("should return Some even when not logged in");
         assert!(!auth.authenticated, "should not be authenticated");
         assert!(auth.email.is_none(), "should have no email");
@@ -866,17 +857,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_try_detect_auth_subprocess_failure() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempdir().unwrap();
         let script = dir.path().join("fake-claude");
         let content = "#!/bin/sh\nexit 1\n";
         std::fs::write(&script, content).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let saved = std::env::var("CLAUDE_BINARY").ok();
-        std::env::set_var("CLAUDE_BINARY", script.to_str().unwrap());
+        let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
         let auth = try_detect_auth();
-        restore_env("CLAUDE_BINARY", saved);
         assert!(auth.is_none(), "should return None when subprocess fails");
     }
 

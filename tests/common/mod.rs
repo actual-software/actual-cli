@@ -1,5 +1,81 @@
 #![allow(dead_code)]
 
+// ── Shared mutex for env-var serialization ───────────────────────────
+
+/// Global mutex used by integration tests to serialize access to
+/// environment variables. Integration tests cannot access
+/// `actual_cli::testutil::ENV_MUTEX` from within the same process
+/// context when it matters most, so we provide one here for
+/// `tests/` modules that need it.
+pub static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// ── RAII env-var guard ───────────────────────────────────────────────
+
+/// RAII guard that saves and restores (or removes) an environment variable.
+///
+/// On construction, saves the previous value and sets the new one.
+/// On drop, restores the previous value (or removes the variable if it
+/// was absent before). Requires `ENV_MUTEX` to be held by the caller.
+pub struct EnvGuard {
+    key: String,
+    old: Option<String>,
+}
+
+impl EnvGuard {
+    /// Set `key` to `val`, saving the previous value for restoration on drop.
+    ///
+    /// The caller must hold `ENV_MUTEX` (or equivalent) before calling this
+    /// function to serialise access, as required by the deprecated
+    /// `set_var`/`remove_var` APIs.
+    pub fn set(key: &str, val: &str) -> Self {
+        let old = std::env::var(key).ok();
+        #[allow(deprecated)]
+        unsafe {
+            std::env::set_var(key, val)
+        };
+        Self {
+            key: key.to_string(),
+            old,
+        }
+    }
+
+    /// Remove `key`, saving the previous value for restoration on drop.
+    ///
+    /// The caller must hold `ENV_MUTEX` (or equivalent) before calling this
+    /// function to serialise access, as required by the deprecated
+    /// `set_var`/`remove_var` APIs.
+    pub fn remove(key: &str) -> Self {
+        let old = std::env::var(key).ok();
+        #[allow(deprecated)]
+        unsafe {
+            std::env::remove_var(key)
+        };
+        Self {
+            key: key.to_string(),
+            old,
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.old {
+            Some(v) => {
+                #[allow(deprecated)]
+                unsafe {
+                    std::env::set_var(&self.key, v)
+                }
+            }
+            None => {
+                #[allow(deprecated)]
+                unsafe {
+                    std::env::remove_var(&self.key)
+                }
+            }
+        }
+    }
+}
+
 // ── Shell escaping helpers ───────────────────────────────────────────
 
 /// Escape a string so it is safe to embed inside a shell single-quoted string.
