@@ -397,14 +397,14 @@ async fn run_tailoring_with_cancel<F, C>(
 ) -> Result<TailoringOutput, ActualError>
 where
     F: std::future::Future<Output = Result<TailoringOutput, ActualError>>,
-    C: std::future::Future<Output = std::io::Result<()>>,
+    C: std::future::Future,
 {
     use futures::FutureExt as _;
 
     tokio::pin!(tailor_fut);
-    // Fuse the cancel future so that after it resolves (whether Ok or Err)
-    // it becomes permanently pending — preventing a "polled after completion"
-    // panic if ctrl_c registration fails and the loop continues.
+    // Fuse the cancel future so that after it resolves it becomes permanently
+    // pending — preventing a "polled after completion" panic if the loop
+    // continues for any reason after cancel fires.
     let mut cancel = std::pin::pin!(cancel.fuse());
     let mut completed = 0usize;
 
@@ -420,11 +420,8 @@ where
             Some(event) = progress_rx.recv() => {
                 apply_tailoring_event(event, pipeline, &mut completed, project_count);
             }
-            result = &mut cancel => {
-                if result.is_ok() {
-                    break Err(ActualError::UserCancelled);
-                }
-                // ctrl_c registration failed — ignore and let tailoring continue
+            _ = &mut cancel => {
+                break Err(ActualError::UserCancelled);
             }
         }
     }
@@ -3089,7 +3086,7 @@ mod tests {
         // A tailor future that never completes
         let tailor_fut = std::future::pending::<Result<TailoringOutput, ActualError>>();
         // A cancel future that fires immediately
-        let cancel = std::future::ready(Ok::<(), std::io::Error>(()));
+        let cancel = std::future::ready(());
 
         let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &pipeline, 0, cancel).await;
 
@@ -3129,33 +3126,6 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "expected channel to be empty after drain"
-        );
-    }
-
-    /// Verify that a ctrl_c registration error (Err result) does NOT cancel
-    /// tailoring — the loop should continue and return the tailor result.
-    #[tokio::test]
-    async fn test_run_tailoring_with_cancel_ignores_ctrl_c_error() {
-        let pipeline = SyncPipeline::new(true);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
-        drop(tx);
-
-        let output = make_output(vec![]);
-        // Tailor future that never resolves by itself — so we need cancel to
-        // fire first, then the tailor future to resolve on the next iteration
-        // after cancel is consumed.
-        let tailor_fut = std::future::ready(Ok::<TailoringOutput, ActualError>(output));
-        // cancel fires with an Err (simulates OS signal registration failure)
-        let cancel = std::future::ready(Err::<(), std::io::Error>(std::io::Error::other(
-            "signal error",
-        )));
-
-        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &pipeline, 0, cancel).await;
-
-        // Should succeed — ctrl_c Err must not cancel tailoring
-        assert!(
-            result.is_ok(),
-            "ctrl_c registration error should not cancel tailoring, got {result:?}"
         );
     }
 }
