@@ -3,13 +3,53 @@ use std::time::Duration;
 use crate::error::ActualError;
 
 /// Configuration for retry behavior with exponential backoff.
+#[derive(Debug)]
 pub struct RetryConfig {
     /// Maximum number of attempts (including the initial attempt).
-    pub max_attempts: u32,
+    max_attempts: u32,
     /// Delay before the first retry.
-    pub initial_delay: Duration,
+    initial_delay: Duration,
     /// Multiplier applied to the delay after each failed attempt.
-    pub backoff_factor: u32,
+    backoff_factor: u32,
+}
+
+impl RetryConfig {
+    /// Create a new `RetryConfig`, rejecting `max_attempts == 0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActualError::ConfigError`] if `max_attempts` is zero.
+    pub fn new(
+        max_attempts: u32,
+        initial_delay: Duration,
+        backoff_factor: u32,
+    ) -> Result<Self, ActualError> {
+        if max_attempts == 0 {
+            return Err(ActualError::ConfigError(
+                "RetryConfig max_attempts must be >= 1".to_string(),
+            ));
+        }
+        Ok(Self {
+            max_attempts,
+            initial_delay,
+            backoff_factor,
+        })
+    }
+
+    /// Maximum number of attempts (including the initial attempt).
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    /// Delay before the first retry.
+    pub fn initial_delay(&self) -> Duration {
+        self.initial_delay
+    }
+
+    /// Multiplier applied to the delay after each failed attempt.
+    pub fn backoff_factor(&self) -> u32 {
+        self.backoff_factor
+    }
 }
 
 impl Default for RetryConfig {
@@ -32,6 +72,12 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, ActualError>>,
 {
+    debug_assert!(
+        config.max_attempts >= 1,
+        "RetryConfig::max_attempts must be >= 1, got {}",
+        config.max_attempts
+    );
+
     let mut last_error = ActualError::ApiError("no attempts made".to_string());
 
     for attempt in 0..config.max_attempts {
@@ -97,9 +143,57 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = RetryConfig::default();
-        assert_eq!(config.max_attempts, 3);
-        assert_eq!(config.initial_delay, Duration::from_secs(1));
-        assert_eq!(config.backoff_factor, 2);
+        assert_eq!(config.max_attempts(), 3);
+        assert_eq!(config.initial_delay(), Duration::from_secs(1));
+        assert_eq!(config.backoff_factor(), 2);
+    }
+
+    #[test]
+    fn test_new_rejects_zero_attempts() {
+        let err = RetryConfig::new(0, Duration::from_secs(1), 2).unwrap_err();
+        assert!(
+            err.to_string().contains("max_attempts must be >= 1"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_new_accepts_one_attempt() {
+        let config = RetryConfig::new(1, Duration::from_secs(1), 2).unwrap();
+        assert_eq!(config.max_attempts(), 1);
+    }
+
+    #[test]
+    fn test_new_valid_config() {
+        let config = RetryConfig::new(5, Duration::from_millis(500), 3).unwrap();
+        assert_eq!(config.max_attempts(), 5);
+        assert_eq!(config.initial_delay(), Duration::from_millis(500));
+        assert_eq!(config.backoff_factor(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_single_attempt_no_retry() {
+        tokio::time::pause();
+
+        let config = RetryConfig::new(1, Duration::from_secs(1), 2).unwrap();
+        // Single attempt fails — should NOT retry.
+        let (result, calls) = run_retry(&config, &[0]).await;
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(_)));
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn test_single_attempt_succeeds() {
+        tokio::time::pause();
+
+        let config = RetryConfig::new(1, Duration::from_secs(1), 2).unwrap();
+        // Single attempt succeeds.
+        let (result, calls) = run_retry(&config, &[2]).await;
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls, 1);
     }
 
     #[tokio::test]
