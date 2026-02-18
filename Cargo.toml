@@ -78,6 +78,11 @@ tree-sitter-php = "0.24"
 # tree-sitter-kotlin excluded: v0.3 depends on tree-sitter 0.20, incompatible with 0.24
 tree-sitter-swift = "0.7"
 
+[profile.release]
+strip = true        # Remove symbols and debug info
+lto = true          # Link-time optimization; also reduces binary size
+codegen-units = 1   # Better optimization, fewer symbol artifacts
+
 [features]
 integration = []
 
