@@ -3078,7 +3078,7 @@ mod tests {
     /// ADRs, the second run uses the cache and completes successfully without
     /// writing any files.
     #[test]
-    fn test_tailoring_cache_hit_zero_applicable_message() {
+    fn test_tailoring_cache_hit_zero_applicable() {
         // Hold ENV_MUTEX to serialize with tests that modify PATH (e.g. the
         // fake-git timeout test).  git calls in init_git_repo and get_git_head
         // must see the real git binary.
@@ -3160,7 +3160,7 @@ mod tests {
     /// Verify that when the tailoring cache contains a result with >0 applicable
     /// ADRs, the second run uses the cache and writes the files as expected.
     #[test]
-    fn test_tailoring_cache_hit_with_files_message() {
+    fn test_tailoring_cache_hit_with_files() {
         // Hold ENV_MUTEX to serialize with tests that modify PATH (e.g. the
         // fake-git timeout test).  git calls in init_git_repo and get_git_head
         // must see the real git binary.
