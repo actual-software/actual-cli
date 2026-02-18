@@ -88,30 +88,35 @@ pub struct MergeResult {
     pub content: String,
 }
 
-/// Merge new managed content into an existing (or new) CLAUDE.md file.
+/// Merge new managed content into an existing (or new) output file.
 ///
 /// # Arguments
 /// * `existing_content` - The current file content, or `None` for a new file.
 /// * `managed_content` - The new AI-generated content to place inside markers.
 /// * `version` - The version number for the managed section header.
-/// * `is_root` - Whether this is the root CLAUDE.md (adds "# Project Guidelines" header).
+/// * `is_root` - Whether this is the root-level output file (adds a format-specific
+///   header for new files).
 /// * `adr_ids` - ADR IDs to include in the managed section metadata.
+/// * `root_header` - Optional header string to prepend for new root files (e.g.
+///   `"# Project Guidelines"` for ClaudeMd/AgentsMd, or the YAML frontmatter block
+///   for CursorRules).  Pass `None` to suppress the header.
 ///
 /// # Behavior
 /// 1. New root file (`existing_content` is `None`, `is_root` is `true`):
-///    Output starts with "# Project Guidelines\n\n", followed by managed section.
+///    Output starts with `root_header` (if `Some`), followed by managed section.
 /// 2. New subdirectory file (`existing_content` is `None`, `is_root` is `false`):
 ///    Output is just the managed section.
 /// 3. Existing file with markers: content between markers is replaced (from start of
 ///    START_MARKER line to end of END_MARKER line), content outside preserved exactly.
 /// 4. Existing file without markers: managed section is appended after existing content
-///    (separated by "\n\n").
+///    (separated by `"\n\n"`).
 pub fn merge_content(
     existing_content: Option<&str>,
     managed_content: &str,
     version: u32,
     is_root: bool,
     adr_ids: &[String],
+    root_header: Option<&str>,
 ) -> MergeResult {
     let managed_section = markers::wrap_in_markers(managed_content, version, adr_ids);
 
@@ -119,7 +124,11 @@ pub fn merge_content(
         None => {
             // New file
             if is_root {
-                format!("# Project Guidelines\n\n{managed_section}\n")
+                if let Some(header) = root_header {
+                    format!("{header}\n\n{managed_section}\n")
+                } else {
+                    format!("{managed_section}\n")
+                }
             } else {
                 format!("{managed_section}\n")
             }
@@ -342,9 +351,20 @@ mod tests {
 
     // ---- merge_content tests ----
 
+    const PROJECT_GUIDELINES_HEADER: &str = "# Project Guidelines";
+    const CURSOR_FRONTMATTER: &str =
+        "---\ndescription: actual.ai ADR policies for this project\nalwaysApply: true\n---";
+
     #[test]
     fn test_new_root_file_has_header_and_managed_section() {
-        let result = merge_content(None, "some content", 1, true, &[]);
+        let result = merge_content(
+            None,
+            "some content",
+            1,
+            true,
+            &[],
+            Some(PROJECT_GUIDELINES_HEADER),
+        );
         assert!(
             result.content.starts_with("# Project Guidelines\n\n"),
             "expected root header, got: {}",
@@ -362,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_new_subdirectory_file_is_managed_section_only() {
-        let result = merge_content(None, "some content", 1, false, &[]);
+        let result = merge_content(None, "some content", 1, false, &[], Some("# Header"));
         assert!(
             result.content.starts_with(START_MARKER),
             "expected output to start with START_MARKER, got: {}",
@@ -383,9 +403,23 @@ mod tests {
     }
 
     #[test]
+    fn test_new_root_no_header_when_none() {
+        let result = merge_content(None, "some content", 1, true, &[], None);
+        assert!(
+            result.content.starts_with(START_MARKER),
+            "expected output to start with START_MARKER when root_header is None, got: {}",
+            result.content
+        );
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected managed section in output"
+        );
+    }
+
+    #[test]
     fn test_existing_with_markers_replaces_content() {
         let existing = format!("{}\n", markers::wrap_in_markers("old content", 1, &[]));
-        let result = merge_content(Some(&existing), "new content", 2, false, &[]);
+        let result = merge_content(Some(&existing), "new content", 2, false, &[], None);
         assert!(
             result.content.contains("new content"),
             "expected new content in output: {}",
@@ -405,7 +439,7 @@ mod tests {
     #[test]
     fn test_existing_without_markers_appends() {
         let existing = "# My Custom Rules\n\nDo stuff";
-        let result = merge_content(Some(existing), "managed stuff", 1, false, &[]);
+        let result = merge_content(Some(existing), "managed stuff", 1, false, &[], None);
         assert!(
             result.content.starts_with("# My Custom Rules\n\nDo stuff"),
             "expected existing content preserved at start: {}",
@@ -425,7 +459,7 @@ mod tests {
     fn test_existing_preserves_content_above_and_below_markers() {
         let managed = markers::wrap_in_markers("old managed", 1, &[]);
         let existing = format!("# User Header\n\n{managed}\n\n## User Footer\n");
-        let result = merge_content(Some(&existing), "new managed", 2, false, &[]);
+        let result = merge_content(Some(&existing), "new managed", 2, false, &[], None);
         assert!(
             result.content.contains("# User Header"),
             "expected user header preserved: {}",
@@ -450,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_empty_managed_content() {
-        let result = merge_content(None, "", 1, false, &[]);
+        let result = merge_content(None, "", 1, false, &[], None);
         assert!(
             markers::has_managed_section(&result.content),
             "expected valid managed section even with empty content"
@@ -465,7 +499,7 @@ mod tests {
     #[test]
     fn test_existing_markers_only_replaces() {
         let existing = format!("{}\n", markers::wrap_in_markers("original", 1, &[]));
-        let result = merge_content(Some(&existing), "replacement", 2, false, &[]);
+        let result = merge_content(Some(&existing), "replacement", 2, false, &[], None);
         assert!(
             result.content.contains("replacement"),
             "expected replacement content: {}",
@@ -485,7 +519,7 @@ mod tests {
     #[test]
     fn test_existing_without_markers_appends_when_trailing_newline() {
         let existing = "# My Custom Rules\n\nDo stuff\n";
-        let result = merge_content(Some(existing), "managed stuff", 1, false, &[]);
+        let result = merge_content(Some(existing), "managed stuff", 1, false, &[], None);
         assert!(
             result
                 .content
@@ -504,7 +538,7 @@ mod tests {
         // END_MARKER is not followed by \n (no trailing newline)
         let managed = markers::wrap_in_markers("old content", 1, &[]);
         let existing = managed.clone(); // no trailing \n
-        let result = merge_content(Some(&existing), "new content", 2, false, &[]);
+        let result = merge_content(Some(&existing), "new content", 2, false, &[], None);
         assert!(
             result.content.contains("new content"),
             "expected new content: {}",
@@ -524,7 +558,14 @@ mod tests {
     #[test]
     fn test_new_root_file_roundtrip() {
         let original = "line one\nline two\nline three";
-        let result = merge_content(None, original, 1, true, &[]);
+        let result = merge_content(
+            None,
+            original,
+            1,
+            true,
+            &[],
+            Some(PROJECT_GUIDELINES_HEADER),
+        );
         let extracted =
             markers::extract_managed_content(&result.content).expect("should extract content");
         assert!(
@@ -547,7 +588,7 @@ mod tests {
             "expected None for reversed markers"
         );
 
-        let result = merge_content(Some(&existing), "new managed", 1, false, &[]);
+        let result = merge_content(Some(&existing), "new managed", 1, false, &[], None);
 
         // The original reversed-marker content must be preserved verbatim at the start.
         assert!(
@@ -569,6 +610,50 @@ mod tests {
             result.content[existing_end..].contains("new managed"),
             "expected new managed content appended after existing: {}",
             result.content
+        );
+    }
+
+    // ---- CursorRules-specific merge_content tests ----
+
+    #[test]
+    fn test_new_cursor_rules_root_file_has_frontmatter() {
+        let result = merge_content(
+            None,
+            "Use Tailwind for all styling.",
+            1,
+            true,
+            &[],
+            Some(CURSOR_FRONTMATTER),
+        );
+        assert!(
+            result.content.starts_with("---\n"),
+            "cursor-rules root file must start with YAML front-matter delimiter, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("alwaysApply: true"),
+            "cursor-rules root file must contain alwaysApply: true"
+        );
+        assert!(
+            markers::has_managed_section(&result.content),
+            "expected managed section in output"
+        );
+        assert!(
+            result.content.contains("Use Tailwind for all styling."),
+            "expected managed content"
+        );
+    }
+
+    #[test]
+    fn test_cursor_rules_frontmatter_separator() {
+        // The frontmatter should be separated from the managed section by \n\n
+        let result = merge_content(None, "content", 1, true, &[], Some(CURSOR_FRONTMATTER));
+        let frontmatter_end = CURSOR_FRONTMATTER.len();
+        let after_frontmatter = &result.content[frontmatter_end..];
+        assert!(
+            after_frontmatter.starts_with("\n\n"),
+            "expected \\n\\n between frontmatter and managed section, got: {:?}",
+            &after_frontmatter[..after_frontmatter.len().min(20)]
         );
     }
 }

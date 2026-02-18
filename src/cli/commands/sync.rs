@@ -353,6 +353,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         args.force,
         args.dry_run,
         args.full,
+        &output_format,
         term,
         pipeline.start_time(),
     )?;
@@ -764,20 +765,24 @@ fn find_existing_claude_md(root_dir: &Path) -> String {
 /// Execute the confirm + write phase of the sync pipeline.
 ///
 /// Given a `TailoringOutput` from the fetch+tailor phase, this function:
-/// 1. Computes per-file diffs against existing CLAUDE.md files
+/// 1. Computes per-file diffs against existing output files
 /// 2. Displays a diff summary
 /// 3. In dry-run mode: prints summary (and full content if --full), returns
 /// 4. In normal mode: runs the confirmation flow (or skips with --force)
 /// 5. Writes confirmed files to disk
 /// 6. Reports per-file results (created/updated/failed)
 ///
+/// The `format` parameter controls the header prepended to new root-level files.
+///
 /// Write errors on individual files do NOT abort the batch.
+#[allow(clippy::too_many_arguments)]
 pub fn confirm_and_write(
     output: &TailoringOutput,
     root_dir: &Path,
     force: bool,
     dry_run: bool,
     full: bool,
+    format: &OutputFormat,
     term: &dyn TerminalIO,
     started_at: Instant,
 ) -> Result<SyncResult, ActualError> {
@@ -854,7 +859,7 @@ pub fn confirm_and_write(
     }
 
     // Step 5: Write confirmed files
-    let results = write_files(root_dir, &confirmed);
+    let results = write_files(root_dir, &confirmed, format);
 
     // Step 6: Report results and return SyncResult
     let width = console::Term::stdout()
@@ -1054,6 +1059,7 @@ mod tests {
             true,
             false,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )
@@ -1088,6 +1094,7 @@ mod tests {
             false,
             true,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )
@@ -1128,6 +1135,7 @@ mod tests {
             false,
             true,
             true,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )
@@ -1169,6 +1177,7 @@ mod tests {
             false,
             false,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )
@@ -1197,6 +1206,7 @@ mod tests {
             false,
             false,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         );
@@ -1231,6 +1241,7 @@ mod tests {
             true,
             false,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )
@@ -1270,6 +1281,7 @@ mod tests {
             true,
             false,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )
@@ -1316,6 +1328,7 @@ mod tests {
             true,
             false,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )
@@ -1345,6 +1358,7 @@ mod tests {
             true,
             false,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )
@@ -1374,6 +1388,7 @@ mod tests {
             false,
             false,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )
@@ -1424,6 +1439,7 @@ mod tests {
             false,
             false,
             false,
+            &OutputFormat::ClaudeMd,
             &term,
             Instant::now(),
         )

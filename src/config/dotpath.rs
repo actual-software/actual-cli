@@ -134,6 +134,7 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .map(|f| match f {
                 OutputFormat::ClaudeMd => "claude-md".to_string(),
                 OutputFormat::AgentsMd => "agents-md".to_string(),
+                OutputFormat::CursorRules => "cursor-rules".to_string(),
             })
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
     }
@@ -258,9 +259,10 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             let fmt = match value {
                 "claude-md" => OutputFormat::ClaudeMd,
                 "agents-md" => OutputFormat::AgentsMd,
+                "cursor-rules" => OutputFormat::CursorRules,
                 _ => {
                     return Err(ActualError::ConfigError(format!(
-                        "invalid value for {path}: expected \"claude-md\" or \"agents-md\", got \"{value}\""
+                        "invalid value for {path}: expected \"claude-md\", \"agents-md\", or \"cursor-rules\", got \"{value}\""
                     )));
                 }
             };
@@ -827,7 +829,7 @@ mod tests {
     #[test]
     fn test_set_invalid_output_format() {
         let mut config = Config::default();
-        let err = set(&mut config, "output_format", "cursor-rules").unwrap_err();
+        let err = set(&mut config, "output_format", "unknown-format").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("invalid value"), "got: {msg}");
     }
