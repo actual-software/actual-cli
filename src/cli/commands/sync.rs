@@ -173,12 +173,13 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         .map_err(|e| ActualError::InternalError(format!("Failed to create async runtime: {e}")))?;
 
     let root_dir_owned = root_dir.to_path_buf();
-    // Resolve the effective output format: CLI flag takes precedence over config.
-    let output_format = if args.output_format != OutputFormat::default() {
-        args.output_format.clone()
-    } else {
-        config.output_format.clone().unwrap_or_default()
-    };
+    // Resolve the effective output format: CLI flag takes precedence over config,
+    // and config takes precedence over the default.
+    let output_format = args
+        .output_format
+        .clone()
+        .or_else(|| config.output_format.clone())
+        .unwrap_or_default();
     let output_format_for_fs = output_format.clone();
     let (response, existing_paths) = rt.block_on(async {
         let api_future = async {
@@ -1490,7 +1491,7 @@ mod tests {
             verbose: false,
             no_tailor,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         }
     }
 
@@ -1506,7 +1507,7 @@ mod tests {
             verbose: false,
             no_tailor: false,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         }
     }
 
@@ -1867,7 +1868,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         let result = run_sync(
             &args,
@@ -2559,7 +2560,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         let result = run_sync(
             &args,
@@ -2600,7 +2601,7 @@ mod tests {
             verbose: true,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         // This should succeed and print verbose output to stderr
         let result = run_sync(
@@ -2642,7 +2643,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
@@ -2705,7 +2706,7 @@ mod tests {
             verbose: true,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
         // adr-001 is rejected, so no ADRs remain → "No files to write."
@@ -2731,7 +2732,7 @@ mod tests {
             verbose: false,
             no_tailor: false, // Triggers tailoring path
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         let result = run_sync(
             &args,
@@ -3115,7 +3116,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3146,7 +3147,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
 
         // Provide "y" for project confirmation and select all files
@@ -3190,7 +3191,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3214,7 +3215,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         run_sync(&args2, dir.path(), &cfg_path, &term2, &runner).unwrap();
 
@@ -3286,7 +3287,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3316,7 +3317,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
         assert!(
@@ -3370,7 +3371,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3402,7 +3403,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
-            output_format: OutputFormat::ClaudeMd,
+            output_format: None,
         };
         let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
         assert!(
