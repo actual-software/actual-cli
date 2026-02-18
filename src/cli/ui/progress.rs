@@ -193,6 +193,28 @@ impl SyncPipeline {
         }
     }
 
+    /// Update the message displayed on an active (spinning) phase without
+    /// changing its state.
+    ///
+    /// This is a no-op if the phase bar is not present (quiet mode) or if
+    /// the bar has already been finished.
+    pub fn update_message(&self, phase: SyncPhase, message: &str) {
+        if let Some(bar) = self.bar(phase) {
+            bar.set_message(message.to_string());
+        }
+    }
+
+    /// Print a line above the progress bars without disrupting the spinner.
+    ///
+    /// Uses [`indicatif::MultiProgress::println`] when in non-quiet mode,
+    /// which flushes the line cleanly above all active bars.
+    /// In quiet mode this is a no-op.
+    pub fn println(&self, line: &str) {
+        if let Some(mp) = &self.mp {
+            let _ = mp.println(line);
+        }
+    }
+
     /// Temporarily hide progress for interactive prompts.
     pub fn suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
         match &self.mp {
@@ -332,6 +354,55 @@ mod tests {
         // Skipped bars should show "skipped" in message
         let msg = bar(&pipeline, SyncPhase::Analysis).message().to_string();
         assert!(msg.contains("skipped"), "expected 'skipped' in: {msg}");
+    }
+
+    #[test]
+    fn test_sync_pipeline_update_message() {
+        let pipeline = SyncPipeline::new(false);
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/3)...");
+        let msg_before = bar(&pipeline, SyncPhase::Tailor).message().to_string();
+        assert!(
+            msg_before.contains("0/3"),
+            "expected initial count in: {msg_before}"
+        );
+
+        pipeline.update_message(SyncPhase::Tailor, "Tailoring ADRs (1/3)...");
+        let msg_after = bar(&pipeline, SyncPhase::Tailor).message().to_string();
+        assert!(
+            msg_after.contains("1/3"),
+            "expected updated count in: {msg_after}"
+        );
+    }
+
+    #[test]
+    fn test_sync_pipeline_update_message_quiet() {
+        // In quiet mode update_message should be a no-op without panic
+        let pipeline = SyncPipeline::new(true);
+        pipeline.update_message(SyncPhase::Tailor, "should not panic");
+    }
+
+    #[test]
+    fn test_sync_pipeline_update_message_finished_bar() {
+        // update_message on a finished bar should be a no-op without panic
+        let pipeline = SyncPipeline::new(false);
+        pipeline.start(SyncPhase::Tailor, "Running...");
+        pipeline.success(SyncPhase::Tailor, "Done");
+        // After finish, set_message is a no-op in indicatif — should not panic
+        pipeline.update_message(SyncPhase::Tailor, "this is ignored");
+    }
+
+    #[test]
+    fn test_sync_pipeline_println() {
+        // println should not panic and returns unit
+        let pipeline = SyncPipeline::new(false);
+        pipeline.println("project alpha done");
+    }
+
+    #[test]
+    fn test_sync_pipeline_println_quiet() {
+        // In quiet mode println is a no-op without panic
+        let pipeline = SyncPipeline::new(true);
+        pipeline.println("should not panic");
     }
 
     #[test]
