@@ -54,7 +54,8 @@ fn map_language_type(lang_type: LanguageType) -> Language {
 ///
 /// Uses tokei to scan the directory (respecting `.gitignore` by default).
 /// Filters out data/markup languages (JSON, YAML, HTML, CSS, Markdown, etc.).
-/// Languages not in the `Language` enum are aggregated into a single `Language::Other` entry.
+/// Unknown languages are represented as distinct `Language::Other(name)` entries, preserving
+/// each language's name (e.g. `Language::Other("haskell")`).
 ///
 /// Returns a list of `(Language, usize)` tuples where `usize` is lines of code.
 pub fn detect_languages(path: &Path) -> Vec<(Language, usize)> {
@@ -62,7 +63,7 @@ pub fn detect_languages(path: &Path) -> Vec<(Language, usize)> {
     let mut languages = Languages::new();
     languages.get_statistics(&[path], &[], &config);
 
-    // Aggregate LOC per Language variant
+    // Aggregate LOC per Language variant; Language::Other(name) entries remain distinct
     let mut loc_map: HashMap<Language, usize> = HashMap::new();
 
     for (lang_type, stats) in &languages {
@@ -79,28 +80,23 @@ pub fn detect_languages(path: &Path) -> Vec<(Language, usize)> {
         *loc_map.entry(language).or_default() += code_lines;
     }
 
-    // Build result vec, separating Other variants from the rest and aggregating their LOC
-    let mut other_loc = 0usize;
-    let mut results: Vec<(Language, usize)> = Vec::new();
+    // Separate known languages from Other variants
+    let mut known: Vec<(Language, usize)> = Vec::new();
+    let mut other: Vec<(Language, usize)> = Vec::new();
 
     for (lang, loc) in loc_map {
         if matches!(lang, Language::Other(_)) {
-            other_loc += loc;
+            other.push((lang, loc));
         } else {
-            results.push((lang, loc));
+            known.push((lang, loc));
         }
     }
 
-    // Sort by LOC descending
-    results.sort_by(|a, b| b.1.cmp(&a.1));
-
-    // Append aggregated Other at the end (using a placeholder name since multiple
-    // unknown languages are merged together)
-    if other_loc > 0 {
-        results.push((Language::Other("other".to_string()), other_loc));
-    }
-
-    results
+    // Sort known languages by LOC descending, then Other variants by LOC descending at the end
+    known.sort_by(|a, b| b.1.cmp(&a.1));
+    other.sort_by(|a, b| b.1.cmp(&a.1));
+    known.extend(other);
+    known
 }
 
 /// Normalize a language name or alias to its canonical lowercase form.
@@ -534,10 +530,10 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_languages_aggregates_other() {
+    fn test_detect_languages_preserves_other_names() {
         let dir = tempdir().unwrap();
 
-        // Haskell and Lua are both "Other"
+        // Haskell and Lua are both unknown languages, each gets its own Other(name) entry
         fs::write(
             dir.path().join("main.hs"),
             "main :: IO ()\nmain = putStrLn \"hello\"\n",
@@ -552,14 +548,32 @@ mod tests {
 
         let result = detect_languages(dir.path());
 
-        // Both should be aggregated into a single Other entry
+        // Each unknown language should appear as its own Other(name) entry
         let other_entries: Vec<_> = result
             .iter()
             .filter(|(l, _)| matches!(l, Language::Other(_)))
             .collect();
-        assert_eq!(other_entries.len(), 1);
-        // The aggregated LOC should be > 0
-        assert!(other_entries[0].1 > 0);
+        assert_eq!(
+            other_entries.len(),
+            2,
+            "Each unknown language should be a distinct Other(name) entry"
+        );
+        // Verify the names are preserved by checking the full result for each expected name.
+        let has_haskell = result
+            .iter()
+            .any(|(l, _)| *l == Language::Other("haskell".to_string()));
+        let has_lua = result
+            .iter()
+            .any(|(l, _)| *l == Language::Other("lua".to_string()));
+        assert!(
+            has_haskell,
+            "Expected Language::Other(\"haskell\") in result"
+        );
+        assert!(has_lua, "Expected Language::Other(\"lua\") in result");
+        // All LOCs should be > 0
+        for (_, loc) in &other_entries {
+            assert!(*loc > 0);
+        }
     }
 
     #[test]
