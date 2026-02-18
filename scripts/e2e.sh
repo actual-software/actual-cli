@@ -282,8 +282,8 @@ scenario_sync_realistic_project() {
     fi
 
     local managed_start managed_end managed_len
-    managed_start="$(echo "$content" | grep -n '<!-- managed:actual-start -->' | cut -d: -f1 | head -1)"
-    managed_end="$(echo "$content" | grep -n '<!-- managed:actual-end -->' | cut -d: -f1 | head -1)"
+    managed_start="$(echo "$content" | grep -n '<!-- managed:actual-start -->' | cut -d: -f1 | head -1 || true)"
+    managed_end="$(echo "$content" | grep -n '<!-- managed:actual-end -->' | cut -d: -f1 | head -1 || true)"
     if [[ -z "$managed_start" || -z "$managed_end" ]]; then
         fail "sync_realistic: managed-start or managed-end marker not found"
         return
