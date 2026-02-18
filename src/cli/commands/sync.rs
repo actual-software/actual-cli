@@ -116,7 +116,7 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         pipeline.suspend(|| eprintln!("{summary}"));
     } else {
         // prompt_project_confirmation displays the project summary itself
-        let action = pipeline.suspend(|| prompt_project_confirmation(&analysis, term));
+        let action = pipeline.suspend(|| prompt_project_confirmation(&analysis, term))?;
         if matches!(action, ConfirmAction::Reject) {
             pipeline.finish_remaining();
             return Err(ActualError::UserCancelled);
