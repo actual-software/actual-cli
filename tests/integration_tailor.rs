@@ -10,23 +10,26 @@ mod tests {
         files: &[(&str, &str, &str, &[&str])], // (path, content, reasoning, adr_ids)
         skipped: &[(&str, &str)],              // (id, reason)
     ) -> String {
-        let file_objects: Vec<String> = files
+        let file_objects: Vec<serde_json::Value> = files
             .iter()
             .map(|(path, content, reasoning, adr_ids)| {
-                let ids: Vec<String> = adr_ids.iter().map(|id| format!("\"{}\"", id)).collect();
-                format!(
-                    r#"{{"path": "{}", "content": "{}", "reasoning": "{}", "adr_ids": [{}]}}"#,
-                    path,
-                    content,
-                    reasoning,
-                    ids.join(", ")
-                )
+                serde_json::json!({
+                    "path": path,
+                    "content": content,
+                    "reasoning": reasoning,
+                    "adr_ids": adr_ids,
+                })
             })
             .collect();
 
-        let skipped_objects: Vec<String> = skipped
+        let skipped_objects: Vec<serde_json::Value> = skipped
             .iter()
-            .map(|(id, reason)| format!(r#"{{"id": "{}", "reason": "{}"}}"#, id, reason))
+            .map(|(id, reason)| {
+                serde_json::json!({
+                    "id": id,
+                    "reason": reason,
+                })
+            })
             .collect();
 
         let applicable = files.iter().map(|(_, _, _, ids)| ids.len()).sum::<usize>();
@@ -34,15 +37,57 @@ mod tests {
         let total_input = applicable + not_applicable;
         let files_generated = files.len();
 
-        format!(
-            r#"{{"files": [{}], "skipped_adrs": [{}], "summary": {{"total_input": {}, "applicable": {}, "not_applicable": {}, "files_generated": {}}}}}"#,
-            file_objects.join(", "),
-            skipped_objects.join(", "),
-            total_input,
-            applicable,
-            not_applicable,
-            files_generated,
-        )
+        serde_json::json!({
+            "files": file_objects,
+            "skipped_adrs": skipped_objects,
+            "summary": {
+                "total_input": total_input,
+                "applicable": applicable,
+                "not_applicable": not_applicable,
+                "files_generated": files_generated,
+            },
+        })
+        .to_string()
+    }
+
+    /// Helper: build a tailoring JSON response with content containing special characters.
+    ///
+    /// Verifies that `make_tailoring_json` correctly handles strings with double quotes,
+    /// backslashes, and other JSON-special characters — something the old `format!`-based
+    /// implementation could not do.
+    #[test]
+    fn make_tailoring_json_handles_special_characters() {
+        let json_str = make_tailoring_json(
+            &[(
+                "CLAUDE.md",
+                r#"Use "quotes" and backslash: C:\path\to\file"#,
+                r#"ADR says: use "double quotes" for strings"#,
+                &["adr-001"],
+            )],
+            &[("adr-002", r#"Not applicable: contains "special" chars"#)],
+        );
+
+        // Must parse as valid JSON
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("output must be valid JSON");
+
+        // File content should round-trip correctly
+        let content = parsed["files"][0]["content"].as_str().unwrap();
+        assert!(
+            content.contains("\"quotes\""),
+            "double quotes should be preserved"
+        );
+        assert!(
+            content.contains(r"C:\path\to\file"),
+            "backslashes should be preserved"
+        );
+
+        // Skipped reason should also round-trip
+        let reason = parsed["skipped_adrs"][0]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("\"special\""),
+            "double quotes in skipped reason should be preserved"
+        );
     }
 
     #[test]
