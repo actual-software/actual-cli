@@ -1,5 +1,34 @@
 use serde::{Deserialize, Serialize};
 
+/// Progress event emitted during concurrent tailoring.
+///
+/// Sent through a channel to allow callers to display real-time progress
+/// as individual projects complete.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TailoringEvent {
+    /// A project started processing.
+    ProjectStarted {
+        /// Human-readable project name.
+        project_name: String,
+    },
+    /// A project finished successfully.
+    ProjectCompleted {
+        /// Human-readable project name.
+        project_name: String,
+        /// Number of CLAUDE.md files generated for this project.
+        files_generated: usize,
+        /// Number of ADRs that were applicable (not skipped) for this project.
+        adrs_applied: usize,
+    },
+    /// A project failed.
+    ProjectFailed {
+        /// Human-readable project name.
+        project_name: String,
+        /// Error message.
+        error: String,
+    },
+}
+
 /// Output from the combined tailoring + formatting Claude Code invocation.
 ///
 /// Represents the complete result of processing ADRs through the tailoring pipeline,
@@ -52,6 +81,78 @@ pub struct TailoringSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── TailoringEvent tests ──
+
+    #[test]
+    fn test_tailoring_event_project_started_debug_clone_eq() {
+        let event = TailoringEvent::ProjectStarted {
+            project_name: "my-app".to_string(),
+        };
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+        let debug = format!("{:?}", event);
+        assert!(
+            debug.contains("ProjectStarted"),
+            "expected variant in: {debug}"
+        );
+        assert!(debug.contains("my-app"), "expected name in: {debug}");
+    }
+
+    #[test]
+    fn test_tailoring_event_project_completed_debug_clone_eq() {
+        let event = TailoringEvent::ProjectCompleted {
+            project_name: "web-app".to_string(),
+            files_generated: 3,
+            adrs_applied: 5,
+        };
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+        let debug = format!("{:?}", event);
+        assert!(
+            debug.contains("ProjectCompleted"),
+            "expected variant in: {debug}"
+        );
+        assert!(debug.contains("web-app"), "expected name in: {debug}");
+        assert!(debug.contains('3'), "expected files_generated in: {debug}");
+        assert!(debug.contains('5'), "expected adrs_applied in: {debug}");
+    }
+
+    #[test]
+    fn test_tailoring_event_project_failed_debug_clone_eq() {
+        let event = TailoringEvent::ProjectFailed {
+            project_name: "api-service".to_string(),
+            error: "timeout".to_string(),
+        };
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+        let debug = format!("{:?}", event);
+        assert!(
+            debug.contains("ProjectFailed"),
+            "expected variant in: {debug}"
+        );
+        assert!(debug.contains("api-service"), "expected name in: {debug}");
+        assert!(debug.contains("timeout"), "expected error in: {debug}");
+    }
+
+    #[test]
+    fn test_tailoring_event_variants_not_equal() {
+        let started = TailoringEvent::ProjectStarted {
+            project_name: "app".to_string(),
+        };
+        let completed = TailoringEvent::ProjectCompleted {
+            project_name: "app".to_string(),
+            files_generated: 1,
+            adrs_applied: 1,
+        };
+        let failed = TailoringEvent::ProjectFailed {
+            project_name: "app".to_string(),
+            error: "err".to_string(),
+        };
+        assert_ne!(started, completed);
+        assert_ne!(started, failed);
+        assert_ne!(completed, failed);
+    }
 
     #[test]
     fn test_deserialize_sample() {

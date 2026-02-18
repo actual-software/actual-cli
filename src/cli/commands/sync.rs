@@ -27,7 +27,7 @@ use crate::generation::markers;
 use crate::generation::writer::{write_files, WriteAction, WriteResult};
 use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfig};
 use crate::tailoring::filter::pre_filter_rejected;
-use crate::tailoring::types::{FileOutput, TailoringOutput, TailoringSummary};
+use crate::tailoring::types::{FileOutput, TailoringEvent, TailoringOutput, TailoringSummary};
 
 /// Result summary from the confirm + write phase.
 #[derive(Debug, Clone, PartialEq)]
@@ -275,7 +275,11 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         );
         out
     } else {
-        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs...");
+        let project_count = analysis.projects.len();
+        pipeline.start(
+            SyncPhase::Tailor,
+            &format!("Tailoring ADRs (0/{project_count} projects done)..."),
+        );
         let tailoring_config = ConcurrentTailoringConfig {
             concurrency: config.concurrency.unwrap_or(3),
             batch_size: config.batch_size.unwrap_or(15),
@@ -286,15 +290,37 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
                 config.invocation_timeout_secs.unwrap_or(600).max(1),
             ),
         };
+
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+
         let result = rt.block_on(async {
-            tokio::select! {
-                result = tailor_all_projects(
-                    runner,
-                    &analysis.projects,
-                    &filtered_adrs,
-                    &tailoring_config,
-                ) => result,
-                _ = tokio::signal::ctrl_c() => Err(ActualError::UserCancelled),
+            let mut completed = 0usize;
+            let tailor_fut = tailor_all_projects(
+                runner,
+                &analysis.projects,
+                &filtered_adrs,
+                &tailoring_config,
+                Some(progress_tx),
+            );
+            tokio::pin!(tailor_fut);
+
+            loop {
+                tokio::select! {
+                    result = &mut tailor_fut => {
+                        // Drain any remaining events before breaking
+                        while let Ok(event) = progress_rx.try_recv() {
+                            apply_tailoring_event(event, &pipeline, &mut completed, project_count);
+                        }
+                        break result;
+                    }
+                    Some(event) = progress_rx.recv() => {
+                        apply_tailoring_event(event, &pipeline, &mut completed, project_count);
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        break Err(ActualError::UserCancelled);
+                    }
+                }
             }
         });
         match result {
@@ -333,6 +359,39 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
         pipeline.start_time(),
     )?;
     Ok(())
+}
+
+/// Apply a single [`TailoringEvent`] to the progress pipeline.
+///
+/// Updates the spinner message and prints per-project status lines as projects
+/// complete or fail. This is extracted from the select loop so that both the
+/// real-time event path and the drain-on-completion path share the same logic
+/// and the function can be tested independently.
+fn apply_tailoring_event(
+    event: TailoringEvent,
+    pipeline: &SyncPipeline,
+    completed: &mut usize,
+    project_count: usize,
+) {
+    match event {
+        TailoringEvent::ProjectCompleted {
+            ref project_name, ..
+        } => {
+            *completed += 1;
+            pipeline.update_message(
+                SyncPhase::Tailor,
+                &format!("Tailoring ADRs ({completed}/{project_count} projects done)..."),
+            );
+            pipeline.println(&format!("  \u{2714} {project_name}"));
+        }
+        TailoringEvent::ProjectFailed {
+            ref project_name,
+            ref error,
+        } => {
+            pipeline.println(&format!("  \u{2716} {project_name}: {error}"));
+        }
+        TailoringEvent::ProjectStarted { .. } => {}
+    }
 }
 
 /// Filter the analysis to only include projects matching the given filters.
@@ -2888,5 +2947,96 @@ mod tests {
             second_time > first_time,
             "force should update cache timestamp: {first_time} vs {second_time}"
         );
+    }
+
+    // ── apply_tailoring_event tests ──
+
+    #[test]
+    fn test_apply_tailoring_event_project_started_is_noop() {
+        let pipeline = SyncPipeline::new(true); // quiet mode — no output
+        let mut completed = 0usize;
+        apply_tailoring_event(
+            TailoringEvent::ProjectStarted {
+                project_name: "app".to_string(),
+            },
+            &pipeline,
+            &mut completed,
+            3,
+        );
+        // ProjectStarted should not increment the counter
+        assert_eq!(completed, 0);
+    }
+
+    #[test]
+    fn test_apply_tailoring_event_project_completed_increments_counter() {
+        let pipeline = SyncPipeline::new(false);
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/3 projects done)...");
+        let mut completed = 0usize;
+        apply_tailoring_event(
+            TailoringEvent::ProjectCompleted {
+                project_name: "web-app".to_string(),
+                files_generated: 2,
+                adrs_applied: 5,
+            },
+            &pipeline,
+            &mut completed,
+            3,
+        );
+        assert_eq!(completed, 1, "expected completed to increment to 1");
+    }
+
+    #[test]
+    fn test_apply_tailoring_event_project_completed_multiple_times() {
+        let pipeline = SyncPipeline::new(false);
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/3 projects done)...");
+        let mut completed = 0usize;
+        for i in 1..=3usize {
+            apply_tailoring_event(
+                TailoringEvent::ProjectCompleted {
+                    project_name: format!("project-{i}"),
+                    files_generated: 1,
+                    adrs_applied: 2,
+                },
+                &pipeline,
+                &mut completed,
+                3,
+            );
+            assert_eq!(completed, i, "expected completed={i} after {i} events");
+        }
+    }
+
+    #[test]
+    fn test_apply_tailoring_event_project_failed_does_not_increment() {
+        let pipeline = SyncPipeline::new(false);
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/2 projects done)...");
+        let mut completed = 0usize;
+        apply_tailoring_event(
+            TailoringEvent::ProjectFailed {
+                project_name: "bad-app".to_string(),
+                error: "timeout".to_string(),
+            },
+            &pipeline,
+            &mut completed,
+            2,
+        );
+        // ProjectFailed should not increment the counter
+        assert_eq!(completed, 0, "expected completed to remain 0 on failure");
+    }
+
+    #[test]
+    fn test_apply_tailoring_event_project_failed_quiet_mode() {
+        // In quiet mode, println is a no-op — should not panic
+        let pipeline = SyncPipeline::new(true);
+        let mut completed = 0usize;
+        apply_tailoring_event(
+            TailoringEvent::ProjectFailed {
+                project_name: "bad-app".to_string(),
+                error: "crashed".to_string(),
+            },
+            &pipeline,
+            &mut completed,
+            1,
+        );
+        assert_eq!(completed, 0);
     }
 }
