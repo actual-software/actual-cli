@@ -8,6 +8,9 @@ use crate::tailoring::types::TailoringOutput;
 
 use super::subprocess::TailoringRunner;
 
+/// The production Anthropic Messages API endpoint.
+const ANTHROPIC_API_BASE: &str = "https://api.anthropic.com";
+
 /// Direct HTTP runner that calls the Anthropic Messages API without spawning a subprocess.
 ///
 /// Uses a forced tool call (`tool_choice: { type: "tool", name: "return_result" }`) to obtain
@@ -18,11 +21,18 @@ pub struct AnthropicApiRunner {
     model: String,
     client: reqwest::Client,
     timeout: Duration,
+    /// Base URL for the API, configurable for testing.
+    base_url: String,
 }
 
 impl AnthropicApiRunner {
     /// Create a new runner with an explicit API key.
     pub fn new(api_key: String, model: String, timeout: Duration) -> Self {
+        Self::with_base_url(api_key, model, timeout, ANTHROPIC_API_BASE.to_string())
+    }
+
+    /// Create a runner with a custom base URL (used in tests to point at a mock server).
+    fn with_base_url(api_key: String, model: String, timeout: Duration, base_url: String) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .build()
@@ -32,6 +42,7 @@ impl AnthropicApiRunner {
             model,
             client,
             timeout,
+            base_url,
         }
     }
 
@@ -44,11 +55,12 @@ impl AnthropicApiRunner {
         Ok(Self::new(api_key, model, timeout))
     }
 
-    /// POST to the Anthropic Messages API and return the raw response body.
+    /// POST to the Anthropic Messages API and return the parsed JSON response body.
     async fn post_messages(&self, body: Value) -> Result<Value, ActualError> {
+        let url = format!("{}/v1/messages", self.base_url);
         let response = self
             .client
-            .post("https://api.anthropic.com/v1/messages")
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -179,31 +191,14 @@ mod tests {
     use super::*;
     use mockito::Server;
 
-    fn make_runner(_server_url: &str) -> AnthropicApiRunner {
-        // Build a client with the mock server's base URL injected via a thin wrapper.
-        // Since reqwest doesn't support base-URL swapping natively for `post()`, we
-        // create the runner then swap the client to point at the mock server by
-        // constructing the request URL explicitly in a test-only helper.
-        //
-        // Instead, we use a subclass approach: override the endpoint via env or we
-        // simply build the runner and rely on mockito patching the URL scheme.
-        //
-        // The cleanest approach for mockito v1: use `Server::url()` as the base and
-        // call the internal helper directly.  However, `post_messages` hard-codes the
-        // URL.  To make tests work we use `mockito`'s `SERVER_URL` env var approach
-        // — but mockito doesn't offer that either.
-        //
-        // The real solution: accept a base_url in the runner for tests.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap();
-        AnthropicApiRunner {
-            api_key: "test-key".to_string(),
-            model: "claude-sonnet-4-5".to_string(),
-            client,
-            timeout: Duration::from_secs(10),
-        }
+    /// Create a runner pointed at `server_url` instead of the production API.
+    fn make_runner(server_url: &str) -> AnthropicApiRunner {
+        AnthropicApiRunner::with_base_url(
+            "test-key".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            Duration::from_secs(10),
+            server_url.to_string(),
+        )
     }
 
     /// Build a minimal valid TailoringOutput JSON value.
@@ -247,116 +242,6 @@ mod tests {
         })
     }
 
-    // ── Internal helper that calls post_messages with a base_url override ──
-
-    impl AnthropicApiRunner {
-        /// Test-only variant of `post_messages` that accepts a custom base URL.
-        async fn post_messages_at(
-            &self,
-            base_url: &str,
-            body: Value,
-        ) -> Result<Value, ActualError> {
-            let url = format!("{}/v1/messages", base_url);
-            let response = self
-                .client
-                .post(&url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| {
-                    if e.is_timeout() {
-                        ActualError::ClaudeTimeout {
-                            seconds: self.timeout.as_secs(),
-                        }
-                    } else {
-                        ActualError::ClaudeSubprocessFailed {
-                            message: format!("HTTP request failed: {e}"),
-                            stderr: String::new(),
-                        }
-                    }
-                })?;
-
-            let status = response.status();
-
-            if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
-                return Err(ActualError::ClaudeNotAuthenticated);
-            }
-
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return Err(ActualError::ClaudeSubprocessFailed {
-                    message: "Anthropic API rate limited".to_string(),
-                    stderr: String::new(),
-                });
-            }
-
-            if status.is_server_error() {
-                let body = response.text().await.unwrap_or_else(|_| String::new());
-                return Err(ActualError::ClaudeSubprocessFailed {
-                    message: format!("Anthropic API error: {status}"),
-                    stderr: body,
-                });
-            }
-
-            let json: Value =
-                response
-                    .json()
-                    .await
-                    .map_err(|e| ActualError::ClaudeSubprocessFailed {
-                        message: format!("Failed to parse Anthropic API response: {e}"),
-                        stderr: String::new(),
-                    })?;
-
-            Ok(json)
-        }
-
-        /// Test-only variant of `run_tailoring` that accepts a custom base URL.
-        async fn run_tailoring_at(
-            &self,
-            base_url: &str,
-            prompt: &str,
-            schema: &str,
-            model_override: Option<&str>,
-        ) -> Result<TailoringOutput, ActualError> {
-            let model = model_override.unwrap_or(&self.model);
-            let schema_value: Value = serde_json::from_str(schema)?;
-
-            let request_body = serde_json::json!({
-                "model": model,
-                "max_tokens": 8192,
-                "system": "You are an expert software architect.",
-                "messages": [{"role": "user", "content": prompt}],
-                "tools": [{"name": "return_result", "description": "Return the structured tailoring result", "input_schema": schema_value}],
-                "tool_choice": {"type": "tool", "name": "return_result"}
-            });
-
-            let response = self.post_messages_at(base_url, request_body).await?;
-
-            let content_blocks: Vec<ContentBlock> = response
-                .get("content")
-                .and_then(|c| serde_json::from_value(c.clone()).ok())
-                .unwrap_or_default();
-
-            let tool_input = content_blocks
-                .into_iter()
-                .find(|block| {
-                    block.block_type == "tool_use" && block.name.as_deref() == Some("return_result")
-                })
-                .and_then(|block| block.input)
-                .ok_or_else(|| ActualError::ClaudeSubprocessFailed {
-                    message: "Anthropic API did not return structured result".to_string(),
-                    stderr: String::new(),
-                })?;
-
-            let output: TailoringOutput = serde_json::from_value(tool_input)?;
-            Ok(output)
-        }
-    }
-
     // Test 1: valid response is parsed correctly
     #[tokio::test]
     async fn test_valid_response_parsed_correctly() {
@@ -374,7 +259,7 @@ mod tests {
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
         let result = runner
-            .run_tailoring_at(&server.url(), "Test prompt", schema, None)
+            .run_tailoring("Test prompt", schema, None, None)
             .await;
 
         mock.assert_async().await;
@@ -398,9 +283,7 @@ mod tests {
 
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
-        let result = runner
-            .run_tailoring_at(&server.url(), "prompt", schema, None)
-            .await;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         mock.assert_async().await;
         assert!(
@@ -424,9 +307,7 @@ mod tests {
 
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
-        let result = runner
-            .run_tailoring_at(&server.url(), "prompt", schema, None)
-            .await;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         mock.assert_async().await;
         match result {
@@ -454,9 +335,7 @@ mod tests {
 
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
-        let result = runner
-            .run_tailoring_at(&server.url(), "prompt", schema, None)
-            .await;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         mock.assert_async().await;
         assert!(
@@ -497,9 +376,7 @@ mod tests {
 
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
-        let result = runner
-            .run_tailoring_at(&server.url(), "prompt", schema, None)
-            .await;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         mock.assert_async().await;
         match result {
@@ -551,7 +428,6 @@ mod tests {
         let mut server = Server::new_async().await;
         let response_body = anthropic_tool_use_response(tailoring_output_json());
 
-        // Capture the request body to verify the model
         let mock = server
             .mock("POST", "/v1/messages")
             .with_status(200)
@@ -563,7 +439,7 @@ mod tests {
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
         let result = runner
-            .run_tailoring_at(&server.url(), "prompt", schema, Some("claude-opus-4-5"))
+            .run_tailoring("prompt", schema, Some("claude-opus-4-5"), None)
             .await;
 
         mock.assert_async().await;
@@ -584,9 +460,7 @@ mod tests {
 
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
-        let result = runner
-            .run_tailoring_at(&server.url(), "prompt", schema, None)
-            .await;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         mock.assert_async().await;
         assert!(
