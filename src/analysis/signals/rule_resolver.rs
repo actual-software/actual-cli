@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::analysis::static_analyzer::languages::normalize_language as canonical_normalize_language;
+
 /// Languages for which semgrep rules may be applicable.
 pub const SUPPORTED_LANGUAGES: &[&str] = &[
     "c",
@@ -80,25 +82,13 @@ impl RuleResolver {
 
     /// Normalize a language name or alias to its canonical form.
     ///
-    /// Returns `None` if the language is not supported.
+    /// Delegates to the canonical implementation in
+    /// [`crate::analysis::static_analyzer::languages::normalize_language`], which
+    /// is the single source of truth for all language aliases.
+    ///
+    /// Returns `None` if the language is not recognized.
     pub fn normalize_language(lang: &str) -> Option<&'static str> {
-        match lang.to_lowercase().as_str() {
-            "ts" | "typescript" => Some("typescript"),
-            "js" | "javascript" => Some("javascript"),
-            "py" | "python" => Some("python"),
-            "golang" | "go" => Some("go"),
-            "c++" | "cxx" | "cpp" => Some("cpp"),
-            "c#" | "cs" | "csharp" | "c_sharp" | "c-sharp" => Some("csharp"),
-            "kt" | "kotlin" => Some("kotlin"),
-            "rb" | "ruby" => Some("ruby"),
-            "java" => Some("java"),
-            "rust" => Some("rust"),
-            "php" => Some("php"),
-            "swift" => Some("swift"),
-            "c" => Some("c"),
-            "scala" => Some("scala"),
-            _ => None,
-        }
+        canonical_normalize_language(lang)
     }
 
     /// List the top-level category subdirectory names found in the rules directory.
@@ -137,6 +127,7 @@ mod tests {
     #[test]
     fn test_normalize_language_typescript_aliases() {
         assert_eq!(RuleResolver::normalize_language("ts"), Some("typescript"));
+        assert_eq!(RuleResolver::normalize_language("tsx"), Some("typescript"));
         assert_eq!(
             RuleResolver::normalize_language("typescript"),
             Some("typescript")
@@ -154,6 +145,7 @@ mod tests {
     #[test]
     fn test_normalize_language_javascript_aliases() {
         assert_eq!(RuleResolver::normalize_language("js"), Some("javascript"));
+        assert_eq!(RuleResolver::normalize_language("jsx"), Some("javascript"));
         assert_eq!(
             RuleResolver::normalize_language("javascript"),
             Some("javascript")
@@ -209,6 +201,13 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_language_rust_aliases() {
+        assert_eq!(RuleResolver::normalize_language("rs"), Some("rust"));
+        assert_eq!(RuleResolver::normalize_language("rust"), Some("rust"));
+        assert_eq!(RuleResolver::normalize_language("Rust"), Some("rust"));
+    }
+
+    #[test]
     fn test_normalize_language_direct_names() {
         assert_eq!(RuleResolver::normalize_language("java"), Some("java"));
         assert_eq!(RuleResolver::normalize_language("rust"), Some("rust"));
@@ -216,6 +215,7 @@ mod tests {
         assert_eq!(RuleResolver::normalize_language("swift"), Some("swift"));
         assert_eq!(RuleResolver::normalize_language("c"), Some("c"));
         assert_eq!(RuleResolver::normalize_language("scala"), Some("scala"));
+        assert_eq!(RuleResolver::normalize_language("elixir"), Some("elixir"));
     }
 
     #[test]
@@ -248,11 +248,16 @@ mod tests {
 
     #[test]
     fn test_normalize_language_output_in_supported() {
-        // Every canonical value returned by normalize_language must be in SUPPORTED_LANGUAGES.
+        // For the aliases that correspond to SUPPORTED_LANGUAGES entries, verify that
+        // normalize_language returns a value that is actually in SUPPORTED_LANGUAGES.
+        // Note: normalize_language may also recognize additional aliases (e.g. "elixir")
+        // whose canonical forms are not in SUPPORTED_LANGUAGES; those are tested separately.
         let aliases = [
             "ts",
+            "tsx",
             "typescript",
             "js",
+            "jsx",
             "javascript",
             "py",
             "python",
@@ -270,6 +275,7 @@ mod tests {
             "kotlin",
             "rb",
             "ruby",
+            "rs",
             "java",
             "rust",
             "php",

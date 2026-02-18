@@ -130,11 +130,11 @@ pub fn normalize_language(value: &str) -> Option<&'static str> {
         "py" | "python" => Some("python"),
         "golang" | "go" => Some("go"),
         "c++" | "cxx" | "cpp" => Some("cpp"),
-        "rust" => Some("rust"),
+        "rs" | "rust" => Some("rust"),
         "java" => Some("java"),
-        "kotlin" => Some("kotlin"),
+        "kt" | "kotlin" => Some("kotlin"),
         "swift" => Some("swift"),
-        "ruby" => Some("ruby"),
+        "rb" | "ruby" => Some("ruby"),
         "php" => Some("php"),
         "c" => Some("c"),
         "scala" => Some("scala"),
@@ -294,6 +294,30 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_kotlin_aliases() {
+        assert_eq!(normalize_language("kt"), Some("kotlin"));
+        assert_eq!(normalize_language("KT"), Some("kotlin"));
+        assert_eq!(normalize_language("kotlin"), Some("kotlin"));
+        assert_eq!(normalize_language("Kotlin"), Some("kotlin"));
+    }
+
+    #[test]
+    fn test_normalize_ruby_aliases() {
+        assert_eq!(normalize_language("rb"), Some("ruby"));
+        assert_eq!(normalize_language("RB"), Some("ruby"));
+        assert_eq!(normalize_language("ruby"), Some("ruby"));
+        assert_eq!(normalize_language("Ruby"), Some("ruby"));
+    }
+
+    #[test]
+    fn test_normalize_rust_aliases() {
+        assert_eq!(normalize_language("rs"), Some("rust"));
+        assert_eq!(normalize_language("RS"), Some("rust"));
+        assert_eq!(normalize_language("rust"), Some("rust"));
+        assert_eq!(normalize_language("Rust"), Some("rust"));
+    }
+
+    #[test]
     fn test_normalize_canonical_returns_self() {
         assert_eq!(normalize_language("rust"), Some("rust"));
         assert_eq!(normalize_language("python"), Some("python"));
@@ -319,6 +343,8 @@ mod tests {
         assert_eq!(normalize_language("Java"), Some("java"));
         assert_eq!(normalize_language("TypeScript"), Some("typescript"));
         assert_eq!(normalize_language("JavaScript"), Some("javascript"));
+        assert_eq!(normalize_language("Kotlin"), Some("kotlin"));
+        assert_eq!(normalize_language("Ruby"), Some("ruby"));
     }
 
     #[test]
@@ -326,6 +352,81 @@ mod tests {
         assert_eq!(normalize_language("haskell"), None);
         assert_eq!(normalize_language("zig"), None);
         assert_eq!(normalize_language(""), None);
+    }
+
+    /// Verify that every alias known to RuleResolver::normalize_language produces
+    /// the same result from this canonical function.  This guards against the two
+    /// call sites diverging again in the future.
+    #[test]
+    fn test_normalize_all_aliases_consistent() {
+        use crate::analysis::signals::rule_resolver::RuleResolver;
+
+        // Union of all aliases that either implementation ever handled.
+        let aliases = [
+            // javascript
+            "js",
+            "jsx",
+            "javascript",
+            "JavaScript",
+            "JS",
+            // typescript
+            "ts",
+            "tsx",
+            "typescript",
+            "TypeScript",
+            "TS",
+            // python
+            "py",
+            "python",
+            "Python",
+            // go
+            "go",
+            "golang",
+            "Golang",
+            "Go",
+            // c++
+            "c++",
+            "cxx",
+            "cpp",
+            "CXX",
+            "C++",
+            // c#
+            "c#",
+            "cs",
+            "csharp",
+            "c_sharp",
+            "c-sharp",
+            "C#",
+            // kotlin (kt was only in rule_resolver before)
+            "kt",
+            "KT",
+            "kotlin",
+            "Kotlin",
+            // ruby (rb was only in rule_resolver before)
+            "rb",
+            "RB",
+            "ruby",
+            "Ruby",
+            // rust (rs was only in languages before)
+            "rs",
+            "RS",
+            "rust",
+            "Rust",
+            // other direct names
+            "java",
+            "php",
+            "swift",
+            "c",
+            "scala",
+        ];
+
+        for alias in &aliases {
+            assert_eq!(
+                normalize_language(alias),
+                RuleResolver::normalize_language(alias),
+                "normalize_language and RuleResolver::normalize_language disagree on alias {alias:?}"
+            );
+        }
     }
 
     // --- detect_languages tests ---
