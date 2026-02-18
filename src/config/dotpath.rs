@@ -130,12 +130,20 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             config.max_per_framework = Some(v);
         }
         "include_categories" => {
-            config.include_categories =
-                Some(value.split(',').map(|s| s.trim().to_string()).collect());
+            let cats: Vec<String> = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            config.include_categories = if cats.is_empty() { None } else { Some(cats) };
         }
         "exclude_categories" => {
-            config.exclude_categories =
-                Some(value.split(',').map(|s| s.trim().to_string()).collect());
+            let cats: Vec<String> = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            config.exclude_categories = if cats.is_empty() { None } else { Some(cats) };
         }
         "telemetry.enabled" => {
             let enabled = value.parse::<bool>().map_err(|_| {
@@ -552,5 +560,53 @@ mod tests {
         let mut config = Config::default();
         set(&mut config, "max_budget_usd", "0.01").unwrap();
         assert_eq!(config.max_budget_usd, Some(0.01));
+    }
+
+    // --- Category empty string tests ---
+
+    #[test]
+    fn test_set_include_categories_empty_string_clears() {
+        let mut config = Config::default();
+        set(&mut config, "include_categories", "testing,security").unwrap();
+        assert!(config.include_categories.is_some());
+        set(&mut config, "include_categories", "").unwrap();
+        assert!(config.include_categories.is_none());
+        let err = get(&config, "include_categories").unwrap_err();
+        assert!(err.to_string().contains("not set"));
+    }
+
+    #[test]
+    fn test_set_exclude_categories_empty_string_clears() {
+        let mut config = Config::default();
+        set(&mut config, "exclude_categories", "deprecated,legacy").unwrap();
+        assert!(config.exclude_categories.is_some());
+        set(&mut config, "exclude_categories", "").unwrap();
+        assert!(config.exclude_categories.is_none());
+        let err = get(&config, "exclude_categories").unwrap_err();
+        assert!(err.to_string().contains("not set"));
+    }
+
+    #[test]
+    fn test_set_include_categories_whitespace_only_clears() {
+        let mut config = Config::default();
+        set(&mut config, "include_categories", " , , ").unwrap();
+        assert!(config.include_categories.is_none());
+    }
+
+    #[test]
+    fn test_set_include_categories_double_commas_filtered() {
+        let mut config = Config::default();
+        set(&mut config, "include_categories", "testing,,security").unwrap();
+        assert_eq!(
+            config.include_categories,
+            Some(vec!["testing".to_string(), "security".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_set_exclude_categories_whitespace_only_clears() {
+        let mut config = Config::default();
+        set(&mut config, "exclude_categories", " , , ").unwrap();
+        assert!(config.exclude_categories.is_none());
     }
 }
