@@ -21,9 +21,9 @@ pub struct EnvGuard {
 impl EnvGuard {
     /// Set `key` to `val`, saving the previous value for restoration on drop.
     ///
-    /// # Safety
     /// The caller must hold `ENV_MUTEX` (or equivalent) before calling this
-    /// function, as required by the deprecated `set_var`/`remove_var` APIs.
+    /// function to serialise access, as required by the deprecated
+    /// `set_var`/`remove_var` APIs.
     pub fn set(key: &str, val: &str) -> Self {
         let old = std::env::var(key).ok();
         // SAFETY: caller holds ENV_MUTEX before calling this.
@@ -39,9 +39,9 @@ impl EnvGuard {
 
     /// Remove `key`, saving the previous value for restoration on drop.
     ///
-    /// # Safety
     /// The caller must hold `ENV_MUTEX` (or equivalent) before calling this
-    /// function, as required by the deprecated `set_var`/`remove_var` APIs.
+    /// function to serialise access, as required by the deprecated
+    /// `set_var`/`remove_var` APIs.
     pub fn remove(key: &str) -> Self {
         let old = std::env::var(key).ok();
         // SAFETY: caller holds ENV_MUTEX before calling this.
