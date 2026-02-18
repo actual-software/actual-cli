@@ -36,9 +36,10 @@ where
 
     for attempt in 0..config.max_attempts {
         if attempt > 0 {
-            let delay = config
-                .initial_delay
-                .saturating_mul(config.backoff_factor.pow(attempt - 1));
+            let delay = match config.backoff_factor.checked_pow(attempt - 1) {
+                Some(multiplier) => config.initial_delay.saturating_mul(multiplier),
+                None => Duration::MAX,
+            };
             tokio::time::sleep(delay).await;
         }
 
@@ -170,5 +171,25 @@ mod tests {
         assert!(first_to_second <= Duration::from_secs(1) + tolerance);
         assert!(second_to_third >= Duration::from_secs(2));
         assert!(second_to_third <= Duration::from_secs(2) + tolerance);
+    }
+
+    #[tokio::test]
+    async fn test_backoff_no_overflow_on_large_attempts() {
+        tokio::time::pause();
+
+        let config = RetryConfig {
+            max_attempts: 33,
+            initial_delay: Duration::from_secs(1),
+            backoff_factor: 2,
+        };
+
+        // All 33 attempts fail with ApiError.
+        // This must NOT panic (debug) or silently wrap (release).
+        let behaviors: Vec<u32> = vec![0; 33];
+        let (result, calls) = run_retry(&config, &behaviors).await;
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(_)));
+        assert_eq!(calls, 33);
     }
 }
