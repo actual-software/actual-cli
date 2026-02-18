@@ -7,4 +7,4 @@ pub mod schemas;
 pub mod subprocess;
 
 pub use options::InvocationOptions;
-pub use subprocess::{ClaudeRunner, CliClaudeRunner};
+pub use subprocess::{ClaudeRunner, CliClaudeRunner, TailoringRunner};

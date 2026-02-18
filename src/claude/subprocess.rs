@@ -6,6 +6,7 @@ use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::error::ActualError;
+use crate::tailoring::types::TailoringOutput;
 
 /// Envelope returned by Claude Code when invoked with `--print --output-format json`.
 ///
@@ -20,6 +21,24 @@ struct ClaudeEnvelope<T> {
     is_error: Option<bool>,
     structured_output: Option<T>,
     result: Option<String>,
+}
+
+/// Backend-agnostic trait for running tailoring invocations.
+///
+/// Accepts high-level parameters instead of raw CLI args, keeping the
+/// subprocess wire format as an implementation detail of [`CliClaudeRunner`].
+///
+/// Uses native async fn in trait (stable since Rust 1.75). The lint is suppressed
+/// because this trait is internal and all implementors are `Send + Sync`.
+#[allow(async_fn_in_trait)]
+pub trait TailoringRunner: Send + Sync {
+    async fn run_tailoring(
+        &self,
+        prompt: &str,
+        schema: &str,
+        model_override: Option<&str>,
+        max_budget_usd: Option<f64>,
+    ) -> Result<TailoringOutput, ActualError>;
 }
 
 /// Trait for running Claude Code and deserializing output.
@@ -160,6 +179,28 @@ async fn run_subprocess<T: DeserializeOwned>(
     parse_output(output)
 }
 
+impl TailoringRunner for CliClaudeRunner {
+    async fn run_tailoring(
+        &self,
+        prompt: &str,
+        schema: &str,
+        model_override: Option<&str>,
+        max_budget_usd: Option<f64>,
+    ) -> Result<TailoringOutput, ActualError> {
+        use crate::claude::options::InvocationOptions;
+
+        let mut opts = InvocationOptions::for_tailoring(model_override);
+        opts.json_schema = Some(schema.to_string());
+        opts.max_budget_usd = max_budget_usd;
+
+        let mut args = opts.to_args();
+        args.push("-p".to_string());
+        args.push(prompt.to_string());
+
+        run_subprocess(&self.binary_path, self.timeout, &args).await
+    }
+}
+
 impl ClaudeRunner for CliClaudeRunner {
     async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError> {
         run_subprocess(&self.binary_path, self.timeout, args).await
@@ -218,6 +259,70 @@ mod tests {
         let result: serde_json::Value = runner.run(&[]).await.unwrap();
         assert_eq!(result["key"], "value");
         assert_eq!(result["num"], 42);
+    }
+
+    /// Verify that `CliClaudeRunner::run_tailoring` passes `--json-schema` and `-p`
+    /// args correctly, constructing the right subprocess invocation from a
+    /// `(prompt, schema)` pair.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_run_tailoring_passes_prompt_and_schema() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let args_file = dir.path().join("captured-args.txt");
+        // Script captures all args to a file, then emits a minimal valid TailoringOutput.
+        let tailoring_json = serde_json::json!({
+            "files": [],
+            "skipped_adrs": [],
+            "summary": {
+                "total_input": 0,
+                "applicable": 0,
+                "not_applicable": 0,
+                "files_generated": 0
+            }
+        });
+        let script_content = format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{}'\n",
+            args_file.display(),
+            tailoring_json
+        );
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
+        let prompt = "My tailoring prompt";
+        let schema = r#"{"type":"object"}"#;
+        let result = runner
+            .run_tailoring(prompt, schema, None, None)
+            .await
+            .unwrap();
+
+        // Verify the output is deserialized correctly
+        assert_eq!(result.files.len(), 0);
+        assert_eq!(result.summary.total_input, 0);
+
+        // Verify captured args contain expected flags
+        let captured = std::fs::read_to_string(&args_file).unwrap();
+        let lines: Vec<&str> = captured.lines().collect();
+
+        // --print is always first
+        assert_eq!(lines[0], "--print");
+
+        // Should contain --json-schema with our schema value
+        let schema_pos = lines
+            .iter()
+            .position(|&l| l == "--json-schema")
+            .expect("--json-schema flag should be present");
+        assert_eq!(lines[schema_pos + 1], schema);
+
+        // Should contain -p with our prompt
+        let prompt_pos = lines
+            .iter()
+            .position(|&l| l == "-p")
+            .expect("-p flag should be present");
+        assert_eq!(lines[prompt_pos + 1], prompt);
     }
 
     #[tokio::test]
