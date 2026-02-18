@@ -227,23 +227,19 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
 
     // 2d. Tailor or skip (--no-tailor), with caching
 
-    // Compute cache key from all tailoring inputs (None for non-git repos)
-    let mut adr_ids: Vec<String> = filtered_adrs.iter().map(|a| a.id.clone()).collect();
-    adr_ids.sort();
+    // Compute cache key from all tailoring inputs.
+    // HEAD commit is intentionally excluded — unrelated commits should not
+    // invalidate the cache. The key is always computed (not gated on git).
     let mut project_paths: Vec<String> = analysis.projects.iter().map(|p| p.path.clone()).collect();
     project_paths.sort();
-    let head_commit = get_git_head(root_dir);
 
-    let tailoring_cache_key = head_commit.as_deref().map(|hc| {
-        compute_tailoring_cache_key(
-            hc,
-            &adr_ids,
-            args.no_tailor,
-            &project_paths,
-            &existing_paths,
-            args.model.as_deref(),
-        )
-    });
+    let tailoring_cache_key = Some(compute_tailoring_cache_key(
+        &filtered_adrs,
+        args.no_tailor,
+        &project_paths,
+        &existing_paths,
+        args.model.as_deref(),
+    ));
 
     // Try cache (unless --force or non-git repo)
     let cached_output = if !args.force {
@@ -529,24 +525,77 @@ fn store_tailoring_cache(
 /// Compute a cache key for the tailoring step by hashing all inputs
 /// that affect the tailoring output.
 ///
-/// The key incorporates: HEAD commit, sorted ADR IDs, the no_tailor flag,
-/// sorted project paths, existing CLAUDE.md content, and model override.
-/// Any change in these inputs produces a different cache key.
+/// The key incorporates: full ADR content (sorted by ID for determinism),
+/// the no_tailor flag, sorted project paths, existing CLAUDE.md content,
+/// and model override. Any change in these inputs produces a different cache
+/// key. The git HEAD commit is intentionally excluded so that commits
+/// unrelated to ADR content or repo structure do not invalidate the cache.
 fn compute_tailoring_cache_key(
-    head_commit: &str,
-    adr_ids: &[String],
+    adrs: &[crate::api::types::Adr],
     no_tailor: bool,
     project_paths: &[String],
     existing_claude_md: &str,
     model: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(head_commit.as_bytes());
-    hasher.update(b"\x00");
-    for id in adr_ids {
-        hasher.update(id.as_bytes());
+
+    // Sort ADRs by ID for determinism regardless of iteration order.
+    let mut sorted_adrs: Vec<&crate::api::types::Adr> = adrs.iter().collect();
+    sorted_adrs.sort_by(|a, b| a.id.cmp(&b.id));
+
+    for adr in sorted_adrs {
+        hasher.update(adr.id.as_bytes());
         hasher.update(b"\x00");
+        hasher.update(adr.title.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(adr.context.as_deref().unwrap_or("").as_bytes());
+        hasher.update(b"\x00");
+
+        let mut policies = adr.policies.clone();
+        policies.sort();
+        for policy in &policies {
+            hasher.update(policy.as_bytes());
+            hasher.update(b"\x00");
+        }
+
+        let mut instructions = adr.instructions.clone().unwrap_or_default();
+        instructions.sort();
+        for instruction in &instructions {
+            hasher.update(instruction.as_bytes());
+            hasher.update(b"\x00");
+        }
+
+        // AdrCategory: hash its id, name, and path fields.
+        hasher.update(adr.category.id.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(adr.category.name.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(adr.category.path.as_bytes());
+        hasher.update(b"\x00");
+
+        // AppliesTo: hash sorted languages and frameworks.
+        let mut languages = adr.applies_to.languages.clone();
+        languages.sort();
+        for lang in &languages {
+            hasher.update(lang.as_bytes());
+            hasher.update(b"\x00");
+        }
+        let mut frameworks = adr.applies_to.frameworks.clone();
+        frameworks.sort();
+        for fw in &frameworks {
+            hasher.update(fw.as_bytes());
+            hasher.update(b"\x00");
+        }
+
+        // matched_projects (sorted).
+        let mut matched = adr.matched_projects.clone();
+        matched.sort();
+        for mp in &matched {
+            hasher.update(mp.as_bytes());
+            hasher.update(b"\x00");
+        }
     }
+
     hasher.update(if no_tailor {
         &b"no_tailor"[..]
     } else {
@@ -2613,19 +2662,42 @@ mod tests {
 
     // ── compute_tailoring_cache_key tests ──
 
+    /// Build a minimal test [`Adr`] with the given id and policies for cache key tests.
+    fn make_cache_test_adr(id: &str, policies: Vec<&str>) -> crate::api::types::Adr {
+        crate::api::types::Adr {
+            id: id.to_string(),
+            title: format!("Title for {id}"),
+            context: None,
+            policies: policies.iter().map(|s| s.to_string()).collect(),
+            instructions: None,
+            category: crate::api::types::AdrCategory {
+                id: "cat-1".to_string(),
+                name: "Category One".to_string(),
+                path: "cat/one".to_string(),
+            },
+            applies_to: crate::api::types::AppliesTo {
+                languages: vec!["rust".to_string()],
+                frameworks: vec![],
+            },
+            matched_projects: vec![".".to_string()],
+        }
+    }
+
     #[test]
     fn test_tailoring_cache_key_deterministic() {
+        let adrs = vec![
+            make_cache_test_adr("adr-001", vec!["p1"]),
+            make_cache_test_adr("adr-002", vec!["p2"]),
+        ];
         let key1 = compute_tailoring_cache_key(
-            "abc123",
-            &["adr-001".to_string(), "adr-002".to_string()],
+            &adrs,
             false,
             &[".".to_string()],
             "existing content",
             Some("opus"),
         );
         let key2 = compute_tailoring_cache_key(
-            "abc123",
-            &["adr-001".to_string(), "adr-002".to_string()],
+            &adrs,
             false,
             &[".".to_string()],
             "existing content",
@@ -2636,39 +2708,65 @@ mod tests {
     }
 
     #[test]
-    fn test_tailoring_cache_key_differs_on_head_commit() {
+    fn test_tailoring_cache_key_head_change_does_not_invalidate() {
+        // Identical ADR content + project structure → same key regardless of git HEAD.
+        let adrs = vec![make_cache_test_adr("adr-001", vec!["use snake_case"])];
+        let key1 = compute_tailoring_cache_key(&adrs, false, &[".".to_string()], "", None);
+        // Simulate a different HEAD by calling again — the function no longer
+        // accepts a head_commit arg, so the key must be identical.
+        let key2 = compute_tailoring_cache_key(&adrs, false, &[".".to_string()], "", None);
+        assert_eq!(
+            key1, key2,
+            "cache key must not change when only the git HEAD changes"
+        );
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_differs_on_adr_content() {
+        // Same ADR ID but different policy content → different key.
+        let adrs1 = vec![make_cache_test_adr("adr-001", vec!["use snake_case"])];
+        let adrs2 = vec![make_cache_test_adr("adr-001", vec!["use camelCase"])];
+        let key1 = compute_tailoring_cache_key(&adrs1, false, &[".".to_string()], "", None);
+        let key2 = compute_tailoring_cache_key(&adrs2, false, &[".".to_string()], "", None);
+        assert_ne!(
+            key1, key2,
+            "different ADR policy content should produce different key"
+        );
+    }
+
+    #[test]
+    fn test_tailoring_cache_key_same_adr_different_order_is_stable() {
+        // ADRs passed in different order → same key (sorting for determinism).
+        let adr1 = make_cache_test_adr("adr-001", vec!["policy-a"]);
+        let adr2 = make_cache_test_adr("adr-002", vec!["policy-b"]);
         let key1 = compute_tailoring_cache_key(
-            "abc123",
-            &["adr-001".to_string()],
+            &[adr1.clone(), adr2.clone()],
             false,
             &[".".to_string()],
             "",
             None,
         );
-        let key2 = compute_tailoring_cache_key(
-            "def456",
-            &["adr-001".to_string()],
-            false,
-            &[".".to_string()],
-            "",
-            None,
+        let key2 = compute_tailoring_cache_key(&[adr2, adr1], false, &[".".to_string()], "", None);
+        assert_eq!(
+            key1, key2,
+            "ADR input order should not affect the cache key"
         );
-        assert_ne!(key1, key2, "different HEAD should produce different key");
     }
 
     #[test]
     fn test_tailoring_cache_key_differs_on_adr_ids() {
         let key1 = compute_tailoring_cache_key(
-            "abc123",
-            &["adr-001".to_string()],
+            &[make_cache_test_adr("adr-001", vec![])],
             false,
             &[".".to_string()],
             "",
             None,
         );
         let key2 = compute_tailoring_cache_key(
-            "abc123",
-            &["adr-001".to_string(), "adr-002".to_string()],
+            &[
+                make_cache_test_adr("adr-001", vec![]),
+                make_cache_test_adr("adr-002", vec![]),
+            ],
             false,
             &[".".to_string()],
             "",
@@ -2679,22 +2777,9 @@ mod tests {
 
     #[test]
     fn test_tailoring_cache_key_differs_on_no_tailor() {
-        let key1 = compute_tailoring_cache_key(
-            "abc123",
-            &["adr-001".to_string()],
-            false,
-            &[".".to_string()],
-            "",
-            None,
-        );
-        let key2 = compute_tailoring_cache_key(
-            "abc123",
-            &["adr-001".to_string()],
-            true,
-            &[".".to_string()],
-            "",
-            None,
-        );
+        let adrs = vec![make_cache_test_adr("adr-001", vec![])];
+        let key1 = compute_tailoring_cache_key(&adrs, false, &[".".to_string()], "", None);
+        let key2 = compute_tailoring_cache_key(&adrs, true, &[".".to_string()], "", None);
         assert_ne!(
             key1, key2,
             "different no_tailor should produce different key"
@@ -2703,9 +2788,8 @@ mod tests {
 
     #[test]
     fn test_tailoring_cache_key_differs_on_project_paths() {
-        let key1 = compute_tailoring_cache_key("abc123", &[], false, &[".".to_string()], "", None);
+        let key1 = compute_tailoring_cache_key(&[], false, &[".".to_string()], "", None);
         let key2 = compute_tailoring_cache_key(
-            "abc123",
             &[],
             false,
             &[".".to_string(), "apps/web".to_string()],
@@ -2720,22 +2804,8 @@ mod tests {
 
     #[test]
     fn test_tailoring_cache_key_differs_on_existing_claude_md() {
-        let key1 = compute_tailoring_cache_key(
-            "abc123",
-            &[],
-            false,
-            &[".".to_string()],
-            "old content",
-            None,
-        );
-        let key2 = compute_tailoring_cache_key(
-            "abc123",
-            &[],
-            false,
-            &[".".to_string()],
-            "new content",
-            None,
-        );
+        let key1 = compute_tailoring_cache_key(&[], false, &[".".to_string()], "old content", None);
+        let key2 = compute_tailoring_cache_key(&[], false, &[".".to_string()], "new content", None);
         assert_ne!(
             key1, key2,
             "different CLAUDE.md content should produce different key"
@@ -2744,24 +2814,15 @@ mod tests {
 
     #[test]
     fn test_tailoring_cache_key_differs_on_model() {
-        let key1 =
-            compute_tailoring_cache_key("abc123", &[], false, &[".".to_string()], "", Some("opus"));
-        let key2 = compute_tailoring_cache_key(
-            "abc123",
-            &[],
-            false,
-            &[".".to_string()],
-            "",
-            Some("sonnet"),
-        );
+        let key1 = compute_tailoring_cache_key(&[], false, &[".".to_string()], "", Some("opus"));
+        let key2 = compute_tailoring_cache_key(&[], false, &[".".to_string()], "", Some("sonnet"));
         assert_ne!(key1, key2, "different model should produce different key");
     }
 
     #[test]
     fn test_tailoring_cache_key_none_vs_some_model() {
-        let key1 = compute_tailoring_cache_key("abc123", &[], false, &[".".to_string()], "", None);
-        let key2 =
-            compute_tailoring_cache_key("abc123", &[], false, &[".".to_string()], "", Some("opus"));
+        let key1 = compute_tailoring_cache_key(&[], false, &[".".to_string()], "", None);
+        let key2 = compute_tailoring_cache_key(&[], false, &[".".to_string()], "", Some("opus"));
         assert_ne!(
             key1, key2,
             "None vs Some model should produce different key"
