@@ -10,6 +10,19 @@ pub const ANALYSIS_SINGLE_PROJECT: &str = r#"{"is_monorepo": false, "projects": 
 
 pub const ANALYSIS_MONOREPO: &str = r#"{"is_monorepo": true, "projects": [{"path": "apps/web", "name": "web-app", "languages": ["typescript"], "frameworks": [{"name": "nextjs", "category": "web-frontend"}], "package_manager": "npm"}, {"path": "apps/api", "name": "api-server", "languages": ["rust"], "frameworks": [], "package_manager": "cargo"}, {"path": "libs/shared", "name": "shared-lib", "languages": ["typescript"], "frameworks": [], "package_manager": "npm"}]}"#;
 
+// ── Platform support note ────────────────────────────────────────────
+//
+// Integration tests are **Unix-only** because the fake Claude binary stubs are
+// implemented as POSIX shell scripts (`#!/bin/sh`). This is a known limitation.
+//
+// To add Windows support, the shell script approach would need to be replaced
+// with one of:
+//   1. Compiled Rust test-helper binaries (cross-platform, most robust)
+//   2. `.bat` / `.cmd` scripts (Windows-only, requires separate implementation)
+//   3. A cross-platform script runner (e.g., `python` subprocess)
+//
+// Until then, all integration test files gate their contents with `#[cfg(unix)]`.
+
 // ── Fake binary builders (Unix only) ────────────────────────────────
 
 /// Create a fake Claude binary that handles `auth` and `--print` invocations.
@@ -251,6 +264,7 @@ pub struct TestEnv {
     pub api_url: String,
 }
 
+// TestEnv is Unix-only; see the platform support note above.
 #[cfg(unix)]
 impl TestEnv {
     pub fn new(server: &mockito::Server, auth_json: &str, analysis_json: &str) -> Self {
