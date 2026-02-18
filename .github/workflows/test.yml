@@ -125,7 +125,7 @@ jobs:
   live-e2e:
     name: Live E2E
     needs: sync-beads
-    if: always() && needs.sync-beads.result != 'cancelled'
+    if: always() && needs.sync-beads.result != 'cancelled' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
