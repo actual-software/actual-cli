@@ -3,6 +3,8 @@ use crate::config::types::Config;
 use crate::error::ActualError;
 use crate::telemetry::metrics::SyncMetrics;
 
+// This is a write-only telemetry ingestion key, safe to embed in source.
+// It can only be used to submit telemetry data, not to read or query it.
 const SERVICE_KEY: &str = "ak_telemetry_prod_actual_cli";
 
 /// Send collected sync metrics to the telemetry endpoint.
