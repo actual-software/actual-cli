@@ -231,22 +231,16 @@ mod tests {
     #[test]
     fn test_find_output_files_cursor_rules_discovers_mdc() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        std::fs::create_dir_all(dir.path().join(".cursor").join("rules")).unwrap();
+        let cursor_rules = dir.path().join(".cursor").join("rules");
+        std::fs::create_dir_all(&cursor_rules).unwrap();
         std::fs::write(
-            dir.path()
-                .join(".cursor")
-                .join("rules")
-                .join("actual-policies.mdc"),
+            cursor_rules.join("actual-policies.mdc"),
             "---\nalwaysApply: true\n---\nRules here",
         )
         .unwrap();
         let files = find_output_files(dir.path(), &OutputFormat::CursorRules);
-        assert_eq!(files.len(), 1, "expected 1 cursor rules file");
-        assert!(
-            files[0].to_string_lossy().ends_with("actual-policies.mdc"),
-            "expected actual-policies.mdc, got: {:?}",
-            files[0]
-        );
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_string_lossy().ends_with("actual-policies.mdc"));
     }
 
     #[test]
@@ -269,31 +263,21 @@ mod tests {
     fn test_find_output_files_cursor_rules_nested_subproject() {
         // A monorepo might have apps/web/.cursor/rules/actual-policies.mdc
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        std::fs::create_dir_all(
-            dir.path()
-                .join("apps")
-                .join("web")
-                .join(".cursor")
-                .join("rules"),
-        )
-        .unwrap();
+        let nested_rules = dir
+            .path()
+            .join("apps")
+            .join("web")
+            .join(".cursor")
+            .join("rules");
+        std::fs::create_dir_all(&nested_rules).unwrap();
         std::fs::write(
-            dir.path()
-                .join("apps")
-                .join("web")
-                .join(".cursor")
-                .join("rules")
-                .join("actual-policies.mdc"),
+            nested_rules.join("actual-policies.mdc"),
             "---\nalwaysApply: true\n---\nWeb rules",
         )
         .unwrap();
         let files = find_output_files(dir.path(), &OutputFormat::CursorRules);
-        assert_eq!(files.len(), 1, "expected 1 nested cursor rules file");
-        assert!(
-            files[0].to_string_lossy().ends_with("actual-policies.mdc"),
-            "expected actual-policies.mdc in nested location, got: {:?}",
-            files[0]
-        );
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_string_lossy().ends_with("actual-policies.mdc"));
     }
 
     #[test]
@@ -308,58 +292,36 @@ mod tests {
         )
         .unwrap();
         // Nested .cursor/rules/actual-policies.mdc
-        std::fs::create_dir_all(
-            dir.path()
-                .join("packages")
-                .join("core")
-                .join(".cursor")
-                .join("rules"),
-        )
-        .unwrap();
+        let nested_rules = dir
+            .path()
+            .join("packages")
+            .join("core")
+            .join(".cursor")
+            .join("rules");
+        std::fs::create_dir_all(&nested_rules).unwrap();
         std::fs::write(
-            dir.path()
-                .join("packages")
-                .join("core")
-                .join(".cursor")
-                .join("rules")
-                .join("actual-policies.mdc"),
+            nested_rules.join("actual-policies.mdc"),
             "Core cursor rules",
         )
         .unwrap();
 
         let files = find_output_files(dir.path(), &OutputFormat::CursorRules);
-        assert_eq!(
-            files.len(),
-            2,
-            "expected 2 cursor rules files (root + nested)"
-        );
+        assert_eq!(files.len(), 2);
         let paths: Vec<String> = files
             .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect();
-        assert!(
-            paths.iter().any(|p| p.ends_with("actual-policies.mdc")),
-            "expected actual-policies.mdc in results"
-        );
+        assert!(paths.iter().any(|p| p.ends_with("actual-policies.mdc")));
     }
 
     #[test]
     fn test_find_output_files_claude_md_does_not_discover_cursor_rules() {
         // Ensure the regular CLAUDE.md walker doesn't accidentally pick up .mdc files
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        std::fs::create_dir_all(dir.path().join(".cursor").join("rules")).unwrap();
-        std::fs::write(
-            dir.path()
-                .join(".cursor")
-                .join("rules")
-                .join("actual-policies.mdc"),
-            "Cursor rules",
-        )
-        .unwrap();
+        let cursor_rules = dir.path().join(".cursor").join("rules");
+        std::fs::create_dir_all(&cursor_rules).unwrap();
+        std::fs::write(cursor_rules.join("actual-policies.mdc"), "Cursor rules").unwrap();
         let files = find_output_files(dir.path(), &OutputFormat::ClaudeMd);
-        assert!(
-            files.is_empty(),
-            "ClaudeMd format should not find .mdc files"
-        );
+        assert_eq!(files.len(), 0);
     }
 }
