@@ -110,19 +110,8 @@ impl ActualApiClient {
         let status = response.status();
         if status.is_success() {
             Ok(())
-        } else if status.is_client_error() {
-            match response.json::<ApiErrorResponse>().await {
-                Ok(error_response) => Err(ActualError::ApiResponseError {
-                    code: error_response.error.code,
-                    message: error_response.error.message,
-                }),
-                Err(e) => Err(ActualError::ApiError(format!(
-                    "HTTP {status}: failed to parse error response: {e}"
-                ))),
-            }
         } else {
-            let body = response.text().await.unwrap_or_default();
-            Err(ActualError::ApiError(format!("HTTP {status}: {body}")))
+            Err(Self::map_error_response(status, response).await)
         }
     }
 
@@ -135,19 +124,28 @@ impl ActualApiClient {
                 .json::<T>()
                 .await
                 .map_err(|e| ActualError::ApiError(e.to_string()))
-        } else if status.is_client_error() {
+        } else {
+            Err(Self::map_error_response(status, response).await)
+        }
+    }
+
+    async fn map_error_response(
+        status: reqwest::StatusCode,
+        response: reqwest::Response,
+    ) -> ActualError {
+        if status.is_client_error() {
             match response.json::<ApiErrorResponse>().await {
-                Ok(error_response) => Err(ActualError::ApiResponseError {
+                Ok(error_response) => ActualError::ApiResponseError {
                     code: error_response.error.code,
                     message: error_response.error.message,
-                }),
-                Err(e) => Err(ActualError::ApiError(format!(
+                },
+                Err(e) => ActualError::ApiError(format!(
                     "HTTP {status}: failed to parse error response: {e}"
-                ))),
+                )),
             }
         } else {
             let body = response.text().await.unwrap_or_default();
-            Err(ActualError::ApiError(format!("HTTP {status}: {body}")))
+            ActualError::ApiError(format!("HTTP {status}: {body}"))
         }
     }
 }
