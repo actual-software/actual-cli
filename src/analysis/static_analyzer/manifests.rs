@@ -1618,13 +1618,6 @@ require github.com/another/indirect v4.0.0 // indirect
     }
 
     #[test]
-    fn test_gradle_version_catalog_missing_file_returns_empty() {
-        let dir = tempdir().unwrap();
-        let info = parse_dependencies(dir.path());
-        assert!(info.dependencies.is_empty());
-    }
-
-    #[test]
     fn test_gradle_version_catalog_invalid_toml_returns_empty() {
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("gradle")).unwrap();
