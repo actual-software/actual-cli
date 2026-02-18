@@ -505,11 +505,8 @@ version = "0.1.0"
         // fail fast with a clear error if that contract is ever violated.
         let dir = tempfile::tempdir().unwrap();
         let result = assemble_analysis(false, vec![], dir.path());
-        assert!(result.is_err(), "expected Err(AnalysisEmpty) but got Ok");
-        assert!(
-            matches!(result.unwrap_err(), ActualError::AnalysisEmpty),
-            "expected ActualError::AnalysisEmpty"
-        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::AnalysisEmpty));
     }
 
     #[test]
