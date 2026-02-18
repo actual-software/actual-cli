@@ -54,6 +54,10 @@ pub struct Config {
     /// Cached repo analysis (keyed to HEAD commit hash).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_analysis: Option<CachedAnalysis>,
+
+    /// Cached tailoring result (keyed to composite input hash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tailoring: Option<CachedTailoring>,
 }
 
 /// Telemetry configuration.
@@ -62,6 +66,19 @@ pub struct TelemetryConfig {
     /// Whether telemetry is enabled (default: true, opt-out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+}
+
+/// Cached tailoring result, keyed by a hash of all tailoring inputs.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct CachedTailoring {
+    /// SHA-256 hash of the composite tailoring inputs.
+    pub cache_key: String,
+    /// Repo path (for display/debugging).
+    pub repo_path: String,
+    /// The tailoring output (stored as opaque YAML value).
+    pub tailoring: serde_yaml::Value,
+    /// When the tailoring was performed.
+    pub tailored_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Cached repository analysis result.
@@ -109,6 +126,7 @@ mod tests {
             }),
             rejected_adrs: Some(rejected),
             cached_analysis: None,
+            cached_tailoring: None,
         };
 
         let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
@@ -159,5 +177,23 @@ mod tests {
         assert_eq!(config.api_url, None);
         assert_eq!(config.telemetry, None);
         assert_eq!(config.concurrency, None);
+    }
+
+    /// Round-trip test with CachedTailoring included.
+    #[test]
+    fn test_round_trip_with_cached_tailoring() {
+        let config = Config {
+            cached_tailoring: Some(CachedTailoring {
+                cache_key: "abc123def456".to_string(),
+                repo_path: "/home/user/project".to_string(),
+                tailoring: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                tailored_at: chrono::Utc::now(),
+            }),
+            ..Config::default()
+        };
+
+        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        assert_eq!(config, deserialized);
     }
 }
