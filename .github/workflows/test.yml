@@ -124,8 +124,8 @@ jobs:
 
   live-e2e:
     name: Live E2E
-    needs: sync-beads
-    if: always() && needs.sync-beads.result != 'cancelled' && github.event_name == 'pull_request'
+    needs: [sync-beads, test]
+    if: always() && needs.sync-beads.result != 'cancelled' && needs.test.result == 'success' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -161,7 +161,7 @@ jobs:
       - name: Verify Claude auth
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-        run: claude auth status --json
+        run: claude auth status --json | grep -q '"loggedIn":.*true'
 
       - name: Run E2E
         env:
@@ -199,7 +199,7 @@ jobs:
   create-live-e2e-fix-bead:
     name: Create Live E2E Fix Bead
     if: always() && needs.live-e2e.result == 'failure' && github.event_name == 'pull_request'
-    needs: [sync-beads, live-e2e]
+    needs: [sync-beads, test, live-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -225,7 +225,7 @@ jobs:
   cleanup-live-e2e-fix-beads:
     name: Cleanup Live E2E Fix Beads
     if: always() && needs.live-e2e.result == 'success' && github.event_name == 'pull_request'
-    needs: [sync-beads, live-e2e]
+    needs: [sync-beads, test, live-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write
