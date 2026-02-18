@@ -146,6 +146,7 @@ jobs:
           key: ${{ runner.os }}-cargo-live-e2e-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-live-e2e-
+            ${{ runner.os }}-cargo-test-
 
       - name: Build actual binary
         run: cargo build --release
