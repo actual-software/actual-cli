@@ -673,8 +673,10 @@ mod tests {
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
         assert_eq!(info.projects.len(), 2);
-        assert_eq!(info.projects[0].name, "server");
-        assert_eq!(info.projects[1].name, "lib");
+
+        let mut names: Vec<&str> = info.projects.iter().map(|p| p.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["lib", "server"]);
     }
 
     #[test]
