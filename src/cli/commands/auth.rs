@@ -44,7 +44,7 @@ fn check_auth_with_timeout(
     let output = rx
         .recv_timeout(timeout)
         .map_err(|_| ActualError::ClaudeTimeout {
-            seconds: timeout.as_secs(),
+            seconds: timeout.as_secs().max(1),
         })?
         .map_err(|e| ActualError::ClaudeSubprocessFailed {
             message: format!("failed to execute claude: {e}"),
