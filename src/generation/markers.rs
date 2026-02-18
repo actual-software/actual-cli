@@ -100,9 +100,10 @@ pub fn has_managed_section(content: &str) -> bool {
 /// Extracts the version number from a `<!-- version: N -->` comment in the content.
 /// Returns `Some(N)` if found, `None` otherwise.
 pub fn extract_version(content: &str) -> Option<u32> {
+    let managed = extract_managed_content(content).unwrap_or(content);
     let prefix = "<!-- version: ";
-    let start = content.find(prefix)? + prefix.len();
-    let rest = &content[start..];
+    let start = managed.find(prefix)? + prefix.len();
+    let rest = &managed[start..];
     let end = rest.find(" -->")?;
     rest[..end].parse().ok()
 }
@@ -120,9 +121,10 @@ pub fn next_version(existing_content: Option<&str>) -> u32 {
 /// Extracts the timestamp string from a `<!-- last-synced: TIMESTAMP -->` comment.
 /// Returns a zero-copy `&str` of the timestamp, or `None` if not found.
 pub fn extract_last_synced(content: &str) -> Option<&str> {
+    let managed = extract_managed_content(content).unwrap_or(content);
     let prefix = "<!-- last-synced: ";
-    let start = content.find(prefix)? + prefix.len();
-    let rest = &content[start..];
+    let start = managed.find(prefix)? + prefix.len();
+    let rest = &managed[start..];
     let end = rest.find(" -->")?;
     Some(&rest[..end])
 }
@@ -706,6 +708,44 @@ mod tests {
         assert!(
             result.contains("Real content here"),
             "should preserve real content: {result}"
+        );
+    }
+
+    // --- extract_version / extract_last_synced scoped to managed section ---
+
+    #[test]
+    fn test_extract_version_ignores_user_content_outside_managed_section() {
+        let managed = wrap_in_markers("managed content", 3, &[]);
+        let full = format!("# My Custom Rules\n\n<!-- version: 99 -->\n\n{managed}\n\n## Footer\n");
+        assert_eq!(extract_version(&full), Some(3));
+    }
+
+    #[test]
+    fn test_extract_last_synced_ignores_user_content_outside_managed_section() {
+        let managed = wrap_in_markers("managed content", 1, &[]);
+        let full =
+            format!("# My Notes\n\n<!-- last-synced: 1999-01-01T00:00:00Z -->\n\n{managed}\n");
+        let ts = extract_last_synced(&full).expect("should find timestamp");
+        assert_ne!(ts, "1999-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_extract_version_ignores_version_after_managed_section() {
+        let managed = wrap_in_markers("managed content", 5, &[]);
+        let full = format!("{managed}\n\n<!-- version: 42 -->\n");
+        assert_eq!(extract_version(&full), Some(5));
+    }
+
+    #[test]
+    fn test_extract_version_falls_back_when_no_managed_section() {
+        assert_eq!(extract_version("<!-- version: 7 -->"), Some(7));
+    }
+
+    #[test]
+    fn test_extract_last_synced_falls_back_when_no_managed_section() {
+        assert_eq!(
+            extract_last_synced("<!-- last-synced: 2025-06-01T00:00:00Z -->"),
+            Some("2025-06-01T00:00:00Z")
         );
     }
 }
