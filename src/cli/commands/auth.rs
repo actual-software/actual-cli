@@ -84,9 +84,7 @@ fn print_auth_status(status: &ClaudeAuthStatus) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    use crate::testutil::ENV_MUTEX;
 
     #[cfg(unix)]
     fn create_fake_binary(dir: &Path, stdout_content: &str, exit_code: i32) -> std::path::PathBuf {
