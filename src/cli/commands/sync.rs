@@ -351,8 +351,8 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
 /// Return the pipeline skip message for a tailoring cache hit.
 ///
 /// Distinguishes between a cached result with no applicable ADRs (deterministic
-/// empty output) and one that produced actual files, so users can tell at a
-/// glance why tailoring was skipped.
+/// empty output) and one with applicable ADRs, so users can tell at a glance
+/// why tailoring was skipped.
 fn tailoring_cache_skip_msg(applicable: usize) -> &'static str {
     if applicable == 0 {
         "No ADRs applicable to this project (cached)"
