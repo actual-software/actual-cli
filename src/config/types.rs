@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::generation::OutputFormat;
+
 /// Top-level configuration for the actual CLI.
 ///
 /// Stored as YAML at `~/.actualai/actual/config.yaml`.
@@ -46,6 +48,10 @@ pub struct Config {
     /// Per-project tailoring timeout in seconds (default: 600).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_timeout_secs: Option<u64>,
+
+    /// Output file format (default: claude-md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormat>,
 
     /// Telemetry settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +138,7 @@ mod tests {
             rejected_adrs: Some(rejected),
             cached_analysis: None,
             cached_tailoring: None,
+            output_format: None,
         };
 
         let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");

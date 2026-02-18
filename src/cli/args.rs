@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+use crate::generation::OutputFormat;
+
 /// Parse and validate a budget value, rejecting negative and non-finite numbers.
 fn parse_budget(s: &str) -> Result<f64, String> {
     let val: f64 = s
@@ -75,6 +77,10 @@ pub struct SyncArgs {
     /// Maximum budget per tailoring invocation (USD)
     #[arg(long, value_parser = parse_budget, allow_hyphen_values = true)]
     pub max_budget_usd: Option<f64>,
+
+    /// Output file format: write CLAUDE.md (default) or AGENTS.md
+    #[arg(long, value_enum, default_value = "claude-md")]
+    pub output_format: OutputFormat,
 }
 
 /// Arguments for the `status` command
