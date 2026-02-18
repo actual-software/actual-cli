@@ -282,7 +282,9 @@ pub(crate) fn run_sync<R: ClaudeRunner>(
             existing_claude_md_paths: &existing_paths,
             model_override: args.model.as_deref(),
             max_budget_usd: args.max_budget_usd.or(config.max_budget_usd),
-            per_project_timeout: Duration::from_secs(config.invocation_timeout_secs.unwrap_or(600)),
+            per_project_timeout: Duration::from_secs(
+                config.invocation_timeout_secs.unwrap_or(600).max(1),
+            ),
         };
         let result = rt.block_on(async {
             tokio::select! {
