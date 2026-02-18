@@ -87,7 +87,9 @@ fn io_err(context: &str, e: std::io::Error) -> ActualError {
 /// first tries to parse as a `ClaudeEnvelope<T>` and extract `structured_output`,
 /// falling back to direct parsing as `T` for backwards compatibility (e.g., test
 /// fake binaries that emit raw JSON).
-fn parse_output<T: DeserializeOwned>(output: std::process::Output) -> Result<T, ActualError> {
+pub(crate) fn parse_output<T: DeserializeOwned>(
+    output: std::process::Output,
+) -> Result<T, ActualError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let code = output
@@ -137,7 +139,7 @@ fn parse_output<T: DeserializeOwned>(output: std::process::Output) -> Result<T, 
 /// - `Ok(Ok(output))` — subprocess finished within the timeout
 /// - `Ok(Err(e))` — subprocess I/O error (e.g., pipe failure during wait)
 /// - `Err(_)` — timeout expired before subprocess finished
-fn resolve_output(
+pub(crate) fn resolve_output(
     result: Result<Result<std::process::Output, std::io::Error>, tokio::time::error::Elapsed>,
     timeout: Duration,
 ) -> Result<std::process::Output, ActualError> {
