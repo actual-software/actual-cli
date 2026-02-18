@@ -196,8 +196,8 @@ impl SyncPipeline {
     /// Update the message displayed on an active (spinning) phase without
     /// changing its state.
     ///
-    /// This is a no-op if the phase bar is not present (quiet mode) or if
-    /// the bar has already been finished.
+    /// This is a no-op if the phase bar is not present (quiet mode). On a
+    /// finished bar, `indicatif` silently ignores the `set_message` call.
     pub fn update_message(&self, phase: SyncPhase, message: &str) {
         if let Some(bar) = self.bar(phase) {
             bar.set_message(message.to_string());
