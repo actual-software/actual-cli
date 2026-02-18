@@ -195,6 +195,7 @@ jobs:
         with:
           name: e2e-output
           path: e2e-output.txt
+          if-no-files-found: ignore
 
   create-live-e2e-fix-bead:
     name: Create Live E2E Fix Bead
@@ -213,6 +214,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: e2e-output
+        continue-on-error: true
 
       - uses: poiley/bdgha@v2
         with:
