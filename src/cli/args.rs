@@ -1,12 +1,14 @@
 use clap::{Parser, Subcommand};
 
-/// Parse and validate a budget value, rejecting negative numbers.
+/// Parse and validate a budget value, rejecting negative and non-finite numbers.
 fn parse_budget(s: &str) -> Result<f64, String> {
     let val: f64 = s
         .parse()
         .map_err(|_| format!("'{s}' is not a valid number"))?;
-    if val < 0.0 {
-        return Err(format!("budget must be non-negative, got {val}"));
+    if val < 0.0 || !val.is_finite() {
+        return Err(format!(
+            "budget must be a non-negative finite number, got {val}"
+        ));
     }
     Ok(val)
 }

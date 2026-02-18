@@ -309,6 +309,28 @@ fn test_cli_parse_sync_non_numeric_budget_rejected() {
     );
 }
 
+#[test]
+fn test_cli_parse_sync_nan_budget_rejected() {
+    let result = Cli::try_parse_from(["actual", "sync", "--max-budget-usd", "nan"]);
+    assert!(result.is_err(), "NaN budget should be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("non-negative finite"),
+        "error should mention non-negative finite: {err}"
+    );
+}
+
+#[test]
+fn test_cli_parse_sync_inf_budget_rejected() {
+    let result = Cli::try_parse_from(["actual", "sync", "--max-budget-usd", "inf"]);
+    assert!(result.is_err(), "inf budget should be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("non-negative finite"),
+        "error should mention non-negative finite: {err}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_run_sync_force_with_fake_claude() {
