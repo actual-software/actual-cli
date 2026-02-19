@@ -142,21 +142,11 @@ pub fn write_files(
             }
 
             // Layer 2: post-create canonicalization check (defense in depth).
-            // Distinguish between a real path-escape (security event) and a
-            // transient I/O error so callers get a precise, actionable message.
-            let canonical_parent = match parent.canonicalize() {
-                Ok(cp) => cp,
-                Err(e) => {
-                    return WriteResult {
-                        path: file.path.clone(),
-                        action: WriteAction::Failed,
-                        version: 0,
-                        error: Some(format!(
-                            "failed to verify output path (canonicalize error): {e}"
-                        )),
-                    };
-                }
-            };
+            // If canonicalize fails (e.g. a dangling symlink was somehow created),
+            // treat it as a path-escape: an empty PathBuf won't start with canonical_root.
+            let canonical_parent = parent
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::new());
             if !canonical_parent.starts_with(&canonical_root) {
                 return WriteResult {
                     path: file.path.clone(),
@@ -649,6 +639,88 @@ mod tests {
             "AGENTS.md root file should have Project Guidelines header, got: {written}"
         );
         assert!(markers::has_managed_section(&written));
+    }
+
+    // ── 4eo.4: create_dir_all failure returns Failed ──
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_create_dir_fails_returns_failed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+        // Make the root dir read-only so that creating a new subdirectory fails.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("failed to set permissions");
+
+        let files = vec![FileOutput {
+            path: "newsubdir/CLAUDE.md".to_string(),
+            content: "content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("failed to restore permissions");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed when create_dir_all fails"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(
+            err_msg.contains("Failed to create directory"),
+            "expected 'Failed to create directory' in error, got: {err_msg}"
+        );
+    }
+
+    // ── 4eo.4: fs::write failure returns Failed ──
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_to_readonly_file_returns_failed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let target = dir.path().join("CLAUDE.md");
+
+        // Create the file and make it read-only.
+        std::fs::write(&target, "existing content").expect("failed to write initial file");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444))
+            .expect("failed to set permissions");
+
+        let files = vec![FileOutput {
+            path: "CLAUDE.md".to_string(),
+            content: "new content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
+            .expect("failed to restore permissions");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed when fs::write fails on read-only file"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(
+            err_msg.contains("Failed to write file"),
+            "expected 'Failed to write file' in error, got: {err_msg}"
+        );
     }
 
     // ── 4eo.3: Unreadable existing files return Failed, not Created ──
