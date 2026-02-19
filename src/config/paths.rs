@@ -413,8 +413,7 @@ mod tests {
         // With write_config_secure, the open() call fails on read-only file
         assert!(
             err.to_string()
-                .contains("Failed to open config file for writing")
-                || err.to_string().contains("Failed to write config file"),
+                .contains("Failed to open config file for writing"),
             "Unexpected error: {err}"
         );
 
