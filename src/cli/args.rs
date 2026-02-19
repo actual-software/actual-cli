@@ -424,10 +424,10 @@ mod parse_tests {
     fn test_cli_accepts_valid_model() {
         let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"])
             .expect("expected Ok");
-        let Command::Sync(args) = cli.command else {
-            unreachable!("test passes 'sync' subcommand")
-        };
-        assert_eq!(args.model, Some("claude-3.5-sonnet".to_string()));
+        assert_eq!(
+            model_from_command(cli.command),
+            Some("claude-3.5-sonnet".to_string())
+        );
     }
 
     #[test]
