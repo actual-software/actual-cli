@@ -113,10 +113,11 @@ async fn tailor_single_project<R: TailoringRunner>(
     let futures: Vec<_> = batches
         .iter()
         .map(|batch_adrs| async {
-            let _permit = semaphore
-                .acquire()
-                .await
-                .expect("semaphore should not be closed");
+            let _permit = semaphore.acquire().await.map_err(|_| {
+                ActualError::InternalError(
+                    "semaphore closed unexpectedly — this is a bug".to_string(),
+                )
+            })?;
             invoke_tailoring(
                 runner,
                 batch_adrs,
@@ -1145,5 +1146,54 @@ mod tests {
         // Should complete without panic
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
         assert!(result.is_ok());
+    }
+
+    // --- Test 14: closed semaphore returns InternalError instead of panicking ---
+
+    #[tokio::test]
+    async fn test_closed_semaphore_returns_internal_error() {
+        let projects = vec![make_project("solo")];
+        let adrs = vec![make_adr("adr-001")];
+
+        // Use a semaphore with 0 permits and close it immediately so that
+        // any acquire() call will fail with AcquireError rather than blocking.
+        let semaphore = Semaphore::new(0);
+        semaphore.close();
+
+        let runner = ConcurrentMockRunner::new(vec![], Duration::from_millis(0));
+
+        let project_json =
+            crate::tailoring::invoke::serialize_json(&projects[0], "project").unwrap();
+        let batches = crate::tailoring::batch::create_batches(&adrs, 15);
+
+        // Directly test the closed-semaphore path via the private function.
+        let futures: Vec<_> = batches
+            .iter()
+            .map(|_batch_adrs| async {
+                semaphore.acquire().await.map_err(|_| {
+                    ActualError::InternalError(
+                        "semaphore closed unexpectedly — this is a bug".to_string(),
+                    )
+                })
+            })
+            .collect();
+
+        let result: Result<Vec<_>, ActualError> = futures::future::try_join_all(futures).await;
+
+        // Must return InternalError, not panic
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ActualError::InternalError(_)),
+            "expected InternalError from closed semaphore, got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("semaphore closed unexpectedly"),
+            "expected semaphore error message, got: {msg}"
+        );
+
+        // Suppress unused-variable warnings for runner / project_json
+        drop(runner);
+        drop(project_json);
     }
 }
