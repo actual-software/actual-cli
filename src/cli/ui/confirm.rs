@@ -40,12 +40,16 @@ fn format_metadata(project: &Project) -> String {
     }
 
     if !project.frameworks.is_empty() {
-        let fws: Vec<&str> = project.frameworks.iter().map(|f| f.name.as_str()).collect();
+        let fws: Vec<String> = project
+            .frameworks
+            .iter()
+            .map(|f| console::strip_ansi_codes(f.name.as_str()).into_owned())
+            .collect();
         parts.push(fws.join(", "));
     }
 
     if let Some(pm) = &project.package_manager {
-        parts.push(pm.clone());
+        parts.push(console::strip_ansi_codes(pm).into_owned());
     }
 
     parts.join(" · ")
@@ -79,7 +83,8 @@ pub fn format_project_summary(analysis: &RepoAnalysis, width: usize) -> String {
     // Project lines
     for project in &analysis.projects {
         let bullet = theme::heading(&theme::BULLET);
-        let name = theme::heading(&project.name);
+        let safe_name = console::strip_ansi_codes(&project.name);
+        let name = theme::heading(&safe_name);
         let metadata = format_metadata(project);
         let meta_display = if metadata.is_empty() {
             String::new()
@@ -89,7 +94,8 @@ pub fn format_project_summary(analysis: &RepoAnalysis, width: usize) -> String {
 
         panel = panel.line(&format!("{bullet} {name}{meta_display}"));
 
-        let path = theme::muted(&project.path);
+        let safe_path = console::strip_ansi_codes(&project.path);
+        let path = theme::muted(&safe_path);
         panel = panel.line(&format!("  {path}"));
     }
 
@@ -542,6 +548,104 @@ mod tests {
         assert!(
             output.contains("Single project detected"),
             "expected header in output: {output}"
+        );
+    }
+
+    // ── ANSI injection prevention tests ──
+
+    #[test]
+    fn format_summary_strips_ansi_from_project_name() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "\x1b[31mINJECTED\x1b[0m".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+            }],
+        };
+        let output = format_project_summary(&analysis, 80);
+        assert!(
+            !output.contains('\x1b'),
+            "output must not contain raw ANSI escape codes from injected project name: {output:?}"
+        );
+        // The text content should still be present
+        let plain = strip(&output);
+        assert!(
+            plain.contains("INJECTED"),
+            "plain text 'INJECTED' should still appear: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_summary_strips_ansi_from_project_path() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![Project {
+                path: "\x1b[32mPATH_INJECT\x1b[0m".to_string(),
+                name: "safe-name".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+            }],
+        };
+        let output = format_project_summary(&analysis, 80);
+        assert!(
+            !output.contains('\x1b'),
+            "output must not contain raw ANSI escape codes from injected project path: {output:?}"
+        );
+        let plain = strip(&output);
+        assert!(
+            plain.contains("PATH_INJECT"),
+            "plain text 'PATH_INJECT' should still appear: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_strips_ansi_from_framework_name() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![],
+            frameworks: vec![Framework {
+                name: "\x1b[31mMALICIOUS\x1b[0m".to_string(),
+                category: FrameworkCategory::WebFrontend,
+            }],
+            package_manager: None,
+            description: None,
+        };
+        let meta = format_metadata(&project);
+        assert!(
+            !meta.contains('\x1b'),
+            "metadata must not contain raw ANSI codes from injected framework name: {meta:?}"
+        );
+        assert!(
+            meta.contains("MALICIOUS"),
+            "text content should still be present: {meta}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_strips_ansi_from_package_manager() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![],
+            frameworks: vec![],
+            package_manager: Some("\x1b[33mINJECT_PM\x1b[0m".to_string()),
+            description: None,
+        };
+        let meta = format_metadata(&project);
+        assert!(
+            !meta.contains('\x1b'),
+            "metadata must not contain raw ANSI codes from injected package manager: {meta:?}"
+        );
+        assert!(
+            meta.contains("INJECT_PM"),
+            "text content should still be present: {meta}"
         );
     }
 
