@@ -50,6 +50,14 @@ pub enum ActualError {
 }
 
 impl ActualError {
+    /// Convenience constructor for `ClaudeSubprocessFailed` with an empty stderr.
+    pub(crate) fn subprocess_error(message: String) -> Self {
+        Self::ClaudeSubprocessFailed {
+            message,
+            stderr: String::new(),
+        }
+    }
+
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::UserCancelled => 4,
@@ -287,5 +295,15 @@ mod tests {
             ActualError::TerminalIOError("test".to_string()).hint(),
             None
         );
+    }
+
+    #[test]
+    fn test_subprocess_error_helper() {
+        let err = ActualError::subprocess_error("spawn failed".to_string());
+        assert!(matches!(
+            &err,
+            ActualError::ClaudeSubprocessFailed { message, stderr }
+                if message == "spawn failed" && stderr.is_empty()
+        ));
     }
 }

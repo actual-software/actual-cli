@@ -44,6 +44,21 @@ pub(crate) fn check_auth(binary_path: &Path) -> Result<ClaudeAuthStatus, ActualE
     Ok(status)
 }
 
+/// Build a single-threaded tokio runtime, mapping any build error to
+/// [`ActualError::ClaudeSubprocessFailed`]. In practice this never fails.
+fn build_current_thread_rt() -> Result<tokio::runtime::Runtime, ActualError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ActualError::subprocess_error(format!("failed to build tokio runtime: {e}")))
+}
+
+/// Convert an [`std::io::Error`] from `wait_with_output` into
+/// [`ActualError::ClaudeSubprocessFailed`].
+fn io_error_to_subprocess_error(e: std::io::Error) -> ActualError {
+    ActualError::subprocess_error(format!("failed to wait for claude: {e}"))
+}
+
 /// Check Claude Code authentication status with a timeout.
 ///
 /// Uses `tokio::process::Command` with `kill_on_drop(true)` so that when the
@@ -56,13 +71,7 @@ pub fn check_auth_with_timeout(
 ) -> Result<ClaudeAuthStatus, ActualError> {
     let binary_path = binary_path.to_path_buf();
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| ActualError::ClaudeSubprocessFailed {
-            message: format!("failed to build tokio runtime: {e}"),
-            stderr: String::new(),
-        })?;
+    let rt = build_current_thread_rt()?;
 
     rt.block_on(async move {
         let mut cmd = tokio::process::Command::new(&binary_path);
@@ -76,21 +85,14 @@ pub fn check_auth_with_timeout(
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| ActualError::ClaudeSubprocessFailed {
-                message: format!("failed to spawn claude: {e}"),
-                stderr: String::new(),
-            })?;
+            .map_err(|e| ActualError::subprocess_error(format!("failed to spawn claude: {e}")))?;
 
-        let output = tokio::time::timeout(timeout, child.wait_with_output())
-            .await
-            .map_err(|_| ActualError::ClaudeTimeout {
-                // Round up so sub-second timeouts display as "1s" rather than "0s".
-                seconds: timeout.as_secs_f64().ceil() as u64,
-            })?
-            .map_err(|e| ActualError::ClaudeSubprocessFailed {
-                message: format!("failed to wait for claude: {e}"),
-                stderr: String::new(),
-            })?;
+        let timed = tokio::time::timeout(timeout, child.wait_with_output()).await;
+        let wait_result = timed.map_err(|_| ActualError::ClaudeTimeout {
+            // Round up so sub-second timeouts display as "1s" rather than "0s".
+            seconds: timeout.as_secs_f64().ceil() as u64,
+        })?;
+        let output = wait_result.map_err(io_error_to_subprocess_error)?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -151,6 +153,20 @@ mod tests {
     use super::*;
     use crate::cli::commands::handle_result;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+    #[test]
+    fn test_build_current_thread_rt_succeeds() {
+        // Building a tokio runtime must always succeed on any supported OS.
+        let rt = build_current_thread_rt();
+        assert!(rt.is_ok(), "expected runtime build to succeed");
+    }
+
+    #[test]
+    fn test_io_error_to_subprocess_error_converts() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke");
+        let err = io_error_to_subprocess_error(io_err);
+        assert!(matches!(err, ActualError::ClaudeSubprocessFailed { .. }));
+    }
 
     #[cfg(unix)]
     fn create_fake_binary(dir: &Path, stdout_content: &str, exit_code: i32) -> std::path::PathBuf {
@@ -348,10 +364,7 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let result = check_auth_with_timeout(&script, std::time::Duration::from_millis(100));
-        assert!(
-            matches!(result, Err(ActualError::ClaudeTimeout { .. })),
-            "expected ClaudeTimeout, got: {result:?}"
-        );
+        assert!(matches!(result, Err(ActualError::ClaudeTimeout { .. })));
     }
 
     #[cfg(unix)]
@@ -434,10 +447,10 @@ mod tests {
             Path::new("/nonexistent/binary/that/does/not/exist"),
             std::time::Duration::from_secs(5),
         );
-        assert!(
-            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
-            "expected ClaudeSubprocessFailed, got: {result:?}"
-        );
+        assert!(matches!(
+            result,
+            Err(ActualError::ClaudeSubprocessFailed { .. })
+        ));
     }
 
     #[cfg(unix)]
@@ -450,7 +463,6 @@ mod tests {
             0,
         );
         let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
-        assert!(result.is_ok(), "expected Ok, got: {result:?}");
         let status = result.unwrap();
         assert!(status.logged_in);
         assert_eq!(status.auth_method.as_deref(), Some("claude.ai"));
@@ -462,10 +474,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = create_fake_binary(dir.path(), "error output", 1);
         let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
-        assert!(
-            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
-            "expected ClaudeSubprocessFailed, got: {result:?}"
-        );
+        assert!(matches!(
+            result,
+            Err(ActualError::ClaudeSubprocessFailed { .. })
+        ));
     }
 
     #[cfg(unix)]
@@ -474,9 +486,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = create_fake_binary(dir.path(), "not json", 0);
         let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
-        assert!(
-            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
-            "expected ClaudeOutputParse, got: {result:?}"
-        );
+        assert!(matches!(result, Err(ActualError::ClaudeOutputParse(_))));
     }
 }
