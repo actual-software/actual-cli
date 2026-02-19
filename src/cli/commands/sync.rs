@@ -21,7 +21,7 @@ use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
 use crate::config::paths::{load_from, save_to};
 use crate::config::rejections::{clear_rejections, get_rejections};
-use crate::config::types::CachedTailoring;
+use crate::config::types::{CachedTailoring, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY};
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::writer::{write_files, WriteAction, WriteResult};
@@ -287,8 +287,8 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             &format!("Tailoring ADRs (0/{project_count} projects done)..."),
         );
         let tailoring_config = ConcurrentTailoringConfig::new(
-            config.concurrency.unwrap_or(3),
-            config.batch_size.unwrap_or(15),
+            config.concurrency.unwrap_or(DEFAULT_CONCURRENCY),
+            config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
             &existing_paths,
             args.model.as_deref(),
             args.max_budget_usd.or(config.max_budget_usd),

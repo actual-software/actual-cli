@@ -12,6 +12,9 @@ pub enum ActualError {
     #[error("Claude Code is not authenticated")]
     ClaudeNotAuthenticated,
 
+    #[error("API key not set. Set {env_var} or configure the api key in your config")]
+    ApiKeyMissing { env_var: String },
+
     #[error("Claude Code subprocess failed: {message}")]
     ClaudeSubprocessFailed { message: String, stderr: String },
 
@@ -53,7 +56,10 @@ impl ActualError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::UserCancelled => 4,
-            Self::ClaudeNotFound | Self::ClaudeNotAuthenticated | Self::CodexNotFound => 2,
+            Self::ClaudeNotFound
+            | Self::ClaudeNotAuthenticated
+            | Self::CodexNotFound
+            | Self::ApiKeyMissing { .. } => 2,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
             Self::IoError(_) => 5,
             _ => 1,
@@ -66,6 +72,12 @@ impl ActualError {
             Self::ClaudeNotFound => Some("npm install -g @anthropic-ai/claude-code"),
             Self::CodexNotFound => Some("npm install -g @openai/codex"),
             Self::ClaudeNotAuthenticated => Some("claude auth login"),
+            Self::ApiKeyMissing { env_var } => {
+                // We can't return a string containing env_var dynamically from a &str hint,
+                // so provide a generic hint pointing users to the config.
+                let _ = env_var;
+                Some("Set the API key environment variable or add it to your config file")
+            }
             Self::ConfigError(_) => Some("Check ~/.config/actual/config.yaml"),
             Self::ClaudeTimeout { .. } => {
                 Some("Try increasing the timeout or check Claude Code status")
