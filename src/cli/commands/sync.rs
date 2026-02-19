@@ -2336,6 +2336,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_compute_repo_key_symlink_behavior() {
+        use std::os::unix::fs::symlink;
+        let target_dir = tempfile::tempdir().unwrap();
+        let symlink_dir = tempfile::tempdir().unwrap();
+        let link_path = symlink_dir.path().join("link");
+        symlink(target_dir.path(), &link_path).expect("failed to create symlink");
+
+        let key_target = compute_repo_key(target_dir.path());
+        let key_symlink = compute_repo_key(&link_path);
+
+        // Both must produce valid 64-char hex hashes
+        assert_eq!(key_target.len(), 64, "target key should be 64-char hex");
+        assert_eq!(key_symlink.len(), 64, "symlink key should be 64-char hex");
+        // Document: on macOS current_dir() resolves symlinks so keys match;
+        // on Linux symlink path may differ from canonical path.
+        // This test documents the actual behavior without enforcing a specific outcome.
+        // If they differ, it means a user cd'ing into a symlink dir gets a different
+        // rejection namespace — a known limitation documented here.
+        println!("key_target: {}", key_target);
+        println!("key_symlink: {}", key_symlink);
+        // Just verify both are valid hashes (no assertion on equality)
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_compute_repo_key_timeout_falls_back_to_path_hash() {
         use std::os::unix::fs::PermissionsExt;
         // Place a fake "git" binary that sleeps for 30s on PATH so the
