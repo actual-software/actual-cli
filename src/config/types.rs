@@ -130,6 +130,13 @@ pub struct CachedAnalysis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_commit: Option<String>,
 
+    /// SHA-256 hash of the config fields that affect analysis results
+    /// (`include_categories`, `exclude_categories`, `include_general`, `max_per_framework`).
+    /// A missing value is treated as a cache miss so that caches created before this
+    /// field existed are automatically invalidated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
+
     /// The analysis data (stored as opaque YAML value until analysis types are implemented).
     pub analysis: serde_yaml::Value,
 
@@ -200,6 +207,7 @@ mod tests {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: Some("abc123".to_string()),
+                config_hash: Some("deadbeef".to_string()),
                 analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
                 analyzed_at: chrono::Utc::now(),
             }),
