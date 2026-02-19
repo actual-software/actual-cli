@@ -714,6 +714,7 @@ mod tests {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: Some("abc123def456789".to_string()),
+                config_hash: None,
                 analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
                 analyzed_at: chrono::Utc::now(),
             }),
@@ -742,6 +743,7 @@ mod tests {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: Some("abc".to_string()),
+                config_hash: None,
                 analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
                 analyzed_at: chrono::Utc::now(),
             }),
@@ -758,6 +760,7 @@ mod tests {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: None,
+                config_hash: None,
                 analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
                 analyzed_at: chrono::Utc::now(),
             }),
@@ -781,6 +784,7 @@ mod tests {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: Some("abcdefg".to_string()),
+                config_hash: None,
                 analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
                 analyzed_at: chrono::Utc::now(),
             }),
