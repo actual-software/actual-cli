@@ -15,23 +15,85 @@ use ratatui::{
 
 use super::log::LogPane;
 use super::steps::{StepStatus, StepsPane};
+use crate::analysis::confirm::ConfirmAction;
+use crate::analysis::types::RepoAnalysis;
+use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::progress::SyncPhase;
+use crate::cli::ui::term_size;
+use crate::cli::ui::terminal::TerminalIO;
+
+/// Abstraction over crossterm event reading so the event loop can be tested
+/// without a real terminal.
+pub(crate) trait EventSource {
+    /// Block until the next key event and return it.
+    fn next_key(&mut self) -> io::Result<crossterm::event::KeyEvent>;
+}
+
+/// Production event source that reads from crossterm.
+pub(crate) struct CrosstermEventSource;
+
+impl EventSource for CrosstermEventSource {
+    fn next_key(&mut self) -> io::Result<crossterm::event::KeyEvent> {
+        use crossterm::event::{read, Event};
+        loop {
+            match read()? {
+                Event::Key(key) => return Ok(key),
+                _ => continue,
+            }
+        }
+    }
+}
+
+/// Which button has focus in the inline confirmation UI.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ConfirmFocus {
+    Accept,
+    Reject,
+}
+
+/// State for the inline confirmation prompt rendered at the bottom of the log pane.
+pub struct ConfirmState {
+    pub question: String,
+    pub focus: ConfirmFocus,
+}
 
 /// Trait-erased interface to a live ratatui terminal.
 ///
 /// Abstracting over the backend type allows tests to inject a [`TestBackend`]
 /// without changing the public API.
 trait TuiTerminal: Send {
-    fn draw_frame(&mut self, steps: &StepsPane, log: &LogPane) -> io::Result<()>;
+    fn draw_frame(
+        &mut self,
+        steps: &StepsPane,
+        log: &LogPane,
+        confirm: Option<&ConfirmState>,
+        hint: bool,
+    ) -> io::Result<()>;
 }
 
 /// Concrete [`TuiTerminal`] backed by any [`Backend`].
 struct TuiTerminalImpl<B: Backend + Send>(Terminal<B>);
 
 impl<B: Backend + Send> TuiTerminal for TuiTerminalImpl<B> {
-    fn draw_frame(&mut self, steps: &StepsPane, log: &LogPane) -> io::Result<()> {
-        render_to(&mut self.0, steps, log)
+    fn draw_frame(
+        &mut self,
+        steps: &StepsPane,
+        log: &LogPane,
+        confirm: Option<&ConfirmState>,
+        hint: bool,
+    ) -> io::Result<()> {
+        render_to(&mut self.0, steps, log, confirm, hint)
     }
+}
+
+fn append_confirm_lines(lines: &mut Vec<String>, cs: &ConfirmState) {
+    lines.push(format!("  {}", cs.question));
+    lines.push("  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string());
+    let (accept_label, reject_label) = match cs.focus {
+        ConfirmFocus::Accept => ("[>Accept<]", "[ Reject ]"),
+        ConfirmFocus::Reject => ("[ Accept ]", "[>Reject<]"),
+    };
+    lines.push(format!("  {accept_label}   {reject_label}"));
 }
 
 /// Render the steps and log panes into an arbitrary ratatui terminal backend.
@@ -43,6 +105,8 @@ pub fn render_to<B: Backend>(
     terminal: &mut Terminal<B>,
     steps: &StepsPane,
     log: &LogPane,
+    confirm: Option<&ConfirmState>,
+    hint: bool,
 ) -> io::Result<()> {
     let size = terminal.size()?;
     let cols = size.width;
@@ -62,7 +126,13 @@ pub fn render_to<B: Backend>(
 
             let log_height = chunks[1].height.saturating_sub(2) as usize;
             let log_width = chunks[1].width.saturating_sub(2) as usize;
-            let log_text = log.render_to_string(log_height, log_width).join("\n");
+            let mut log_lines = log.render_to_string(log_height, log_width);
+            if let Some(cs) = confirm {
+                append_confirm_lines(&mut log_lines, cs);
+            } else if hint {
+                log_lines.push("  Press any key to close".to_string());
+            }
+            let log_text = log_lines.join("\n");
             let log_widget = Paragraph::new(log_text)
                 .block(Block::default().borders(Borders::ALL).title("Output"));
             frame.render_widget(log_widget, chunks[1]);
@@ -77,7 +147,13 @@ pub fn render_to<B: Backend>(
 
             let log_height = chunks[1].height as usize;
             let log_width = area.width as usize;
-            let log_text = log.render_to_string(log_height, log_width).join("\n");
+            let mut log_lines = log.render_to_string(log_height, log_width);
+            if let Some(cs) = confirm {
+                append_confirm_lines(&mut log_lines, cs);
+            } else if hint {
+                log_lines.push("  Press any key to close".to_string());
+            }
+            let log_text = log_lines.join("\n");
             frame.render_widget(Paragraph::new(log_text), chunks[1]);
         }
     })?;
@@ -109,6 +185,8 @@ pub struct TuiRenderer {
     pub log: LogPane,
     starts: [Option<Instant>; 5],
     created_at: Instant,
+    hint: bool,
+    confirm_state: Option<ConfirmState>,
 }
 
 impl TuiRenderer {
@@ -138,6 +216,8 @@ impl TuiRenderer {
             log,
             starts,
             created_at,
+            hint: false,
+            confirm_state: None,
         }
     }
 
@@ -170,6 +250,8 @@ impl TuiRenderer {
             log: LogPane::new(),
             starts: [None; 5],
             created_at: Instant::now(),
+            hint: false,
+            confirm_state: None,
         }
     }
 
@@ -300,6 +382,115 @@ impl TuiRenderer {
         }
     }
 
+    /// Show "Press any key to close" hint and block until a keypress in TUI mode.
+    /// In Plain/Quiet mode: no-op (non-interactive sessions should not block).
+    pub fn wait_for_keypress(&mut self) {
+        self.wait_for_keypress_impl(&mut CrosstermEventSource);
+    }
+
+    fn wait_for_keypress_impl(&mut self, source: &mut dyn EventSource) {
+        if let Mode::Tui(_) = &self.mode {
+            self.hint = true;
+            self.draw();
+            let _ = source.next_key();
+            self.hint = false;
+        }
+    }
+
+    /// Show the project confirmation prompt.
+    /// In TUI mode: renders inline buttons in the log pane.
+    /// In Plain/Quiet mode: delegates to the existing terminal prompt.
+    pub fn confirm_project(
+        &mut self,
+        analysis: &RepoAnalysis,
+        term: &dyn TerminalIO,
+    ) -> Result<ConfirmAction, crate::error::ActualError> {
+        self.confirm_project_impl(analysis, term, &mut CrosstermEventSource)
+    }
+
+    fn confirm_project_impl(
+        &mut self,
+        analysis: &RepoAnalysis,
+        term: &dyn TerminalIO,
+        source: &mut dyn EventSource,
+    ) -> Result<ConfirmAction, crate::error::ActualError> {
+        match &self.mode {
+            Mode::Tui(_) => {
+                // Push the project summary to the log pane
+                let width = term_size::terminal_width();
+                let summary = format_project_summary(analysis, width);
+                for line in summary.lines() {
+                    self.log.push(line.to_string());
+                }
+                // Set up confirm state
+                self.confirm_state = Some(ConfirmState {
+                    question: "Proceed with sync?".to_string(),
+                    focus: ConfirmFocus::Accept,
+                });
+                self.draw();
+                // Event loop
+                let result = self.run_confirm_loop(source);
+                self.confirm_state = None;
+                self.draw();
+                result
+            }
+            Mode::Plain | Mode::Quiet => prompt_project_confirmation(analysis, term),
+        }
+    }
+
+    fn run_confirm_loop(
+        &mut self,
+        source: &mut dyn EventSource,
+    ) -> Result<ConfirmAction, crate::error::ActualError> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        loop {
+            let key = source.next_key().map_err(|e| {
+                crate::error::ActualError::InternalError(format!("event read failed: {e}"))
+            })?;
+            match (key.code, key.modifiers) {
+                (KeyCode::Enter, _) => {
+                    let focus = self
+                        .confirm_state
+                        .as_ref()
+                        .map(|cs| cs.focus)
+                        .unwrap_or(ConfirmFocus::Accept);
+                    return if focus == ConfirmFocus::Accept {
+                        Ok(ConfirmAction::Accept)
+                    } else {
+                        Ok(ConfirmAction::Reject)
+                    };
+                }
+                (KeyCode::Left, _) | (KeyCode::BackTab, _) => {
+                    if let Some(ref mut cs) = self.confirm_state {
+                        cs.focus = ConfirmFocus::Accept;
+                    }
+                    self.draw();
+                }
+                (KeyCode::Right, _) | (KeyCode::Tab, _) => {
+                    if let Some(ref mut cs) = self.confirm_state {
+                        cs.focus = ConfirmFocus::Reject;
+                    }
+                    self.draw();
+                }
+                (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
+                    return Ok(ConfirmAction::Accept);
+                }
+                (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) => {
+                    return Ok(ConfirmAction::Reject);
+                }
+                (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) | (KeyCode::Esc, _) => {
+                    return Ok(ConfirmAction::Reject);
+                }
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    return Err(crate::error::ActualError::UserCancelled);
+                }
+                _ => {
+                    // resize or unknown — ignore and continue
+                }
+            }
+        }
+    }
+
     /// Return the wall-clock time elapsed since this renderer was created.
     pub fn total_elapsed(&self) -> Duration {
         self.created_at.elapsed()
@@ -313,7 +504,12 @@ impl TuiRenderer {
     /// Redraw the TUI. No-op in Plain and Quiet modes.
     fn draw(&mut self) {
         if let Mode::Tui(ref mut terminal) = self.mode {
-            let _ = terminal.draw_frame(&self.steps, &self.log);
+            let _ = terminal.draw_frame(
+                &self.steps,
+                &self.log,
+                self.confirm_state.as_ref(),
+                self.hint,
+            );
         }
     }
 }
@@ -325,6 +521,29 @@ impl Drop for TuiRenderer {
             let _ = disable_raw_mode();
             let _ = execute!(io::stderr(), LeaveAlternateScreen, Show);
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct MockEventSource {
+    pub(crate) events: std::collections::VecDeque<crossterm::event::KeyEvent>,
+}
+
+#[cfg(test)]
+impl MockEventSource {
+    pub(crate) fn new(events: Vec<crossterm::event::KeyEvent>) -> Self {
+        Self {
+            events: events.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl EventSource for MockEventSource {
+    fn next_key(&mut self) -> io::Result<crossterm::event::KeyEvent> {
+        self.events
+            .pop_front()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no more events"))
     }
 }
 
@@ -347,7 +566,7 @@ mod tests {
             "Write Files",
         ]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false).unwrap();
     }
 
     #[test]
@@ -362,7 +581,7 @@ mod tests {
             "Write Files",
         ]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false).unwrap();
     }
 
     #[test]
@@ -378,7 +597,7 @@ mod tests {
         ]);
         let mut log = LogPane::new();
         log.push("a log line".to_string());
-        render_to(&mut terminal, &steps, &log).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false).unwrap();
     }
 
     #[test]
@@ -399,7 +618,7 @@ mod tests {
         let mut log = LogPane::new();
         log.push("line one".to_string());
         log.push("line two".to_string());
-        render_to(&mut terminal, &steps, &log).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false).unwrap();
     }
 
     // ── TuiRenderer::new tests ──
@@ -696,14 +915,14 @@ mod tests {
         let log = LogPane::new();
 
         // First draw at wide size — must not panic.
-        render_to(&mut terminal, &steps, &log).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false).unwrap();
         assert_eq!(terminal.size().unwrap().width, 100);
 
         // Simulate a SIGWINCH / terminal resize: shrink to narrow layout (60 cols).
         terminal.backend_mut().resize(60, 20);
 
         // Second draw at narrow size — must not panic and must use new dimensions.
-        render_to(&mut terminal, &steps, &log).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false).unwrap();
         assert_eq!(terminal.size().unwrap().width, 60);
         assert_eq!(terminal.size().unwrap().height, 20);
     }
@@ -722,11 +941,279 @@ mod tests {
         ]);
         let log = LogPane::new();
 
-        render_to(&mut terminal, &steps, &log).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false).unwrap();
 
         // Resize to just below the breakpoint — switches from wide to narrow layout.
         terminal.backend_mut().resize(79, 24);
-        render_to(&mut terminal, &steps, &log).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false).unwrap();
         assert_eq!(terminal.size().unwrap().width, 79);
+    }
+
+    // ── wait_for_keypress tests ──
+
+    #[test]
+    fn test_wait_for_keypress_plain_mode_is_noop() {
+        let mut r = TuiRenderer::new(false, true); // Plain mode
+                                                   // Should return without blocking
+        r.wait_for_keypress_impl(&mut MockEventSource::new(vec![]));
+        // no panic, no event consumed
+    }
+
+    #[test]
+    fn test_wait_for_keypress_quiet_mode_is_noop() {
+        let mut r = TuiRenderer::new(true, false); // Quiet mode
+        r.wait_for_keypress_impl(&mut MockEventSource::new(vec![]));
+    }
+
+    #[test]
+    fn test_wait_for_keypress_tui_mode_consumes_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![key]);
+        r.wait_for_keypress_impl(&mut source);
+        assert!(!r.hint, "hint should be reset after keypress");
+        assert!(source.events.is_empty(), "event should be consumed");
+    }
+
+    // ── confirm_project tests ──
+
+    #[test]
+    fn test_confirm_project_plain_mode_delegates() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        // MockTerminal with default (accept) response
+        let term = MockTerminal::new(vec![]);
+        let mut r = TuiRenderer::new(false, true); // Plain mode
+                                                   // Just test it doesn't panic; result depends on MockTerminal default
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        // This calls prompt_project_confirmation which uses MockTerminal
+        let _ = r.confirm_project(&analysis, &term);
+    }
+
+    #[test]
+    fn test_confirm_project_quiet_mode_delegates() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        let term = MockTerminal::new(vec![]);
+        let mut r = TuiRenderer::new(true, false); // Quiet mode
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        let _ = r.confirm_project(&analysis, &term);
+    }
+
+    #[test]
+    fn test_confirm_project_tui_enter_accept() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![enter]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(matches!(result, Ok(ConfirmAction::Accept)));
+        assert!(r.confirm_state.is_none(), "confirm state should be cleared");
+    }
+
+    #[test]
+    fn test_confirm_project_tui_y_accept() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![y]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(matches!(result, Ok(ConfirmAction::Accept)));
+    }
+
+    #[test]
+    fn test_confirm_project_tui_n_reject() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![n]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(matches!(result, Ok(ConfirmAction::Reject)));
+    }
+
+    #[test]
+    fn test_confirm_project_tui_esc_reject() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![esc]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(matches!(result, Ok(ConfirmAction::Reject)));
+    }
+
+    #[test]
+    fn test_confirm_project_tui_tab_switches_focus_then_enter() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![tab, enter]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        // After Tab, focus moves to Reject, then Enter confirms Reject
+        assert!(matches!(result, Ok(ConfirmAction::Reject)));
+    }
+
+    #[test]
+    fn test_confirm_project_tui_right_then_left_then_enter() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![right, left, enter]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        // Right → Reject, Left → Accept, Enter confirms Accept
+        assert!(matches!(result, Ok(ConfirmAction::Accept)));
+    }
+
+    #[test]
+    fn test_confirm_project_tui_ctrl_c_cancels() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let mut source = MockEventSource::new(vec![ctrl_c]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(matches!(
+            result,
+            Err(crate::error::ActualError::UserCancelled)
+        ));
+    }
+
+    #[test]
+    fn test_confirm_project_tui_source_exhausted() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![],
+        };
+        let mut source = MockEventSource::new(vec![]); // no events → EOF error
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(result.is_err()); // IO error propagated
+    }
+
+    // ── render_to with hint/confirm tests ──
+
+    #[test]
+    fn test_render_to_with_hint() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        render_to(&mut terminal, &steps, &log, None, true).unwrap();
+    }
+
+    #[test]
+    fn test_render_to_with_confirm() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        let cs = ConfirmState {
+            question: "Proceed?".to_string(),
+            focus: ConfirmFocus::Accept,
+        };
+        render_to(&mut terminal, &steps, &log, Some(&cs), false).unwrap();
+    }
+
+    #[test]
+    fn test_render_to_with_confirm_reject_focus() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        let cs = ConfirmState {
+            question: "Proceed?".to_string(),
+            focus: ConfirmFocus::Reject,
+        };
+        render_to(&mut terminal, &steps, &log, Some(&cs), false).unwrap();
+    }
+
+    #[test]
+    fn test_render_to_narrow_with_hint() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        render_to(&mut terminal, &steps, &log, None, true).unwrap();
+    }
+
+    #[test]
+    fn test_render_to_narrow_with_confirm() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        let cs = ConfirmState {
+            question: "Proceed?".to_string(),
+            focus: ConfirmFocus::Accept,
+        };
+        render_to(&mut terminal, &steps, &log, Some(&cs), false).unwrap();
     }
 }

@@ -11,7 +11,7 @@ use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
 use crate::branding::banner::render_banner;
 use crate::cli::args::SyncArgs;
-use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
+use crate::cli::ui::confirm::format_project_summary;
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::confirm_files;
 use crate::cli::ui::panel::Panel;
@@ -115,8 +115,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         let summary = format_project_summary(&analysis, width);
         pipeline.suspend(|| eprintln!("{summary}"));
     } else {
-        // prompt_project_confirmation displays the project summary itself
-        let action = pipeline.suspend(|| prompt_project_confirmation(&analysis, term))?;
+        let action = pipeline.confirm_project(&analysis, term)?;
         if matches!(action, ConfirmAction::Reject) {
             pipeline.finish_remaining();
             return Err(ActualError::UserCancelled);
@@ -356,6 +355,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         term,
         &mut pipeline,
     )?;
+    pipeline.wait_for_keypress();
     Ok(())
 }
 
