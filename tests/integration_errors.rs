@@ -25,7 +25,7 @@ mod tests {
     }
 
     /// Create a fake binary that handles auth + analysis OK but crashes on the
-    /// tailoring invocation (detected via `skipped_adrs` in args).
+    /// tailoring invocation (detected via `--json-schema` flag in args).
     fn create_tailoring_crash_binary(
         dir: &std::path::Path,
         auth_json: &str,
@@ -48,7 +48,14 @@ mod tests {
              printf '\\n'\n\
              exit 0\n\
              elif [ \"$1\" = \"--print\" ]; then\n\
-             if echo \"$@\" | grep -q \"skipped_adrs\"; then\n\
+             _is_tailoring=0\n\
+             for _arg in \"$@\"; do\n\
+             if [ \"$_arg\" = \"--json-schema\" ]; then\n\
+             _is_tailoring=1\n\
+             break\n\
+             fi\n\
+             done\n\
+             if [ \"$_is_tailoring\" = \"1\" ]; then\n\
              echo 'tailoring subprocess crashed' >&2\n\
              exit 1\n\
              else\n\
@@ -68,7 +75,7 @@ mod tests {
     }
 
     /// Create a fake binary that handles auth + analysis OK but returns invalid
-    /// JSON for the tailoring invocation (detected via `skipped_adrs` in args).
+    /// JSON for the tailoring invocation (detected via `--json-schema` flag in args).
     fn create_tailoring_invalid_json_binary(
         dir: &std::path::Path,
         auth_json: &str,
@@ -91,7 +98,14 @@ mod tests {
              printf '\\n'\n\
              exit 0\n\
              elif [ \"$1\" = \"--print\" ]; then\n\
-             if echo \"$@\" | grep -q \"skipped_adrs\"; then\n\
+             _is_tailoring=0\n\
+             for _arg in \"$@\"; do\n\
+             if [ \"$_arg\" = \"--json-schema\" ]; then\n\
+             _is_tailoring=1\n\
+             break\n\
+             fi\n\
+             done\n\
+             if [ \"$_is_tailoring\" = \"1\" ]; then\n\
              printf '%s\\n' 'not valid json'\n\
              exit 0\n\
              else\n\

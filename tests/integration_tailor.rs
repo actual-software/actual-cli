@@ -531,6 +531,53 @@ mod tests {
     }
 
     #[test]
+    fn tailoring_not_misfired_when_adr_contains_skipped_adrs_string() {
+        // Regression test: ADR policy text contains "skipped_adrs" as a substring.
+        // With the old grep-based discriminator, the fake binary would mis-route
+        // the analysis invocation to the tailoring branch.
+        // This test verifies the fix (--json-schema flag check) works correctly.
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json(
+            "adr-001",
+            "CI Pipeline",
+            &["Do not reference skipped_adrs fields in external scripts"],
+            &[],
+            &["."],
+        );
+        let response = make_match_response_json(&format!("[{}]", adr));
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&response)
+            .create();
+
+        let tailoring_json = make_tailoring_json(
+            &[("CLAUDE.md", "# CI Rules", "Applied CI ADR", &["adr-001"])],
+            &[],
+        );
+
+        let env =
+            TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
+
+        env.cmd()
+            .args(["sync", "--force", "--api-url", &env.api_url])
+            .assert()
+            .success();
+
+        // Tailoring should have written CLAUDE.md correctly
+        assert!(
+            env.file_exists("CLAUDE.md"),
+            "CLAUDE.md should be created by tailoring"
+        );
+        let content = env.read_file("CLAUDE.md");
+        assert!(
+            content.contains("CI Rules"),
+            "Expected tailored content in CLAUDE.md"
+        );
+    }
+
+    #[test]
     fn tailored_content_replaces_existing_managed_section() {
         let mut server = mockito::Server::new();
         let adr = make_adr_json(
