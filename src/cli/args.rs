@@ -378,10 +378,10 @@ mod parse_tests {
     #[test]
     fn test_cli_accepts_valid_model() {
         let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"]).unwrap();
-        match cli.command {
-            Command::Sync(args) => assert_eq!(args.model, Some("claude-3.5-sonnet".to_string())),
-            _ => panic!("expected Sync"),
-        }
+        let Command::Sync(args) = cli.command else {
+            panic!("expected Sync command");
+        };
+        assert_eq!(args.model, Some("claude-3.5-sonnet".to_string()));
     }
 
     #[test]
