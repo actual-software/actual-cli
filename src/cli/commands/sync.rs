@@ -1196,8 +1196,8 @@ mod tests {
     fn test_confirm_and_write_dry_run_full() {
         let dir = tempfile::tempdir().unwrap();
         let output = make_output(vec![make_file(
-            "CLAUDE.md",
-            "Full content here",
+            "\x1b[32mCLAUDE.md\x1b[0m",
+            "\x1b[31mANSI content\x1b[0m Full content here",
             vec!["adr-001"],
         )]);
         let term = MockTerminal::new(vec![]);
@@ -1220,7 +1220,7 @@ mod tests {
         let text = term.output_text();
         assert!(
             text.contains("── CLAUDE.md ──"),
-            "expected file header in: {text}"
+            "expected file header (without ANSI) in: {text}"
         );
         assert!(
             text.contains("Full content here"),
@@ -1228,8 +1228,60 @@ mod tests {
         );
         assert!(text.contains("── end ──"), "expected end marker in: {text}");
 
+        // No ANSI escape codes in output
+        assert!(
+            !text.as_bytes().contains(&0x1Bu8),
+            "dry-run --full output must not contain ESC (0x1B)"
+        );
+
         // File should NOT exist on disk
         assert!(!dir.path().join("CLAUDE.md").exists());
+    }
+
+    // ── test_dry_run_full_strips_ansi_from_tailored_content ──
+
+    #[test]
+    fn test_dry_run_full_strips_ansi_from_tailored_content() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create output with ANSI in both path and content
+        let output = make_output(vec![make_file(
+            "\x1b[32mCLAUDE.md\x1b[0m",
+            "\x1b[31mINJECTED\x1b[0m safe content here",
+            vec!["adr-001"],
+        )]);
+        let term = MockTerminal::new(vec![]).with_selection(Some(vec![]));
+
+        let result = confirm_and_write(
+            &output,
+            dir.path(),
+            false, // force
+            true,  // dry_run
+            true,  // full
+            &OutputFormat::ClaudeMd,
+            &term,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        assert_eq!(result.files_created, 0, "dry-run must not write files");
+
+        let text = term.output_text();
+        assert!(
+            !text.as_bytes().contains(&0x1Bu8),
+            "dry-run --full output must not contain ESC (0x1B)"
+        );
+        assert!(
+            text.contains("safe content here"),
+            "expected non-ANSI content preserved in: {text}"
+        );
+        assert!(
+            text.contains("CLAUDE.md"),
+            "expected path (without ANSI) in output: {text}"
+        );
+        assert!(
+            !dir.path().join("CLAUDE.md").exists(),
+            "dry-run must not write any file"
+        );
     }
 
     // ── test_confirm_and_write_reject_file ──
