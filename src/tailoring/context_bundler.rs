@@ -982,6 +982,54 @@ mod tests {
         inner();
     }
 
+    // Test 40: is_sensitive_file returns false for a path with no file name (e.g., root "/")
+    #[test]
+    fn test_is_sensitive_file_no_file_name() {
+        // Path::new("/") has no file_name component — covers the None branch
+        assert!(!is_sensitive_file(Path::new("/")));
+    }
+
+    // Test 41: is_sensitive_file returns true for exact-name matches
+    #[test]
+    fn test_is_sensitive_file_exact_names() {
+        assert!(is_sensitive_file(Path::new(".env")));
+        assert!(is_sensitive_file(Path::new(".secrets")));
+        assert!(is_sensitive_file(Path::new(".npmrc")));
+        assert!(is_sensitive_file(Path::new(".pypirc")));
+        assert!(is_sensitive_file(Path::new(".netrc")));
+    }
+
+    // Test 42: is_sensitive_file returns true for sensitive extensions
+    #[test]
+    fn test_is_sensitive_file_sensitive_extensions() {
+        assert!(is_sensitive_file(Path::new("api_key.env")));
+        assert!(is_sensitive_file(Path::new("server.key")));
+        assert!(is_sensitive_file(Path::new("cert.pem")));
+        assert!(is_sensitive_file(Path::new("keystore.p12")));
+        assert!(is_sensitive_file(Path::new("keystore.pfx")));
+    }
+
+    // Test 43: is_sensitive_file returns true for sensitive name substrings
+    #[test]
+    fn test_is_sensitive_file_name_substrings() {
+        assert!(is_sensitive_file(Path::new("credentials.json")));
+        assert!(is_sensitive_file(Path::new("my_secret_key")));
+        assert!(is_sensitive_file(Path::new("id_rsa")));
+        assert!(is_sensitive_file(Path::new("id_ecdsa")));
+        assert!(is_sensitive_file(Path::new("id_ed25519")));
+        assert!(is_sensitive_file(Path::new("private_key.txt")));
+        assert!(is_sensitive_file(Path::new("privatekey.json")));
+    }
+
+    // Test 44: is_sensitive_file returns false for safe files
+    #[test]
+    fn test_is_sensitive_file_safe_files() {
+        assert!(!is_sensitive_file(Path::new("Cargo.toml")));
+        assert!(!is_sensitive_file(Path::new("src/main.rs")));
+        assert!(!is_sensitive_file(Path::new("README.md")));
+        assert!(!is_sensitive_file(Path::new("config.toml")));
+    }
+
     // Test 39: walker error path in find_entrypoints — unreadable subdirectory is skipped
     #[test]
     #[cfg(unix)]
