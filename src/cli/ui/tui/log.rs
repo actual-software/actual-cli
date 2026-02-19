@@ -1,0 +1,166 @@
+use std::collections::VecDeque;
+
+/// Maximum number of lines to retain in the buffer.
+const MAX_LINES: usize = 1000;
+
+pub struct LogPane {
+    buffer: VecDeque<String>,
+    capacity: usize,
+}
+
+impl LogPane {
+    pub fn new() -> Self {
+        Self {
+            buffer: VecDeque::new(),
+            capacity: MAX_LINES,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buffer: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    /// Push a new line into the log buffer. Oldest lines are dropped when capacity is exceeded.
+    pub fn push(&mut self, line: String) {
+        if self.buffer.len() >= self.capacity {
+            self.buffer.pop_front();
+        }
+        self.buffer.push_back(line);
+    }
+
+    /// Returns the number of lines currently in the buffer.
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Returns true if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Render the last `height` lines, each truncated to `width` visible chars.
+    /// Returns a Vec of strings (one per line, from top to bottom).
+    /// If there are fewer than `height` lines, returns all of them.
+    pub fn render_to_string(&self, height: usize, width: usize) -> Vec<String> {
+        let total = self.buffer.len();
+        let start = total.saturating_sub(height);
+        self.buffer
+            .iter()
+            .skip(start)
+            .map(|line| truncate_line(line, width))
+            .collect()
+    }
+}
+
+impl Default for LogPane {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Truncate a line to `width` visible characters, appending `…` if truncated.
+fn truncate_line(line: &str, width: usize) -> String {
+    if line.chars().count() <= width {
+        line.to_string()
+    } else {
+        let truncated: String = line.chars().take(width.saturating_sub(1)).collect();
+        format!("{truncated}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_is_empty() {
+        let pane = LogPane::new();
+        assert!(pane.is_empty());
+        assert_eq!(pane.len(), 0);
+    }
+
+    #[test]
+    fn test_default_is_empty() {
+        let pane = LogPane::default();
+        assert!(pane.is_empty());
+        assert_eq!(pane.len(), 0);
+    }
+
+    #[test]
+    fn test_push_adds_lines() {
+        let mut pane = LogPane::new();
+        pane.push("line 1".to_string());
+        pane.push("line 2".to_string());
+        assert_eq!(pane.len(), 2);
+        assert!(!pane.is_empty());
+    }
+
+    #[test]
+    fn test_push_overflow_drops_oldest() {
+        let mut pane = LogPane::with_capacity(2);
+        pane.push("first".to_string());
+        pane.push("second".to_string());
+        pane.push("third".to_string());
+        // Buffer should only hold 2 items, oldest ("first") dropped
+        assert_eq!(pane.len(), 2);
+        let rendered = pane.render_to_string(10, 100);
+        assert_eq!(rendered[0], "second");
+        assert_eq!(rendered[1], "third");
+    }
+
+    #[test]
+    fn test_render_fewer_lines_than_height() {
+        let mut pane = LogPane::new();
+        pane.push("line 1".to_string());
+        pane.push("line 2".to_string());
+        let result = pane.render_to_string(10, 100);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "line 1");
+        assert_eq!(result[1], "line 2");
+    }
+
+    #[test]
+    fn test_render_more_lines_than_height_auto_scroll() {
+        let mut pane = LogPane::new();
+        for i in 0..10 {
+            pane.push(format!("line {i}"));
+        }
+        // Ask for only 3 lines — should get last 3
+        let result = pane.render_to_string(3, 100);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "line 7");
+        assert_eq!(result[1], "line 8");
+        assert_eq!(result[2], "line 9");
+    }
+
+    #[test]
+    fn test_truncate_line_no_truncation() {
+        let result = truncate_line("hello", 10);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_truncate_line_exact_width() {
+        let result = truncate_line("hello", 5);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_truncate_line_truncated() {
+        let result = truncate_line("hello world", 7);
+        // takes 6 chars + ellipsis
+        assert_eq!(result, "hello …");
+    }
+
+    #[test]
+    fn test_render_with_truncation() {
+        let mut pane = LogPane::new();
+        pane.push("hello world".to_string());
+        let result = pane.render_to_string(5, 7);
+        assert_eq!(result[0], "hello …");
+    }
+}
