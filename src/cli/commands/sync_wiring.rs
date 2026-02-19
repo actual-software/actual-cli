@@ -87,13 +87,15 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 authenticated: true,
                 email: Some("Anthropic API".to_string()),
             });
+            // Full API model name — unlike the Claude CLI alias in options.rs DEFAULT_MODEL,
+            // the Anthropic HTTP API requires the complete model identifier.
             let model = args
                 .model
                 .as_deref()
                 .or(cfg.model.as_deref())
                 .unwrap_or("claude-sonnet-4-5")
                 .to_string();
-            let runner = AnthropicApiRunner::new(api_key, model, Duration::from_secs(300));
+            let runner = AnthropicApiRunner::new(api_key, model, Duration::from_secs(300))?;
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
         RunnerChoice::OpenAiApi => {
@@ -102,13 +104,15 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 authenticated: true,
                 email: Some("OpenAI API".to_string()),
             });
+            // Full API model name — the OpenAI HTTP API requires the complete model identifier,
+            // unlike the Claude CLI alias in options.rs DEFAULT_MODEL.
             let model = args
                 .model
                 .as_deref()
                 .or(cfg.model.as_deref())
                 .unwrap_or("gpt-4o")
                 .to_string();
-            let runner = OpenAiApiRunner::new(api_key, model, Duration::from_secs(300));
+            let runner = OpenAiApiRunner::new(api_key, model, Duration::from_secs(300))?;
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
         RunnerChoice::CodexCli => {
