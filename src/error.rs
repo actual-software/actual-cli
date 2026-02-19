@@ -142,6 +142,13 @@ mod tests {
             ActualError::TerminalIOError("test".to_string()).exit_code(),
             1
         );
+        assert_eq!(
+            ActualError::ApiKeyMissing {
+                env_var: "ANTHROPIC_API_KEY".to_string()
+            }
+            .exit_code(),
+            2
+        );
     }
 
     #[test]
@@ -236,6 +243,19 @@ mod tests {
             msg.contains("broken pipe"),
             "expected 'broken pipe' in: {msg}"
         );
+
+        let msg = ActualError::ApiKeyMissing {
+            env_var: "OPENAI_API_KEY".to_string(),
+        }
+        .to_string();
+        assert!(
+            msg.contains("API key not set"),
+            "expected 'API key not set' in: {msg}"
+        );
+        assert!(
+            msg.contains("OPENAI_API_KEY"),
+            "expected env var name in: {msg}"
+        );
     }
 
     #[test]
@@ -298,6 +318,20 @@ mod tests {
         assert_eq!(
             ActualError::TerminalIOError("test".to_string()).hint(),
             None
+        );
+    }
+
+    #[test]
+    fn test_hint_api_key_missing() {
+        let err = ActualError::ApiKeyMissing {
+            env_var: "ANTHROPIC_API_KEY".to_string(),
+        };
+        let hint = err.hint();
+        assert!(hint.is_some(), "expected Some hint for ApiKeyMissing");
+        assert!(
+            hint.unwrap().contains("API key"),
+            "expected 'API key' in hint: {:?}",
+            hint
         );
     }
 }

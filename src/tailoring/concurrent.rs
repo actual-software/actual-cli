@@ -1268,7 +1268,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -1303,7 +1303,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -1339,7 +1339,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(2),
