@@ -89,6 +89,10 @@ impl Drop for EnvGuard {
 /// yields the string `it's` in the shell.
 #[cfg(unix)]
 pub fn shell_single_quote_escape(s: &str) -> String {
+    debug_assert!(
+        !s.contains('\x00'),
+        "shell_single_quote_escape: null bytes not supported — they are silently stripped by POSIX shells"
+    );
     s.replace('\'', "'\\''")
 }
 
@@ -446,5 +450,61 @@ impl TestEnv {
             "[package]\nname = \"api-server\"\nversion = \"0.1.0\"\n",
         );
         self.write_file("libs/shared/package.json", r#"{"name": "shared-lib"}"#);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod shell_escape_tests {
+    use super::shell_single_quote_escape;
+
+    #[test]
+    fn escape_empty_string() {
+        assert_eq!(shell_single_quote_escape(""), "");
+    }
+
+    #[test]
+    fn escape_no_special_chars() {
+        assert_eq!(shell_single_quote_escape("hello world"), "hello world");
+        assert_eq!(
+            shell_single_quote_escape("no-quotes-here"),
+            "no-quotes-here"
+        );
+    }
+
+    #[test]
+    fn escape_single_quote() {
+        assert_eq!(shell_single_quote_escape("it's alive"), "it'\\''s alive");
+    }
+
+    #[test]
+    fn escape_multiple_single_quotes() {
+        assert_eq!(
+            shell_single_quote_escape("it's all 'good'"),
+            "it'\\''s all '\\''good'\\''",
+        );
+        assert_eq!(shell_single_quote_escape("'''"), "'\\'''\\'''\\''");
+    }
+
+    #[test]
+    fn escape_quote_at_boundaries() {
+        assert_eq!(shell_single_quote_escape("'leading"), "'\\''leading");
+        assert_eq!(shell_single_quote_escape("trailing'"), "trailing'\\''");
+    }
+
+    #[test]
+    fn escape_safe_passthrough_metacharacters() {
+        // These chars are safe inside POSIX single-quoted strings — no escaping needed.
+        assert_eq!(shell_single_quote_escape("foo`id`bar"), "foo`id`bar");
+        assert_eq!(shell_single_quote_escape("$(id)"), "$(id)");
+        assert_eq!(shell_single_quote_escape("cost $5"), "cost $5");
+        assert_eq!(shell_single_quote_escape("say \"hello\""), "say \"hello\"");
+        assert_eq!(shell_single_quote_escape("foo\\bar"), "foo\\bar");
+    }
+
+    #[test]
+    fn escape_newline_passthrough() {
+        // Literal newlines are safe in POSIX single-quoted strings
+        assert_eq!(shell_single_quote_escape("line1\nline2"), "line1\nline2");
+        assert_eq!(shell_single_quote_escape("line1\rline2"), "line1\rline2");
     }
 }
