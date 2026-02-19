@@ -2255,6 +2255,37 @@ mod tests {
         assert_eq!(result, result2);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_compute_repo_key_empty_url_falls_back_to_path_hash() {
+        use std::os::unix::fs::PermissionsExt;
+        // Fake "git" that exits 0 but prints nothing — the empty-string guard
+        // in compute_repo_key_with_timeout should fall back to the path hash.
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake_git = bin_dir.path().join("git");
+        std::fs::write(&fake_git, "#!/bin/sh\nprintf ''\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _path_guard = crate::testutil::EnvGuard::set(
+            "PATH",
+            &format!("{}:{}", bin_dir.path().display(), original_path),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let result = compute_repo_key_with_timeout(dir.path(), std::time::Duration::from_secs(5));
+        assert_eq!(result.len(), 64, "expected 64-char SHA256 hex string");
+        // Should equal the path-hash fallback
+        let expected = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(dir.path().to_string_lossy().as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        assert_eq!(result, expected, "empty URL should fall back to path hash");
+    }
+
     // ── raw_adrs_to_output tests ──
 
     fn make_test_adr(id: &str, title: &str, projects: Vec<&str>) -> crate::api::types::Adr {
