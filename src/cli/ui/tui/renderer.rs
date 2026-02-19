@@ -17,10 +17,28 @@ use super::log::LogPane;
 use super::steps::{StepStatus, StepsPane};
 use crate::cli::ui::progress::SyncPhase;
 
+/// Trait-erased interface to a live ratatui terminal.
+///
+/// Abstracting over the backend type allows tests to inject a [`TestBackend`]
+/// without changing the public API.
+trait TuiTerminal: Send {
+    fn draw_frame(&mut self, steps: &StepsPane, log: &LogPane) -> io::Result<()>;
+}
+
+/// Concrete [`TuiTerminal`] backed by any [`Backend`].
+struct TuiTerminalImpl<B: Backend + Send>(Terminal<B>);
+
+impl<B: Backend + Send> TuiTerminal for TuiTerminalImpl<B> {
+    fn draw_frame(&mut self, steps: &StepsPane, log: &LogPane) -> io::Result<()> {
+        render_to(&mut self.0, steps, log)
+    }
+}
+
 /// Render the steps and log panes into an arbitrary ratatui terminal backend.
 ///
 /// This is a free function (not a method) so it can be called from tests with
-/// `TestBackend` without needing a real TTY or `CrosstermBackend`.
+/// [`ratatui::backend::TestBackend`] without requiring a real TTY or
+/// `CrosstermBackend`.
 pub fn render_to<B: Backend>(
     terminal: &mut Terminal<B>,
     steps: &StepsPane,
@@ -68,8 +86,8 @@ pub fn render_to<B: Backend>(
 
 /// The rendering mode chosen at construction time.
 enum Mode {
-    /// Full ratatui TUI on a real TTY.
-    Tui(Terminal<ratatui::backend::CrosstermBackend<io::Stderr>>),
+    /// Full ratatui TUI on a live terminal (trait-erased for testability).
+    Tui(Box<dyn TuiTerminal>),
     /// Plain line-based output to stderr (non-TTY or `--no-tui`).
     Plain,
     /// No output at all (`--quiet`).
@@ -121,8 +139,9 @@ impl TuiRenderer {
         }
 
         // Attempt TUI setup; fall back to Plain on any failure.
-        let tui_mode = Self::setup_tui().ok().map(Mode::Tui);
-        let mode = tui_mode.unwrap_or(Mode::Plain);
+        let mode = Self::setup_tui()
+            .map(|t| Mode::Tui(Box::new(TuiTerminalImpl(t)) as Box<dyn TuiTerminal>))
+            .unwrap_or(Mode::Plain);
 
         Self {
             mode,
@@ -133,6 +152,8 @@ impl TuiRenderer {
         }
     }
 
+    /// Set up a crossterm terminal. Returns `Err` if the TTY is unavailable or
+    /// the terminal cannot be created.
     fn setup_tui() -> io::Result<Terminal<ratatui::backend::CrosstermBackend<io::Stderr>>> {
         enable_raw_mode()?;
         let mut stderr = io::stderr();
@@ -142,6 +163,23 @@ impl TuiRenderer {
         }
         let backend = ratatui::backend::CrosstermBackend::new(io::stderr());
         Terminal::new(backend).map_err(io::Error::other)
+    }
+
+    /// Construct a renderer in Tui mode using the given backend (for tests).
+    ///
+    /// The crossterm raw-mode and alternate-screen setup is intentionally
+    /// **skipped** — only the drawing path, suspend branches, and Drop impl
+    /// need to be exercised.  The `let _ = ...` calls in those paths silently
+    /// ignore "not a TTY" errors, making them safe to run in CI.
+    #[cfg(test)]
+    pub(crate) fn new_with_tui<B: Backend + Send + 'static>(terminal: Terminal<B>) -> Self {
+        Self {
+            mode: Mode::Tui(Box::new(TuiTerminalImpl(terminal))),
+            steps: StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]),
+            log: LogPane::new(),
+            starts: [None; 4],
+            created_at: Instant::now(),
+        }
     }
 
     /// Map a `SyncPhase` to a step index.
@@ -257,6 +295,7 @@ impl TuiRenderer {
     pub fn suspend<F: FnOnce() -> R, R>(&mut self, f: F) -> R {
         match &self.mode {
             Mode::Tui(_) => {
+                // Silently ignore errors — in tests there is no raw-mode TTY.
                 let _ = disable_raw_mode();
                 let _ = execute!(io::stderr(), LeaveAlternateScreen, Show);
                 let result = f();
@@ -282,7 +321,7 @@ impl TuiRenderer {
     /// Redraw the TUI. No-op in Plain and Quiet modes.
     fn draw(&mut self) {
         if let Mode::Tui(ref mut terminal) = self.mode {
-            let _ = render_to(terminal, &self.steps, &self.log);
+            let _ = terminal.draw_frame(&self.steps, &self.log);
         }
     }
 }
@@ -290,6 +329,7 @@ impl TuiRenderer {
 impl Drop for TuiRenderer {
     fn drop(&mut self) {
         if let Mode::Tui(_) = &self.mode {
+            // Silently ignore errors — in tests there is no raw-mode TTY.
             let _ = disable_raw_mode();
             let _ = execute!(io::stderr(), LeaveAlternateScreen, Show);
         }
@@ -352,7 +392,6 @@ mod tests {
     fn test_new_quiet() {
         let r = TuiRenderer::new(true, false);
         assert!(matches!(r.mode, Mode::Quiet));
-        // total_elapsed works in any mode
         let _ = r.total_elapsed();
         let _ = r.start_time();
     }
@@ -365,12 +404,69 @@ mod tests {
 
     #[test]
     fn test_new_non_tty_falls_back_to_plain() {
-        // In CI / test environments stderr is not a TTY, so new(false, false)
-        // should produce Plain mode.
+        // In CI / test environments stderr is not a TTY.
         let r = TuiRenderer::new(false, false);
         // Either Plain or Tui is acceptable depending on the test environment,
-        // but we just verify construction does not panic.
+        // but construction must not panic.
         let _ = r.total_elapsed();
+    }
+
+    // ── Tui mode tests via new_with_tui ──
+
+    #[test]
+    fn test_tui_mode_draw_on_start() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // All public methods that call draw() should work without panicking.
+        r.start(SyncPhase::Environment, "checking...");
+    }
+
+    #[test]
+    fn test_tui_mode_all_transitions() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "env...");
+        r.success(SyncPhase::Environment, "env ok");
+        r.start(SyncPhase::Analysis, "analysis...");
+        r.warn(SyncPhase::Analysis, "warn");
+        r.start(SyncPhase::Fetch, "fetch...");
+        r.error(SyncPhase::Fetch, "failed");
+        r.skip(SyncPhase::Tailor, "skipped");
+        r.update_message(SyncPhase::Tailor, "updated");
+        r.println("a log line");
+        r.finish_remaining();
+    }
+
+    #[test]
+    fn test_tui_mode_suspend() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // suspend() in Tui mode: disable_raw_mode/execute!/enable_raw_mode all
+        // fail silently (not a TTY in tests) but the closure is called.
+        let result = r.suspend(|| 99_i32);
+        assert_eq!(result, 99);
+    }
+
+    #[test]
+    fn test_tui_mode_drop_cleans_up() {
+        // Drop is called when r goes out of scope. The crossterm calls fail
+        // silently (not a TTY in tests).
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let r = TuiRenderer::new_with_tui(terminal);
+        drop(r); // exercises the Drop impl Tui branch
+    }
+
+    #[test]
+    fn test_tui_mode_narrow_draw() {
+        // Test the narrow (< 80 cols) render path via new_with_tui.
+        let backend = TestBackend::new(60, 20);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "narrow layout test");
     }
 
     // ── phase_idx coverage via public methods ──
