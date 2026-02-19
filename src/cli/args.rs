@@ -2,6 +2,123 @@ use clap::{Parser, Subcommand};
 
 use crate::generation::OutputFormat;
 
+/// AI backend runner selection for the `--runner` flag.
+///
+/// Using a typed enum prevents log injection: invalid runner names are rejected
+/// by clap before they ever reach business logic or error messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerChoice {
+    /// Claude Code CLI subprocess (default).
+    ClaudeCli,
+    /// Anthropic Messages API (requires `ANTHROPIC_API_KEY`).
+    AnthropicApi,
+    /// OpenAI Responses API (requires `OPENAI_API_KEY`).
+    OpenAiApi,
+    /// Codex CLI subprocess (requires `codex` binary).
+    CodexCli,
+}
+
+impl clap::ValueEnum for RunnerChoice {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[
+            RunnerChoice::ClaudeCli,
+            RunnerChoice::AnthropicApi,
+            RunnerChoice::OpenAiApi,
+            RunnerChoice::CodexCli,
+        ]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(match self {
+            RunnerChoice::ClaudeCli => clap::builder::PossibleValue::new("claude-cli"),
+            RunnerChoice::AnthropicApi => clap::builder::PossibleValue::new("anthropic-api"),
+            RunnerChoice::OpenAiApi => clap::builder::PossibleValue::new("openai-api"),
+            RunnerChoice::CodexCli => clap::builder::PossibleValue::new("codex-cli"),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: try to parse `actual sync --runner <value>` and return the result.
+    fn parse_runner(value: &str) -> Result<Option<RunnerChoice>, clap::Error> {
+        Cli::try_parse_from(["actual", "sync", "--runner", value]).map(|cli| match cli.command {
+            Command::Sync(args) => args.runner,
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn test_runner_claude_cli_accepted() {
+        let result = parse_runner("claude-cli");
+        assert!(result.is_ok(), "claude-cli should be accepted");
+        assert_eq!(result.unwrap(), Some(RunnerChoice::ClaudeCli));
+    }
+
+    #[test]
+    fn test_runner_anthropic_api_accepted() {
+        let result = parse_runner("anthropic-api");
+        assert!(result.is_ok(), "anthropic-api should be accepted");
+        assert_eq!(result.unwrap(), Some(RunnerChoice::AnthropicApi));
+    }
+
+    #[test]
+    fn test_runner_openai_api_accepted() {
+        let result = parse_runner("openai-api");
+        assert!(result.is_ok(), "openai-api should be accepted");
+        assert_eq!(result.unwrap(), Some(RunnerChoice::OpenAiApi));
+    }
+
+    #[test]
+    fn test_runner_codex_cli_accepted() {
+        let result = parse_runner("codex-cli");
+        assert!(result.is_ok(), "codex-cli should be accepted");
+        assert_eq!(result.unwrap(), Some(RunnerChoice::CodexCli));
+    }
+
+    #[test]
+    fn test_runner_invalid_value_rejected() {
+        let result = parse_runner("unknown-runner");
+        assert!(result.is_err(), "unknown-runner should be rejected by clap");
+    }
+
+    #[test]
+    fn test_runner_log_injection_rejected() {
+        // Ensure clap rejects a runner value that contains characters used for log
+        // injection (newline + payload).  The key security property is that clap
+        // rejects the value entirely — business logic (sync_wiring.rs) never sees
+        // it, so it can never appear in an ActualError message constructed there.
+        //
+        // Clap's own error message may quote the invalid value for usability, but
+        // that is acceptable because clap's error messages are not written to
+        // structured logs; they are displayed directly to the user on stderr.
+        let injected = "invalid\nlog-injection";
+        let result = parse_runner(injected);
+        assert!(
+            result.is_err(),
+            "log-injection runner value must be rejected by clap"
+        );
+    }
+
+    #[test]
+    fn test_runner_empty_value_rejected() {
+        let result = parse_runner("");
+        assert!(result.is_err(), "empty runner value should be rejected");
+    }
+
+    #[test]
+    fn test_runner_absent_is_none() {
+        let cli =
+            Cli::try_parse_from(["actual", "sync"]).expect("sync without --runner should parse");
+        match cli.command {
+            Command::Sync(args) => assert_eq!(args.runner, None),
+            _ => panic!("expected Sync command"),
+        }
+    }
+}
+
 /// Parse and validate a budget value, rejecting negative and non-finite numbers.
 fn parse_budget(s: &str) -> Result<f64, String> {
     let val: f64 = s
@@ -102,8 +219,8 @@ pub struct SyncArgs {
     ///   codex-cli      — Codex CLI subprocess (requires codex binary)
     ///
     /// Can also be set permanently via: actual config set runner anthropic-api
-    #[arg(long, value_name = "RUNNER")]
-    pub runner: Option<String>,
+    #[arg(long, value_enum, value_name = "RUNNER")]
+    pub runner: Option<RunnerChoice>,
 }
 
 /// Arguments for the `status` command
