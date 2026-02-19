@@ -147,33 +147,27 @@ mod tests {
     #[test]
     fn test_cli_parse_sync_runner_flag() {
         let cli = Cli::try_parse_from(["actual", "sync", "--runner", "anthropic-api"]).unwrap();
-        match cli.command {
-            Command::Sync(args) => {
-                assert_eq!(args.runner, Some("anthropic-api".to_string()));
-            }
-            _ => panic!("expected Sync command"),
-        }
+        let Command::Sync(args) = cli.command else {
+            unreachable!()
+        };
+        assert_eq!(args.runner, Some("anthropic-api".to_string()));
     }
 
     #[test]
     fn test_cli_parse_sync_runner_openai() {
         let cli = Cli::try_parse_from(["actual", "sync", "--runner", "openai-api"]).unwrap();
-        match cli.command {
-            Command::Sync(args) => {
-                assert_eq!(args.runner, Some("openai-api".to_string()));
-            }
-            _ => panic!("expected Sync command"),
-        }
+        let Command::Sync(args) = cli.command else {
+            unreachable!()
+        };
+        assert_eq!(args.runner, Some("openai-api".to_string()));
     }
 
     #[test]
     fn test_cli_parse_sync_no_runner_flag() {
         let cli = Cli::try_parse_from(["actual", "sync"]).unwrap();
-        match cli.command {
-            Command::Sync(args) => {
-                assert_eq!(args.runner, None);
-            }
-            _ => panic!("expected Sync command"),
-        }
+        let Command::Sync(args) = cli.command else {
+            unreachable!()
+        };
+        assert_eq!(args.runner, None);
     }
 }
