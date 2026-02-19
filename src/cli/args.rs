@@ -123,10 +123,7 @@ mod tests {
     fn test_runner_absent_is_none() {
         let cli =
             Cli::try_parse_from(["actual", "sync"]).expect("sync without --runner should parse");
-        assert!(matches!(cli.command, Command::Sync(_)));
-        if let Command::Sync(args) = cli.command {
-            assert_eq!(args.runner, None);
-        }
+        assert_eq!(runner_from_command(cli.command), None);
     }
 }
 
@@ -301,6 +298,21 @@ mod parse_tests {
     use super::*;
     use clap::Parser;
 
+    /// Extract model from a parsed command; returns None for non-Sync commands.
+    fn model_from_command(cmd: Command) -> Option<String> {
+        match cmd {
+            Command::Sync(args) => args.model,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_model_from_non_sync_command_returns_none() {
+        // Exercises the `_ => None` arm of model_from_command.
+        let cli = Cli::try_parse_from(["actual", "status"]).unwrap();
+        assert_eq!(model_from_command(cli.command), None);
+    }
+
     // ---- parse_model unit tests ----
 
     #[test]
@@ -389,10 +401,10 @@ mod parse_tests {
     #[test]
     fn test_cli_accepts_valid_model() {
         let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"]).unwrap();
-        assert!(matches!(cli.command, Command::Sync(_)));
-        if let Command::Sync(args) = cli.command {
-            assert_eq!(args.model, Some("claude-3.5-sonnet".to_string()));
-        }
+        assert_eq!(
+            model_from_command(cli.command),
+            Some("claude-3.5-sonnet".to_string())
+        );
     }
 
     #[test]
