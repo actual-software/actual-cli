@@ -178,7 +178,7 @@ impl Panel {
                         out,
                         "{} {}{} {}",
                         theme::border("│"),
-                        theme::muted(line),
+                        theme::muted(&line),
                         Self::padding(inner, Self::visual_width(text).min(inner)),
                         theme::border("│"),
                     );
@@ -579,10 +579,10 @@ mod tests {
         );
 
         // The extra row in footer is the separator
+        let sep_row = footer_rows[1];
         assert!(
-            footer_rows[1].starts_with('├'),
-            "footer's extra row should be a separator: {}",
-            footer_rows[1]
+            sep_row.starts_with('├'),
+            "footer's extra row should be a separator: {sep_row}"
         );
     }
 
