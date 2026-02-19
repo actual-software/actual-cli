@@ -1503,6 +1503,7 @@ mod tests {
             no_tailor,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         }
     }
 
@@ -1519,6 +1520,7 @@ mod tests {
             no_tailor: false,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         }
     }
 
@@ -1880,6 +1882,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         let result = run_sync(
             &args,
@@ -2572,6 +2575,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         let result = run_sync(
             &args,
@@ -2613,6 +2617,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         // This should succeed and print verbose output to stderr
         let result = run_sync(
@@ -2655,6 +2660,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
@@ -2718,6 +2724,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
         // adr-001 is rejected, so no ADRs remain → "No files to write."
@@ -2744,6 +2751,7 @@ mod tests {
             no_tailor: false, // Triggers tailoring path
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         let result = run_sync(
             &args,
@@ -2780,6 +2788,7 @@ mod tests {
             no_tailor: false, // triggers tailoring path
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         let result = run_sync(
             &args,
@@ -3167,6 +3176,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3198,6 +3208,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
 
         // Provide "y" for project confirmation and select all files
@@ -3242,6 +3253,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3266,6 +3278,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         run_sync(&args2, dir.path(), &cfg_path, &term2, &runner).unwrap();
 
@@ -3338,6 +3351,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3368,6 +3382,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
         assert!(
@@ -3422,6 +3437,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
 
@@ -3454,6 +3470,7 @@ mod tests {
             no_tailor: true,
             max_budget_usd: None,
             output_format: None,
+            runner: None,
         };
         let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
         assert!(

@@ -92,6 +92,18 @@ pub struct SyncArgs {
     /// Can also be set permanently via: actual config set output_format agents-md
     #[arg(long, value_enum, value_name = "FORMAT")]
     pub output_format: Option<OutputFormat>,
+
+    /// AI backend to use for tailoring.
+    ///
+    /// Supported values:
+    ///   claude-cli     — Claude Code CLI subprocess (default)
+    ///   anthropic-api  — Anthropic Messages API (requires ANTHROPIC_API_KEY)
+    ///   openai-api     — OpenAI Responses API (requires OPENAI_API_KEY)
+    ///   codex-cli      — Codex CLI subprocess (requires codex binary)
+    ///
+    /// Can also be set permanently via: actual config set runner anthropic-api
+    #[arg(long, value_name = "RUNNER")]
+    pub runner: Option<String>,
 }
 
 /// Arguments for the `status` command
@@ -126,4 +138,42 @@ pub struct ConfigSetArgs {
     pub key: String,
     /// Configuration value
     pub value: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_parse_sync_runner_flag() {
+        let cli = Cli::try_parse_from(["actual", "sync", "--runner", "anthropic-api"]).unwrap();
+        match cli.command {
+            Command::Sync(args) => {
+                assert_eq!(args.runner, Some("anthropic-api".to_string()));
+            }
+            _ => panic!("expected Sync command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_sync_runner_openai() {
+        let cli = Cli::try_parse_from(["actual", "sync", "--runner", "openai-api"]).unwrap();
+        match cli.command {
+            Command::Sync(args) => {
+                assert_eq!(args.runner, Some("openai-api".to_string()));
+            }
+            _ => panic!("expected Sync command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_sync_no_runner_flag() {
+        let cli = Cli::try_parse_from(["actual", "sync"]).unwrap();
+        match cli.command {
+            Command::Sync(args) => {
+                assert_eq!(args.runner, None);
+            }
+            _ => panic!("expected Sync command"),
+        }
+    }
 }

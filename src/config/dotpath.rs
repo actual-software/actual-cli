@@ -72,6 +72,9 @@ define_config_keys! {
     (ExcludeCategories,     "exclude_categories"),
     (TelemetryEnabled,      "telemetry.enabled"),
     (OutputFormatKey,       "output_format"),
+    (Runner,                "runner"),
+    (AnthropicApiKey,       "anthropic_api_key"),
+    (OpenaiApiKey,          "openai_api_key"),
 }
 
 /// Get a config value by dotpath, returning its string representation.
@@ -136,6 +139,18 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
                 OutputFormat::AgentsMd => "agents-md".to_string(),
                 OutputFormat::CursorRules => "cursor-rules".to_string(),
             })
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::Runner => config
+            .runner
+            .clone()
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::AnthropicApiKey => config
+            .anthropic_api_key
+            .clone()
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::OpenaiApiKey => config
+            .openai_api_key
+            .clone()
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
     }
 }
@@ -267,6 +282,22 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
                 }
             };
             config.output_format = Some(fmt);
+        }
+        ConfigKey::Runner => match value {
+            "claude-cli" | "anthropic-api" | "openai-api" | "codex-cli" => {
+                config.runner = Some(value.to_string());
+            }
+            _ => {
+                return Err(ActualError::ConfigError(format!(
+                        "invalid value for {path}: expected \"claude-cli\", \"anthropic-api\", \"openai-api\", or \"codex-cli\", got \"{value}\""
+                    )));
+            }
+        },
+        ConfigKey::AnthropicApiKey => {
+            config.anthropic_api_key = Some(value.to_string());
+        }
+        ConfigKey::OpenaiApiKey => {
+            config.openai_api_key = Some(value.to_string());
         }
     }
     Ok(())
@@ -766,6 +797,9 @@ mod tests {
             ("exclude_categories", "deprecated"),
             ("telemetry.enabled", "false"),
             ("output_format", "agents-md"),
+            ("runner", "anthropic-api"),
+            ("anthropic_api_key", "sk-ant-test"),
+            ("openai_api_key", "sk-openai-test"),
         ];
 
         // Sanity-check: valid_values must cover every variant in ConfigKey::ALL.

@@ -83,6 +83,20 @@ pub struct Config {
     /// Cached tailoring result (keyed to composite input hash).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tailoring: Option<CachedTailoring>,
+
+    /// AI backend runner for tailoring (default: "claude-cli").
+    ///
+    /// Supported values: "claude-cli", "anthropic-api", "openai-api", "codex-cli"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+
+    /// Fallback Anthropic API key (used when runner = "anthropic-api" and ANTHROPIC_API_KEY not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key: Option<String>,
+
+    /// Fallback OpenAI API key (used when runner = "openai-api" and OPENAI_API_KEY not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_api_key: Option<String>,
 }
 
 /// Telemetry configuration.
@@ -154,6 +168,9 @@ mod tests {
             cached_analysis: None,
             cached_tailoring: None,
             output_format: None,
+            runner: None,
+            anthropic_api_key: None,
+            openai_api_key: None,
         };
 
         let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
@@ -260,6 +277,43 @@ mod tests {
         let yaml = "output_format: agents-md\n";
         let config: Config = serde_yaml::from_str(yaml).expect("deserialize partial YAML");
         assert_eq!(config.output_format, Some(OutputFormat::AgentsMd));
+    }
+
+    /// Round-trip test: config with runner field round-trips through YAML.
+    #[test]
+    fn test_round_trip_runner_field() {
+        let config = Config {
+            runner: Some("anthropic-api".to_string()),
+            ..Config::default()
+        };
+        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        assert!(
+            yaml.contains("anthropic-api"),
+            "YAML must contain 'anthropic-api': {yaml}"
+        );
+        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        assert_eq!(config, deserialized);
+    }
+
+    /// Round-trip test: config with both API key fields round-trips through YAML.
+    #[test]
+    fn test_round_trip_api_keys() {
+        let config = Config {
+            anthropic_api_key: Some("sk-ant-test123".to_string()),
+            openai_api_key: Some("sk-openai-test456".to_string()),
+            ..Config::default()
+        };
+        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        assert!(
+            yaml.contains("sk-ant-test123"),
+            "YAML must contain anthropic key: {yaml}"
+        );
+        assert!(
+            yaml.contains("sk-openai-test456"),
+            "YAML must contain openai key: {yaml}"
+        );
+        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        assert_eq!(config, deserialized);
     }
 
     /// Round-trip test with CachedTailoring included.
