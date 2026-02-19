@@ -69,16 +69,29 @@ pub fn write_files(
         .map(|file| {
             let full_path = root_dir.join(&file.path);
 
-            // Layer 1: reject paths with .. components (path traversal guard)
-            if Path::new(&file.path)
-                .components()
-                .any(|c| c == std::path::Component::ParentDir)
-            {
+            // Layer 1: reject paths with .. components (path traversal guard) or
+            // absolute paths (RootDir / Prefix), which would silently ignore root_dir
+            // on most operating systems.
+            let path_components_invalid = Path::new(&file.path).components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            });
+            if path_components_invalid {
+                let is_absolute = Path::new(&file.path).is_absolute();
+                let error_msg = if is_absolute {
+                    "absolute paths are not allowed".to_string()
+                } else {
+                    "path traversal detected: path escapes root directory".to_string()
+                };
                 return WriteResult {
                     path: file.path.clone(),
                     action: WriteAction::Failed,
                     version: 0,
-                    error: Some("path traversal detected: path escapes root directory".to_string()),
+                    error: Some(error_msg),
                 };
             }
 
@@ -468,6 +481,60 @@ mod tests {
         assert!(
             err_msg.contains("path traversal"),
             "expected 'path traversal' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_absolute_path_fails() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let files = vec![FileOutput {
+            path: "/etc/passwd".to_string(),
+            content: "malicious content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed action for absolute path"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(
+            err_msg.contains("absolute paths are not allowed"),
+            "expected 'absolute paths are not allowed' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_absolute_path_arbitrary_fails() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let files = vec![FileOutput {
+            path: "/absolute/path/CLAUDE.md".to_string(),
+            content: "malicious content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed action for absolute path"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(
+            err_msg.contains("absolute paths are not allowed"),
+            "expected 'absolute paths are not allowed' in error, got: {err_msg}"
         );
     }
 
