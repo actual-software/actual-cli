@@ -494,7 +494,6 @@ mod tests {
     #[test]
     fn test_from_env_missing_key() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let prev = std::env::var("OPENAI_API_KEY").ok();
         // SAFETY: protected by ENV_MUTEX; no concurrent env access in tests.
         unsafe { std::env::remove_var("OPENAI_API_KEY") };
 
@@ -503,10 +502,6 @@ mod tests {
             matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
             "expected ClaudeNotAuthenticated when OPENAI_API_KEY is unset"
         );
-
-        if let Some(val) = prev {
-            unsafe { std::env::set_var("OPENAI_API_KEY", val) };
-        }
     }
 
     // Test 7: HTTP 403 also maps to ClaudeNotAuthenticated
@@ -609,18 +604,14 @@ mod tests {
     #[test]
     fn test_from_env_success() {
         let _guard = ENV_MUTEX.lock().unwrap();
-        let prev = std::env::var("OPENAI_API_KEY").ok();
-        // SAFETY: protected by ENV_MUTEX.
+        // SAFETY: protected by ENV_MUTEX; no concurrent env access in tests.
         unsafe { std::env::set_var("OPENAI_API_KEY", "test-key-from-env") };
 
         let result = OpenAiApiRunner::from_env("gpt-4o".to_string(), Duration::from_secs(10));
         assert!(result.is_ok(), "expected Ok when OPENAI_API_KEY is set");
 
-        // Restore.
-        match prev {
-            Some(val) => unsafe { std::env::set_var("OPENAI_API_KEY", val) },
-            None => unsafe { std::env::remove_var("OPENAI_API_KEY") },
-        }
+        // Clean up after the test.
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
     }
 
     // Test 11: refusal with no refusal field falls back to "unknown reason"
