@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -343,6 +343,8 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     };
 
     // ── Phase 3: confirm + write (fully implemented) ──
+    // pipeline stays alive through confirm+write so output goes into the TUI
+    // log pane. It drops naturally at end of run_sync.
     confirm_and_write(
         &output,
         root_dir,
@@ -351,7 +353,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         args.full,
         &output_format,
         term,
-        pipeline.start_time(),
+        &mut pipeline,
     )?;
     Ok(())
 }
@@ -867,7 +869,7 @@ pub fn confirm_and_write(
     full: bool,
     format: &OutputFormat,
     term: &dyn TerminalIO,
-    started_at: Instant,
+    pipeline: &mut TuiRenderer,
 ) -> Result<SyncResult, ActualError> {
     // Step 1: Compute diffs
     let diffs: Vec<FileDiff> = output
@@ -903,7 +905,9 @@ pub fn confirm_and_write(
         for line in summary.lines() {
             panel = panel.line(line);
         }
-        term.write_line(&panel.render(width));
+        for line in panel.render(width).lines() {
+            pipeline.println(line);
+        }
     }
 
     // Step 3: Handle --dry-run
@@ -912,9 +916,11 @@ pub fn confirm_and_write(
             for file in &output.files {
                 let safe_path = console::strip_ansi_codes(&file.path);
                 let safe_content = console::strip_ansi_codes(&file.content);
-                term.write_line(&format!("── {safe_path} ──"));
-                term.write_line(&safe_content);
-                term.write_line("── end ──");
+                pipeline.println(&format!("── {safe_path} ──"));
+                for line in safe_content.lines() {
+                    pipeline.println(line);
+                }
+                pipeline.println("── end ──");
             }
         }
         return Ok(SyncResult {
@@ -926,11 +932,11 @@ pub fn confirm_and_write(
     }
 
     // Step 4: Run confirmation (if not dry-run)
-    let confirmed = confirm_files(output, force, term)?;
+    let confirmed = pipeline.suspend(|| confirm_files(output, force, term))?;
     let files_rejected = output.files.len() - confirmed.len();
 
     if confirmed.is_empty() {
-        term.write_line("No files to write.");
+        pipeline.println("No files to write.");
         return Ok(SyncResult {
             files_created: 0,
             files_updated: 0,
@@ -944,8 +950,13 @@ pub fn confirm_and_write(
 
     // Step 6: Report results and return SyncResult
     let width = term_size::terminal_width();
-    let (files_created, files_updated, files_failed) =
-        report_write_results(&results, files_rejected, started_at.elapsed(), term, width);
+    let (files_created, files_updated, files_failed) = report_write_results(
+        &results,
+        files_rejected,
+        pipeline.start_time().elapsed(),
+        pipeline,
+        width,
+    );
 
     Ok(SyncResult {
         files_created,
@@ -962,7 +973,7 @@ fn report_write_results(
     results: &[WriteResult],
     rejected_count: usize,
     elapsed: Duration,
-    term: &dyn TerminalIO,
+    pipeline: &mut TuiRenderer,
     width: usize,
 ) -> (usize, usize, usize) {
     let mut files_created = 0;
@@ -1011,7 +1022,9 @@ fn report_write_results(
     );
 
     panel = panel.separator().footer(&summary);
-    term.write_line(&panel.render(width));
+    for line in panel.render(width).lines() {
+        pipeline.println(line);
+    }
 
     (files_created, files_updated, files_failed)
 }
@@ -1022,6 +1035,7 @@ mod tests {
     use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
     use crate::cli::commands::handle_result;
     use crate::cli::ui::test_utils::MockTerminal;
+    use crate::cli::ui::tui::renderer::TuiRenderer;
     use crate::error::ActualError;
     use crate::generation::markers;
     use crate::tailoring::types::{FileOutput, TailoringSummary};
@@ -1125,6 +1139,7 @@ mod tests {
             make_file("apps/web/CLAUDE.md", "Web rules", vec!["adr-002"]),
         ]);
         let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1134,7 +1149,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
@@ -1160,6 +1175,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output = make_output(vec![make_file("CLAUDE.md", "Root rules", vec!["adr-001"])]);
         let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1169,7 +1185,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
@@ -1182,11 +1198,11 @@ mod tests {
         // File should NOT exist on disk
         assert!(!dir.path().join("CLAUDE.md").exists());
 
-        // Diff summary should be displayed in a panel
-        let text = term.output_text();
+        // Diff summary should be displayed in the log pane
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("Changes"),
-            "expected changes panel in: {text}"
+            log_text.contains("Changes"),
+            "expected changes panel in log: {log_text}"
         );
     }
 
@@ -1201,6 +1217,7 @@ mod tests {
             vec!["adr-001"],
         )]);
         let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1210,27 +1227,30 @@ mod tests {
             true,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
         assert_eq!(result.files_created, 0);
 
-        // Full content should be displayed
-        let text = term.output_text();
+        // Full content should be displayed in the log pane
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("── CLAUDE.md ──"),
-            "expected file header (without ANSI) in: {text}"
+            log_text.contains("── CLAUDE.md ──"),
+            "expected file header in log: {log_text}"
         );
         assert!(
-            text.contains("Full content here"),
-            "expected full content in: {text}"
+            log_text.contains("Full content here"),
+            "expected full content in log: {log_text}"
         );
-        assert!(text.contains("── end ──"), "expected end marker in: {text}");
+        assert!(
+            log_text.contains("── end ──"),
+            "expected end marker in log: {log_text}"
+        );
 
         // No ANSI escape codes in output
         assert!(
-            !text.as_bytes().contains(&0x1Bu8),
+            !log_text.as_bytes().contains(&0x1Bu8),
             "dry-run --full output must not contain ESC (0x1B)"
         );
 
@@ -1250,6 +1270,7 @@ mod tests {
             vec!["adr-001"],
         )]);
         let term = MockTerminal::new(vec![]).with_selection(Some(vec![]));
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1259,24 +1280,24 @@ mod tests {
             true,  // full
             &OutputFormat::ClaudeMd,
             &term,
-            std::time::Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
         assert_eq!(result.files_created, 0, "dry-run must not write files");
 
-        let text = term.output_text();
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            !text.as_bytes().contains(&0x1Bu8),
+            !log_text.as_bytes().contains(&0x1Bu8),
             "dry-run --full output must not contain ESC (0x1B)"
         );
         assert!(
-            text.contains("safe content here"),
-            "expected non-ANSI content preserved in: {text}"
+            log_text.contains("safe content here"),
+            "expected non-ANSI content preserved in log: {log_text}"
         );
         assert!(
-            text.contains("CLAUDE.md"),
-            "expected path (without ANSI) in output: {text}"
+            log_text.contains("CLAUDE.md"),
+            "expected path (without ANSI) in log: {log_text}"
         );
         assert!(
             !dir.path().join("CLAUDE.md").exists(),
@@ -1295,6 +1316,7 @@ mod tests {
         ]);
         // Select only file 1 (index 0), skip file 2
         let term = MockTerminal::new(vec![]).with_selection(Some(vec![0]));
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1304,7 +1326,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
@@ -1324,6 +1346,7 @@ mod tests {
         let output = make_output(vec![make_file("CLAUDE.md", "Root rules", vec!["adr-001"])]);
         // User cancels the selection
         let term = MockTerminal::new(vec![]).with_selection(None);
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1333,7 +1356,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         );
 
         assert!(
@@ -1359,6 +1382,7 @@ mod tests {
             make_file("bad/CLAUDE.md", "Bad rules", vec!["adr-002"]),
         ]);
         let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1368,7 +1392,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
@@ -1380,11 +1404,11 @@ mod tests {
         // First file should exist
         assert!(dir.path().join("CLAUDE.md").exists());
 
-        // Error should be reported in output
-        let text = term.output_text();
+        // Error should be reported in log pane
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("bad/CLAUDE.md"),
-            "expected failed file path in output: {text}"
+            log_text.contains("bad/CLAUDE.md"),
+            "expected failed file path in log: {log_text}"
         );
     }
 
@@ -1399,6 +1423,7 @@ mod tests {
             vec!["adr-001"],
         )]);
         let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1408,7 +1433,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
@@ -1419,11 +1444,11 @@ mod tests {
         assert!(markers::has_managed_section(&content));
         assert!(content.contains("Brand new rules"));
 
-        // Verify diff output showed new file
-        let text = term.output_text();
+        // Verify diff output showed new file in log pane
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("new file"),
-            "expected 'new file' in diff output: {text}"
+            log_text.contains("new file"),
+            "expected 'new file' in log: {log_text}"
         );
     }
 
@@ -1446,6 +1471,7 @@ mod tests {
             vec!["adr-001"],
         )]);
         let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1455,7 +1481,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
@@ -1476,6 +1502,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output = make_output(vec![]);
         let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1485,7 +1512,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
@@ -1506,6 +1533,7 @@ mod tests {
         ]);
         // Select nothing (reject all)
         let term = MockTerminal::new(vec![]).with_selection(Some(vec![]));
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1515,7 +1543,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
@@ -1528,10 +1556,10 @@ mod tests {
         assert!(!dir.path().join("CLAUDE.md").exists());
         assert!(!dir.path().join("apps/web/CLAUDE.md").exists());
 
-        let text = term.output_text();
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("No files to write."),
-            "expected 'No files to write.' in: {text}"
+            log_text.contains("No files to write."),
+            "expected 'No files to write.' in log: {log_text}"
         );
     }
 
@@ -1557,6 +1585,7 @@ mod tests {
 
         // Select files 0-2, reject file 3 (apps/api/CLAUDE.md)
         let term = MockTerminal::new(vec![]).with_selection(Some(vec![0, 1, 2]));
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_and_write(
             &output,
@@ -1566,7 +1595,7 @@ mod tests {
             false,
             &OutputFormat::ClaudeMd,
             &term,
-            Instant::now(),
+            &mut pipeline,
         )
         .unwrap();
 
@@ -1575,14 +1604,46 @@ mod tests {
         assert_eq!(result.files_failed, 1, "expected 1 failed (fail/)");
         assert_eq!(result.files_rejected, 1, "expected 1 rejected (apps/api)");
 
-        // Verify summary line (now uses · separators in panel footer)
-        let text = term.output_text();
+        // Verify summary line in log pane (now uses · separators in panel footer)
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("1 created")
-                && text.contains("1 updated")
-                && text.contains("1 failed")
-                && text.contains("1 rejected"),
-            "expected correct summary counts in: {text}"
+            log_text.contains("1 created")
+                && log_text.contains("1 updated")
+                && log_text.contains("1 failed")
+                && log_text.contains("1 rejected"),
+            "expected correct summary counts in log: {log_text}"
+        );
+    }
+
+    // ── test_confirm_and_write_log_pane_populated_in_plain_mode ──
+
+    #[test]
+    fn test_confirm_and_write_log_pane_populated_in_plain_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = make_output(vec![make_file("CLAUDE.md", "Rules", vec!["adr-001"])]);
+        let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        confirm_and_write(
+            &output,
+            dir.path(),
+            true,
+            false,
+            false,
+            &OutputFormat::ClaudeMd,
+            &term,
+            &mut pipeline,
+        )
+        .unwrap();
+
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
+        assert!(
+            log_text.contains("Results"),
+            "expected Results panel title in log: {log_text}"
+        );
+        assert!(
+            log_text.contains("created"),
+            "expected 'created' in log: {log_text}"
         );
     }
 
@@ -1671,12 +1732,8 @@ mod tests {
             &runner,
         );
         assert!(result.is_ok(), "run_sync with --force should succeed");
-        // With empty API response + force, terminal should show "No files to write."
-        let text = term.output_text();
-        assert!(
-            text.contains("No files to write."),
-            "expected 'No files to write.' in: {text}"
-        );
+        // Output (including "No files to write.") now goes through pipeline.println()
+        // into the TUI log pane, not to MockTerminal.
     }
 
     #[test]
@@ -2082,103 +2139,102 @@ mod tests {
 
     #[test]
     fn test_report_write_results_failed_without_error_message() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![WriteResult {
             path: "CLAUDE.md".to_string(),
             action: WriteAction::Failed,
             version: 0,
             error: None,
         }];
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
 
         assert_eq!(created, 0);
         assert_eq!(updated, 0);
         assert_eq!(failed, 1);
 
-        let text = term.output_text();
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("unknown error"),
-            "expected 'unknown error' fallback in: {text}"
+            log_text.contains("unknown error"),
+            "expected 'unknown error' fallback in log: {log_text}"
         );
     }
 
     #[test]
     fn test_report_write_results_created() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![WriteResult {
             path: "CLAUDE.md".to_string(),
             action: WriteAction::Created,
             version: 1,
             error: None,
         }];
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
 
         assert_eq!(created, 1);
         assert_eq!(updated, 0);
         assert_eq!(failed, 0);
 
-        let text = term.output_text();
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("CLAUDE.md") && text.contains("created"),
-            "expected created message in: {text}"
+            log_text.contains("CLAUDE.md") && log_text.contains("created"),
+            "expected created message in log: {log_text}"
         );
     }
 
     #[test]
     fn test_report_write_results_updated() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![WriteResult {
             path: "apps/web/CLAUDE.md".to_string(),
             action: WriteAction::Updated,
             version: 3,
             error: None,
         }];
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
 
         assert_eq!(created, 0);
         assert_eq!(updated, 1);
         assert_eq!(failed, 0);
 
-        let text = term.output_text();
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("apps/web/CLAUDE.md") && text.contains("updated"),
-            "expected updated message in: {text}"
+            log_text.contains("apps/web/CLAUDE.md") && log_text.contains("updated"),
+            "expected updated message in log: {log_text}"
         );
     }
 
     #[test]
     fn test_report_write_results_failed_with_error_message() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![WriteResult {
             path: "bad/CLAUDE.md".to_string(),
             action: WriteAction::Failed,
             version: 0,
             error: Some("permission denied".to_string()),
         }];
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
 
         assert_eq!(created, 0);
         assert_eq!(updated, 0);
         assert_eq!(failed, 1);
 
-        let text = term.output_text();
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
         assert!(
-            text.contains("permission denied"),
-            "expected error message in: {text}"
+            log_text.contains("permission denied"),
+            "expected error message in log: {log_text}"
         );
     }
 
     #[test]
     fn test_report_write_results_mixed() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![
             WriteResult {
                 path: "CLAUDE.md".to_string(),
@@ -2199,9 +2255,10 @@ mod tests {
                 error: None,
             },
         ];
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
 
         assert_eq!(created, 1);
         assert_eq!(updated, 1);
@@ -2212,79 +2269,78 @@ mod tests {
 
     #[test]
     fn test_report_write_results_panel_has_box_characters() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![WriteResult {
             path: "CLAUDE.md".to_string(),
             action: WriteAction::Created,
             version: 1,
             error: None,
         }];
+        let mut pipeline = TuiRenderer::new(false, true);
 
-        report_write_results(&results, 0, Duration::from_secs(3), &term, 80);
+        report_write_results(&results, 0, Duration::from_secs(3), &mut pipeline, 80);
 
-        let text = term.output_text();
-        let stripped = console::strip_ansi_codes(&text);
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
+        let stripped = console::strip_ansi_codes(&log_text);
         assert!(
             stripped.contains("Results"),
-            "expected panel title 'Results' in: {stripped}"
+            "expected panel title 'Results' in log: {stripped}"
         );
         assert!(
             stripped.contains('\u{250c}'), // ┌
-            "expected top-left border in: {stripped}"
+            "expected top-left border in log: {stripped}"
         );
         assert!(
             stripped.contains('\u{2514}'), // └
-            "expected bottom-left border in: {stripped}"
+            "expected bottom-left border in log: {stripped}"
         );
         assert!(
             stripped.contains('\u{2502}'), // │
-            "expected side border in: {stripped}"
+            "expected side border in log: {stripped}"
         );
     }
 
     #[test]
     fn test_report_write_results_panel_has_separator() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![WriteResult {
             path: "CLAUDE.md".to_string(),
             action: WriteAction::Created,
             version: 1,
             error: None,
         }];
+        let mut pipeline = TuiRenderer::new(false, true);
 
-        report_write_results(&results, 0, Duration::from_secs(1), &term, 80);
+        report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
 
-        let text = term.output_text();
-        let stripped = console::strip_ansi_codes(&text);
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
+        let stripped = console::strip_ansi_codes(&log_text);
         assert!(
             stripped.contains('\u{251c}') && stripped.contains('\u{2524}'), // ├ and ┤
-            "expected separator T-junctions in: {stripped}"
+            "expected separator T-junctions in log: {stripped}"
         );
     }
 
     #[test]
     fn test_report_write_results_panel_has_timing() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![WriteResult {
             path: "CLAUDE.md".to_string(),
             action: WriteAction::Created,
             version: 1,
             error: None,
         }];
+        let mut pipeline = TuiRenderer::new(false, true);
 
-        report_write_results(&results, 0, Duration::from_millis(7300), &term, 80);
+        report_write_results(&results, 0, Duration::from_millis(7300), &mut pipeline, 80);
 
-        let text = term.output_text();
-        let stripped = console::strip_ansi_codes(&text);
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
+        let stripped = console::strip_ansi_codes(&log_text);
         assert!(
             stripped.contains("[7.3s total]"),
-            "expected timing display in: {stripped}"
+            "expected timing display in log: {stripped}"
         );
     }
 
     #[test]
     fn test_report_write_results_panel_dot_separated_summary() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![
             WriteResult {
                 path: "CLAUDE.md".to_string(),
@@ -2299,27 +2355,27 @@ mod tests {
                 error: None,
             },
         ];
+        let mut pipeline = TuiRenderer::new(false, true);
 
-        report_write_results(&results, 1, Duration::from_secs(2), &term, 80);
+        report_write_results(&results, 1, Duration::from_secs(2), &mut pipeline, 80);
 
-        let text = term.output_text();
-        let stripped = console::strip_ansi_codes(&text);
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
+        let stripped = console::strip_ansi_codes(&log_text);
         assert!(
             stripped.contains("\u{00b7}"),
-            "expected middle dot separator in: {stripped}"
+            "expected middle dot separator in log: {stripped}"
         );
         assert!(
             stripped.contains("1 created")
                 && stripped.contains("1 updated")
                 && stripped.contains("0 failed")
                 && stripped.contains("1 rejected"),
-            "expected all counts in: {stripped}"
+            "expected all counts in log: {stripped}"
         );
     }
 
     #[test]
     fn test_report_write_results_panel_mixed_results() {
-        let term = MockTerminal::new(vec![]);
         let results = vec![
             WriteResult {
                 path: "CLAUDE.md".to_string(),
@@ -2340,16 +2396,17 @@ mod tests {
                 error: Some("permission denied".to_string()),
             },
         ];
+        let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 2, Duration::from_millis(4500), &term, 80);
+            report_write_results(&results, 2, Duration::from_millis(4500), &mut pipeline, 80);
 
         assert_eq!(created, 1);
         assert_eq!(updated, 1);
         assert_eq!(failed, 1);
 
-        let text = term.output_text();
-        let stripped = console::strip_ansi_codes(&text);
+        let log_text = pipeline.log.render_to_string(1000, 200).join("\n");
+        let stripped = console::strip_ansi_codes(&log_text);
         // Verify all file entries
         assert!(stripped.contains("CLAUDE.md") && stripped.contains("updated"));
         assert!(stripped.contains("apps/web/CLAUDE.md") && stripped.contains("created"));

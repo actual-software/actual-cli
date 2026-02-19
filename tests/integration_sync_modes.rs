@@ -179,11 +179,11 @@ mod tests {
             ])
             .assert()
             .success()
-            .stdout(predicate::str::contains("## Use Error Types"))
-            .stdout(predicate::str::contains(
+            .stderr(predicate::str::contains("## Use Error Types"))
+            .stderr(predicate::str::contains(
                 "- Always use thiserror for errors",
             ))
-            .stdout(predicate::str::contains(
+            .stderr(predicate::str::contains(
                 "- Never use unwrap in production code",
             ));
 
@@ -217,7 +217,7 @@ mod tests {
             ])
             .assert()
             .success()
-            .stdout(predicate::str::contains("new file"));
+            .stderr(predicate::str::contains("new file"));
     }
 
     // ── Re-sync (updating existing CLAUDE.md) ───────────────────────────
@@ -630,7 +630,7 @@ User footer";
             .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
             .assert()
             .success()
-            .stdout(predicate::str::contains("No files to write."));
+            .stderr(predicate::str::contains("No files to write."));
 
         assert!(
             !env.file_exists("CLAUDE.md"),
@@ -685,7 +685,7 @@ User footer";
     }
 
     #[test]
-    fn dry_run_full_with_tailoring_strips_ansi_from_stdout() {
+    fn dry_run_full_with_tailoring_strips_ansi_from_stderr() {
         let mut server = mockito::Server::new();
         let adr = make_adr_json(
             "adr-001",
@@ -734,16 +734,16 @@ User footer";
             String::from_utf8_lossy(&output.stderr)
         );
 
-        // Assert no ESC byte in raw stdout
+        // Assert no ESC byte in raw stderr
         assert!(
-            !output.stdout.contains(&0x1Bu8),
-            "dry-run --full stdout must not contain ESC byte (0x1B)"
+            !output.stderr.contains(&0x1Bu8),
+            "dry-run --full stderr must not contain ESC byte (0x1B)"
         );
 
-        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stdout_str.contains("safe content"),
-            "expected plain-text content in stdout: {stdout_str}"
+            stderr_str.contains("safe content"),
+            "expected plain-text content in stderr: {stderr_str}"
         );
 
         assert!(
