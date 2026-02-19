@@ -50,7 +50,9 @@ pub struct FileOutput {
     pub path: String,
     /// AI-generated markdown content (goes inside managed section markers)
     pub content: String,
-    /// Brief explanation of what this file contains and why
+    /// Brief explanation of what this file contains and why.
+    /// Populated from LLM output but not yet surfaced in the UI.
+    /// TODO: display in --verbose output or the diff review panel.
     pub reasoning: String,
     /// UUIDs of ADRs included in this file
     pub adr_ids: Vec<String>,
