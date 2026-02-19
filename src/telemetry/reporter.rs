@@ -17,11 +17,19 @@ const SERVICE_KEY: &str = "ak_telemetry_prod_actual_cli";
 
 /// Send collected sync metrics to the telemetry endpoint.
 ///
-/// This function is fire-and-forget: all errors are silently swallowed.
-/// Telemetry is opt-out — it can be disabled via the `ACTUAL_NO_TELEMETRY`
-/// environment variable (any non-empty value) or by setting `telemetry.enabled: false` in config.
+/// This function is fire-and-forget: errors are logged at debug level and
+/// then discarded. Telemetry is opt-out — it can be disabled via the
+/// `ACTUAL_NO_TELEMETRY` environment variable (any non-empty value) or by
+/// setting `telemetry.enabled: false` in config.
+///
+/// # Production wiring status
+///
+/// NOTE: This function is not currently called from the sync pipeline.
+/// It is preserved for future telemetry integration. See actual-cli-bek.13.
 pub async fn report_metrics(metrics: &SyncMetrics, config: &Config, api_url: &str) {
-    let _ = try_report_metrics(metrics, config, api_url).await;
+    if let Err(e) = try_report_metrics(metrics, config, api_url).await {
+        tracing::debug!("telemetry: {e}");
+    }
 }
 
 /// Inner implementation that returns errors instead of swallowing them.

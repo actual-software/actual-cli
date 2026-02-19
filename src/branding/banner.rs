@@ -193,7 +193,10 @@ mod tests {
         // First line should match the first line of BANNER
         assert_eq!(
             lines[0],
-            BANNER.lines().next().unwrap(),
+            BANNER
+                .lines()
+                .next()
+                .expect("BANNER must have at least one line"),
             "plain lines should match BANNER content"
         );
     }
