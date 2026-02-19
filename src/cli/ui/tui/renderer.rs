@@ -137,8 +137,6 @@ impl TuiRenderer {
 
     /// Attempt crossterm TUI setup. Returns `None` on any failure.
     fn try_setup_tui() -> Option<Mode> {
-        // Each `.ok()?` returns None on failure; the whole chain is one logical
-        // expression so llvm-cov counts it as a single coverable region.
         enable_raw_mode().ok()?;
         execute!(io::stderr(), EnterAlternateScreen, Hide).ok()?;
         Terminal::new(ratatui::backend::CrosstermBackend::new(io::stderr()))
