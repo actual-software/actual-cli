@@ -1,7 +1,31 @@
+//! XOR obfuscation of embedded prompt templates and output schemas.
+//!
+//! # Security Note
+//!
+//! This module provides **anti-grep obfuscation only** — it is NOT a security control.
+//!
+//! The XOR key and the encrypted data both reside in the same binary. Any user with
+//! access to the binary can trivially recover the plaintext by:
+//! 1. Locating the key bytes in the binary
+//! 2. XOR-ing the obfuscated constants with the key
+//!
+//! The purpose of this obfuscation is to prevent casual discovery of the prompt
+//! template via `strings(1)` or similar tools. It does NOT protect against
+//! determined inspection of the binary.
+//!
+//! If genuine confidentiality of the prompt is required in the future, the prompt
+//! should be fetched at runtime from an authenticated server endpoint over HTTPS,
+//! rather than being embedded in the binary.
+
 use crate::error::ActualError;
 
 /// XOR key mirroring the one in build.rs.
-/// Non-printable bytes intentionally — they will not appear in `strings` output.
+///
+/// All bytes are intentionally non-printable (outside the 0x20–0x7E printable ASCII range)
+/// so they will not appear in `strings(1)` output as a recognisable sequence.
+///
+/// **This key is NOT secret** — it lives in the same binary as the obfuscated data.
+/// Its sole purpose is anti-grep obfuscation, not encryption.
 const KEY: &[u8] = &[
     0x17, 0x8F, 0x09, 0xAB, 0xDC, 0xE2, 0xF4, 0xD1, 0x0E, 0x93, 0xE1, 0xBF, 0xAA, 0x88, 0xCF, 0x1D,
     0xC7, 0xD6, 0x9E, 0x9A, 0xF2, 0xF5, 0x8B, 0xD4, 0xC7, 0xEC, 0x1C, 0x85, 0xEB, 0xB0, 0xA9, 0xFE,
