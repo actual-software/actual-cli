@@ -1,10 +1,74 @@
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 use crate::analysis::orchestrate::run_static_analysis;
 use crate::analysis::types::RepoAnalysis;
 use crate::config;
-use crate::config::types::CachedAnalysis;
+use crate::config::types::{CachedAnalysis, Config};
 use crate::error::ActualError;
+
+/// Compute a deterministic SHA-256 hash of the config fields that affect
+/// analysis results: `include_categories`, `exclude_categories`,
+/// `include_general`, and `max_per_framework`.
+///
+/// The hash is encoded as a lowercase hex string and is stable across runs
+/// (sorted vecs, canonical `None` representation).
+pub fn compute_config_hash(cfg: &Config) -> String {
+    let mut hasher = Sha256::new();
+
+    // include_categories — sort for determinism
+    match &cfg.include_categories {
+        None => hasher.update(b"include_categories:none\n"),
+        Some(cats) => {
+            let mut sorted = cats.clone();
+            sorted.sort();
+            hasher.update(b"include_categories:");
+            for c in &sorted {
+                hasher.update(c.as_bytes());
+                hasher.update(b",");
+            }
+            hasher.update(b"\n");
+        }
+    }
+
+    // exclude_categories — sort for determinism
+    match &cfg.exclude_categories {
+        None => hasher.update(b"exclude_categories:none\n"),
+        Some(cats) => {
+            let mut sorted = cats.clone();
+            sorted.sort();
+            hasher.update(b"exclude_categories:");
+            for c in &sorted {
+                hasher.update(c.as_bytes());
+                hasher.update(b",");
+            }
+            hasher.update(b"\n");
+        }
+    }
+
+    // include_general
+    match cfg.include_general {
+        None => hasher.update(b"include_general:none\n"),
+        Some(v) => {
+            hasher.update(b"include_general:");
+            hasher.update(if v { b"true" as &[u8] } else { b"false" });
+            hasher.update(b"\n");
+        }
+    }
+
+    // max_per_framework
+    match cfg.max_per_framework {
+        None => hasher.update(b"max_per_framework:none\n"),
+        Some(v) => {
+            hasher.update(b"max_per_framework:");
+            hasher.update(v.to_string().as_bytes());
+            hasher.update(b"\n");
+        }
+    }
+
+    format!("{:x}", hasher.finalize())
+}
 
 /// Parse the output of `git rev-parse HEAD` into a commit hash.
 ///
@@ -69,12 +133,14 @@ pub fn run_analysis_cached(
     };
 
     let mut cfg = config::paths::load_from(config_path)?;
+    let cfg_hash = compute_config_hash(&cfg);
 
     // Check for cache hit (skip when force=true)
     if !force {
         if let Some(ref cached) = cfg.cached_analysis {
             if cached.repo_path == repo_path.to_string_lossy().as_ref()
                 && cached.head_commit.as_deref() == Some(&head_hash)
+                && cached.config_hash.as_deref() == Some(cfg_hash.as_str())
             {
                 // Try to deserialize the cached analysis
                 match serde_yaml::from_value::<RepoAnalysis>(cached.analysis.clone()) {
@@ -97,6 +163,7 @@ pub fn run_analysis_cached(
     let cached_analysis = CachedAnalysis {
         repo_path: repo_path.to_string_lossy().to_string(),
         head_commit: Some(head_hash),
+        config_hash: Some(cfg_hash),
         analysis: serialize_for_cache(&analysis)?,
         analyzed_at: chrono::Utc::now(),
     };
@@ -165,16 +232,22 @@ mod tests {
     }
 
     /// Write a config with a pre-populated CachedAnalysis to disk.
+    ///
+    /// `config_hash` is the pre-computed config hash to store in the cached entry.
+    /// Pass `None` to simulate a cache entry written before the config_hash field existed
+    /// (which will always be treated as a cache miss).
     fn write_config_with_cache(
         config_path: &Path,
         repo_path: &str,
         head_commit: Option<&str>,
+        config_hash: Option<&str>,
         analysis_value: serde_yaml::Value,
     ) {
         let cfg = config::Config {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: repo_path.to_string(),
                 head_commit: head_commit.map(|s| s.to_string()),
+                config_hash: config_hash.map(|s| s.to_string()),
                 analysis: analysis_value,
                 analyzed_at: chrono::Utc::now(),
             }),
@@ -262,10 +335,13 @@ mod tests {
         // Write config with cached analysis matching current HEAD
         let analysis = valid_analysis();
         let analysis_value = serde_yaml::to_value(&analysis).unwrap();
+        let default_cfg = config::Config::default();
+        let cfg_hash = compute_config_hash(&default_cfg);
         write_config_with_cache(
             &config_path,
             &repo_dir.path().to_string_lossy(),
             Some(&head_hash),
+            Some(&cfg_hash),
             analysis_value,
         );
 
@@ -291,6 +367,7 @@ mod tests {
             &config_path,
             &repo_dir.path().to_string_lossy(),
             Some("different_head_hash"),
+            None,
             analysis_value,
         );
 
@@ -361,6 +438,7 @@ mod tests {
             &config_path,
             "/some/other/repo",
             Some(&head_hash),
+            None,
             analysis_value,
         );
 
@@ -384,10 +462,13 @@ mod tests {
 
         // Write config with matching HEAD but corrupted analysis value
         let corrupted_value = serde_yaml::to_value("this is a string, not a RepoAnalysis").unwrap();
+        let default_cfg = config::Config::default();
+        let cfg_hash = compute_config_hash(&default_cfg);
         write_config_with_cache(
             &config_path,
             &repo_dir.path().to_string_lossy(),
             Some(&head_hash),
+            Some(&cfg_hash),
             corrupted_value,
         );
 
@@ -489,10 +570,13 @@ mod tests {
         // Write config with cached analysis matching current HEAD (would be a cache hit)
         let analysis = valid_analysis();
         let analysis_value = serde_yaml::to_value(&analysis).unwrap();
+        let default_cfg = config::Config::default();
+        let cfg_hash = compute_config_hash(&default_cfg);
         write_config_with_cache(
             &config_path,
             &repo_dir.path().to_string_lossy(),
             Some(&head_hash),
+            Some(&cfg_hash),
             analysis_value,
         );
 
@@ -525,10 +609,13 @@ mod tests {
         // Write config with cached analysis using an old timestamp
         let old_time = chrono::Utc::now() - chrono::Duration::hours(1);
         let analysis = valid_analysis();
+        let base_cfg = config::Config::default();
+        let cfg_hash = compute_config_hash(&base_cfg);
         let cfg = config::Config {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: repo_dir.path().to_string_lossy().to_string(),
                 head_commit: Some(head_hash.clone()),
+                config_hash: Some(cfg_hash),
                 analysis: serde_yaml::to_value(&analysis).unwrap(),
                 analyzed_at: old_time,
             }),
@@ -606,6 +693,199 @@ mod tests {
         );
     }
 
+    // ── actual-cli-jot.8: config-change cache invalidation ──
+
+    /// Changing a config field that affects analysis (e.g. include_categories)
+    /// must produce a different config hash, causing a cache miss.
+    #[test]
+    fn test_config_hash_differs_when_include_categories_changes() {
+        let default_cfg = config::Config::default();
+        let hash_default = compute_config_hash(&default_cfg);
+
+        let modified_cfg = config::Config {
+            include_categories: Some(vec!["security".to_string()]),
+            ..config::Config::default()
+        };
+        let hash_modified = compute_config_hash(&modified_cfg);
+
+        assert_ne!(
+            hash_default, hash_modified,
+            "config hash must differ when include_categories changes"
+        );
+    }
+
+    #[test]
+    fn test_config_hash_differs_when_exclude_categories_changes() {
+        let default_cfg = config::Config::default();
+        let hash_default = compute_config_hash(&default_cfg);
+
+        let modified_cfg = config::Config {
+            exclude_categories: Some(vec!["deprecated".to_string()]),
+            ..config::Config::default()
+        };
+        let hash_modified = compute_config_hash(&modified_cfg);
+
+        assert_ne!(
+            hash_default, hash_modified,
+            "config hash must differ when exclude_categories changes"
+        );
+    }
+
+    #[test]
+    fn test_config_hash_differs_when_include_general_changes() {
+        let default_cfg = config::Config::default();
+        let hash_default = compute_config_hash(&default_cfg);
+
+        let modified_cfg = config::Config {
+            include_general: Some(true),
+            ..config::Config::default()
+        };
+        let hash_modified = compute_config_hash(&modified_cfg);
+
+        assert_ne!(
+            hash_default, hash_modified,
+            "config hash must differ when include_general changes"
+        );
+    }
+
+    #[test]
+    fn test_config_hash_differs_when_max_per_framework_changes() {
+        let default_cfg = config::Config::default();
+        let hash_default = compute_config_hash(&default_cfg);
+
+        let modified_cfg = config::Config {
+            max_per_framework: Some(5),
+            ..config::Config::default()
+        };
+        let hash_modified = compute_config_hash(&modified_cfg);
+
+        assert_ne!(
+            hash_default, hash_modified,
+            "config hash must differ when max_per_framework changes"
+        );
+    }
+
+    #[test]
+    fn test_config_hash_stable_for_same_config() {
+        let cfg = config::Config {
+            include_categories: Some(vec!["testing".to_string(), "security".to_string()]),
+            exclude_categories: Some(vec!["deprecated".to_string()]),
+            include_general: Some(false),
+            max_per_framework: Some(10),
+            ..config::Config::default()
+        };
+        let hash1 = compute_config_hash(&cfg);
+        let hash2 = compute_config_hash(&cfg);
+        assert_eq!(hash1, hash2, "config hash must be deterministic");
+    }
+
+    #[test]
+    fn test_config_hash_stable_regardless_of_category_order() {
+        let cfg_a = config::Config {
+            include_categories: Some(vec!["security".to_string(), "testing".to_string()]),
+            ..config::Config::default()
+        };
+        let cfg_b = config::Config {
+            include_categories: Some(vec!["testing".to_string(), "security".to_string()]),
+            ..config::Config::default()
+        };
+        assert_eq!(
+            compute_config_hash(&cfg_a),
+            compute_config_hash(&cfg_b),
+            "config hash must be order-independent for categories"
+        );
+    }
+
+    /// Cache miss when config_hash in the cached entry is absent (old-format cache).
+    /// Simulates a cache written before the config_hash field was introduced.
+    #[test]
+    fn test_cache_miss_when_config_hash_absent() {
+        let repo_dir = tempdir().unwrap();
+        let head_hash = create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Write a cache entry with no config_hash (simulating old format)
+        let analysis = valid_analysis();
+        let analysis_value = serde_yaml::to_value(&analysis).unwrap();
+        write_config_with_cache(
+            &config_path,
+            &repo_dir.path().to_string_lossy(),
+            Some(&head_hash),
+            None, // no config_hash — old-format entry
+            analysis_value,
+        );
+
+        // Should be a cache miss: re-runs analysis instead of returning "test-project"
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_ne!(
+            result.projects[0].name, "test-project",
+            "cache with missing config_hash must be treated as a miss"
+        );
+
+        // Verify the updated cache now contains a config_hash
+        let cfg = config::paths::load_from(&config_path).unwrap();
+        let cached = cfg.cached_analysis.unwrap();
+        assert!(
+            cached.config_hash.is_some(),
+            "updated cache entry must include config_hash"
+        );
+    }
+
+    /// Cache miss when config settings change even if the commit hash matches.
+    #[test]
+    fn test_cache_miss_when_config_hash_differs() {
+        let repo_dir = tempdir().unwrap();
+        let head_hash = create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Store a cache entry built from the default config
+        let analysis = valid_analysis();
+        let analysis_value = serde_yaml::to_value(&analysis).unwrap();
+        let default_cfg = config::Config::default();
+        let default_hash = compute_config_hash(&default_cfg);
+        write_config_with_cache(
+            &config_path,
+            &repo_dir.path().to_string_lossy(),
+            Some(&head_hash),
+            Some(&default_hash),
+            analysis_value,
+        );
+
+        // Now write a config file with different settings (include_categories changed)
+        let modified_cfg = config::Config {
+            include_categories: Some(vec!["security".to_string()]),
+            cached_analysis: config::paths::load_from(&config_path)
+                .unwrap()
+                .cached_analysis,
+            ..config::Config::default()
+        };
+        config::paths::save_to(&modified_cfg, &config_path).unwrap();
+
+        // Should be a cache miss because config_hash differs
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_ne!(
+            result.projects[0].name, "test-project",
+            "cache must be invalidated when config settings change"
+        );
+
+        // Verify the cache was updated with the new config hash
+        let updated_cfg = config::paths::load_from(&config_path).unwrap();
+        let updated_cached = updated_cfg.cached_analysis.unwrap();
+        let expected_hash = compute_config_hash(&config::Config {
+            include_categories: Some(vec!["security".to_string()]),
+            ..config::Config::default()
+        });
+        assert_eq!(
+            updated_cached.config_hash,
+            Some(expected_hash),
+            "updated cache must reflect new config hash"
+        );
+    }
+
     // ── 4eo.2: tracing::warn! is emitted when cached analysis fails to deserialize ──
 
     #[tracing_test::traced_test]
@@ -619,10 +899,13 @@ mod tests {
 
         // Write config with matching HEAD but corrupted analysis value.
         let corrupted_value = serde_yaml::to_value("not a RepoAnalysis").unwrap();
+        let default_cfg = config::Config::default();
+        let cfg_hash = compute_config_hash(&default_cfg);
         write_config_with_cache(
             &config_path,
             &repo_dir.path().to_string_lossy(),
             Some(&head_hash),
+            Some(&cfg_hash),
             corrupted_value,
         );
 
