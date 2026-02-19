@@ -1,12 +1,23 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use regex::Regex;
+use std::sync::OnceLock;
 use tokio::process::Command;
 
 use crate::error::ActualError;
 use crate::tailoring::types::TailoringOutput;
 
 use super::subprocess::{parse_output, resolve_output, TailoringRunner};
+
+/// Compiled regex for validating model names: alphanumeric start, then
+/// alphanumeric, dots, underscores, slashes, or hyphens, up to 100 chars total.
+static MODEL_NAME_RE: OnceLock<Regex> = OnceLock::new();
+
+fn model_name_regex() -> &'static Regex {
+    MODEL_NAME_RE
+        .get_or_init(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._/\-]{0,99}$").expect("valid regex"))
+}
 
 /// The default binary name to search for on PATH.
 const CODEX_BINARY_NAME: &str = "codex";
@@ -54,14 +65,31 @@ impl CodexCliRunner {
 /// Locate the Codex CLI binary on the system.
 ///
 /// Resolution order:
-/// 1. If `CODEX_BINARY` env var is set, use that path directly.
+/// 1. If `CODEX_BINARY` env var is set, use that path (must exist and be executable).
 /// 2. Otherwise, search PATH for `codex` using `which::which`.
 ///
 /// Returns the absolute path to the binary on success, or
-/// `ActualError::CodexNotFound` if the binary cannot be located.
+/// `ActualError::CodexNotFound` if the binary cannot be located or is invalid.
 pub fn find_codex_binary() -> Result<PathBuf, ActualError> {
-    if let Ok(path) = std::env::var(CODEX_BINARY_ENV) {
-        return Ok(PathBuf::from(path));
+    if let Ok(path_str) = std::env::var(CODEX_BINARY_ENV) {
+        let path = PathBuf::from(&path_str);
+        if !path.exists() {
+            return Err(ActualError::CodexNotFound);
+        }
+        if !path.is_file() {
+            return Err(ActualError::CodexNotFound);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0);
+            if mode & 0o111 == 0 {
+                return Err(ActualError::CodexNotFound);
+            }
+        }
+        return Ok(path);
     }
     which::which(CODEX_BINARY_NAME).map_err(|_| ActualError::CodexNotFound)
 }
@@ -81,8 +109,24 @@ fn io_err(context: &str, e: std::io::Error) -> ActualError {
 /// The `exec` subcommand runs Codex in non-interactive mode.
 /// `--approval-mode full-auto` suppresses all confirmation prompts.
 /// `-q` requests quiet / non-interactive output.
-fn build_codex_args(prompt: &str, schema: &str, model: &str) -> Vec<String> {
-    vec![
+///
+/// # Errors
+///
+/// Returns `ActualError::ConfigError` if:
+/// - `model` does not match `^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,99}$`
+/// - `prompt` starts with `-` (would be interpreted as a flag by the CLI parser)
+fn build_codex_args(prompt: &str, schema: &str, model: &str) -> Result<Vec<String>, ActualError> {
+    if !model_name_regex().is_match(model) {
+        return Err(ActualError::ConfigError(format!(
+            "Invalid model name: {model:?}. Must match [a-zA-Z0-9][a-zA-Z0-9._/-]{{0,99}}"
+        )));
+    }
+    if prompt.starts_with('-') {
+        return Err(ActualError::ConfigError(
+            "Invalid prompt: must not start with '-'".to_string(),
+        ));
+    }
+    Ok(vec![
         "exec".to_string(),
         "--approval-mode".to_string(),
         "full-auto".to_string(),
@@ -92,7 +136,7 @@ fn build_codex_args(prompt: &str, schema: &str, model: &str) -> Vec<String> {
         model.to_string(),
         "--json-schema".to_string(),
         schema.to_string(),
-    ]
+    ])
 }
 
 /// Spawn the Codex binary, wait with timeout, and parse JSON output.
@@ -129,7 +173,7 @@ impl TailoringRunner for CodexCliRunner {
         _max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError> {
         let model = model_override.unwrap_or(&self.model);
-        let args = build_codex_args(prompt, schema, model);
+        let args = build_codex_args(prompt, schema, model)?;
         run_codex_subprocess(&self.binary_path, self.timeout, &args).await
     }
 }
@@ -250,15 +294,23 @@ mod tests {
         assert_eq!(timeout_seconds(result.unwrap_err()), 0);
     }
 
-    // ---- Test 4: find_codex_binary respects CODEX_BINARY env var ----
+    // ---- Test 4: find_codex_binary respects CODEX_BINARY env var (must be valid executable) ----
 
     #[test]
+    #[cfg(unix)]
     fn test_find_codex_binary_respects_env_var() {
+        use std::os::unix::fs::PermissionsExt;
+
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("CODEX_BINARY", "/some/path/to/codex");
+        let dir = tempfile::tempdir().unwrap();
+        let fake_binary = dir.path().join("fake-codex");
+        std::fs::write(&fake_binary, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&fake_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _guard = EnvGuard::set("CODEX_BINARY", fake_binary.to_str().unwrap());
         let result = find_codex_binary();
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), PathBuf::from("/some/path/to/codex"));
+        assert_eq!(result.unwrap(), fake_binary);
     }
 
     // ---- Test 5: find_codex_binary returns CodexNotFound when not in PATH ----
@@ -268,6 +320,47 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("CODEX_BINARY");
         let _g2 = EnvGuard::set("PATH", "");
+        let result = find_codex_binary();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::CodexNotFound));
+    }
+
+    // ---- Security: find_codex_binary validates CODEX_BINARY env var ----
+
+    #[test]
+    fn test_find_codex_binary_env_nonexistent_path() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("CODEX_BINARY", "/nonexistent/path/to/codex");
+        let result = find_codex_binary();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::CodexNotFound));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_find_codex_binary_env_non_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let non_exec = dir.path().join("codex-not-executable");
+        // Create the file but do NOT set executable bit
+        std::fs::write(&non_exec, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _guard = EnvGuard::set("CODEX_BINARY", non_exec.to_str().unwrap());
+        let result = find_codex_binary();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::CodexNotFound));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_find_codex_binary_env_directory_rejected() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+
+        let _guard = EnvGuard::set("CODEX_BINARY", dir.path().to_str().unwrap());
         let result = find_codex_binary();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::CodexNotFound));
@@ -331,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_build_codex_args() {
-        let args = build_codex_args("my prompt", r#"{"type":"object"}"#, "o4-mini");
+        let args = build_codex_args("my prompt", r#"{"type":"object"}"#, "o4-mini").unwrap();
         assert_eq!(args[0], "exec");
         assert_eq!(args[1], "--approval-mode");
         assert_eq!(args[2], "full-auto");
@@ -341,6 +434,65 @@ mod tests {
         assert_eq!(args[6], "o4-mini");
         assert_eq!(args[7], "--json-schema");
         assert_eq!(args[8], r#"{"type":"object"}"#);
+    }
+
+    // ---- Security: build_codex_args rejects flag-like model names ----
+
+    #[test]
+    fn test_build_codex_args_rejects_flag_model() {
+        let err = build_codex_args("valid prompt", r#"{}"#, "--dangerous-flag").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(_)),
+            "expected ConfigError, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid model name"), "message: {msg}");
+    }
+
+    #[test]
+    fn test_build_codex_args_rejects_model_with_spaces() {
+        let err = build_codex_args("valid prompt", r#"{}"#, "model with spaces").unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(_)));
+    }
+
+    #[test]
+    fn test_build_codex_args_rejects_model_with_shell_metacharacters() {
+        for bad_model in &["model|cmd", "model;cmd", "model$var", "model`cmd`"] {
+            let err = build_codex_args("valid prompt", r#"{}"#, bad_model).unwrap_err();
+            assert!(
+                matches!(err, ActualError::ConfigError(_)),
+                "expected ConfigError for model {bad_model:?}, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_codex_args_rejects_flag_prompt() {
+        let err = build_codex_args("--bad-flag", r#"{}"#, "o4-mini").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(_)),
+            "expected ConfigError, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid prompt"), "message: {msg}");
+    }
+
+    #[test]
+    fn test_build_codex_args_accepts_valid_model_names() {
+        let valid_models = [
+            "o4-mini",
+            "codex-mini-latest",
+            "gpt-4o",
+            "claude-3.5-sonnet",
+            "openai/o4-mini",
+            "provider/model-name_v2",
+        ];
+        for model in &valid_models {
+            assert!(
+                build_codex_args("prompt", r#"{}"#, model).is_ok(),
+                "expected Ok for model {model:?}"
+            );
+        }
     }
 
     // ---- Additional: spawn failure (bad binary path) ----
