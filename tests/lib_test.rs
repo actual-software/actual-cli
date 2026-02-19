@@ -292,12 +292,60 @@ fn test_cli_parse_sync_inf_budget_rejected() {
 }
 
 #[test]
-fn test_cli_parse_sync_runner_flag() {
+fn test_cli_parse_sync_runner_claude_cli_accepted() {
+    let cli = Cli::parse_from(["actual", "sync", "--runner", "claude-cli"]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert_eq!(args.runner, Some(RunnerChoice::ClaudeCli));
+}
+
+#[test]
+fn test_cli_parse_sync_runner_anthropic_api_accepted() {
     let cli = Cli::parse_from(["actual", "sync", "--runner", "anthropic-api"]);
     let Command::Sync(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.runner, Some(RunnerChoice::AnthropicApi));
+}
+
+#[test]
+fn test_cli_parse_sync_runner_openai_api_accepted() {
+    let cli = Cli::parse_from(["actual", "sync", "--runner", "openai-api"]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert_eq!(args.runner, Some(RunnerChoice::OpenAiApi));
+}
+
+#[test]
+fn test_cli_parse_sync_runner_codex_cli_accepted() {
+    let cli = Cli::parse_from(["actual", "sync", "--runner", "codex-cli"]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert_eq!(args.runner, Some(RunnerChoice::CodexCli));
+}
+
+#[test]
+fn test_cli_parse_sync_runner_invalid_value_rejected() {
+    let result = Cli::try_parse_from(["actual", "sync", "--runner", "unknown-runner"]);
+    assert!(result.is_err(), "invalid runner value should be rejected");
+}
+
+#[test]
+fn test_cli_parse_sync_runner_log_injection_rejected() {
+    let result = Cli::try_parse_from(["actual", "sync", "--runner", "invalid\nlog-injection"]);
+    assert!(
+        result.is_err(),
+        "runner value with newline should be rejected"
+    );
+}
+
+#[test]
+fn test_cli_parse_sync_runner_empty_value_rejected() {
+    let result = Cli::try_parse_from(["actual", "sync", "--runner", ""]);
+    assert!(result.is_err(), "empty runner value should be rejected");
 }
 
 #[test]
