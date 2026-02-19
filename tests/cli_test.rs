@@ -269,3 +269,108 @@ fn test_sync_full_without_dry_run_fails() {
         .failure()
         .stderr(predicate::str::contains("--dry-run"));
 }
+
+#[test]
+fn test_config_set_anthropic_api_key_redacts_in_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+    cmd()
+        .args(["config", "set", "anthropic_api_key", "sk-ant-test-12345"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("anthropic_api_key"))
+        .stdout(predicate::str::contains("[redacted]"))
+        .stdout(predicate::str::contains("sk-ant-test-12345").not());
+}
+
+#[test]
+fn test_config_set_openai_api_key_redacts_in_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+    cmd()
+        .args(["config", "set", "openai_api_key", "sk-openai-test-67890"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("openai_api_key"))
+        .stdout(predicate::str::contains("[redacted]"))
+        .stdout(predicate::str::contains("sk-openai-test-67890").not());
+}
+
+#[test]
+fn test_config_show_after_anthropic_api_key_set_redacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+
+    // First: set the key
+    cmd()
+        .args(["config", "set", "anthropic_api_key", "sk-ant-test-12345"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success();
+
+    // Then: show should redact
+    cmd()
+        .args(["config", "show"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("anthropic_api_key"))
+        .stdout(predicate::str::contains("[redacted]"))
+        .stdout(predicate::str::contains("sk-ant-test-12345").not());
+}
+
+#[test]
+fn test_config_show_after_openai_api_key_set_redacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+
+    // First: set the key
+    cmd()
+        .args(["config", "set", "openai_api_key", "sk-openai-test-67890"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success();
+
+    // Then: show should redact
+    cmd()
+        .args(["config", "show"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("openai_api_key"))
+        .stdout(predicate::str::contains("[redacted]"))
+        .stdout(predicate::str::contains("sk-openai-test-67890").not());
+}
+
+#[test]
+fn test_config_show_redacts_both_keys_simultaneously() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+
+    // Set both keys
+    cmd()
+        .args(["config", "set", "anthropic_api_key", "sk-ant-test-12345"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success();
+
+    cmd()
+        .args(["config", "set", "openai_api_key", "sk-openai-test-67890"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success();
+
+    // Show once — both keys should be redacted, neither raw value should appear
+    cmd()
+        .args(["config", "show"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("anthropic_api_key"))
+        .stdout(predicate::str::contains("openai_api_key"))
+        .stdout(predicate::str::contains("[redacted]"))
+        .stdout(predicate::str::contains("sk-ant-test-12345").not())
+        .stdout(predicate::str::contains("sk-openai-test-67890").not());
+}
