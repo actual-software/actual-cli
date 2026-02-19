@@ -171,10 +171,17 @@ impl TailoringRunner for AnthropicApiRunner {
         let response = self.post_messages(request_body).await?;
 
         // Find the tool_use block named "return_result" in the content array.
-        let content_blocks: Vec<ContentBlock> = response
-            .get("content")
-            .and_then(|c| serde_json::from_value(c.clone()).ok())
-            .unwrap_or_default();
+        // Propagate deserialization failures so API schema drift produces a
+        // specific, actionable error rather than a confusing "no structured result".
+        let content_blocks: Vec<ContentBlock> = match response.get("content") {
+            Some(c) => serde_json::from_value(c.clone()).map_err(|e| {
+                ActualError::ClaudeSubprocessFailed {
+                    message: format!("Failed to parse API response content blocks: {e}"),
+                    stderr: String::new(),
+                }
+            })?,
+            None => Vec::new(),
+        };
 
         let tool_input = content_blocks
             .into_iter()

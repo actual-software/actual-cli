@@ -75,7 +75,7 @@ fn parse_package_json(
     let parsed: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Warning: failed to parse {}: {e}", path.display());
+            tracing::warn!("failed to parse {}: {e}", path.display());
             return;
         }
     };
@@ -107,7 +107,7 @@ fn parse_cargo_toml(
     let parsed: toml::Value = match content.parse() {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Warning: failed to parse {}: {e}", path.display());
+            tracing::warn!("failed to parse {}: {e}", path.display());
             return;
         }
     };
@@ -162,7 +162,7 @@ fn parse_pyproject_toml(
     let parsed: toml::Value = match content.parse() {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Warning: failed to parse {}: {e}", path.display());
+            tracing::warn!("failed to parse {}: {e}", path.display());
             return;
         }
     };
@@ -291,7 +291,7 @@ fn parse_pipfile(project_dir: &Path, deps: &mut HashSet<String>, dev_deps: &mut 
     let parsed: toml::Value = match content.parse() {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Warning: failed to parse {}: {e}", path.display());
+            tracing::warn!("failed to parse {}: {e}", path.display());
             return;
         }
     };
@@ -859,6 +859,131 @@ dependencies {
         assert!(info
             .dependencies
             .contains(&"io.ktor:ktor-server-core".to_string()));
+    }
+
+    // ── 4eo.5: tracing::warn! is emitted for malformed manifests ──
+
+    /// Helper: run a closure while capturing tracing events, return the
+    /// collected warning messages.
+    fn capture_warnings<F: FnOnce()>(f: F) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+        use tracing::Level;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let warnings: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_clone = warnings.clone();
+
+        // Build a layer that captures WARN events.
+        struct Collector {
+            warnings: Arc<Mutex<Vec<String>>>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Collector {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == Level::WARN {
+                    let mut visitor = MessageVisitor(String::new());
+                    event.record(&mut visitor);
+                    self.warnings.lock().unwrap().push(visitor.0);
+                }
+            }
+        }
+
+        struct MessageVisitor(String);
+        impl tracing::field::Visit for MessageVisitor {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "message" {
+                    self.0 = value.to_string();
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+
+        let subscriber = tracing_subscriber::registry().with(Collector {
+            warnings: warnings_clone,
+        });
+
+        // Run the closure with the subscriber as default, then drop the guard
+        // so the subscriber (and its Arc clone) is released before we read the results.
+        {
+            let _guard = subscriber.set_default();
+            f();
+        }
+
+        let result = warnings.lock().unwrap().clone();
+        result
+    }
+
+    #[test]
+    fn test_malformed_package_json_emits_tracing_warn() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("package.json"), "not valid json at all").unwrap();
+
+        let warnings = capture_warnings(|| {
+            let info = parse_dependencies(dir.path());
+            // Malformed file → empty deps (no panic)
+            assert!(info.dependencies.is_empty());
+        });
+
+        assert!(
+            warnings.iter().any(|w| w.contains("package.json")),
+            "expected a warning mentioning 'package.json', got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_malformed_cargo_toml_emits_tracing_warn() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "not valid toml [[[").unwrap();
+
+        let warnings = capture_warnings(|| {
+            let info = parse_dependencies(dir.path());
+            assert!(info.dependencies.is_empty());
+        });
+
+        assert!(
+            warnings.iter().any(|w| w.contains("Cargo.toml")),
+            "expected a warning mentioning 'Cargo.toml', got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_malformed_pyproject_toml_emits_tracing_warn() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("pyproject.toml"), "[[[invalid").unwrap();
+
+        let warnings = capture_warnings(|| {
+            let info = parse_dependencies(dir.path());
+            assert!(info.dependencies.is_empty());
+        });
+
+        assert!(
+            warnings.iter().any(|w| w.contains("pyproject.toml")),
+            "expected a warning mentioning 'pyproject.toml', got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_malformed_pipfile_emits_tracing_warn() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Pipfile"), "[[[invalid").unwrap();
+
+        let warnings = capture_warnings(|| {
+            let info = parse_dependencies(dir.path());
+            assert!(info.dependencies.is_empty());
+        });
+
+        assert!(
+            warnings.iter().any(|w| w.contains("Pipfile")),
+            "expected a warning mentioning 'Pipfile', got: {warnings:?}"
+        );
     }
 
     #[test]
