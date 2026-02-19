@@ -11,6 +11,10 @@ pub struct RetryConfig {
     initial_delay: Duration,
     /// Multiplier applied to the delay after each failed attempt.
     backoff_factor: u32,
+    /// Maximum delay between retries. The computed backoff is capped at this
+    /// value to prevent overflow (e.g. `Duration::MAX` ≈ 584 years) from
+    /// causing an effective infinite hang. Defaults to 30 seconds.
+    max_delay: Duration,
 }
 
 impl RetryConfig {
@@ -33,6 +37,31 @@ impl RetryConfig {
             max_attempts,
             initial_delay,
             backoff_factor,
+            max_delay: Duration::from_secs(30),
+        })
+    }
+
+    /// Create a new `RetryConfig` with a custom maximum delay cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActualError::ConfigError`] if `max_attempts` is zero.
+    pub fn new_with_max_delay(
+        max_attempts: u32,
+        initial_delay: Duration,
+        backoff_factor: u32,
+        max_delay: Duration,
+    ) -> Result<Self, ActualError> {
+        if max_attempts == 0 {
+            return Err(ActualError::ConfigError(
+                "RetryConfig max_attempts must be >= 1".to_string(),
+            ));
+        }
+        Ok(Self {
+            max_attempts,
+            initial_delay,
+            backoff_factor,
+            max_delay,
         })
     }
 
@@ -50,6 +79,12 @@ impl RetryConfig {
     pub fn backoff_factor(&self) -> u32 {
         self.backoff_factor
     }
+
+    /// Maximum delay between retries. The computed backoff is always capped at
+    /// this value. Defaults to 30 seconds.
+    pub fn max_delay(&self) -> Duration {
+        self.max_delay
+    }
 }
 
 impl Default for RetryConfig {
@@ -58,6 +93,7 @@ impl Default for RetryConfig {
             max_attempts: 3,
             initial_delay: Duration::from_secs(1),
             backoff_factor: 2,
+            max_delay: Duration::from_secs(30),
         }
     }
 }
@@ -84,8 +120,13 @@ where
         if attempt > 0 {
             let delay = match config.backoff_factor.checked_pow(attempt - 1) {
                 Some(multiplier) => config.initial_delay.saturating_mul(multiplier),
-                None => Duration::MAX,
+                // Overflow: fall back to the maximum allowed delay rather than
+                // Duration::MAX to avoid an effective infinite hang.
+                None => config.max_delay,
             };
+            // Cap the delay so that a large backoff_factor cannot produce a
+            // delay approaching Duration::MAX (~584 years).
+            let delay = delay.min(config.max_delay);
             tokio::time::sleep(delay).await;
         }
 
@@ -146,6 +187,7 @@ mod tests {
         assert_eq!(config.max_attempts(), 3);
         assert_eq!(config.initial_delay(), Duration::from_secs(1));
         assert_eq!(config.backoff_factor(), 2);
+        assert_eq!(config.max_delay(), Duration::from_secs(30));
     }
 
     #[test]
@@ -169,6 +211,34 @@ mod tests {
         assert_eq!(config.max_attempts(), 5);
         assert_eq!(config.initial_delay(), Duration::from_millis(500));
         assert_eq!(config.backoff_factor(), 3);
+        // new() must default max_delay to 30 seconds.
+        assert_eq!(config.max_delay(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_new_with_max_delay_valid() {
+        let config = RetryConfig::new_with_max_delay(
+            4,
+            Duration::from_millis(200),
+            3,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(config.max_attempts(), 4);
+        assert_eq!(config.initial_delay(), Duration::from_millis(200));
+        assert_eq!(config.backoff_factor(), 3);
+        assert_eq!(config.max_delay(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_new_with_max_delay_rejects_zero_attempts() {
+        let err =
+            RetryConfig::new_with_max_delay(0, Duration::from_secs(1), 2, Duration::from_secs(30))
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("max_attempts must be >= 1"),
+            "unexpected error message: {err}"
+        );
     }
 
     #[tokio::test]
@@ -275,17 +345,114 @@ mod tests {
             max_attempts: 34,
             initial_delay: Duration::from_secs(1),
             backoff_factor: 2,
+            max_delay: Duration::from_secs(30),
         };
 
         // All 34 attempts fail with ApiError.
         // attempt=33 computes 2^32 which overflows u32, exercising the
-        // checked_pow → None → Duration::MAX fallback path.
-        // This must NOT panic (debug) or silently wrap (release).
+        // checked_pow → None → max_delay fallback path.
+        // This must NOT panic (debug) or silently wrap (release), and the
+        // delay must be capped at max_delay rather than Duration::MAX.
         let behaviors: Vec<u32> = vec![0; 34];
         let (result, calls) = run_retry(&config, &behaviors).await;
 
         let err = result.unwrap_err();
         assert!(matches!(err, ActualError::ApiError(_)));
         assert_eq!(calls, 34);
+    }
+
+    /// Verify that a large `backoff_factor` never produces a delay exceeding
+    /// `max_delay` (30 seconds by default).
+    #[tokio::test]
+    async fn test_backoff_capped_with_large_factor() {
+        tokio::time::pause();
+
+        let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let timestamps_clone = Arc::clone(&timestamps);
+
+        // backoff_factor=1000 would produce 1000^1 = 1000s on the second
+        // attempt and 1000^2 = 1_000_000s on the third — both must be capped
+        // at 30 seconds.
+        let config = RetryConfig::new(3, Duration::from_secs(1), 1000).unwrap();
+
+        let _result: Result<i32, _> = with_retry(&config, || {
+            let timestamps = Arc::clone(&timestamps_clone);
+            async move {
+                timestamps.lock().unwrap().push(tokio::time::Instant::now());
+                Err(ActualError::ApiError("500".to_string()))
+            }
+        })
+        .await;
+
+        let ts = timestamps.lock().unwrap();
+        assert_eq!(ts.len(), 3);
+
+        let first_to_second = ts[1] - ts[0];
+        let second_to_third = ts[2] - ts[1];
+
+        let max_delay = Duration::from_secs(30);
+        let tolerance = Duration::from_millis(10);
+
+        // Both gaps must be at most 30 seconds (plus a small tolerance for
+        // tokio's paused-clock auto-advance).
+        assert!(
+            first_to_second <= max_delay + tolerance,
+            "first→second delay {first_to_second:?} exceeded 30s cap"
+        );
+        assert!(
+            second_to_third <= max_delay + tolerance,
+            "second→third delay {second_to_third:?} exceeded 30s cap"
+        );
+        // With factor=1000 and initial=1s, without a cap the second gap would
+        // be 1000s. Assert we're nowhere near that.
+        assert!(
+            first_to_second <= max_delay + tolerance,
+            "delay should be capped at 30s, not 1000s"
+        );
+    }
+
+    /// Verify that `new_with_max_delay` respects a custom cap.
+    #[tokio::test]
+    async fn test_backoff_custom_max_delay() {
+        tokio::time::pause();
+
+        let timestamps = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let timestamps_clone = Arc::clone(&timestamps);
+
+        // Custom cap of 5 seconds; factor=1000 would overflow without cap.
+        let config = RetryConfig::new_with_max_delay(
+            3,
+            Duration::from_secs(1),
+            1000,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let _result: Result<i32, _> = with_retry(&config, || {
+            let timestamps = Arc::clone(&timestamps_clone);
+            async move {
+                timestamps.lock().unwrap().push(tokio::time::Instant::now());
+                Err(ActualError::ApiError("500".to_string()))
+            }
+        })
+        .await;
+
+        let ts = timestamps.lock().unwrap();
+        assert_eq!(ts.len(), 3);
+
+        let custom_cap = Duration::from_secs(5);
+        let tolerance = Duration::from_millis(10);
+
+        let first_to_second = ts[1] - ts[0];
+        let second_to_third = ts[2] - ts[1];
+
+        assert!(
+            first_to_second <= custom_cap + tolerance,
+            "first→second delay {first_to_second:?} exceeded 5s cap"
+        );
+        assert!(
+            second_to_third <= custom_cap + tolerance,
+            "second→third delay {second_to_third:?} exceeded 5s cap"
+        );
     }
 }
