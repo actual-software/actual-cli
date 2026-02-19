@@ -6,6 +6,7 @@ use crate::cli::args::StatusArgs;
 use crate::cli::commands::auth::check_auth_with_timeout;
 use crate::cli::ui::header::{render_header_bar, AuthDisplay};
 use crate::cli::ui::panel::Panel;
+use crate::cli::ui::term_size;
 use crate::cli::ui::theme;
 use crate::config;
 use crate::config::types::Config;
@@ -57,16 +58,8 @@ fn run_status(
     config_exists: bool,
     cwd: &Path,
 ) {
-    let stderr_width = console::Term::stderr()
-        .size_checked()
-        .map(|(_, cols)| cols as usize)
-        .unwrap_or(80)
-        .min(90);
-    let width = console::Term::stdout()
-        .size_checked()
-        .map(|(_, cols)| cols as usize)
-        .unwrap_or(80)
-        .min(90);
+    let stderr_width = term_size::terminal_width();
+    let width = term_size::terminal_width();
 
     // Banner + header bar (written to stderr)
     print_banner(false);
