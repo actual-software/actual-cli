@@ -144,7 +144,7 @@ pub fn render_to<B: Backend>(
                         max
                     )
                 } else {
-                    "  ↑/↓ scroll  q quit".to_string()
+                    "  q to quit".to_string()
                 };
                 log_lines.push(scroll_hint);
             }
@@ -169,7 +169,17 @@ pub fn render_to<B: Backend>(
             if let Some(cs) = confirm {
                 append_confirm_lines(&mut log_lines, cs);
             } else if hint {
-                log_lines.push("  ↑/↓ scroll  q quit".to_string());
+                let max = log.max_scroll(log_height);
+                let scroll_hint = if max > 0 {
+                    format!(
+                        "  ↑/↓ scroll  Home/End top/bottom  q quit  [{}/{}]",
+                        scroll_offset.min(max),
+                        max
+                    )
+                } else {
+                    "  q to quit".to_string()
+                };
+                log_lines.push(scroll_hint);
             }
             let log_text = log_lines.join("\n");
             frame.render_widget(Paragraph::new(log_text), chunks[1]);
@@ -426,11 +436,23 @@ impl TuiRenderer {
                 let Ok(key) = source.next_key() else {
                     break;
                 };
-                // Use actual terminal height to correctly compute max_scroll.
-                // Subtract borders (2) + footer hint line (1) + steps row/condensed (varies).
-                // Using crossterm::terminal::size() for the live terminal dimensions.
+                // Mirror the log_height calculation from render_to exactly:
+                //   wide layout (>=80): log_inner = rows - 2 (Output box borders),
+                //                       then subtract 1 for the hint footer line.
+                //   narrow layout: rows - 1 (condensed steps row), no border subtraction.
+                // We use the wide formula here as a conservative lower bound; render_to
+                // also clamps internally, so over-estimating max is the only risk.
                 let log_height: usize = crossterm::terminal::size()
-                    .map(|(_, rows)| (rows as usize).saturating_sub(4))
+                    .map(|(cols, rows)| {
+                        let rows = rows as usize;
+                        if cols >= 80 {
+                            // log_inner_height = rows - 2 borders, then -1 for hint line
+                            rows.saturating_sub(3)
+                        } else {
+                            // narrow: rows - 1 condensed row (no border)
+                            rows.saturating_sub(1)
+                        }
+                    })
                     .unwrap_or(20);
                 let max = self.log.max_scroll(log_height);
                 match (key.code, key.modifiers) {
