@@ -685,6 +685,74 @@ User footer";
     }
 
     #[test]
+    fn dry_run_full_with_tailoring_strips_ansi_from_stdout() {
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json(
+            "adr-001",
+            "Error Handling",
+            &["Use Result<T, E>"],
+            &[],
+            &["."],
+        );
+        let response = make_match_response_json(&format!("[{}]", adr));
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&response)
+            .create();
+
+        // Tailoring response with ANSI escape sequences in content
+        let ansi_content = "\x1b[31mINJECTED\x1b[0m safe content";
+        let tailoring_json = serde_json::json!({
+            "files": [{"path": "CLAUDE.md", "content": ansi_content,
+                       "reasoning": "test", "adr_ids": ["adr-001"]}],
+            "skipped_adrs": [],
+            "summary": {"total_input": 1, "applicable": 1, "not_applicable": 0, "files_generated": 1}
+        })
+        .to_string();
+
+        let env =
+            TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
+
+        let output = env
+            .cmd()
+            .args([
+                "sync",
+                "--force",
+                "--dry-run",
+                "--full",
+                "--api-url",
+                &env.api_url,
+            ])
+            .output()
+            .expect("command must run");
+
+        assert!(
+            output.status.success(),
+            "command must succeed, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // Assert no ESC byte in raw stdout
+        assert!(
+            !output.stdout.contains(&0x1Bu8),
+            "dry-run --full stdout must not contain ESC byte (0x1B)"
+        );
+
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout_str.contains("safe content"),
+            "expected plain-text content in stdout: {stdout_str}"
+        );
+
+        assert!(
+            !env.file_exists("CLAUDE.md"),
+            "dry-run must not write CLAUDE.md"
+        );
+    }
+
+    #[test]
     fn project_filter_with_no_tailor() {
         let mut server = mockito::Server::new();
         let adr_web = make_adr_json(
