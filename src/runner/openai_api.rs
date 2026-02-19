@@ -1016,4 +1016,57 @@ mod tests {
             "expected ClaudeTimeout or ClaudeSubprocessFailed, got: {result:?}"
         );
     }
+
+    // Test 20: with_base_url for a non-localhost (https) URL does not rebuild the client.
+    //
+    // This exercises the `else` branch of `if is_localhost` in `with_base_url`,
+    // ensuring the existing https_only client is retained when the base URL is
+    // already HTTPS.  We confirm the base URL is set and the runner can be
+    // constructed without panicking; we do not make a real network request.
+    #[test]
+    fn test_with_base_url_non_localhost_retains_client() {
+        let runner = OpenAiApiRunner::new(
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            Duration::from_secs(10),
+        )
+        .with_base_url("https://api.example.com".to_string());
+
+        assert_eq!(runner.base_url, "https://api.example.com");
+    }
+
+    // Test 21: large server error body is truncated to 4096 bytes.
+    #[tokio::test]
+    async fn test_500_large_body_is_truncated() {
+        let mut server = Server::new_async().await;
+
+        // Body larger than 4096 bytes.
+        let large_body = "X".repeat(8192);
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(500)
+            .with_body(&large_body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { stderr, .. }) => {
+                assert_eq!(
+                    stderr.len(),
+                    4096,
+                    "expected error body truncated to 4096 bytes, got {} bytes",
+                    stderr.len()
+                );
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
 }
