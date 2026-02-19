@@ -33,7 +33,19 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
     let cfg_path = config_path()?;
 
     // Load config first to get runner/key fallbacks.
-    let cfg = load_from(&cfg_path).unwrap_or_default();
+    // If the config file exists but is malformed, surface the error so the user
+    // can fix it rather than silently falling back to defaults (which would cause
+    // confusing downstream failures like ClaudeNotAuthenticated).
+    let cfg = match load_from(&cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to load config from {}: {e}. Using defaults.",
+                cfg_path.display()
+            );
+            Default::default()
+        }
+    };
 
     // Resolve the runner: CLI flag > config (parsed from string) > default.
     //

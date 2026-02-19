@@ -217,9 +217,10 @@ impl TreeSitterAnalyzer {
                         query,
                     }),
                     Err(e) => {
-                        eprintln!(
-                            "warning: skipping query {}/{} that failed to compile: {e}",
-                            lang_id, def.rule_id
+                        tracing::warn!(
+                            "skipping query {}/{} that failed to compile: {e}",
+                            lang_id,
+                            def.rule_id
                         );
                         None
                     }

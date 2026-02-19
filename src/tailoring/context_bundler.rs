@@ -129,7 +129,14 @@ fn build_file_tree(root: &Path) -> String {
         .git_exclude(true)
         .build();
 
-    for entry in walker.filter_map(|r| r.ok()) {
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("skipping unreadable path during context bundling: {e}");
+                continue;
+            }
+        };
         let path = entry.path();
 
         // Skip root itself.
@@ -309,10 +316,17 @@ fn find_entrypoints(root: &Path, max: usize) -> Vec<(String, PathBuf)> {
         .git_exclude(true)
         .build();
 
-    for entry in walker.filter_map(|r| r.ok()) {
+    for entry in walker {
         if found.len() >= max {
             break;
         }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("skipping unreadable path during context bundling: {e}");
+                continue;
+            }
+        };
         let path = entry.path();
         if path == root || path.is_dir() {
             continue;
