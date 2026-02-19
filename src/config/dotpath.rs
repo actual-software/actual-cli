@@ -874,4 +874,57 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("invalid value"), "got: {msg}");
     }
+
+    #[test]
+    fn test_set_and_get_runner() {
+        let mut config = Config::default();
+        set(&mut config, "runner", "claude-cli").unwrap();
+        assert_eq!(get(&config, "runner").unwrap(), "claude-cli");
+    }
+
+    #[test]
+    fn test_set_invalid_runner() {
+        let mut config = Config::default();
+        let err = set(&mut config, "runner", "unknown-runner").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid value"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_get_unset_runner() {
+        let config = Config::default();
+        let err = get(&config, "runner").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_and_get_anthropic_api_key() {
+        let mut config = Config::default();
+        set(&mut config, "anthropic_api_key", "sk-ant-test").unwrap();
+        assert_eq!(get(&config, "anthropic_api_key").unwrap(), "sk-ant-test");
+    }
+
+    #[test]
+    fn test_get_unset_anthropic_api_key() {
+        let config = Config::default();
+        let err = get(&config, "anthropic_api_key").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_and_get_openai_api_key() {
+        let mut config = Config::default();
+        set(&mut config, "openai_api_key", "sk-openai-test").unwrap();
+        assert_eq!(get(&config, "openai_api_key").unwrap(), "sk-openai-test");
+    }
+
+    #[test]
+    fn test_get_unset_openai_api_key() {
+        let config = Config::default();
+        let err = get(&config, "openai_api_key").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
 }
