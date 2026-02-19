@@ -45,12 +45,16 @@ impl TerminalIO for RealTerminal {
     }
 
     fn confirm(&self, prompt: &str) -> Result<bool, ActualError> {
+        self.confirm_with_cancel(prompt)
+            .map(|opt| opt.unwrap_or(false))
+    }
+
+    fn confirm_with_cancel(&self, prompt: &str) -> Result<Option<bool>, ActualError> {
         DialoguerConfirm::new()
             .with_prompt(prompt)
             .default(false)
             .interact_opt()
             .map_err(|e| terminal_io_error("confirmation failed", e))
-            .map(|opt| opt.unwrap_or(false))
     }
 
     fn select_files(
@@ -65,5 +69,96 @@ impl TerminalIO for RealTerminal {
             .defaults(defaults)
             .interact_on_opt(&self.term)
             .map_err(|e| terminal_io_error("file selection failed", e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::ui::terminal::TerminalIO;
+
+    /// A minimal `TerminalIO` implementation used to verify the
+    /// `confirm` / `confirm_with_cancel` contract without touching OS I/O.
+    ///
+    /// `interact_result` holds the `Option<bool>` that `confirm_with_cancel`
+    /// will return (mirroring what `dialoguer::Confirm::interact_opt` returns).
+    struct StubTerminal {
+        interact_result: Option<bool>,
+    }
+
+    impl StubTerminal {
+        fn returning(result: Option<bool>) -> Self {
+            Self {
+                interact_result: result,
+            }
+        }
+    }
+
+    impl TerminalIO for StubTerminal {
+        fn read_line(&self, _prompt: &str) -> Result<String, ActualError> {
+            unimplemented!("not used in these tests")
+        }
+
+        fn write_line(&self, _text: &str) {}
+
+        fn select_files(
+            &self,
+            _prompt: &str,
+            _items: &[String],
+            _defaults: &[bool],
+        ) -> Result<Option<Vec<usize>>, ActualError> {
+            unimplemented!("not used in these tests")
+        }
+
+        /// Mirrors `RealTerminal::confirm_with_cancel` by returning the stored
+        /// `Option<bool>` directly, just as `interact_opt()` would.
+        fn confirm_with_cancel(&self, _prompt: &str) -> Result<Option<bool>, ActualError> {
+            Ok(self.interact_result)
+        }
+
+        /// Mirrors `RealTerminal::confirm` by delegating to `confirm_with_cancel`
+        /// and mapping `None` to `false`.
+        fn confirm(&self, prompt: &str) -> Result<bool, ActualError> {
+            self.confirm_with_cancel(prompt)
+                .map(|opt| opt.unwrap_or(false))
+        }
+    }
+
+    #[test]
+    fn confirm_maps_none_to_false() {
+        // None means user pressed Ctrl-C / Escape — confirm() must treat it as No
+        let stub = StubTerminal::returning(None);
+        assert_eq!(stub.confirm("proceed?").unwrap(), false);
+    }
+
+    #[test]
+    fn confirm_maps_some_true_to_true() {
+        let stub = StubTerminal::returning(Some(true));
+        assert_eq!(stub.confirm("proceed?").unwrap(), true);
+    }
+
+    #[test]
+    fn confirm_maps_some_false_to_false() {
+        let stub = StubTerminal::returning(Some(false));
+        assert_eq!(stub.confirm("proceed?").unwrap(), false);
+    }
+
+    #[test]
+    fn confirm_with_cancel_preserves_none() {
+        // Ctrl-C / Escape must be visible to callers as None, not collapsed to false
+        let stub = StubTerminal::returning(None);
+        assert_eq!(stub.confirm_with_cancel("proceed?").unwrap(), None);
+    }
+
+    #[test]
+    fn confirm_with_cancel_preserves_some_true() {
+        let stub = StubTerminal::returning(Some(true));
+        assert_eq!(stub.confirm_with_cancel("proceed?").unwrap(), Some(true));
+    }
+
+    #[test]
+    fn confirm_with_cancel_preserves_some_false() {
+        let stub = StubTerminal::returning(Some(false));
+        assert_eq!(stub.confirm_with_cancel("proceed?").unwrap(), Some(false));
     }
 }
