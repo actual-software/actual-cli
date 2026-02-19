@@ -368,10 +368,7 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let result = check_auth_with_timeout(&script, std::time::Duration::from_millis(100));
-        assert!(
-            matches!(result, Err(ActualError::ClaudeTimeout { .. })),
-            "expected ClaudeTimeout, got: {result:?}"
-        );
+        assert!(matches!(result, Err(ActualError::ClaudeTimeout { .. })));
     }
 
     #[cfg(unix)]
@@ -454,10 +451,10 @@ mod tests {
             Path::new("/nonexistent/binary/that/does/not/exist"),
             std::time::Duration::from_secs(5),
         );
-        assert!(
-            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
-            "expected ClaudeSubprocessFailed, got: {result:?}"
-        );
+        assert!(matches!(
+            result,
+            Err(ActualError::ClaudeSubprocessFailed { .. })
+        ));
     }
 
     #[cfg(unix)]
@@ -482,10 +479,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = create_fake_binary(dir.path(), "error output", 1);
         let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
-        assert!(
-            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
-            "expected ClaudeSubprocessFailed, got: {result:?}"
-        );
+        assert!(matches!(
+            result,
+            Err(ActualError::ClaudeSubprocessFailed { .. })
+        ));
     }
 
     #[cfg(unix)]
@@ -494,10 +491,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = create_fake_binary(dir.path(), "not json", 0);
         let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
-        assert!(
-            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
-            "expected ClaudeOutputParse, got: {result:?}"
-        );
+        assert!(matches!(result, Err(ActualError::ClaudeOutputParse(_))));
     }
 
     // ── Direct tests of check_auth_async for coverage of all reachable paths ──
@@ -584,10 +578,10 @@ mod tests {
         // only reachable coverage of that code path without OS-level trickery.
         let io_err = std::io::Error::new(std::io::ErrorKind::Other, "synthetic error");
         let err = runtime_build_error(io_err);
-        assert!(
-            matches!(err, ActualError::ClaudeSubprocessFailed { ref message, .. } if message.contains("failed to build tokio runtime")),
-            "unexpected error variant: {err:?}"
-        );
+        assert!(matches!(
+            err,
+            ActualError::ClaudeSubprocessFailed { ref message, .. } if message.contains("failed to build tokio runtime")
+        ));
     }
 
     #[test]
@@ -596,9 +590,9 @@ mod tests {
         // only reachable coverage of that code path without OS-level trickery.
         let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe closed");
         let err = wait_io_error(io_err);
-        assert!(
-            matches!(err, ActualError::ClaudeSubprocessFailed { ref message, .. } if message.contains("failed to wait for claude")),
-            "unexpected error variant: {err:?}"
-        );
+        assert!(matches!(
+            err,
+            ActualError::ClaudeSubprocessFailed { ref message, .. } if message.contains("failed to wait for claude")
+        ));
     }
 }

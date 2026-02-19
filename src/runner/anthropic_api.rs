@@ -419,11 +419,7 @@ mod tests {
         let result =
             AnthropicApiRunner::from_env("claude-sonnet-4-5".to_string(), Duration::from_secs(30));
 
-        assert!(
-            matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
-            "expected ClaudeNotAuthenticated, got: {:?}",
-            result
-        );
+        assert!(matches!(result, Err(ActualError::ClaudeNotAuthenticated)));
     }
 
     // Test 7: from_env succeeds when ANTHROPIC_API_KEY is set
@@ -613,5 +609,85 @@ mod tests {
             "expected ClaudeTimeout, got: {:?}",
             result
         );
+    }
+
+    // Test 15: response with no "content" field → empty Vec → no tool_use → structured result error
+    #[tokio::test]
+    async fn test_response_without_content_field_maps_to_structured_result_error() {
+        let mut server = Server::new_async().await;
+
+        // Return a response that has no "content" key at all.
+        let response_body = serde_json::json!({
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-5",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+                assert!(message.contains("structured result"));
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+        }
+    }
+
+    // Test 16: content blocks deserialization failure maps to ClaudeSubprocessFailed
+    #[tokio::test]
+    async fn test_malformed_content_blocks_maps_to_subprocess_failed() {
+        let mut server = Server::new_async().await;
+
+        // Return a response where "content" is a string, not an array of content blocks.
+        // This makes serde_json::from_value::<Vec<ContentBlock>> fail.
+        let response_body = serde_json::json!({
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": "this is a string, not an array",
+            "model": "claude-sonnet-4-5",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        match result {
+            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+                assert!(
+                    message.contains("Failed to parse API response content blocks"),
+                    "expected content block parse error in message, got: {message}"
+                );
+            }
+            other => panic!(
+                "expected ClaudeSubprocessFailed for malformed content, got: {:?}",
+                other
+            ),
+        }
     }
 }

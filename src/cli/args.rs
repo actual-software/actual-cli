@@ -41,12 +41,15 @@ impl clap::ValueEnum for RunnerChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     /// Helper: try to parse `actual sync --runner <value>` and return the result.
     fn parse_runner(value: &str) -> Result<Option<RunnerChoice>, clap::Error> {
-        Cli::try_parse_from(["actual", "sync", "--runner", value]).map(|cli| match cli.command {
-            Command::Sync(args) => args.runner,
-            _ => None,
+        Cli::try_parse_from(["actual", "sync", "--runner", value]).map(|cli| {
+            let Command::Sync(args) = cli.command else {
+                unreachable!("always Sync")
+            };
+            args.runner
         })
     }
 
@@ -96,10 +99,7 @@ mod tests {
         // structured logs; they are displayed directly to the user on stderr.
         let injected = "invalid\nlog-injection";
         let result = parse_runner(injected);
-        assert!(
-            result.is_err(),
-            "log-injection runner value must be rejected by clap"
-        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -112,10 +112,10 @@ mod tests {
     fn test_runner_absent_is_none() {
         let cli =
             Cli::try_parse_from(["actual", "sync"]).expect("sync without --runner should parse");
-        match cli.command {
-            Command::Sync(args) => assert_eq!(args.runner, None),
-            _ => panic!("expected Sync command"),
-        }
+        let Command::Sync(args) = cli.command else {
+            panic!("expected Sync command");
+        };
+        assert_eq!(args.runner, None);
     }
 }
 
@@ -286,7 +286,7 @@ pub struct ConfigSetArgs {
 }
 
 #[cfg(test)]
-mod tests {
+mod parse_tests {
     use super::*;
     use clap::Parser;
 
@@ -305,10 +305,7 @@ mod tests {
             "codex-mini-latest",
         ];
         for m in &valid {
-            assert!(
-                parse_model(m).is_ok(),
-                "expected Ok for model {m:?}, got Err"
-            );
+            assert!(parse_model(m).is_ok());
         }
     }
 
@@ -375,20 +372,15 @@ mod tests {
             "--model",
             "--allow-dangerously-skip-permissions",
         ]);
-        assert!(
-            result.is_err(),
-            "expected clap to reject flag-like model name"
-        );
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_cli_accepts_valid_model() {
-        let result = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"]);
-        assert!(result.is_ok(), "expected Ok, got: {result:?}");
-        if let Ok(cli) = result {
-            if let Command::Sync(args) = cli.command {
-                assert_eq!(args.model, Some("claude-3.5-sonnet".to_string()));
-            }
+        let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"]).unwrap();
+        match cli.command {
+            Command::Sync(args) => assert_eq!(args.model, Some("claude-3.5-sonnet".to_string())),
+            _ => panic!("expected Sync"),
         }
     }
 
