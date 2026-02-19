@@ -120,4 +120,38 @@ mod tests {
 
         assert!(config.rejected_adrs.is_none());
     }
+
+    #[test]
+    fn test_rejections_keys_are_independent() {
+        // Two different fake repo keys (simulating different repos)
+        let key_a = "a".repeat(64); // 64-char hex-like string
+        let key_b = "b".repeat(64);
+        assert_ne!(key_a, key_b);
+
+        let mut config = Config::default();
+        add_rejection(&mut config, &key_a, "adr-001");
+        add_rejection(&mut config, &key_a, "adr-002");
+        add_rejection(&mut config, &key_b, "adr-003");
+
+        // save and reload to test persistence
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        crate::config::paths::save_to(&config, &path).unwrap();
+        let loaded = crate::config::paths::load_from(&path).unwrap();
+
+        // Each key only sees its own rejections
+        let a_rejections = get_rejections(&loaded, &key_a);
+        let b_rejections = get_rejections(&loaded, &key_b);
+        assert!(a_rejections.contains(&"adr-001".to_string()));
+        assert!(a_rejections.contains(&"adr-002".to_string()));
+        assert!(
+            !a_rejections.contains(&"adr-003".to_string()),
+            "repo A should not see repo B's rejection"
+        );
+        assert!(b_rejections.contains(&"adr-003".to_string()));
+        assert!(
+            !b_rejections.contains(&"adr-001".to_string()),
+            "repo B should not see repo A's rejection"
+        );
+    }
 }

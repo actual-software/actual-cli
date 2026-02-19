@@ -430,6 +430,88 @@ User footer";
         );
     }
 
+    // ── Cross-repo rejection isolation ──────────────────────────────────
+
+    #[test]
+    fn rejection_in_one_repo_does_not_affect_other_repo() {
+        let mut server_a = mockito::Server::new();
+        let mut server_b = mockito::Server::new();
+
+        // Both servers return the same shared ADR
+        let adr = make_adr_json("adr-shared", "Shared Rule", &["Use Result"], &[], &["."]);
+        let response = make_match_response_json(&format!("[{}]", adr));
+
+        server_a
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&response)
+            .create();
+        server_b
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&response)
+            .create();
+
+        let env_a = TestEnv::new(&server_a, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
+        let env_b = TestEnv::new(&server_b, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
+
+        // Compute repo key for env_a the same way the binary does (SHA-256 of canonical path)
+        use sha2::{Digest, Sha256};
+        let canonical_path_a = env_a.dir.path().canonicalize().unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(canonical_path_a.to_string_lossy().as_bytes());
+        let repo_key_a = format!("{:x}", hasher.finalize());
+
+        // Pre-populate env_a's config with a rejection for the shared ADR
+        let config_yaml = format!("rejected_adrs:\n  {}:\n  - adr-shared\n", repo_key_a);
+        std::fs::write(&env_a.config_path, &config_yaml).unwrap();
+
+        // Sync in env_a: the ADR should be filtered out (it was rejected)
+        env_a
+            .cmd()
+            .args([
+                "sync",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env_a.api_url,
+            ])
+            .assert()
+            .success();
+
+        // env_a should NOT have CLAUDE.md (ADR was rejected, no output)
+        assert!(
+            !env_a.file_exists("CLAUDE.md"),
+            "env_a: rejected ADR should not produce CLAUDE.md"
+        );
+
+        // Sync in env_b: the same ADR should NOT be filtered (different repo, no rejection)
+        env_b
+            .cmd()
+            .args([
+                "sync",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env_b.api_url,
+            ])
+            .assert()
+            .success();
+
+        // env_b should have CLAUDE.md with the ADR content (no rejection applies here)
+        assert!(
+            env_b.file_exists("CLAUDE.md"),
+            "env_b: ADR should not be filtered — rejection is isolated to env_a"
+        );
+        let content_b = env_b.read_file("CLAUDE.md");
+        assert!(
+            content_b.contains("## Shared Rule"),
+            "env_b: expected ADR content in CLAUDE.md, got:\n{content_b}"
+        );
+    }
+
     // ── Edge cases ──────────────────────────────────────────────────────
 
     #[test]
