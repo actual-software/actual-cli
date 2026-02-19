@@ -289,17 +289,15 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             SyncPhase::Tailor,
             &format!("Tailoring ADRs (0/{project_count} projects done)..."),
         );
-        let tailoring_config = ConcurrentTailoringConfig {
-            concurrency: config.concurrency.unwrap_or(3),
-            batch_size: config.batch_size.unwrap_or(15),
-            existing_claude_md_paths: &existing_paths,
-            model_override: args.model.as_deref(),
-            max_budget_usd: args.max_budget_usd.or(config.max_budget_usd),
-            per_project_timeout: Duration::from_secs(
-                config.invocation_timeout_secs.unwrap_or(600).max(1),
-            ),
-            output_format: &output_format,
-        };
+        let tailoring_config = ConcurrentTailoringConfig::new(
+            config.concurrency.unwrap_or(3),
+            config.batch_size.unwrap_or(15),
+            &existing_paths,
+            args.model.as_deref(),
+            args.max_budget_usd.or(config.max_budget_usd),
+            Duration::from_secs(config.invocation_timeout_secs.unwrap_or(600).max(1)),
+            &output_format,
+        )?;
 
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();

@@ -31,6 +31,38 @@ pub struct ConcurrentTailoringConfig<'a> {
     pub output_format: &'a OutputFormat,
 }
 
+impl<'a> ConcurrentTailoringConfig<'a> {
+    /// Construct a new [`ConcurrentTailoringConfig`], validating that `batch_size` is non-zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ActualError::ConfigError`] if `batch_size` is `0`.
+    pub fn new(
+        concurrency: usize,
+        batch_size: usize,
+        existing_claude_md_paths: &'a str,
+        model_override: Option<&'a str>,
+        max_budget_usd: Option<f64>,
+        per_project_timeout: Duration,
+        output_format: &'a OutputFormat,
+    ) -> Result<Self, ActualError> {
+        if batch_size == 0 {
+            return Err(ActualError::ConfigError(
+                "concurrent_batch_size must be greater than 0".to_string(),
+            ));
+        }
+        Ok(Self {
+            concurrency,
+            batch_size,
+            existing_claude_md_paths,
+            model_override,
+            max_budget_usd,
+            per_project_timeout,
+            output_format,
+        })
+    }
+}
+
 /// Tailor ADRs for multiple projects concurrently, then merge results.
 ///
 /// Uses a semaphore to limit the number of concurrent tailoring invocations.
@@ -1189,5 +1221,36 @@ mod tests {
             msg.contains("semaphore closed unexpectedly"),
             "expected semaphore error message, got: {msg}"
         );
+    }
+
+    // --- Config validation tests ---
+
+    #[test]
+    fn test_config_new_zero_batch_size_returns_config_error() {
+        let fmt = OutputFormat::ClaudeMd;
+        let result = ConcurrentTailoringConfig::new(
+            3,
+            0, // zero batch_size — should be rejected
+            "",
+            None,
+            None,
+            Duration::from_secs(600),
+            &fmt,
+        );
+        assert!(
+            matches!(result, Err(ActualError::ConfigError(_))),
+            "expected ConfigError for batch_size=0"
+        );
+    }
+
+    #[test]
+    fn test_config_new_nonzero_batch_size_succeeds() {
+        let fmt = OutputFormat::ClaudeMd;
+        let result =
+            ConcurrentTailoringConfig::new(3, 15, "", None, None, Duration::from_secs(600), &fmt);
+        assert!(result.is_ok());
+        let cfg = result.unwrap();
+        assert_eq!(cfg.batch_size, 15);
+        assert_eq!(cfg.concurrency, 3);
     }
 }
