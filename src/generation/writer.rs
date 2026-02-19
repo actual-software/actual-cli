@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::path::Path;
 
 use super::markers;
@@ -90,8 +91,22 @@ pub fn write_files(
                     .parent()
                     .is_none_or(|p| p == Path::new(""));
 
-            // Read existing content
-            let existing_content = std::fs::read_to_string(&full_path).ok();
+            // Read existing content.
+            // Only treat NotFound as "new file"; other errors (permission denied,
+            // path is a directory, etc.) must be surfaced to avoid silently
+            // overwriting or losing user content.
+            let existing_content = match std::fs::read_to_string(&full_path) {
+                Ok(c) => Some(c),
+                Err(e) if e.kind() == ErrorKind::NotFound => None,
+                Err(e) => {
+                    return WriteResult {
+                        path: file.path.clone(),
+                        action: WriteAction::Failed,
+                        version: 0,
+                        error: Some(format!("failed to read existing file: {e}")),
+                    };
+                }
+            };
             let existing_ref = existing_content.as_deref();
 
             // Determine if this is a create or update
@@ -127,10 +142,21 @@ pub fn write_files(
             }
 
             // Layer 2: post-create canonicalization check (defense in depth).
-            // A canonicalize failure after create_dir_all is treated as a path-escape.
-            let canonical_parent = parent
-                .canonicalize()
-                .unwrap_or_else(|_| std::path::PathBuf::new());
+            // Distinguish between a real path-escape (security event) and a
+            // transient I/O error so callers get a precise, actionable message.
+            let canonical_parent = match parent.canonicalize() {
+                Ok(cp) => cp,
+                Err(e) => {
+                    return WriteResult {
+                        path: file.path.clone(),
+                        action: WriteAction::Failed,
+                        version: 0,
+                        error: Some(format!(
+                            "failed to verify output path (canonicalize error): {e}"
+                        )),
+                    };
+                }
+            };
             if !canonical_parent.starts_with(&canonical_root) {
                 return WriteResult {
                     path: file.path.clone(),
@@ -384,16 +410,19 @@ mod tests {
             "expected error message on failure"
         );
         let err_msg = results[0].error.as_ref().unwrap();
+        // The error surfaces at either the read stage (NotADirectory for intermediate component)
+        // or the directory-creation stage, depending on the OS.
         assert!(
-            err_msg.contains("Failed to create directory"),
-            "expected directory creation error message"
+            err_msg.contains("Failed to create directory")
+                || err_msg.contains("failed to read existing file"),
+            "expected a filesystem error, got: {err_msg}"
         );
     }
 
     #[test]
     fn test_write_fails_when_file_cannot_be_written() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        // Create a directory at the target file path — writing to a directory always fails
+        // Create a directory at the target file path — reading/writing to a directory fails
         let target = dir.path().join("subdir").join("CLAUDE.md");
         std::fs::create_dir_all(&target).unwrap();
 
@@ -418,9 +447,11 @@ mod tests {
             "expected error message on write failure"
         );
         let err_msg = results[0].error.as_ref().unwrap();
+        // The error surfaces at either the read stage (is a directory) or the write stage
         assert!(
-            err_msg.contains("Failed to write file"),
-            "expected file write error message"
+            err_msg.contains("Failed to write file")
+                || err_msg.contains("failed to read existing file"),
+            "expected a file operation error, got: {err_msg}"
         );
     }
 
@@ -618,5 +649,118 @@ mod tests {
             "AGENTS.md root file should have Project Guidelines header, got: {written}"
         );
         assert!(markers::has_managed_section(&written));
+    }
+
+    // ── 4eo.3: Unreadable existing files return Failed, not Created ──
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_unreadable_existing_file_returns_failed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let target = dir.path().join("CLAUDE.md");
+
+        // Create the file and make it unreadable.
+        std::fs::write(&target, "existing content").expect("failed to write initial file");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000))
+            .expect("failed to set permissions");
+
+        let files = vec![FileOutput {
+            path: "CLAUDE.md".to_string(),
+            content: "new content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
+            .expect("failed to restore permissions");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed when existing file is unreadable, not Created"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(
+            err_msg.contains("failed to read existing file"),
+            "expected 'failed to read existing file' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_path_is_directory_returns_failed() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        // Create a directory at the path where a file should be read.
+        let target = dir.path().join("CLAUDE.md");
+        std::fs::create_dir(&target).expect("failed to create directory");
+
+        let files = vec![FileOutput {
+            path: "CLAUDE.md".to_string(),
+            content: "content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        assert_eq!(results.len(), 1);
+        // Reading a directory as a file fails — should return Failed, not Created
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed when path is a directory"
+        );
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        // The read error message should either mention reading or writing failure
+        assert!(
+            err_msg.contains("failed to read existing file") || err_msg.contains("Failed to write"),
+            "expected an error about reading or writing, got: {err_msg}"
+        );
+    }
+
+    // ── 4eo.4: Distinct error message when canonicalize fails vs path escape ──
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_layer2_symlink_escape_has_distinct_error_from_io_failure() {
+        use std::os::unix::fs::symlink;
+
+        let outer_dir = tempfile::tempdir().expect("failed to create outer temp dir");
+        let inner_dir = tempfile::tempdir().expect("failed to create inner temp dir");
+
+        // Create a symlink inside inner_dir that points outside (to outer_dir).
+        // This is a genuine path-escape and should produce "path escapes root directory".
+        let symlink_path = inner_dir.path().join("escape");
+        symlink(outer_dir.path(), &symlink_path).expect("failed to create symlink");
+
+        let files = vec![FileOutput {
+            path: "escape/CLAUDE.md".to_string(),
+            content: "content".to_string(),
+            reasoning: "test".to_string(),
+            adr_ids: vec![],
+        }];
+
+        let results = write_files(inner_dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].action, WriteAction::Failed);
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        // A real symlink escape must say "path escapes root directory",
+        // NOT "failed to verify output path".
+        assert!(
+            err_msg.contains("path escapes root directory"),
+            "real path escape should say 'path escapes root directory', got: {err_msg}"
+        );
+        assert!(
+            !err_msg.contains("failed to verify output path"),
+            "real path escape should not say 'failed to verify output path', got: {err_msg}"
+        );
     }
 }

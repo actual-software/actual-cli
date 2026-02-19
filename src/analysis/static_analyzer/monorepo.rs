@@ -4,6 +4,19 @@ use std::path::Path;
 use ignore::WalkBuilder;
 use serde::Deserialize;
 
+/// Read a file's contents and include the file path in any I/O error.
+///
+/// This ensures that callers see `"failed to read /path/to/file.yaml: permission denied"`
+/// rather than the bare `"permission denied (os error 13)"`.
+fn read_with_path(path: &Path) -> Result<String, std::io::Error> {
+    fs::read_to_string(path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("failed to read {}: {}", path.display(), e),
+        )
+    })
+}
+
 /// Result of monorepo detection.
 #[derive(Debug)]
 pub struct MonorepoInfo {
@@ -72,7 +85,7 @@ fn detect_pnpm(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&path)?;
+    let content = read_with_path(&path)?;
 
     #[derive(Deserialize)]
     struct PnpmWorkspace {
@@ -108,7 +121,7 @@ fn detect_npm_workspaces(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&path)?;
+    let content = read_with_path(&path)?;
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -161,7 +174,7 @@ fn detect_lerna(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&path)?;
+    let content = read_with_path(&path)?;
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -198,7 +211,7 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&path)?;
+    let content = read_with_path(&path)?;
     let json: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -253,7 +266,7 @@ fn detect_cargo_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&path)?;
+    let content = read_with_path(&path)?;
     let toml_val: toml::Value = content.parse().map_err(|e: toml::de::Error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -290,7 +303,7 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
         return Ok(None);
     }
 
-    let content = fs::read_to_string(&path)?;
+    let content = read_with_path(&path)?;
     let mut dirs = Vec::new();
 
     let mut in_use_block = false;
@@ -2020,5 +2033,59 @@ mod tests {
         // The walk must not be empty either — there are valid nested dirs
         // within the depth limit.
         assert!(count > 0);
+    }
+
+    // ── 4eo.6: File path context in read errors ──
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pnpm_workspace_read_error_includes_file_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Create pnpm-workspace.yaml but make it unreadable.
+        let ws_path = root.join("pnpm-workspace.yaml");
+        fs::write(&ws_path, "packages:\n  - \"packages/*\"\n").unwrap();
+        fs::set_permissions(&ws_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = detect_monorepo(root);
+
+        // Restore permissions for cleanup
+        fs::set_permissions(&ws_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pnpm-workspace.yaml"),
+            "error should contain the file name, got: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_package_json_read_error_includes_file_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Create package.json (with workspaces) but make it unreadable.
+        let pkg_path = root.join("package.json");
+        fs::write(&pkg_path, r#"{"name": "root", "workspaces": ["apps/*"]}"#).unwrap();
+        fs::set_permissions(&pkg_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = detect_monorepo(root);
+
+        // Restore permissions for cleanup
+        fs::set_permissions(&pkg_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("package.json"),
+            "error should contain the file name, got: {msg}"
+        );
     }
 }

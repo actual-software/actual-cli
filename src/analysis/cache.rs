@@ -77,12 +77,15 @@ pub fn run_analysis_cached(
                 && cached.head_commit.as_deref() == Some(&head_hash)
             {
                 // Try to deserialize the cached analysis
-                if let Ok(analysis) =
-                    serde_yaml::from_value::<RepoAnalysis>(cached.analysis.clone())
-                {
-                    return Ok(analysis);
+                match serde_yaml::from_value::<RepoAnalysis>(cached.analysis.clone()) {
+                    Ok(analysis) => return Ok(analysis),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to deserialize cached analysis: {e}. Re-running analysis."
+                        );
+                        // fall through to cache miss
+                    }
                 }
-                // Deserialization failed — fall through to cache miss
             }
         }
     }
@@ -600,6 +603,84 @@ mod tests {
                 .contains("Failed to serialize analysis for caching"),
             "expected ConfigError with serialization message, got: {}",
             err
+        );
+    }
+
+    // ── 4eo.2: tracing::warn! is emitted when cached analysis fails to deserialize ──
+
+    #[test]
+    fn test_corrupted_cache_emits_tracing_warn() {
+        use std::sync::{Arc, Mutex};
+        use tracing::Level;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        let repo_dir = tempdir().unwrap();
+        let head_hash = create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Write config with matching HEAD but corrupted analysis value.
+        let corrupted_value = serde_yaml::to_value("not a RepoAnalysis").unwrap();
+        write_config_with_cache(
+            &config_path,
+            &repo_dir.path().to_string_lossy(),
+            Some(&head_hash),
+            corrupted_value,
+        );
+
+        // Collect warnings emitted during the call.
+        let warnings: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let warnings_clone = warnings.clone();
+
+        struct WarnCollector {
+            warnings: Arc<Mutex<Vec<String>>>,
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCollector {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == Level::WARN {
+                    let mut v = MessageVisitor(String::new());
+                    event.record(&mut v);
+                    self.warnings.lock().unwrap().push(v.0);
+                }
+            }
+        }
+        struct MessageVisitor(String);
+        impl tracing::field::Visit for MessageVisitor {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "message" {
+                    self.0 = value.to_string();
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+
+        let subscriber = tracing_subscriber::registry().with(WarnCollector {
+            warnings: warnings_clone,
+        });
+
+        // Run inside a scope so the guard is dropped before we unwrap the Arc.
+        let result = {
+            let _guard = subscriber.set_default();
+            run_analysis_cached(repo_dir.path(), &config_path, false).unwrap()
+        };
+        assert_eq!(result.projects.len(), 1);
+
+        let captured = Arc::try_unwrap(warnings).unwrap().into_inner().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|w| w.contains("Failed to deserialize cached analysis")),
+            "expected a tracing::warn! about deserialization failure, got: {captured:?}"
         );
     }
 }
