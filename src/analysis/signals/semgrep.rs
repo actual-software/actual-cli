@@ -5,6 +5,15 @@ use tokio::process::Command;
 
 use super::{EvidenceSpan, SignalSource, ToolMatch};
 
+/// Maximum size of a single file written to the semgrep temp directory (10 MB).
+const MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Maximum number of files in a single semgrep batch.
+const MAX_BATCH_FILES: usize = 1000;
+
+/// Maximum total content size across all files in a single semgrep batch (100 MB).
+const MAX_BATCH_SIZE_BYTES: usize = 100 * 1024 * 1024;
+
 /// Output from running the semgrep command.
 #[derive(Debug)]
 struct CommandOutput {
@@ -52,6 +61,15 @@ impl SemgrepScanner {
         let mut file_map: HashMap<PathBuf, PathBuf> = HashMap::new();
 
         for (i, (rel_path, content)) in files.iter().enumerate() {
+            if content.len() > MAX_FILE_SIZE_BYTES {
+                bail!(
+                    "file too large for analysis: {} bytes (max {}): {:?}",
+                    content.len(),
+                    MAX_FILE_SIZE_BYTES,
+                    rel_path
+                );
+            }
+
             let subdir = temp_dir.path().join(format!("f{i}"));
             std::fs::create_dir_all(&subdir).context("failed to create temp subdir")?;
 
@@ -64,10 +82,12 @@ impl SemgrepScanner {
 
             // Canonicalize so the key matches what semgrep emits (semgrep
             // resolves symlinks, e.g. /tmp → /private/tmp on macOS).
-            // The fallback preserves the raw path if canonicalization fails,
-            // which is defensive — since we just wrote the file above,
-            // canonicalize should not fail in practice.
-            let canonical = std::fs::canonicalize(&temp_path).unwrap_or(temp_path);
+            // We propagate errors here rather than silently falling back to
+            // the raw path: the file was just written, so canonicalization
+            // should never fail in practice, and if it does we want to know.
+            let canonical = std::fs::canonicalize(&temp_path).map_err(|e| {
+                anyhow::anyhow!("failed to canonicalize temp path {temp_path:?}: {e}")
+            })?;
             file_map.insert(canonical, rel_path.clone());
         }
 
@@ -131,6 +151,19 @@ impl SemgrepScanner {
     ) -> Result<Vec<ToolMatch>> {
         if files.is_empty() || rule_files.is_empty() {
             return Ok(vec![]);
+        }
+
+        if files.len() > MAX_BATCH_FILES {
+            bail!(
+                "batch too large: {} files (max {})",
+                files.len(),
+                MAX_BATCH_FILES
+            );
+        }
+
+        let batch_size: usize = files.iter().map(|(_, c)| c.len()).sum();
+        if batch_size > MAX_BATCH_SIZE_BYTES {
+            bail!("batch too large: {batch_size} bytes total (max {MAX_BATCH_SIZE_BYTES})");
         }
 
         let (temp_dir, file_map) = Self::prepare_temp_files(files)?;
@@ -971,6 +1004,79 @@ EOJSON
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("failed to parse"));
+    }
+
+    // ---- file size / batch size limit tests (g5j.16, g5j.19) ----
+
+    #[test]
+    fn test_prepare_temp_files_rejects_oversized_file() {
+        // A single file whose content exceeds MAX_FILE_SIZE_BYTES should cause
+        // prepare_temp_files to return an error.
+        let big_content = "x".repeat(MAX_FILE_SIZE_BYTES + 1);
+        let files = vec![(PathBuf::from("big.js"), big_content)];
+        let result = SemgrepScanner::prepare_temp_files(&files);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("too large"),
+            "expected 'too large' in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_prepare_temp_files_accepts_file_at_exact_limit() {
+        // A file exactly at the limit should be accepted.
+        let content = "x".repeat(MAX_FILE_SIZE_BYTES);
+        let files = vec![(PathBuf::from("exact.js"), content)];
+        let result = SemgrepScanner::prepare_temp_files(&files);
+        assert!(result.is_ok(), "file at exact limit should be accepted");
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_rejects_too_many_files() {
+        let scanner = SemgrepScanner::with_binary(
+            PathBuf::from("/nonexistent/semgrep"),
+            std::time::Duration::from_secs(5),
+        );
+        // Build MAX_BATCH_FILES + 1 tiny files
+        let files: Vec<(PathBuf, String)> = (0..=MAX_BATCH_FILES)
+            .map(|i| (PathBuf::from(format!("f{i}.js")), "x".to_string()))
+            .collect();
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("batch too large"),
+            "expected 'batch too large' in error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_batch_rejects_oversized_total_bytes() {
+        let scanner = SemgrepScanner::with_binary(
+            PathBuf::from("/nonexistent/semgrep"),
+            std::time::Duration::from_secs(5),
+        );
+        // Two files that together exceed MAX_BATCH_SIZE_BYTES but are each
+        // individually within MAX_FILE_SIZE_BYTES.  Use 60 MB each (120 MB
+        // total > 100 MB limit, each < 10 MB per-file limit is NOT satisfied
+        // here — use 6 MB each instead so each is under 10 MB per-file).
+        let chunk = "x".repeat(6 * 1024 * 1024); // 6 MB per file
+        let files: Vec<(PathBuf, String)> =
+            (0..20) // 20 × 6 MB = 120 MB
+                .map(|i| (PathBuf::from(format!("f{i}.js")), chunk.clone()))
+                .collect();
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("batch too large"),
+            "expected 'batch too large' in error, got: {msg}"
+        );
     }
 
     #[tokio::test]
