@@ -296,6 +296,25 @@ fn detect_cargo_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::
     }))
 }
 
+/// Returns `true` if any component of the path is a `..` parent-directory
+/// reference.
+///
+/// Uses [`std::path::Path::components`] rather than string splitting so that
+/// the check works correctly on all platforms regardless of separator
+/// character.
+///
+/// NOTE: This is a best-effort pre-filter only.  The authoritative path
+/// containment check is the `canonicalize + starts_with` test performed later
+/// in [`detect_go_workspace`].  This pre-filter rejects the most obvious
+/// traversal attempts early, but encoded or otherwise unusual paths that slip
+/// through are caught by canonicalization.
+fn has_parent_component(path: &str) -> bool {
+    use std::path::Component;
+    Path::new(path)
+        .components()
+        .any(|c| c == Component::ParentDir)
+}
+
 /// Detect Go workspace from `go.work`.
 fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
     let path = root.join("go.work");
@@ -319,7 +338,9 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
             if !trimmed.is_empty() && !trimmed.starts_with("//") {
                 let dir_str = trimmed.split("//").next().unwrap_or("").trim();
                 let cleaned = dir_str.strip_prefix("./").unwrap_or(dir_str);
-                if !cleaned.is_empty() && !cleaned.split('/').any(|c| c == "..") {
+                // Pre-filter: reject obvious `..` traversal via path components.
+                // NOTE: canonicalize check below is the authoritative containment check.
+                if !cleaned.is_empty() && !has_parent_component(cleaned) {
                     dirs.push(cleaned.to_string());
                 }
             }
@@ -341,7 +362,9 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
                     dir_str
                 };
                 let cleaned = dir_str.strip_prefix("./").unwrap_or(dir_str);
-                if !cleaned.is_empty() && !cleaned.split('/').any(|c| c == "..") {
+                // Pre-filter: reject obvious `..` traversal via path components.
+                // NOTE: canonicalize check below is the authoritative containment check.
+                if !cleaned.is_empty() && !has_parent_component(cleaned) {
                     dirs.push(cleaned.to_string());
                 }
             }
@@ -351,7 +374,9 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
         if let Some(rest) = trimmed.strip_prefix("use ") {
             let dir = rest.split("//").next().unwrap_or("").trim();
             let cleaned = dir.strip_prefix("./").unwrap_or(dir);
-            if !cleaned.is_empty() && cleaned != "(" && !cleaned.split('/').any(|c| c == "..") {
+            // Pre-filter: reject obvious `..` traversal via path components.
+            // NOTE: canonicalize check below is the authoritative containment check.
+            if !cleaned.is_empty() && cleaned != "(" && !has_parent_component(cleaned) {
                 dirs.push(cleaned.to_string());
             }
         }
@@ -362,6 +387,10 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
     }
 
     let canonical_root = fs::canonicalize(root)?;
+    // NOTE: This canonicalize + starts_with check is the authoritative path
+    // containment control.  It resolves symlinks and normalises the path so
+    // that any traversal attempt (including encoded separators that survived
+    // the pre-filter above) is definitively rejected here.
     let projects: Vec<ProjectInfo> = dirs
         .into_iter()
         .filter_map(|d| {
@@ -960,6 +989,59 @@ mod tests {
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
         // Only "inside" should be included; "../sibling" should be rejected
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].path, "inside");
+    }
+
+    /// Verify that the `has_parent_component` helper correctly identifies paths
+    /// that contain `..` components using `Path::components()`, not string
+    /// splitting.
+    #[test]
+    fn test_has_parent_component_detects_dotdot() {
+        use super::has_parent_component;
+        assert!(has_parent_component(".."));
+        assert!(has_parent_component("../etc"));
+        assert!(has_parent_component("foo/../bar"));
+        assert!(has_parent_component("a/b/../../etc/passwd"));
+        // Clean paths must not be flagged
+        assert!(!has_parent_component("inside"));
+        assert!(!has_parent_component("foo/bar"));
+        assert!(!has_parent_component("."));
+        // URL-encoded traversal ("%2F" etc.) is NOT a real path separator on
+        // the filesystem; it will be treated as a literal filename component
+        // and will not match Component::ParentDir.  Such paths survive the
+        // pre-filter but are rejected by the authoritative canonicalize check
+        // (the directory won't exist, or it won't be inside the root).
+        assert!(!has_parent_component("..%2F..%2Fetc"));
+    }
+
+    /// Verify that a URL-encoded traversal attempt such as `..%2F..%2Fetc` is
+    /// rejected by the canonicalization + `starts_with` check even if it passes
+    /// the `has_parent_component` pre-filter.
+    ///
+    /// On a real filesystem, `..%2F..%2Fetc` would be a literal directory name
+    /// (the `%2F` is never decoded by the OS), so `canonicalize` would either
+    /// fail (directory doesn't exist) or resolve to a path that does not start
+    /// with the repo root.  Either way the entry is dropped.
+    #[test]
+    fn test_go_work_encoded_traversal_rejected_by_canonicalize() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // go.work references a URL-encoded traversal path.  The pre-filter
+        // (`has_parent_component`) won't catch this because `%2F` is not a
+        // real path separator, but the authoritative canonicalize check must
+        // reject it.
+        fs::write(
+            root.join("go.work"),
+            "go 1.21\n\nuse (\n\t..%2F..%2Fetc\n\t./inside\n)\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("inside")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        // Only "inside" should appear; the encoded traversal must be dropped.
         assert_eq!(info.projects.len(), 1);
         assert_eq!(info.projects[0].path, "inside");
     }
