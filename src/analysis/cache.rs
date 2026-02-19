@@ -608,13 +608,9 @@ mod tests {
 
     // ── 4eo.2: tracing::warn! is emitted when cached analysis fails to deserialize ──
 
+    #[tracing_test::traced_test]
     #[test]
     fn test_corrupted_cache_emits_tracing_warn() {
-        use std::sync::{Arc, Mutex};
-        use tracing::Level;
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-
         let repo_dir = tempdir().unwrap();
         let head_hash = create_git_repo(repo_dir.path());
 
@@ -630,57 +626,9 @@ mod tests {
             corrupted_value,
         );
 
-        // Collect warnings emitted during the call.
-        let warnings: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let warnings_clone = warnings.clone();
-
-        struct WarnCollector {
-            warnings: Arc<Mutex<Vec<String>>>,
-        }
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCollector {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _ctx: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if *event.metadata().level() == Level::WARN {
-                    let mut v = MessageVisitor(String::new());
-                    event.record(&mut v);
-                    self.warnings.lock().unwrap().push(v.0);
-                }
-            }
-        }
-        struct MessageVisitor(String);
-        impl tracing::field::Visit for MessageVisitor {
-            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                if field.name() == "message" {
-                    self.0 = value.to_string();
-                }
-            }
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    self.0 = format!("{value:?}");
-                }
-            }
-        }
-
-        let subscriber = tracing_subscriber::registry().with(WarnCollector {
-            warnings: warnings_clone,
-        });
-
-        // Run inside a scope so the guard is dropped before we unwrap the Arc.
-        let result = {
-            let _guard = subscriber.set_default();
-            run_analysis_cached(repo_dir.path(), &config_path, false).unwrap()
-        };
+        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
         assert_eq!(result.projects.len(), 1);
 
-        let captured = Arc::try_unwrap(warnings).unwrap().into_inner().unwrap();
-        assert!(
-            captured
-                .iter()
-                .any(|w| w.contains("Failed to deserialize cached analysis")),
-            "expected a tracing::warn! about deserialization failure, got: {captured:?}"
-        );
+        assert!(logs_contain("Failed to deserialize cached analysis"));
     }
 }
