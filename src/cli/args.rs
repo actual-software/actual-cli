@@ -43,14 +43,25 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    /// Extract runner choice from a parsed command; returns None for non-Sync commands.
+    fn runner_from_command(cmd: Command) -> Option<RunnerChoice> {
+        match cmd {
+            Command::Sync(args) => args.runner,
+            _ => None,
+        }
+    }
+
     /// Helper: try to parse `actual sync --runner <value>` and return the result.
     fn parse_runner(value: &str) -> Result<Option<RunnerChoice>, clap::Error> {
-        Cli::try_parse_from(["actual", "sync", "--runner", value]).map(|cli| {
-            let Command::Sync(args) = cli.command else {
-                unreachable!("always Sync")
-            };
-            args.runner
-        })
+        Cli::try_parse_from(["actual", "sync", "--runner", value])
+            .map(|cli| runner_from_command(cli.command))
+    }
+
+    #[test]
+    fn test_runner_from_non_sync_command_returns_none() {
+        // Exercises the `_ => None` arm of runner_from_command.
+        let cli = Cli::try_parse_from(["actual", "status"]).unwrap();
+        assert_eq!(runner_from_command(cli.command), None);
     }
 
     #[test]
@@ -112,10 +123,10 @@ mod tests {
     fn test_runner_absent_is_none() {
         let cli =
             Cli::try_parse_from(["actual", "sync"]).expect("sync without --runner should parse");
-        let Command::Sync(args) = cli.command else {
-            panic!("expected Sync command");
-        };
-        assert_eq!(args.runner, None);
+        assert!(matches!(cli.command, Command::Sync(_)));
+        if let Command::Sync(args) = cli.command {
+            assert_eq!(args.runner, None);
+        }
     }
 }
 
@@ -378,10 +389,10 @@ mod parse_tests {
     #[test]
     fn test_cli_accepts_valid_model() {
         let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"]).unwrap();
-        let Command::Sync(args) = cli.command else {
-            panic!("expected Sync command");
-        };
-        assert_eq!(args.model, Some("claude-3.5-sonnet".to_string()));
+        assert!(matches!(cli.command, Command::Sync(_)));
+        if let Command::Sync(args) = cli.command {
+            assert_eq!(args.model, Some("claude-3.5-sonnet".to_string()));
+        }
     }
 
     #[test]
