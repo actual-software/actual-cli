@@ -54,57 +54,69 @@ pub fn check_auth_with_timeout(
     binary_path: &Path,
     timeout: std::time::Duration,
 ) -> Result<ClaudeAuthStatus, ActualError> {
-    let binary_path = binary_path.to_path_buf();
+    let rt = build_tokio_runtime()?;
+    rt.block_on(check_auth_async(binary_path, timeout))
+}
 
-    let rt = tokio::runtime::Builder::new_current_thread()
+/// Build a single-threaded tokio runtime.
+fn build_tokio_runtime() -> Result<tokio::runtime::Runtime, ActualError> {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| ActualError::ClaudeSubprocessFailed {
-            message: format!("failed to build tokio runtime: {e}"),
+            // LCOV_EXCL_LINE
+            message: format!("failed to build tokio runtime: {e}"), // LCOV_EXCL_LINE
+            stderr: String::new(),                                  // LCOV_EXCL_LINE
+        }) // LCOV_EXCL_LINE
+}
+
+/// Inner async logic for [`check_auth_with_timeout`].
+///
+/// Separated for testability with `#[tokio::test]`.
+async fn check_auth_async(
+    binary_path: &Path,
+    timeout: std::time::Duration,
+) -> Result<ClaudeAuthStatus, ActualError> {
+    let mut cmd = tokio::process::Command::new(binary_path);
+    cmd.args(["auth", "status", "--json"]);
+    cmd.stdin(std::process::Stdio::null());
+    // When the timeout future is dropped, the Child is dropped. With
+    // kill_on_drop(true) tokio sends SIGKILL, preventing orphaned processes.
+    cmd.kill_on_drop(true);
+
+    let child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| ActualError::ClaudeSubprocessFailed {
+            message: format!("failed to spawn claude: {e}"),
             stderr: String::new(),
         })?;
 
-    rt.block_on(async move {
-        let mut cmd = tokio::process::Command::new(&binary_path);
-        cmd.args(["auth", "status", "--json"]);
-        cmd.stdin(std::process::Stdio::null());
-        // When the timeout future is dropped, the Child is dropped. With
-        // kill_on_drop(true) tokio sends SIGKILL, preventing orphaned processes.
-        cmd.kill_on_drop(true);
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| ActualError::ClaudeTimeout {
+            // Round up so sub-second timeouts display as "1s" rather than "0s".
+            seconds: timeout.as_secs_f64().ceil() as u64,
+        })?
+        .map_err(|e| ActualError::ClaudeSubprocessFailed {
+            // LCOV_EXCL_LINE
+            message: format!("failed to wait for claude: {e}"), // LCOV_EXCL_LINE
+            stderr: String::new(),                              // LCOV_EXCL_LINE
+        })?; // LCOV_EXCL_LINE
 
-        let child = cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| ActualError::ClaudeSubprocessFailed {
-                message: format!("failed to spawn claude: {e}"),
-                stderr: String::new(),
-            })?;
-
-        let output = tokio::time::timeout(timeout, child.wait_with_output())
-            .await
-            .map_err(|_| ActualError::ClaudeTimeout {
-                // Round up so sub-second timeouts display as "1s" rather than "0s".
-                seconds: timeout.as_secs_f64().ceil() as u64,
-            })?
-            .map_err(|e| ActualError::ClaudeSubprocessFailed {
-                message: format!("failed to wait for claude: {e}"),
-                stderr: String::new(),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(ActualError::ClaudeSubprocessFailed {
-                message: format!(
-                    "claude auth status exited with code {}",
-                    output.status.code().unwrap_or(-1)
-                ),
-                stderr,
-            });
-        }
-        let status: ClaudeAuthStatus = serde_json::from_slice(&output.stdout)?;
-        Ok(status)
-    })
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(ActualError::ClaudeSubprocessFailed {
+            message: format!(
+                "claude auth status exited with code {}",
+                output.status.code().unwrap_or(-1)
+            ),
+            stderr,
+        });
+    }
+    let status: ClaudeAuthStatus = serde_json::from_slice(&output.stdout)?;
+    Ok(status)
 }
 
 fn run_auth_with_binary(binary_path: &Path) -> Result<(), ActualError> {
@@ -478,5 +490,83 @@ mod tests {
             matches!(result, Err(ActualError::ClaudeOutputParse(_))),
             "expected ClaudeOutputParse, got: {result:?}"
         );
+    }
+
+    // ── Direct tests of check_auth_async for coverage of all reachable paths ──
+
+    #[tokio::test]
+    async fn test_check_auth_async_spawn_failure() {
+        let result = check_auth_async(
+            Path::new("/nonexistent/binary/that/does/not/exist"),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
+            "expected ClaudeSubprocessFailed from spawn failure, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = check_auth_async(&script, std::time::Duration::from_millis(100)).await;
+        assert!(
+            matches!(result, Err(ActualError::ClaudeTimeout { .. })),
+            "expected ClaudeTimeout, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_subprocess_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(dir.path(), "error output", 1);
+        let result = check_auth_async(&script, std::time::Duration::from_secs(5)).await;
+        assert!(
+            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
+            "expected ClaudeSubprocessFailed, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(dir.path(), "not json", 0);
+        let result = check_auth_async(&script, std::time::Duration::from_secs(5)).await;
+        assert!(
+            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
+            "expected ClaudeOutputParse, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(
+            dir.path(),
+            r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "user@example.com"}"#,
+            0,
+        );
+        let result = check_auth_async(&script, std::time::Duration::from_secs(5)).await;
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        let status = result.unwrap();
+        assert!(status.logged_in);
+        assert_eq!(status.auth_method.as_deref(), Some("claude.ai"));
+    }
+
+    #[test]
+    fn test_build_tokio_runtime_succeeds() {
+        // In any normal environment, building the runtime always succeeds.
+        // This exercises the success path and ensures the function is reachable.
+        let rt = build_tokio_runtime();
+        assert!(rt.is_ok(), "expected runtime to build successfully");
     }
 }
