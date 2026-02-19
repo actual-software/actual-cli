@@ -7,6 +7,11 @@
 
 use std::time::Duration;
 
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
+const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
+const DEFAULT_CODEX_MODEL: &str = "codex-mini-latest";
+
 use clap::ValueEnum as _;
 
 use crate::cli::args::{RunnerChoice, SyncArgs};
@@ -78,7 +83,8 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 email: auth_status.email.clone(),
             };
             print_header_bar(&auth_display);
-            let runner = CliClaudeRunner::new(binary_path, Duration::from_secs(300));
+            let runner =
+                CliClaudeRunner::new(binary_path, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
         RunnerChoice::AnthropicApi => {
@@ -93,9 +99,10 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .model
                 .as_deref()
                 .or(cfg.model.as_deref())
-                .unwrap_or("claude-sonnet-4-5")
+                .unwrap_or(DEFAULT_ANTHROPIC_MODEL)
                 .to_string();
-            let runner = AnthropicApiRunner::new(api_key, model, Duration::from_secs(300))?;
+            let runner =
+                AnthropicApiRunner::new(api_key, model, Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
         RunnerChoice::OpenAiApi => {
@@ -110,9 +117,10 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .model
                 .as_deref()
                 .or(cfg.model.as_deref())
-                .unwrap_or("gpt-4o")
+                .unwrap_or(DEFAULT_OPENAI_MODEL)
                 .to_string();
-            let runner = OpenAiApiRunner::new(api_key, model, Duration::from_secs(300))?;
+            let runner =
+                OpenAiApiRunner::new(api_key, model, Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
         RunnerChoice::CodexCli => {
@@ -125,9 +133,13 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .model
                 .as_deref()
                 .or(cfg.model.as_deref())
-                .unwrap_or("codex-mini-latest")
+                .unwrap_or(DEFAULT_CODEX_MODEL)
                 .to_string();
-            let runner = CodexCliRunner::new(binary_path, model, Duration::from_secs(300));
+            let runner = CodexCliRunner::new(
+                binary_path,
+                model,
+                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+            );
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
     }
@@ -135,10 +147,12 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
 
 /// Resolve an API key from an environment variable or a config fallback.
 ///
-/// Returns `Err(ActualError::ClaudeNotAuthenticated)` if neither source provides a key.
+/// Returns `Err(ActualError::ApiKeyMissing)` if neither source provides a key.
 fn resolve_api_key(env_var: &str, config_key: Option<&str>) -> Result<String, ActualError> {
     std::env::var(env_var)
         .ok()
         .or_else(|| config_key.map(|s| s.to_string()))
-        .ok_or(ActualError::ClaudeNotAuthenticated)
+        .ok_or_else(|| ActualError::ApiKeyMissing {
+            env_var: env_var.to_string(),
+        })
 }
