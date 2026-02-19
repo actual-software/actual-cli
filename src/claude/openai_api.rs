@@ -10,10 +10,13 @@ use super::subprocess::TailoringRunner;
 
 /// Map a `reqwest::Error` from `send()` into an [`ActualError`].
 ///
-/// Extracted so the timeout vs. other-network-error branch can be unit tested
-/// without an actual network roundtrip.
-fn map_send_error(e: reqwest::Error, timeout: Duration) -> ActualError {
-    if e.is_timeout() {
+/// The `is_timeout` predicate allows tests to inject the timeout classification
+/// without requiring a real network roundtrip to produce a timed-out error.
+fn map_send_error_with<F>(e: reqwest::Error, timeout: Duration, is_timeout: F) -> ActualError
+where
+    F: Fn(&reqwest::Error) -> bool,
+{
+    if is_timeout(&e) {
         ActualError::ClaudeTimeout {
             seconds: timeout.as_secs(),
         }
@@ -23,6 +26,11 @@ fn map_send_error(e: reqwest::Error, timeout: Duration) -> ActualError {
             stderr: String::new(),
         }
     }
+}
+
+/// Map a `reqwest::Error` from `send()` into an [`ActualError`].
+fn map_send_error(e: reqwest::Error, timeout: Duration) -> ActualError {
+    map_send_error_with(e, timeout, |err| err.is_timeout())
 }
 
 /// Runner that uses the OpenAI Responses API with structured JSON output.
@@ -902,10 +910,10 @@ mod tests {
         );
     }
 
-    // Test 18: map_send_error with a non-timeout network error → ClaudeSubprocessFailed
+    // Test 18a: map_send_error_with — non-timeout classifier → ClaudeSubprocessFailed
     #[tokio::test]
     async fn test_map_send_error_non_timeout() {
-        // Connection refused is reliably a non-timeout error on loopback.
+        // Connection refused produces a reliable network error on loopback.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -916,17 +924,43 @@ mod tests {
             .await
             .unwrap_err();
 
-        // Regardless of whether it ends up as timeout or not, map_send_error must
-        // return one of the two expected variants — no panics.
-        let mapped = map_send_error(err, Duration::from_secs(10));
-        assert!(
-            matches!(
-                mapped,
-                ActualError::ClaudeSubprocessFailed { .. } | ActualError::ClaudeTimeout { .. }
-            ),
-            "expected ClaudeSubprocessFailed or ClaudeTimeout, got: {:?}",
-            mapped
-        );
+        // Force is_timeout → false so we always hit the ClaudeSubprocessFailed branch.
+        let mapped = map_send_error_with(err, Duration::from_secs(10), |_| false);
+        match mapped {
+            ActualError::ClaudeSubprocessFailed { message, stderr } => {
+                assert!(
+                    message.contains("OpenAI API request failed"),
+                    "expected request-failed prefix in: {message}"
+                );
+                assert!(stderr.is_empty(), "expected empty stderr, got: {stderr}");
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+        }
+    }
+
+    // Test 18b: map_send_error_with — timeout classifier → ClaudeTimeout
+    #[tokio::test]
+    async fn test_map_send_error_timeout_branch() {
+        // Connection refused produces a reliable network error on loopback.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let err = client
+            .get("http://127.0.0.1:1/test") // port 1 always refused
+            .send()
+            .await
+            .unwrap_err();
+
+        // Force is_timeout → true to exercise the ClaudeTimeout branch regardless
+        // of how the OS classifies the underlying network error.
+        let mapped = map_send_error_with(err, Duration::from_secs(30), |_| true);
+        match mapped {
+            ActualError::ClaudeTimeout { seconds } => {
+                assert_eq!(seconds, 30, "expected timeout duration forwarded");
+            }
+            other => panic!("expected ClaudeTimeout, got: {:?}", other),
+        }
     }
 
     // Test 19: ClaudeTimeout produced when reqwest times out before the server responds.
