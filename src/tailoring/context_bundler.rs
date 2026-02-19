@@ -358,12 +358,13 @@ fn find_entrypoints(root: &Path, max: usize) -> Vec<(String, PathBuf)> {
 /// Returns `ActualError::IoError` if `root_dir` does not exist or is not a directory.
 pub fn bundle_context(root_dir: &Path) -> Result<RepoBundleContext, ActualError> {
     if !root_dir.exists() || !root_dir.is_dir() {
+        let dir_name = root_dir
+            .file_name()
+            .unwrap_or(root_dir.as_os_str())
+            .to_string_lossy();
         return Err(ActualError::IoError(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!(
-                "'{}' does not exist or is not a directory",
-                root_dir.display()
-            ),
+            format!("'{dir_name}' does not exist or is not a directory"),
         )));
     }
 
@@ -450,6 +451,23 @@ mod tests {
         let result = bundle_context(Path::new("/nonexistent/path/that/does/not/exist"));
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::IoError(_)));
+    }
+
+    // Test 4b: error message does not expose the full absolute path (path disclosure prevention)
+    #[test]
+    fn test_missing_dir_error_no_absolute_path() {
+        let result = bundle_context(Path::new("/home/user/project"));
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        // The error should mention the final component only, not the parent directories
+        assert!(
+            msg.contains("project"),
+            "expected 'project' in error: {msg}"
+        );
+        assert!(
+            !msg.contains("/home/user"),
+            "error must not expose parent path '/home/user': {msg}"
+        );
     }
 
     // Test 5: file tree truncates at 200 entries
