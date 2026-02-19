@@ -536,27 +536,43 @@ fn compute_repo_key_with_timeout(root_dir: &Path, timeout: std::time::Duration) 
     format!("{:x}", hasher.finalize())
 }
 
+/// Serialize a value to `serde_yaml::Value`, logging a warning and returning
+/// `None` if serialization fails.
+///
+/// In practice `TailoringOutput` contains only string/number/vec fields and
+/// serialization never fails.  The `Option` return defends against a future
+/// type change that adds a non-YAML-representable field (e.g. `f64::NAN`).
+fn serialize_tailoring_output<T: serde::Serialize>(output: &T) -> Option<serde_yaml::Value> {
+    match serde_yaml::to_value(output) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            eprintln!("warning: failed to serialize tailoring cache: {e}");
+            None
+        }
+    }
+}
+
 /// Store a tailoring result in the config cache (best-effort).
 ///
 /// Skips caching when `cache_key` is `None`.
 /// Disk persistence failures are silently ignored because the cache
 /// is an optimisation — a write failure should never abort a sync.
-fn store_tailoring_cache(
+///
+/// The output is generic over any `serde::Serialize` type so that tests can
+/// inject a type that always fails serialization to exercise the warning path.
+/// In production the concrete type is always `TailoringOutput`.
+fn store_tailoring_cache<T: serde::Serialize>(
     config: &mut crate::config::types::Config,
     cfg_path: &Path,
     cache_key: Option<&str>,
     root_dir: &Path,
-    output: &TailoringOutput,
+    output: &T,
 ) {
     let Some(key) = cache_key else {
         return;
     };
-    let tailoring_value = match serde_yaml::to_value(output) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("warning: failed to serialize tailoring cache: {e}");
-            return;
-        }
+    let Some(tailoring_value) = serialize_tailoring_output(output) else {
+        return;
     };
     config.cached_tailoring = Some(CachedTailoring {
         cache_key: key.to_string(),
@@ -3384,6 +3400,27 @@ mod tests {
         assert_eq!(cached.cache_key, "disk-test-key");
     }
 
+    /// A test-only newtype that always fails to serialize, used to exercise the
+    /// `serialize_tailoring_output` error path without changing production types.
+    struct AlwaysFailsSerialize;
+
+    impl serde::Serialize for AlwaysFailsSerialize {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("intentional test failure"))
+        }
+    }
+
+    #[test]
+    fn test_serialize_tailoring_output_warns_on_error() {
+        // AlwaysFailsSerialize always returns Err from serde, exercising the
+        // eprintln! warning branch inside serialize_tailoring_output.
+        let result = serialize_tailoring_output(&AlwaysFailsSerialize);
+        assert!(
+            result.is_none(),
+            "serialize_tailoring_output should return None on error"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_store_tailoring_cache_warns_on_disk_write_failure() {
@@ -3418,6 +3455,31 @@ mod tests {
 
         // Restore permissions for cleanup
         std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn test_store_tailoring_cache_skips_on_serialization_error() {
+        // When serialize_tailoring_output returns None (e.g. a non-YAML-
+        // representable future field), store_tailoring_cache must return early
+        // without populating the in-memory cache or writing to disk.
+        //
+        // store_tailoring_cache is generic over T: Serialize, so we can pass
+        // AlwaysFailsSerialize to exercise the serialize error branch.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+        let mut config = crate::config::Config::default();
+        store_tailoring_cache(
+            &mut config,
+            &cfg_path,
+            Some("will-not-be-stored"),
+            dir.path(),
+            &AlwaysFailsSerialize,
+        );
+        // Serialization failed → no cache should be stored
+        assert!(
+            config.cached_tailoring.is_none(),
+            "cache should not be set when serialization fails"
+        );
     }
 
     // ── Tailoring cache round-trip test ──
