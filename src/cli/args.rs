@@ -228,9 +228,11 @@ mod parse_tests {
 
     /// Helper: try to parse `actual sync --runner <value>` and return the result.
     fn parse_runner(value: &str) -> Result<Option<RunnerChoice>, clap::Error> {
-        Cli::try_parse_from(["actual", "sync", "--runner", value]).map(|cli| match cli.command {
-            Command::Sync(args) => args.runner,
-            _ => None,
+        Cli::try_parse_from(["actual", "sync", "--runner", value]).map(|cli| {
+            let Command::Sync(args) = cli.command else {
+                unreachable!("parse_runner always passes 'sync' as subcommand")
+            };
+            args.runner
         })
     }
 
@@ -296,10 +298,10 @@ mod parse_tests {
     fn test_runner_absent_is_none() {
         let cli =
             Cli::try_parse_from(["actual", "sync"]).expect("sync without --runner should parse");
-        match cli.command {
-            Command::Sync(args) => assert_eq!(args.runner, None),
-            _ => panic!("expected Sync command"),
-        }
+        let Command::Sync(args) = cli.command else {
+            unreachable!("test passes 'sync' subcommand")
+        };
+        assert_eq!(args.runner, None);
     }
 
     // ---- parse_budget unit tests ----
@@ -420,11 +422,12 @@ mod parse_tests {
 
     #[test]
     fn test_cli_accepts_valid_model() {
-        let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"]).unwrap();
-        assert_eq!(
-            model_from_command(cli.command),
-            Some("claude-3.5-sonnet".to_string())
-        );
+        let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"])
+            .expect("expected Ok");
+        let Command::Sync(args) = cli.command else {
+            unreachable!("test passes 'sync' subcommand")
+        };
+        assert_eq!(args.model, Some("claude-3.5-sonnet".to_string()));
     }
 
     #[test]
