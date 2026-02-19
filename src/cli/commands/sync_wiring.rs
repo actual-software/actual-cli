@@ -7,11 +7,6 @@
 
 use std::time::Duration;
 
-use crate::claude::anthropic_api::AnthropicApiRunner;
-use crate::claude::binary::find_claude_binary;
-use crate::claude::codex_cli::{find_codex_binary, CodexCliRunner};
-use crate::claude::openai_api::OpenAiApiRunner;
-use crate::claude::subprocess::CliClaudeRunner;
 use crate::cli::args::SyncArgs;
 use crate::cli::commands::auth::check_auth_with_timeout;
 use crate::cli::commands::sync::{resolve_cwd, run_sync};
@@ -19,6 +14,11 @@ use crate::cli::ui::header::{print_header_bar, AuthDisplay};
 use crate::cli::ui::real_terminal::RealTerminal;
 use crate::config::paths::{config_path, load_from};
 use crate::error::ActualError;
+use crate::runner::anthropic_api::AnthropicApiRunner;
+use crate::runner::binary::find_claude_binary;
+use crate::runner::codex_cli::{find_codex_binary, CodexCliRunner};
+use crate::runner::openai_api::OpenAiApiRunner;
+use crate::runner::subprocess::CliClaudeRunner;
 
 /// Production wiring for `actual sync`.
 ///
