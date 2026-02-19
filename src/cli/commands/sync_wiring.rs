@@ -7,7 +7,9 @@
 
 use std::time::Duration;
 
-use crate::cli::args::SyncArgs;
+use clap::ValueEnum as _;
+
+use crate::cli::args::{RunnerChoice, SyncArgs};
 use crate::cli::commands::auth::check_auth_with_timeout;
 use crate::cli::commands::sync::{resolve_cwd, run_sync};
 use crate::cli::ui::header::{print_header_bar, AuthDisplay};
@@ -33,15 +35,27 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
     // Load config first to get runner/key fallbacks.
     let cfg = load_from(&cfg_path).unwrap_or_default();
 
-    // Resolve the runner name: CLI flag > config > default.
-    let runner_name = args
-        .runner
-        .as_deref()
-        .or(cfg.runner.as_deref())
-        .unwrap_or("claude-cli");
+    // Resolve the runner: CLI flag > config (parsed from string) > default.
+    //
+    // The CLI flag is already a typed `RunnerChoice` (clap rejects invalid
+    // values before they reach here).  The config value is still a raw string
+    // (user-edited YAML), so we parse it through `RunnerChoice::from_str` to
+    // validate it and surface a clean error for unknown values.
+    let runner = if let Some(r) = &args.runner {
+        r.clone()
+    } else if let Some(cfg_runner_str) = cfg.runner.as_deref() {
+        RunnerChoice::from_str(cfg_runner_str, true).map_err(|_| {
+            ActualError::ConfigError(format!(
+                "Unknown runner '{}' in config. Valid values: claude-cli, anthropic-api, openai-api, codex-cli",
+                cfg_runner_str.chars().take(64).collect::<String>()
+            ))
+        })?
+    } else {
+        RunnerChoice::ClaudeCli
+    };
 
-    match runner_name {
-        "claude-cli" => {
+    match runner {
+        RunnerChoice::ClaudeCli => {
             let binary_path = find_claude_binary()?;
             let auth_status = check_auth_with_timeout(&binary_path, Duration::from_secs(10))?;
             if !auth_status.is_usable() {
@@ -55,7 +69,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
             let runner = CliClaudeRunner::new(binary_path, Duration::from_secs(300));
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
-        "anthropic-api" => {
+        RunnerChoice::AnthropicApi => {
             let api_key = resolve_api_key("ANTHROPIC_API_KEY", cfg.anthropic_api_key.as_deref())?;
             print_header_bar(&AuthDisplay {
                 authenticated: true,
@@ -70,7 +84,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
             let runner = AnthropicApiRunner::new(api_key, model, Duration::from_secs(300));
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
-        "openai-api" => {
+        RunnerChoice::OpenAiApi => {
             let api_key = resolve_api_key("OPENAI_API_KEY", cfg.openai_api_key.as_deref())?;
             print_header_bar(&AuthDisplay {
                 authenticated: true,
@@ -85,7 +99,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
             let runner = OpenAiApiRunner::new(api_key, model, Duration::from_secs(300));
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
-        "codex-cli" => {
+        RunnerChoice::CodexCli => {
             let binary_path = find_codex_binary()?;
             print_header_bar(&AuthDisplay {
                 authenticated: true,
@@ -100,9 +114,6 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
             let runner = CodexCliRunner::new(binary_path, model, Duration::from_secs(300));
             run_sync(args, &root_dir, &cfg_path, &term, &runner)
         }
-        other => Err(ActualError::ConfigError(format!(
-            "Unknown runner '{other}'. Valid values: claude-cli, anthropic-api, openai-api, codex-cli"
-        ))),
     }
 }
 

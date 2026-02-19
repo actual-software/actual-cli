@@ -17,7 +17,9 @@ pub(crate) mod testutil;
 pub use error::ActualError;
 
 // Re-export CLI types for backward compatibility with tests
-pub use cli::args::{Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs, StatusArgs, SyncArgs};
+pub use cli::args::{
+    Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs, RunnerChoice, StatusArgs, SyncArgs,
+};
 
 pub fn run(cli: Cli) -> Result<(), ActualError> {
     match &cli.command {
