@@ -1,6 +1,6 @@
 mod common;
 
-use actual_cli::{handle_result, run, Cli, Command, ConfigAction};
+use actual_cli::{handle_result, run, Cli, Command, ConfigAction, RunnerChoice};
 use clap::Parser;
 use common::{EnvGuard, ENV_MUTEX};
 
@@ -297,7 +297,7 @@ fn test_cli_parse_sync_runner_flag() {
     let Command::Sync(args) = cli.command else {
         unreachable!()
     };
-    assert_eq!(args.runner, Some("anthropic-api".to_string()));
+    assert_eq!(args.runner, Some(RunnerChoice::AnthropicApi));
 }
 
 #[test]
