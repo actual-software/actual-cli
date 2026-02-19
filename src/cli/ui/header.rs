@@ -68,7 +68,10 @@ fn format_auth_status(auth: Option<&AuthDisplay>) -> String {
     match auth {
         Some(a) if a.authenticated => {
             let label = match &a.email {
-                Some(email) => format!("{} authenticated ({email})", theme::SUCCESS),
+                Some(email) => {
+                    let safe_email = console::strip_ansi_codes(email);
+                    format!("{} authenticated ({safe_email})", theme::SUCCESS)
+                }
                 None => format!("{} authenticated", theme::SUCCESS),
             };
             format!("{} ", theme::success(&label).for_stderr())
@@ -236,6 +239,27 @@ mod tests {
         assert_eq!(
             line_count, 2,
             "expected 2 lines (content + separator), got {line_count}"
+        );
+    }
+
+    #[test]
+    fn test_ansi_injection_in_email_is_stripped() {
+        let auth = AuthDisplay {
+            authenticated: true,
+            email: Some("\x1b[31mINJECTED\x1b[0m@evil.com".to_string()),
+        };
+        let output = render_header_bar(80, "0.1.0", Some(&auth));
+        // The raw ANSI codes from the email should not appear in the output.
+        // Theme styling adds its own ANSI codes, but the injected ones are stripped first.
+        let plain = console::strip_ansi_codes(&output).to_string();
+        assert!(
+            plain.contains("INJECTED@evil.com"),
+            "plain text of email should still appear: {plain}"
+        );
+        // Confirm the plain text does not contain a raw ESC character.
+        assert!(
+            !plain.contains('\x1b'),
+            "plain text must not contain ESC after stripping: {plain:?}"
         );
     }
 }
