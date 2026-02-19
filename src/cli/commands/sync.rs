@@ -9,7 +9,7 @@ use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
-use crate::branding::banner::print_banner;
+use crate::branding::banner::render_banner;
 use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
@@ -72,11 +72,12 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 ) -> Result<(), ActualError> {
     // ── Phase 1: env check + analysis ──
 
-    // 1. Show banner
-    print_banner(false);
-
-    // 2. Create pipeline and check environment (git status)
+    // 1. Create pipeline and push banner lines into the log pane
     let mut pipeline = TuiRenderer::new(false, args.no_tui);
+    let use_color = console::colors_enabled_stderr();
+    for line in render_banner(use_color) {
+        pipeline.println(&line);
+    }
     pipeline.start(SyncPhase::Environment, "Checking environment...");
     let is_git = get_git_head(root_dir).is_some();
     if is_git {
