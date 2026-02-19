@@ -226,14 +226,18 @@ mod parse_tests {
 
     // ---- RunnerChoice / --runner flag tests ----
 
+    /// Helper to extract runner from a parsed Sync command.
+    fn runner_from_command(cmd: Command) -> Option<RunnerChoice> {
+        match cmd {
+            Command::Sync(args) => args.runner,
+            _ => None,
+        }
+    }
+
     /// Helper: try to parse `actual sync --runner <value>` and return the result.
     fn parse_runner(value: &str) -> Result<Option<RunnerChoice>, clap::Error> {
-        Cli::try_parse_from(["actual", "sync", "--runner", value]).map(|cli| {
-            let Command::Sync(args) = cli.command else {
-                unreachable!("parse_runner always passes 'sync' as subcommand")
-            };
-            args.runner
-        })
+        Cli::try_parse_from(["actual", "sync", "--runner", value])
+            .map(|cli| runner_from_command(cli.command))
     }
 
     #[test]
@@ -298,10 +302,7 @@ mod parse_tests {
     fn test_runner_absent_is_none() {
         let cli =
             Cli::try_parse_from(["actual", "sync"]).expect("sync without --runner should parse");
-        let Command::Sync(args) = cli.command else {
-            unreachable!("test passes 'sync' subcommand")
-        };
-        assert_eq!(args.runner, None);
+        assert_eq!(runner_from_command(cli.command), None);
     }
 
     // ---- parse_budget unit tests ----
@@ -436,38 +437,68 @@ mod parse_tests {
         assert!(result.is_err(), "expected clap to reject model with '|'");
     }
 
+    /// Helper to extract ConfigAction from a parsed Config command.
+    fn config_action_from_command(cmd: Command) -> Option<ConfigAction> {
+        match cmd {
+            Command::Config(args) => Some(args.action),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_runner_from_non_sync_command_returns_none() {
+        // Exercises the `_ => None` arm of runner_from_command.
+        let cli = Cli::try_parse_from(["actual", "status"]).unwrap();
+        assert_eq!(runner_from_command(cli.command), None);
+    }
+
+    #[test]
+    fn test_config_action_from_non_config_command_returns_none() {
+        // Exercises the `_ => None` arm of config_action_from_command.
+        let cli = Cli::try_parse_from(["actual", "status"]).unwrap();
+        assert!(config_action_from_command(cli.command).is_none());
+    }
+
     // ---- ConfigAction parsing tests ----
 
     #[test]
     fn test_config_show_parses() {
         let cli = Cli::try_parse_from(["actual", "config", "show"]).unwrap();
-        let Command::Config(args) = cli.command else {
-            unreachable!("expected Config command")
-        };
-        assert!(matches!(args.action, ConfigAction::Show));
+        let action = config_action_from_command(cli.command).expect("expected Config command");
+        assert!(matches!(action, ConfigAction::Show));
     }
 
     #[test]
     fn test_config_path_parses() {
         let cli = Cli::try_parse_from(["actual", "config", "path"]).unwrap();
-        let Command::Config(args) = cli.command else {
-            unreachable!("expected Config command")
-        };
-        assert!(matches!(args.action, ConfigAction::Path));
+        let action = config_action_from_command(cli.command).expect("expected Config command");
+        assert!(matches!(action, ConfigAction::Path));
+    }
+
+    /// Helper to extract ConfigSetArgs from a ConfigAction.
+    fn set_args_from_action(action: ConfigAction) -> Option<ConfigSetArgs> {
+        match action {
+            ConfigAction::Set(args) => Some(args),
+            _ => None,
+        }
     }
 
     #[test]
     fn test_config_set_parses() {
         let cli =
             Cli::try_parse_from(["actual", "config", "set", "options.batch_size", "5"]).unwrap();
-        let Command::Config(args) = cli.command else {
-            unreachable!("expected Config command")
-        };
-        let ConfigAction::Set(set_args) = args.action else {
-            unreachable!("expected Set action")
-        };
+        let action = config_action_from_command(cli.command).expect("expected Config command");
+        let set_args = set_args_from_action(action).expect("expected Set action");
         assert_eq!(set_args.key, "options.batch_size");
         assert_eq!(set_args.value, "5");
+    }
+
+    #[test]
+    fn test_set_args_from_non_set_action_returns_none() {
+        // Exercises the `_ => None` arm of set_args_from_action.
+        let cli = Cli::try_parse_from(["actual", "config", "show"]).unwrap();
+        let action = config_action_from_command(cli.command).expect("expected Config command");
+        assert!(set_args_from_action(action).is_none());
     }
 
     // ---- parse_budget NaN test ----
