@@ -1,4 +1,5 @@
 use super::obfuscation::tailoring_schema_decoded;
+use crate::error::ActualError;
 
 /// Returns the JSON schema for the combined tailoring + formatting Claude Code invocation.
 ///
@@ -9,7 +10,9 @@ use super::obfuscation::tailoring_schema_decoded;
 /// Required top-level fields: `files`, `skipped_adrs`, `summary`.
 ///
 /// See `docs/plan/05-adr-tailoring.md` for the full schema specification.
-pub fn tailoring_output_schema() -> String {
+///
+/// Returns `Err(ActualError::InternalError)` if the obfuscated constant is malformed.
+pub fn tailoring_output_schema() -> Result<String, ActualError> {
     tailoring_schema_decoded()
 }
 
@@ -19,7 +22,8 @@ mod tests {
 
     #[test]
     fn tailoring_output_schema_is_valid_json() {
-        let schema_str = tailoring_output_schema();
+        let schema_str =
+            tailoring_output_schema().expect("decode must succeed for valid obfuscated constant");
         let schema: serde_json::Value =
             serde_json::from_str(&schema_str).expect("TAILORING_OUTPUT_SCHEMA is not valid JSON");
         assert_eq!(schema["type"], "object");
@@ -27,7 +31,8 @@ mod tests {
 
     #[test]
     fn tailoring_output_schema_has_required_fields() {
-        let schema_str = tailoring_output_schema();
+        let schema_str =
+            tailoring_output_schema().expect("decode must succeed for valid obfuscated constant");
         let schema: serde_json::Value = serde_json::from_str(&schema_str).unwrap();
         let required = schema["required"]
             .as_array()

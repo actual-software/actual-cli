@@ -1,4 +1,5 @@
 use super::obfuscation::{cursor_rules_prompt_decoded, tailoring_prompt_decoded};
+use crate::error::ActualError;
 
 /// Returns a tailoring prompt with the given repository context, existing output file
 /// paths, and ADR JSON array interpolated into the template.
@@ -10,12 +11,15 @@ use super::obfuscation::{cursor_rules_prompt_decoded, tailoring_prompt_decoded};
 /// The `format` parameter controls which filename (e.g. `CLAUDE.md`, `AGENTS.md`, or
 /// `.cursor/rules/actual-policies.mdc`) is referenced inside the prompt so the LLM
 /// targets the correct output file and uses the correct file structure.
+///
+/// Returns `Err(ActualError::InternalError)` if the obfuscated constant is malformed
+/// (e.g. due to a key/build-artifact mismatch).
 pub fn tailoring_prompt(
     projects_json: &str,
     existing_output_paths: &str,
     adr_json_array: &str,
     format: &crate::generation::OutputFormat,
-) -> String {
+) -> Result<String, ActualError> {
     use crate::generation::OutputFormat;
     match format {
         OutputFormat::CursorRules => {
@@ -33,7 +37,7 @@ fn standard_tailoring_prompt(
     existing_output_paths: &str,
     adr_json_array: &str,
     format: &crate::generation::OutputFormat,
-) -> String {
+) -> Result<String, ActualError> {
     let filename = format.filename();
     tailoring_prompt_decoded(
         projects_json,
@@ -51,7 +55,7 @@ fn cursor_rules_tailoring_prompt(
     projects_json: &str,
     existing_output_paths: &str,
     adr_json_array: &str,
-) -> String {
+) -> Result<String, ActualError> {
     use crate::generation::format::CURSOR_RULES_PATH;
     cursor_rules_prompt_decoded(
         projects_json,
@@ -72,7 +76,8 @@ mod tests {
         let paths = "CLAUDE.md\napps/web/CLAUDE.md";
         let adrs = r#"[{"id": "adr-001", "title": "Use TypeScript"}]"#;
 
-        let prompt = tailoring_prompt(projects, paths, adrs, &OutputFormat::ClaudeMd);
+        let prompt = tailoring_prompt(projects, paths, adrs, &OutputFormat::ClaudeMd)
+            .expect("decode must succeed for valid obfuscated constant");
 
         assert!(
             prompt.contains(projects),
@@ -90,7 +95,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_contains_tailor_each_adr() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("Tailor each ADR"),
             "tailoring prompt must contain 'Tailor each ADR'"
@@ -99,7 +105,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_contains_skip_inapplicable() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("Skip inapplicable"),
             "tailoring prompt must contain 'Skip inapplicable'"
@@ -108,7 +115,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_contains_decide_file_layout() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("Decide file layout"),
             "tailoring prompt must contain 'Decide file layout'"
@@ -117,7 +125,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_contains_format_as_markdown() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("Format as markdown"),
             "tailoring prompt must contain 'Format as markdown'"
@@ -126,7 +135,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_does_not_panic_on_empty_inputs() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             !prompt.is_empty(),
             "tailoring prompt with empty inputs must not be empty"
@@ -135,7 +145,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_claude_md_references_claude_md() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::ClaudeMd)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("CLAUDE.md"),
             "claude-md format prompt must reference CLAUDE.md"
@@ -148,7 +159,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_agents_md_references_agents_md() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::AgentsMd);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::AgentsMd)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("AGENTS.md"),
             "agents-md format prompt must reference AGENTS.md"
@@ -163,7 +175,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_cursor_rules_references_mdc_path() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains(".cursor/rules/actual-policies.mdc"),
             "cursor-rules prompt must reference .cursor/rules/actual-policies.mdc, got: {prompt}"
@@ -172,7 +185,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_cursor_rules_does_not_reference_claude_md() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             !prompt.contains("CLAUDE.md"),
             "cursor-rules prompt must not reference CLAUDE.md"
@@ -181,7 +195,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_cursor_rules_does_not_reference_agents_md() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             !prompt.contains("AGENTS.md"),
             "cursor-rules prompt must not reference AGENTS.md"
@@ -190,7 +205,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_cursor_rules_contains_tailor_each_adr() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("Tailor each ADR"),
             "cursor-rules prompt must contain 'Tailor each ADR'"
@@ -200,7 +216,8 @@ mod tests {
     #[test]
     fn tailoring_prompt_cursor_rules_interpolates_projects() {
         let projects = r#"{"projects": [{"name": "app"}]}"#;
-        let prompt = tailoring_prompt(projects, "", "", &OutputFormat::CursorRules);
+        let prompt = tailoring_prompt(projects, "", "", &OutputFormat::CursorRules)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains(projects),
             "cursor-rules prompt must contain projects_json"
@@ -209,7 +226,8 @@ mod tests {
 
     #[test]
     fn tailoring_prompt_cursor_rules_is_not_empty() {
-        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules);
+        let prompt = tailoring_prompt("", "", "", &OutputFormat::CursorRules)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(!prompt.is_empty(), "cursor-rules prompt must not be empty");
     }
 }
