@@ -20,6 +20,20 @@ pub trait TerminalIO: Send + Sync {
         }
     }
 
+    /// Prompt the user for a yes/no confirmation, distinguishing cancel (Ctrl-C/Escape)
+    /// from an explicit "No" response.
+    ///
+    /// Returns:
+    /// - `Ok(Some(true))` — user confirmed
+    /// - `Ok(Some(false))` — user rejected
+    /// - `Ok(None)` — user cancelled (pressed Ctrl-C or Escape)
+    ///
+    /// Default implementation delegates to `confirm()` and wraps the result in `Some`.
+    /// `RealTerminal` overrides this to pass through `interact_opt()`'s `None` directly.
+    fn confirm_with_cancel(&self, prompt: &str) -> Result<Option<bool>, ActualError> {
+        self.confirm(prompt).map(Some)
+    }
+
     /// Present a multi-select file picker.
     /// Returns `Ok(Some(indices))` for confirmed selection, `Ok(None)` for cancel.
     fn select_files(
