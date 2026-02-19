@@ -291,6 +291,24 @@ fn test_cli_parse_sync_inf_budget_rejected() {
     );
 }
 
+#[test]
+fn test_cli_parse_sync_runner_flag() {
+    let cli = Cli::parse_from(["actual", "sync", "--runner", "anthropic-api"]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert_eq!(args.runner, Some("anthropic-api".to_string()));
+}
+
+#[test]
+fn test_cli_parse_sync_no_runner_flag() {
+    let cli = Cli::parse_from(["actual", "sync"]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert_eq!(args.runner, None);
+}
+
 #[cfg(unix)]
 #[test]
 fn test_run_sync_force_with_fake_claude() {
