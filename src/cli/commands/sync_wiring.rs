@@ -148,11 +148,87 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
 /// Resolve an API key from an environment variable or a config fallback.
 ///
 /// Returns `Err(ActualError::ApiKeyMissing)` if neither source provides a key.
-fn resolve_api_key(env_var: &str, config_key: Option<&str>) -> Result<String, ActualError> {
+pub(crate) fn resolve_api_key(
+    env_var: &str,
+    config_key: Option<&str>,
+) -> Result<String, ActualError> {
     std::env::var(env_var)
         .ok()
         .or_else(|| config_key.map(|s| s.to_string()))
         .ok_or_else(|| ActualError::ApiKeyMissing {
             env_var: env_var.to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_api_key;
+    use crate::error::ActualError;
+    use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+    #[test]
+    fn test_resolve_api_key_from_env_openai() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("OPENAI_API_KEY", "test-key-from-env");
+        let result = resolve_api_key("OPENAI_API_KEY", None);
+        assert_eq!(result.unwrap(), "test-key-from-env");
+    }
+
+    #[test]
+    fn test_resolve_api_key_from_env_anthropic() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("ANTHROPIC_API_KEY", "test-anthropic-key");
+        let result = resolve_api_key("ANTHROPIC_API_KEY", None);
+        assert_eq!(result.unwrap(), "test-anthropic-key");
+    }
+
+    #[test]
+    fn test_resolve_api_key_config_fallback_when_env_absent() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("OPENAI_API_KEY");
+        let result = resolve_api_key("OPENAI_API_KEY", Some("config-fallback-key"));
+        assert_eq!(result.unwrap(), "config-fallback-key");
+    }
+
+    #[test]
+    fn test_resolve_api_key_env_takes_priority_over_config() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("OPENAI_API_KEY", "env-key-wins");
+        let result = resolve_api_key("OPENAI_API_KEY", Some("config-fallback-key"));
+        assert_eq!(result.unwrap(), "env-key-wins");
+    }
+
+    #[test]
+    fn test_resolve_api_key_missing_both_returns_err() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("OPENAI_API_KEY");
+        let result = resolve_api_key("OPENAI_API_KEY", None);
+        assert!(
+            matches!(result, Err(ActualError::ApiKeyMissing { ref env_var }) if env_var == "OPENAI_API_KEY"),
+            "expected ApiKeyMissing, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_env_guard_restores_on_panic() {
+        // Use a synthetic key that is guaranteed absent in any real environment.
+        const TEST_KEY: &str = "ACTUAL_CLI_TEST_PANIC_GUARD_KEY_DO_NOT_SET";
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // Ensure key is absent at the start.
+        let _pre = EnvGuard::remove(TEST_KEY);
+        drop(_pre);
+
+        let result = std::panic::catch_unwind(|| {
+            let _guard = EnvGuard::set(TEST_KEY, "leak-test-value");
+            assert_eq!(std::env::var(TEST_KEY).unwrap(), "leak-test-value");
+            panic!("deliberate test panic");
+        });
+
+        assert!(result.is_err(), "expected catch_unwind to capture panic");
+        assert!(
+            std::env::var(TEST_KEY).is_err(),
+            "{TEST_KEY} must be cleaned up even after panic"
+        );
+    }
 }
