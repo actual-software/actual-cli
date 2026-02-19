@@ -24,8 +24,8 @@ pub async fn invoke_tailoring<R: TailoringRunner>(
     format: &OutputFormat,
 ) -> Result<TailoringOutput, ActualError> {
     let adr_json = serialize_json(adrs, "ADRs")?;
-    let prompt = build_prompt(&adr_json, projects_json, existing_output_paths, format);
-    let schema = tailoring_output_schema();
+    let prompt = build_prompt(&adr_json, projects_json, existing_output_paths, format)?;
+    let schema = tailoring_output_schema()?;
     let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
 
     // First attempt
@@ -60,7 +60,7 @@ pub(crate) fn build_prompt(
     projects_json: &str,
     existing_output_paths: &str,
     format: &OutputFormat,
-) -> String {
+) -> Result<String, ActualError> {
     tailoring_prompt(projects_json, existing_output_paths, adr_json, format)
 }
 
@@ -469,7 +469,8 @@ mod tests {
     #[test]
     fn test_build_prompt_with_valid_input() {
         let adr_json = r#"[{"id":"adr-001"},{"id":"adr-002"}]"#;
-        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd);
+        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd)
+            .expect("build_prompt must succeed for valid obfuscated constant");
 
         // The prompt should contain the ADR JSON
         assert!(

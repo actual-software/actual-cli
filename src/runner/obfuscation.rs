@@ -1,3 +1,5 @@
+use crate::error::ActualError;
+
 /// XOR key mirroring the one in build.rs.
 /// Non-printable bytes intentionally — they will not appear in `strings` output.
 const KEY: &[u8] = &[
@@ -10,15 +12,16 @@ include!(concat!(env!("OUT_DIR"), "/obfuscated_constants.rs"));
 
 /// Decode an XOR-obfuscated byte slice back to a UTF-8 string.
 ///
-/// # Panics
-/// Panics if the decoded bytes are not valid UTF-8 (indicates a build/key mismatch).
-fn decode(data: &[u8]) -> String {
+/// Returns `Err(ActualError::InternalError)` if the decoded bytes are not valid UTF-8,
+/// which indicates a build/key mismatch (e.g. stale build artifact).
+fn decode(data: &[u8]) -> Result<String, ActualError> {
     let decoded: Vec<u8> = data
         .iter()
         .enumerate()
         .map(|(i, b)| b ^ KEY[i % KEY.len()])
         .collect();
-    String::from_utf8(decoded).expect("obfuscated constant decoded to invalid UTF-8")
+    String::from_utf8(decoded)
+        .map_err(|_| ActualError::InternalError("obfuscated constant malformed".to_string()))
 }
 
 /// Returns the tailoring prompt template with runtime values interpolated.
@@ -30,15 +33,15 @@ pub fn tailoring_prompt_decoded(
     existing_output_paths: &str,
     adr_json_array: &str,
     filename: &str,
-) -> String {
-    let template = decode(PROMPT_OBFUSCATED);
+) -> Result<String, ActualError> {
+    let template = decode(PROMPT_OBFUSCATED)?;
     // Positional placeholders: {0}=filename, {1}=projects_json,
     // {2}=existing_output_paths, {3}=adr_json_array
-    template
+    Ok(template
         .replace("{0}", filename)
         .replace("{1}", projects_json)
         .replace("{2}", existing_output_paths)
-        .replace("{3}", adr_json_array)
+        .replace("{3}", adr_json_array))
 }
 
 /// Returns the CursorRules tailoring prompt template with runtime values interpolated.
@@ -50,20 +53,20 @@ pub fn cursor_rules_prompt_decoded(
     existing_output_paths: &str,
     adr_json_array: &str,
     cursor_rules_path: &str,
-) -> String {
-    let template = decode(CURSOR_RULES_PROMPT_OBFUSCATED);
+) -> Result<String, ActualError> {
+    let template = decode(CURSOR_RULES_PROMPT_OBFUSCATED)?;
     // Positional placeholders: {0}=cursor_rules_path, {1}=projects_json,
     // {2}=existing_output_paths, {3}=adr_json_array
-    template
+    Ok(template
         .replace("{0}", cursor_rules_path)
         .replace("{1}", projects_json)
         .replace("{2}", existing_output_paths)
-        .replace("{3}", adr_json_array)
+        .replace("{3}", adr_json_array))
 }
 
 /// Returns the tailoring output JSON schema string, decoded from its obfuscated
 /// compile-time representation.
-pub fn tailoring_schema_decoded() -> String {
+pub fn tailoring_schema_decoded() -> Result<String, ActualError> {
     decode(SCHEMA_OBFUSCATED)
 }
 
@@ -73,7 +76,8 @@ mod tests {
 
     #[test]
     fn decode_roundtrips_prompt() {
-        let prompt = tailoring_prompt_decoded(r#"{"projects":[]}"#, "CLAUDE.md", "[]", "CLAUDE.md");
+        let prompt = tailoring_prompt_decoded(r#"{"projects":[]}"#, "CLAUDE.md", "[]", "CLAUDE.md")
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("Tailor each ADR"),
             "decoded prompt must contain instruction text"
@@ -91,7 +95,8 @@ mod tests {
     #[test]
     fn decode_roundtrips_cursor_rules_prompt() {
         let path = ".cursor/rules/actual-policies.mdc";
-        let prompt = cursor_rules_prompt_decoded(r#"{"projects":[]}"#, "", "[]", path);
+        let prompt = cursor_rules_prompt_decoded(r#"{"projects":[]}"#, "", "[]", path)
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("Tailor each ADR"),
             "decoded cursor prompt must contain instruction text"
@@ -104,7 +109,8 @@ mod tests {
 
     #[test]
     fn decode_roundtrips_schema() {
-        let schema = tailoring_schema_decoded();
+        let schema =
+            tailoring_schema_decoded().expect("decode must succeed for valid obfuscated constant");
         let value: serde_json::Value =
             serde_json::from_str(&schema).expect("decoded schema must be valid JSON");
         assert_eq!(value["type"], "object");
@@ -141,8 +147,29 @@ mod tests {
 
     #[test]
     fn prompt_filename_substituted_for_agents_md() {
-        let prompt = tailoring_prompt_decoded("", "", "", "AGENTS.md");
+        let prompt = tailoring_prompt_decoded("", "", "", "AGENTS.md")
+            .expect("decode must succeed for valid obfuscated constant");
         assert!(prompt.contains("AGENTS.md"));
         assert!(!prompt.contains("CLAUDE.md"));
+    }
+
+    #[test]
+    fn decode_returns_err_for_invalid_utf8() {
+        // XOR 0xFF and 0xFE with the key — produce bytes that after decoding
+        // are not valid UTF-8 regardless of the key, by constructing a known
+        // invalid sequence. We XOR with the key bytes so that after decode()
+        // re-XORs them we get the raw bytes 0xFF and 0xFE, which are never
+        // valid UTF-8.
+        let raw_invalid: Vec<u8> = vec![0xFF, 0xFE];
+        let obfuscated: Vec<u8> = raw_invalid
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ KEY[i % KEY.len()])
+            .collect();
+        let result = decode(&obfuscated);
+        assert!(
+            matches!(result, Err(ActualError::InternalError(_))),
+            "decode() must return Err(InternalError) for invalid UTF-8, got: {result:?}"
+        );
     }
 }
