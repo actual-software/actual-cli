@@ -118,28 +118,14 @@ impl TuiRenderer {
         let created_at = Instant::now();
         let starts = [None; 4];
 
-        if quiet {
-            return Self {
-                mode: Mode::Quiet,
-                steps,
-                log,
-                starts,
-                created_at,
-            };
-        }
-
-        if no_tui || !io::stderr().is_terminal() {
-            return Self {
-                mode: Mode::Plain,
-                steps,
-                log,
-                starts,
-                created_at,
-            };
-        }
-
-        // Attempt TUI setup; fall back to Plain on any failure (e.g. not a real TTY).
-        let mode = Self::try_setup_tui().unwrap_or(Mode::Plain);
+        let mode = if quiet {
+            Mode::Quiet
+        } else if no_tui || !io::stderr().is_terminal() {
+            Mode::Plain
+        } else {
+            // Attempt TUI setup; fall back to Plain on any failure (e.g. not a real TTY).
+            Self::try_setup_tui().unwrap_or(Mode::Plain)
+        };
         Self {
             mode,
             steps,
@@ -501,11 +487,10 @@ mod tests {
         r.update_message(SyncPhase::Tailor, "updated message");
         assert_eq!(r.steps.steps[3].message, "updated message");
         // tick should have advanced
-        assert!(
-            matches!(r.steps.steps[3].status, StepStatus::Running { tick } if tick == 1),
-            "expected Running{{tick:1}}, got {:?}",
-            r.steps.steps[3].status
-        );
+        assert!(matches!(
+            r.steps.steps[3].status,
+            StepStatus::Running { tick } if tick == 1
+        ));
     }
 
     #[test]
@@ -594,6 +579,15 @@ mod tests {
     }
 
     // ── setup_tui coverage ──
+
+    #[test]
+    fn test_try_setup_tui_direct() {
+        // Call try_setup_tui() directly to exercise lines 153-161 in CI.
+        // In CI, enable_raw_mode() fails and returns None (line 156 ok()? path).
+        // On a real TTY it returns Some(Mode::Tui(...)) — we clean up via drop.
+        let result = TuiRenderer::try_setup_tui();
+        drop(result); // Mode::Tui Drop impl restores terminal state if entered
+    }
 
     #[test]
     fn test_new_tty_or_fallback() {
