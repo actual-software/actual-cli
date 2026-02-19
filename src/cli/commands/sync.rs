@@ -16,6 +16,7 @@ use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::confirm_files;
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::progress::{SyncPhase, SyncPipeline};
+use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
 use crate::config::paths::{load_from, save_to};
@@ -108,11 +109,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     // 5. Confirmation (unless --force)
     if args.force {
         // Show project summary even in --force mode for visibility
-        let width = console::Term::stderr()
-            .size_checked()
-            .map(|(_, cols)| cols as usize)
-            .unwrap_or(80)
-            .min(90);
+        let width = term_size::terminal_width();
         let summary = format_project_summary(&analysis, width);
         pipeline.suspend(|| eprintln!("{summary}"));
     } else {
@@ -885,11 +882,7 @@ pub fn confirm_and_write(
     // Step 2: Display diff summary in a panel
     let summary = format_diff_summary(&diffs);
     if !summary.is_empty() {
-        let width = console::Term::stdout()
-            .size_checked()
-            .map(|(_, cols)| cols as usize)
-            .unwrap_or(80)
-            .min(90);
+        let width = term_size::terminal_width();
         let mut panel = Panel::titled("Changes");
         for line in summary.lines() {
             panel = panel.line(line);
@@ -934,11 +927,7 @@ pub fn confirm_and_write(
     let results = write_files(root_dir, &confirmed, format);
 
     // Step 6: Report results and return SyncResult
-    let width = console::Term::stdout()
-        .size_checked()
-        .map(|(_, cols)| cols as usize)
-        .unwrap_or(80)
-        .min(90);
+    let width = term_size::terminal_width();
     let (files_created, files_updated, files_failed) =
         report_write_results(&results, files_rejected, started_at.elapsed(), term, width);
 

@@ -13,6 +13,7 @@
 
 use std::fmt::Write;
 
+use super::term_size;
 use super::theme;
 
 /// Authentication display info for the header bar.
@@ -93,11 +94,7 @@ fn format_auth_status(auth: Option<&AuthDisplay>) -> String {
 /// direct stderr output for branding/chrome that is not part of the
 /// testable data path.
 pub fn print_header_bar(auth: &AuthDisplay) {
-    let width = console::Term::stderr()
-        .size_checked()
-        .map(|(_, cols)| cols as usize)
-        .unwrap_or(80)
-        .min(90);
+    let width = term_size::terminal_width();
     eprint!(
         "{}",
         render_header_bar(width, env!("CARGO_PKG_VERSION"), Some(auth))

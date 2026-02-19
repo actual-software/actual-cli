@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli::ui::panel::Panel;
+use crate::cli::ui::term_size;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
 use crate::generation::format::{CURSOR_RULES_DIR, CURSOR_RULES_FILENAME};
@@ -126,11 +127,7 @@ pub fn handle_result(result: Result<(), ActualError>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(e) => {
-            let width = console::Term::stderr()
-                .size_checked()
-                .map(|(_, cols)| cols as usize)
-                .unwrap_or(80)
-                .min(90);
+            let width = term_size::terminal_width();
 
             let error_line = format!("{} {}", theme::error_prefix().for_stderr(), e);
             let mut panel = Panel::titled("Error").line("").line(&error_line);

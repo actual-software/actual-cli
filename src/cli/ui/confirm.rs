@@ -1,5 +1,6 @@
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::{Language, Project, RepoAnalysis};
+use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::error::ActualError;
 
@@ -112,11 +113,7 @@ pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
     term: &dyn TerminalIO,
 ) -> Result<ConfirmAction, ActualError> {
-    let width = console::Term::stdout()
-        .size_checked()
-        .map(|(_, cols)| cols as usize)
-        .unwrap_or(80)
-        .min(90);
+    let width = term_size::terminal_width();
     let summary = format_project_summary(analysis, width);
     term.write_line(&summary);
 
