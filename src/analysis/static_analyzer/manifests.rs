@@ -1,6 +1,23 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+/// Maximum manifest file size to read into memory (10 MB).
+const MAX_MANIFEST_SIZE: u64 = 10 * 1024 * 1024;
+
+/// Read a manifest file, returning `None` if the file is missing, unreadable,
+/// or exceeds [`MAX_MANIFEST_SIZE`].  This prevents OOM on adversarial repos
+/// that contain abnormally large manifest files.
+fn read_manifest_file(path: &Path) -> Option<String> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_MANIFEST_SIZE => {
+            return None;
+        }
+        Err(_) => return None,
+        _ => {}
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 /// Dependency information extracted from manifest files.
 #[derive(Debug, Default)]
 pub struct DependencyInfo {
@@ -51,9 +68,9 @@ fn parse_package_json(
     dev_deps: &mut HashSet<String>,
 ) {
     let path = project_dir.join("package.json");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
     let parsed: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
@@ -83,9 +100,9 @@ fn parse_cargo_toml(
     dev_deps: &mut HashSet<String>,
 ) {
     let path = project_dir.join("Cargo.toml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
     let parsed: toml::Value = match content.parse() {
         Ok(v) => v,
@@ -138,9 +155,9 @@ fn parse_pyproject_toml(
     dev_deps: &mut HashSet<String>,
 ) {
     let path = project_dir.join("pyproject.toml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
     let parsed: toml::Value = match content.parse() {
         Ok(v) => v,
@@ -246,9 +263,9 @@ fn strip_python_version_specifier(s: &str) -> Option<String> {
 
 fn parse_requirements_txt(project_dir: &Path, deps: &mut HashSet<String>) {
     let path = project_dir.join("requirements.txt");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
 
     for line in content.lines() {
@@ -267,9 +284,9 @@ fn parse_requirements_txt(project_dir: &Path, deps: &mut HashSet<String>) {
 
 fn parse_pipfile(project_dir: &Path, deps: &mut HashSet<String>, dev_deps: &mut HashSet<String>) {
     let path = project_dir.join("Pipfile");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
     let parsed: toml::Value = match content.parse() {
         Ok(v) => v,
@@ -295,9 +312,9 @@ fn parse_pipfile(project_dir: &Path, deps: &mut HashSet<String>, dev_deps: &mut 
 
 fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
     let path = project_dir.join("go.mod");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
 
     let mut in_require_block = false;
@@ -367,9 +384,9 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
 
 fn parse_gemfile(project_dir: &Path, deps: &mut HashSet<String>) {
     let path = project_dir.join("Gemfile");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
 
     // Match: gem "name" or gem 'name'
@@ -399,9 +416,9 @@ fn regex_gem_name() -> &'static regex::Regex {
 
 fn parse_pom_xml(project_dir: &Path, deps: &mut HashSet<String>) {
     let path = project_dir.join("pom.xml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
 
     // Match <dependency> blocks and extract groupId + artifactId
@@ -460,9 +477,9 @@ fn regex_pom_artifact_id() -> &'static regex::Regex {
 fn parse_build_gradle(project_dir: &Path, deps: &mut HashSet<String>) {
     for filename in &["build.gradle", "build.gradle.kts"] {
         let path = project_dir.join(filename);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let content = match read_manifest_file(&path) {
+            Some(c) => c,
+            None => continue,
         };
 
         let re = regex_gradle_dependency();
@@ -503,9 +520,9 @@ fn regex_gradle_dependency() -> &'static regex::Regex {
 /// Missing file or parse errors are silently skipped.
 pub(crate) fn parse_gradle_version_catalog(project_dir: &Path, deps: &mut HashSet<String>) {
     let path = project_dir.join("gradle/libs.versions.toml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
 
     let table: toml::Table = match content.parse() {
@@ -552,9 +569,9 @@ fn insert_gradle_coord(coord: &str, deps: &mut HashSet<String>) {
 
 fn parse_package_swift(project_dir: &Path, deps: &mut HashSet<String>) {
     let path = project_dir.join("Package.swift");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return,
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
     };
 
     // Match: .package(name: "Name" or .package(url: "...Name.git"
@@ -1725,5 +1742,92 @@ require github.com/another/indirect v4.0.0 // indirect
         let _ = regex_gradle_dependency();
         let _ = regex_swift_package_name();
         let _ = regex_swift_package_url();
+    }
+
+    // ── File-size limit tests (g5j.17) ───────────────────────────────
+
+    /// Helper: write exactly `size` bytes to `path`.
+    fn write_file_of_size(path: &std::path::Path, size: usize) {
+        // Write a file filled with 'x' bytes.
+        let content = vec![b'x'; size];
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn test_manifest_oversized_package_json_is_skipped() {
+        let dir = tempdir().unwrap();
+        // Write a file just over 10 MB — the content isn't valid JSON, but the
+        // size check happens before parsing, so parse_dependencies should return
+        // empty deps rather than panicking or reading the huge file.
+        let path = dir.path().join("package.json");
+        let over_limit = (super::MAX_MANIFEST_SIZE + 1) as usize;
+        write_file_of_size(&path, over_limit);
+
+        let info = parse_dependencies(dir.path());
+        assert!(
+            info.dependencies.is_empty(),
+            "expected no deps from oversized package.json"
+        );
+    }
+
+    #[test]
+    fn test_manifest_oversized_cargo_toml_is_skipped() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        let over_limit = (super::MAX_MANIFEST_SIZE + 1) as usize;
+        write_file_of_size(&path, over_limit);
+
+        let info = parse_dependencies(dir.path());
+        assert!(
+            info.dependencies.is_empty(),
+            "expected no deps from oversized Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn test_manifest_oversized_requirements_txt_is_skipped() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("requirements.txt");
+        let over_limit = (super::MAX_MANIFEST_SIZE + 1) as usize;
+        write_file_of_size(&path, over_limit);
+
+        let info = parse_dependencies(dir.path());
+        assert!(
+            info.dependencies.is_empty(),
+            "expected no deps from oversized requirements.txt"
+        );
+    }
+
+    #[test]
+    fn test_read_manifest_file_returns_none_for_oversized_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let over_limit = (super::MAX_MANIFEST_SIZE + 1) as usize;
+        write_file_of_size(&path, over_limit);
+
+        let result = super::read_manifest_file(&path);
+        assert!(
+            result.is_none(),
+            "read_manifest_file should return None for files exceeding the size limit"
+        );
+    }
+
+    #[test]
+    fn test_read_manifest_file_returns_content_for_normal_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        fs::write(&path, "hello world").unwrap();
+
+        let result = super::read_manifest_file(&path);
+        assert_eq!(result, Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_read_manifest_file_returns_none_for_missing_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nonexistent.txt");
+
+        let result = super::read_manifest_file(&path);
+        assert!(result.is_none());
     }
 }
