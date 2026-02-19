@@ -14,6 +14,15 @@ const MAX_BATCH_FILES: usize = 1000;
 /// Maximum total content size across all files in a single semgrep batch (100 MB).
 const MAX_BATCH_SIZE_BYTES: usize = 100 * 1024 * 1024;
 
+/// Canonicalize `path`, returning an error that includes the path in the
+/// message rather than silently swallowing the failure.
+///
+/// Extracted as a standalone function so the error path is directly testable.
+fn canonicalize_with_context(path: &std::path::Path) -> Result<PathBuf> {
+    std::fs::canonicalize(path)
+        .with_context(|| format!("failed to canonicalize temp path {path:?}"))
+}
+
 /// Output from running the semgrep command.
 #[derive(Debug)]
 struct CommandOutput {
@@ -81,9 +90,7 @@ impl SemgrepScanner {
             // We propagate errors here rather than silently falling back to
             // the raw path: the file was just written, so canonicalization
             // should never fail in practice, and if it does we want to know.
-            let canonical = std::fs::canonicalize(&temp_path).map_err(|e| {
-                anyhow::anyhow!("failed to canonicalize temp path {temp_path:?}: {e}")
-            })?;
+            let canonical = canonicalize_with_context(&temp_path)?;
             file_map.insert(canonical, rel_path.clone());
         }
 
@@ -1000,6 +1007,29 @@ EOJSON
     }
 
     // ---- file size / batch size limit tests (g5j.16, g5j.19) ----
+
+    #[test]
+    fn test_canonicalize_with_context_ok() {
+        // Canonicalize a path that exists (the temp dir itself).
+        let dir = tempfile::tempdir().unwrap();
+        let result = canonicalize_with_context(dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_canonicalize_with_context_error() {
+        // Canonicalize a path that does not exist — should return Err with a
+        // message containing the path.
+        let dir = tempfile::tempdir().unwrap();
+        let nonexistent = dir.path().join("does_not_exist");
+        let result = canonicalize_with_context(&nonexistent);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("failed to canonicalize"),
+            "expected 'failed to canonicalize' in error, got: {msg}"
+        );
+    }
 
     #[test]
     fn test_prepare_temp_files_rejects_oversized_file() {
