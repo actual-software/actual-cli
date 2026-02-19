@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 
 use crate::api::DEFAULT_API_URL;
 use crate::branding::banner::print_banner;
-use crate::claude::binary::find_claude_binary;
 use crate::cli::args::StatusArgs;
 use crate::cli::commands::auth::check_auth_with_timeout;
 use crate::cli::ui::header::{render_header_bar, AuthDisplay};
@@ -12,6 +11,7 @@ use crate::config;
 use crate::config::types::Config;
 use crate::error::ActualError;
 use crate::generation::markers;
+use crate::runner::binary::find_claude_binary;
 
 pub fn exec(args: &StatusArgs) -> Result<(), ActualError> {
     load_and_run(args)

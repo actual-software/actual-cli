@@ -3,11 +3,11 @@ use std::collections::HashSet;
 use serde::Serialize;
 
 use crate::api::types::Adr;
-use crate::claude::prompts::tailoring_prompt;
-use crate::claude::schemas::tailoring_output_schema;
-use crate::claude::TailoringRunner;
 use crate::error::ActualError;
 use crate::generation::OutputFormat;
+use crate::runner::prompts::tailoring_prompt;
+use crate::runner::schemas::tailoring_output_schema;
+use crate::runner::TailoringRunner;
 use crate::tailoring::types::TailoringOutput;
 
 /// Invoke Claude to tailor ADRs for the given project context.
