@@ -68,6 +68,7 @@ trait TuiTerminal: Send {
         log: &LogPane,
         confirm: Option<&ConfirmState>,
         hint: bool,
+        scroll_offset: usize,
     ) -> io::Result<()>;
 }
 
@@ -81,8 +82,9 @@ impl<B: Backend + Send> TuiTerminal for TuiTerminalImpl<B> {
         log: &LogPane,
         confirm: Option<&ConfirmState>,
         hint: bool,
+        scroll_offset: usize,
     ) -> io::Result<()> {
-        render_to(&mut self.0, steps, log, confirm, hint)
+        render_to(&mut self.0, steps, log, confirm, hint, scroll_offset)
     }
 }
 
@@ -107,6 +109,7 @@ pub fn render_to<B: Backend>(
     log: &LogPane,
     confirm: Option<&ConfirmState>,
     hint: bool,
+    scroll_offset: usize,
 ) -> io::Result<()> {
     let size = terminal.size()?;
     let cols = size.width;
@@ -124,13 +127,26 @@ pub fn render_to<B: Backend>(
                 .block(Block::default().borders(Borders::ALL).title("Steps"));
             frame.render_widget(step_widget, chunks[0]);
 
-            let log_height = chunks[1].height.saturating_sub(2) as usize;
+            // Reserve one line for the footer hint so it is always visible.
+            let log_inner_height = chunks[1].height.saturating_sub(2) as usize;
+            let footer_height: usize = if confirm.is_some() || hint { 1 } else { 0 };
+            let log_height = log_inner_height.saturating_sub(footer_height);
             let log_width = chunks[1].width.saturating_sub(2) as usize;
-            let mut log_lines = log.render_to_string(log_height, log_width);
+            let mut log_lines = log.render_to_string(log_height, log_width, scroll_offset);
             if let Some(cs) = confirm {
                 append_confirm_lines(&mut log_lines, cs);
             } else if hint {
-                log_lines.push("  Press any key to close".to_string());
+                let max = log.max_scroll(log_height);
+                let scroll_hint = if max > 0 {
+                    format!(
+                        "  j/k scroll  g/G top/bottom  q quit  [{}/{}]",
+                        scroll_offset.min(max),
+                        max
+                    )
+                } else {
+                    "  j/k scroll  q quit".to_string()
+                };
+                log_lines.push(scroll_hint);
             }
             let log_text = log_lines.join("\n");
             let log_widget = Paragraph::new(log_text)
@@ -145,13 +161,15 @@ pub fn render_to<B: Backend>(
             let condensed = steps.render_condensed(area.width as usize);
             frame.render_widget(Paragraph::new(condensed), chunks[0]);
 
-            let log_height = chunks[1].height as usize;
+            let log_inner_height = chunks[1].height as usize;
+            let footer_height: usize = if confirm.is_some() || hint { 1 } else { 0 };
+            let log_height = log_inner_height.saturating_sub(footer_height);
             let log_width = area.width as usize;
-            let mut log_lines = log.render_to_string(log_height, log_width);
+            let mut log_lines = log.render_to_string(log_height, log_width, scroll_offset);
             if let Some(cs) = confirm {
                 append_confirm_lines(&mut log_lines, cs);
             } else if hint {
-                log_lines.push("  Press any key to close".to_string());
+                log_lines.push("  j/k scroll  q quit".to_string());
             }
             let log_text = log_lines.join("\n");
             frame.render_widget(Paragraph::new(log_text), chunks[1]);
@@ -187,6 +205,8 @@ pub struct TuiRenderer {
     created_at: Instant,
     hint: bool,
     confirm_state: Option<ConfirmState>,
+    /// Lines scrolled up from the bottom of the log pane (0 = pinned to bottom).
+    scroll_offset: usize,
 }
 
 impl TuiRenderer {
@@ -218,6 +238,7 @@ impl TuiRenderer {
             created_at,
             hint: false,
             confirm_state: None,
+            scroll_offset: 0,
         }
     }
 
@@ -258,6 +279,7 @@ impl TuiRenderer {
             created_at: Instant::now(),
             hint: false,
             confirm_state: None,
+            scroll_offset: 0,
         }
     }
 
@@ -395,11 +417,62 @@ impl TuiRenderer {
     }
 
     fn wait_for_keypress_impl(&mut self, source: &mut dyn EventSource) {
+        use crossterm::event::{KeyCode, KeyModifiers};
         if let Mode::Tui(_) = &self.mode {
             self.hint = true;
+            self.scroll_offset = 0; // start pinned to bottom
             self.draw();
-            let _ = source.next_key();
+            loop {
+                let Ok(key) = source.next_key() else {
+                    break;
+                };
+                // Conservative log-height estimate for max_scroll clamping.
+                // Exact height is only known inside render_to, but render_to
+                // clamps internally too, so this just avoids spinning past top.
+                let log_height: usize = 30;
+                let max = self.log.max_scroll(log_height);
+                match (key.code, key.modifiers) {
+                    // Quit
+                    (KeyCode::Char('q'), _)
+                    | (KeyCode::Char('Q'), _)
+                    | (KeyCode::Esc, _)
+                    | (KeyCode::Enter, _) => break,
+                    (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break,
+                    // Scroll down (towards newer output)
+                    (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                        self.draw();
+                    }
+                    // Scroll up (towards older output)
+                    (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+                        self.scroll_offset = (self.scroll_offset + 1).min(max);
+                        self.draw();
+                    }
+                    // Half-page down
+                    (KeyCode::Char('d'), _) | (KeyCode::PageDown, _) => {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(log_height / 2);
+                        self.draw();
+                    }
+                    // Half-page up
+                    (KeyCode::Char('u'), _) | (KeyCode::PageUp, _) => {
+                        self.scroll_offset = (self.scroll_offset + log_height / 2).min(max);
+                        self.draw();
+                    }
+                    // Jump to top
+                    (KeyCode::Char('g'), _) | (KeyCode::Home, _) => {
+                        self.scroll_offset = max;
+                        self.draw();
+                    }
+                    // Jump to bottom
+                    (KeyCode::Char('G'), _) | (KeyCode::End, _) => {
+                        self.scroll_offset = 0;
+                        self.draw();
+                    }
+                    _ => {} // resize or unknown key — ignore
+                }
+            }
             self.hint = false;
+            self.scroll_offset = 0;
         }
     }
 
@@ -515,6 +588,7 @@ impl TuiRenderer {
                 &self.log,
                 self.confirm_state.as_ref(),
                 self.hint,
+                self.scroll_offset,
             );
         }
     }
@@ -572,7 +646,7 @@ mod tests {
             "Write Files",
         ]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, false).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
     }
 
     #[test]
@@ -587,7 +661,7 @@ mod tests {
             "Write Files",
         ]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, false).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
     }
 
     #[test]
@@ -603,7 +677,7 @@ mod tests {
         ]);
         let mut log = LogPane::new();
         log.push("a log line".to_string());
-        render_to(&mut terminal, &steps, &log, None, false).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
     }
 
     #[test]
@@ -624,7 +698,7 @@ mod tests {
         let mut log = LogPane::new();
         log.push("line one".to_string());
         log.push("line two".to_string());
-        render_to(&mut terminal, &steps, &log, None, false).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
     }
 
     // ── TuiRenderer::new tests ──
@@ -921,14 +995,14 @@ mod tests {
         let log = LogPane::new();
 
         // First draw at wide size — must not panic.
-        render_to(&mut terminal, &steps, &log, None, false).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
         assert_eq!(terminal.size().unwrap().width, 100);
 
         // Simulate a SIGWINCH / terminal resize: shrink to narrow layout (60 cols).
         terminal.backend_mut().resize(60, 20);
 
         // Second draw at narrow size — must not panic and must use new dimensions.
-        render_to(&mut terminal, &steps, &log, None, false).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
         assert_eq!(terminal.size().unwrap().width, 60);
         assert_eq!(terminal.size().unwrap().height, 20);
     }
@@ -947,11 +1021,11 @@ mod tests {
         ]);
         let log = LogPane::new();
 
-        render_to(&mut terminal, &steps, &log, None, false).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
 
         // Resize to just below the breakpoint — switches from wide to narrow layout.
         terminal.backend_mut().resize(79, 24);
-        render_to(&mut terminal, &steps, &log, None, false).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
         assert_eq!(terminal.size().unwrap().width, 79);
     }
 
@@ -1172,7 +1246,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, true).unwrap();
+        render_to(&mut terminal, &steps, &log, None, true, 0).unwrap();
     }
 
     #[test]
@@ -1185,7 +1259,7 @@ mod tests {
             question: "Proceed?".to_string(),
             focus: ConfirmFocus::Accept,
         };
-        render_to(&mut terminal, &steps, &log, Some(&cs), false).unwrap();
+        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0).unwrap();
     }
 
     #[test]
@@ -1198,7 +1272,7 @@ mod tests {
             question: "Proceed?".to_string(),
             focus: ConfirmFocus::Reject,
         };
-        render_to(&mut terminal, &steps, &log, Some(&cs), false).unwrap();
+        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0).unwrap();
     }
 
     #[test]
@@ -1207,7 +1281,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, true).unwrap();
+        render_to(&mut terminal, &steps, &log, None, true, 0).unwrap();
     }
 
     #[test]
@@ -1220,6 +1294,6 @@ mod tests {
             question: "Proceed?".to_string(),
             focus: ConfirmFocus::Accept,
         };
-        render_to(&mut terminal, &steps, &log, Some(&cs), false).unwrap();
+        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0).unwrap();
     }
 }
