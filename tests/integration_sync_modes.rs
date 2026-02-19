@@ -6,6 +6,106 @@ mod tests {
     use super::common::*;
     use predicates::prelude::*;
 
+    // ── Dry-run + tailoring subprocess behavior ─────────────────────────
+
+    /// Verify that `--dry-run` (without `--no-tailor`) DOES invoke the tailoring
+    /// subprocess but does NOT write any files to disk.
+    ///
+    /// The tailoring guard in `confirm_and_write` (sync.rs) returns early AFTER
+    /// tailoring has already run.  This means the Claude subprocess is called
+    /// (tailoring is not skipped), but its output is discarded without writing
+    /// any files.  This test pins that behavior so a future refactor that
+    /// accidentally skips tailoring *or* starts writing files during dry-run
+    /// will be caught immediately.
+    #[test]
+    fn dry_run_invokes_tailoring_subprocess_but_writes_nothing() {
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json(
+            "adr-001",
+            "Use Error Types",
+            &["Always use thiserror for errors"],
+            &[],
+            &["."],
+        );
+        let response = make_match_response_json(&format!("[{}]", adr));
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&response)
+            .create();
+
+        // Build tailoring JSON that would be returned by the Claude subprocess.
+        let tailoring_json = serde_json::json!({
+            "files": [{
+                "path": "CLAUDE.md",
+                "content": "# Tailored Rules",
+                "reasoning": "Applied",
+                "adr_ids": ["adr-001"]
+            }],
+            "skipped_adrs": [],
+            "summary": {
+                "total_input": 1,
+                "applicable": 1,
+                "not_applicable": 0,
+                "files_generated": 1
+            }
+        })
+        .to_string();
+
+        // Create a capturing binary that records every Claude subprocess invocation.
+        let dir = tempfile::tempdir().unwrap();
+        let capture_file = dir.path().join("captured_args.txt");
+        let binary_path = create_fake_claude_binary_capturing_with_tailoring(
+            dir.path(),
+            AUTH_OK,
+            ANALYSIS_SINGLE_PROJECT,
+            &tailoring_json,
+            &capture_file,
+        );
+        let config_path = dir.path().join("config.yaml");
+        let api_url = server.url();
+
+        // Construct a TestEnv manually so we can use the capturing binary.
+        let env = TestEnv {
+            dir,
+            config_path,
+            binary_path,
+            api_url,
+        };
+
+        // Run sync --force --dry-run WITHOUT --no-tailor so that tailoring runs.
+        env.cmd()
+            .args(["sync", "--force", "--dry-run", "--api-url", &env.api_url])
+            .assert()
+            .success();
+
+        // Assert: tailoring subprocess WAS invoked (tailoring = has --json-schema / skipped_adrs in args).
+        // --dry-run skips writing but does NOT skip tailoring.
+        let captured = if capture_file.exists() {
+            std::fs::read_to_string(&capture_file).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let invocations = parse_captured_invocations(&captured);
+        let tailoring_invocations: Vec<_> = invocations
+            .iter()
+            .filter(|args| args.iter().any(|a| a.contains("skipped_adrs")))
+            .collect();
+        assert!(
+            !tailoring_invocations.is_empty(),
+            "--dry-run should still invoke the tailoring subprocess (dry-run only skips writing, not tailoring); \
+             got 0 tailoring invocations. Full captured args: {:?}",
+            invocations
+        );
+
+        // Assert: CLAUDE.md was NOT written (dry-run guard prevents file I/O).
+        assert!(
+            !env.file_exists("CLAUDE.md"),
+            "--dry-run must not write CLAUDE.md to disk"
+        );
+    }
+
     // ── Dry-run mode ────────────────────────────────────────────────────
 
     #[test]
