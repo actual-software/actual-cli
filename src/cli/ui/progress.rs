@@ -500,4 +500,19 @@ mod tests {
         assert!(msg.contains("Done"), "expected msg in: {msg}");
         assert!(!msg.contains('['), "no timing without start in: {msg}");
     }
+
+    #[test]
+    fn test_start_time_returns_past_instant() {
+        let pipeline = SyncPipeline::new(false);
+        let t = pipeline.start_time();
+        // The returned instant must be at or before now
+        assert!(t <= std::time::Instant::now());
+    }
+
+    #[test]
+    fn test_start_time_quiet_returns_past_instant() {
+        let pipeline = SyncPipeline::new(true);
+        let t = pipeline.start_time();
+        assert!(t <= std::time::Instant::now());
+    }
 }
