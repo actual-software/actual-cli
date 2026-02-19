@@ -26,6 +26,7 @@ pub enum SyncPhase {
     Analysis = 1,
     Fetch = 2,
     Tailor = 3,
+    Write = 4,
 }
 
 /// Number of phases in the sync pipeline.
@@ -33,20 +34,26 @@ pub enum SyncPhase {
 /// Keep in sync with the `SyncPhase` enum variants. Update this whenever
 /// a variant is added or removed. The compile-time assert below catches
 /// mismatches between this constant and the `PHASE_LABELS` array.
-const PHASE_COUNT: usize = 4;
+const PHASE_COUNT: usize = 5;
 
 /// Display labels for each phase, indexed by `SyncPhase` discriminant.
 /// The typed array `[&str; PHASE_COUNT]` ensures the label count matches
 /// `PHASE_COUNT` at compile time — adding a variant without a label is an error.
-const PHASE_LABELS: [&str; PHASE_COUNT] = ["Environment", "Analysis", "Fetch ADRs", "Tailoring"];
+const PHASE_LABELS: [&str; PHASE_COUNT] = [
+    "Environment",
+    "Analysis",
+    "Fetch ADRs",
+    "Tailoring",
+    "Write Files",
+];
 
 // Verify that the last variant's discriminant matches the expected count.
 // Catches mismatches if a variant is added/removed without updating PHASE_COUNT.
-const _: () = assert!(SyncPhase::Tailor as usize == PHASE_COUNT - 1);
+const _: () = assert!(SyncPhase::Write as usize == PHASE_COUNT - 1);
 
 /// A multi-phase progress display for the sync command.
 ///
-/// All 4 phases are shown simultaneously: waiting → active → completed.
+/// All 5 phases are shown simultaneously: waiting → active → completed.
 /// When `quiet` is true, all operations are no-ops (no output produced).
 pub struct SyncPipeline {
     mp: Option<MultiProgress>,
@@ -56,7 +63,7 @@ pub struct SyncPipeline {
 }
 
 impl SyncPipeline {
-    /// Create a new pipeline with all 4 phases in "waiting" state.
+    /// Create a new pipeline with all 5 phases in "waiting" state.
     /// If `quiet` is true, no output is produced.
     pub fn new(quiet: bool) -> Self {
         if quiet {
@@ -254,6 +261,8 @@ mod tests {
         pipeline.skip(SyncPhase::Fetch, "skipped");
         pipeline.error(SyncPhase::Fetch, "failed");
         pipeline.warn(SyncPhase::Tailor, "warning");
+        pipeline.start(SyncPhase::Write, "writing");
+        pipeline.success(SyncPhase::Write, "written");
         pipeline.finish_remaining();
     }
 
@@ -263,8 +272,8 @@ mod tests {
         assert!(pipeline.mp.is_some(), "expected mp to be Some");
         assert_eq!(
             pipeline.bars.iter().filter(|b| b.is_some()).count(),
-            4,
-            "expected 4 phase bars"
+            5,
+            "expected 5 phase bars"
         );
 
         // Start and succeed each phase
@@ -289,6 +298,10 @@ mod tests {
         pipeline.start(SyncPhase::Tailor, "Tailoring...");
         pipeline.success(SyncPhase::Tailor, "Tailored 5 into 3");
         assert!(bar(&pipeline, SyncPhase::Tailor).is_finished());
+
+        pipeline.start(SyncPhase::Write, "Writing files...");
+        pipeline.success(SyncPhase::Write, "2 created · 0 updated · 0 failed");
+        assert!(bar(&pipeline, SyncPhase::Write).is_finished());
     }
 
     #[test]
@@ -339,10 +352,11 @@ mod tests {
         // Finish only the first phase
         pipeline.start(SyncPhase::Environment, "Checking...");
         pipeline.success(SyncPhase::Environment, "OK");
-        // Remaining 3 should be unfinished
+        // Remaining 4 should be unfinished
         assert!(!bar(&pipeline, SyncPhase::Analysis).is_finished());
         assert!(!bar(&pipeline, SyncPhase::Fetch).is_finished());
         assert!(!bar(&pipeline, SyncPhase::Tailor).is_finished());
+        assert!(!bar(&pipeline, SyncPhase::Write).is_finished());
 
         pipeline.finish_remaining();
 
@@ -425,12 +439,13 @@ mod tests {
     #[test]
     fn test_phase_label_alignment() {
         let pipeline = SyncPipeline::new(false);
-        // Start all 4 phases — initial messages should have consistent width
+        // Start all 5 phases — initial messages should have consistent width
         for (i, phase) in [
             SyncPhase::Environment,
             SyncPhase::Analysis,
             SyncPhase::Fetch,
             SyncPhase::Tailor,
+            SyncPhase::Write,
         ]
         .iter()
         .enumerate()

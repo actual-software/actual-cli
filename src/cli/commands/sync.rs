@@ -947,7 +947,30 @@ pub fn confirm_and_write(
     }
 
     // Step 5: Write confirmed files
+    pipeline.start(SyncPhase::Write, "Writing files...");
     let results = write_files(root_dir, &confirmed, format);
+
+    // Report Write phase outcome
+    let write_created: usize = results
+        .iter()
+        .filter(|r| r.action == WriteAction::Created)
+        .count();
+    let write_updated: usize = results
+        .iter()
+        .filter(|r| r.action == WriteAction::Updated)
+        .count();
+    let write_failed: usize = results
+        .iter()
+        .filter(|r| r.action == WriteAction::Failed)
+        .count();
+    let write_summary = format!(
+        "{write_created} created \u{00b7} {write_updated} updated \u{00b7} {write_failed} failed"
+    );
+    if write_failed > 0 {
+        pipeline.warn(SyncPhase::Write, &write_summary);
+    } else {
+        pipeline.success(SyncPhase::Write, &write_summary);
+    }
 
     // Step 6: Report results and return SyncResult
     let width = term_size::terminal_width();
