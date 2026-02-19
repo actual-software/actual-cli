@@ -33,8 +33,12 @@ impl AnthropicApiRunner {
 
     /// Create a runner with a custom base URL (used in tests to point at a mock server).
     fn with_base_url(api_key: String, model: String, timeout: Duration, base_url: String) -> Self {
+        let is_localhost = base_url.starts_with("http://localhost")
+            || base_url.starts_with("http://127.0.0.1")
+            || base_url.starts_with("http://[::1]");
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .https_only(!is_localhost)
             .build()
             .expect("failed to build reqwest client");
         Self {
@@ -94,7 +98,9 @@ impl AnthropicApiRunner {
         }
 
         if status.is_server_error() {
-            let body = response.text().await.unwrap_or_else(|_| String::new());
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            let truncated = &body_bytes[..body_bytes.len().min(4096)];
+            let body = String::from_utf8_lossy(truncated).into_owned();
             return Err(ActualError::ClaudeSubprocessFailed {
                 message: format!("Anthropic API error: {status}"),
                 stderr: body,

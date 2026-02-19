@@ -12,6 +12,7 @@ pub const DEFAULT_API_URL: &str = "https://api-service.api.prod.actual.ai";
 
 const USER_AGENT_VALUE: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
+#[derive(Debug)]
 pub struct ActualApiClient {
     client: reqwest::Client,
     base_url: String,
@@ -19,11 +20,24 @@ pub struct ActualApiClient {
 
 impl ActualApiClient {
     pub fn new(base_url: &str) -> Result<Self, ActualError> {
+        // Enforce HTTPS for all non-loopback URLs to protect credentials in transit.
+        let is_localhost = base_url.starts_with("http://localhost")
+            || base_url.starts_with("http://127.0.0.1")
+            || base_url.starts_with("http://[::1]");
+        if !base_url.starts_with("https://") && !is_localhost {
+            return Err(ActualError::ConfigError(
+                "API URL must use HTTPS (got a non-HTTPS URL). \
+                 Use https:// to protect your credentials."
+                    .to_string(),
+            ));
+        }
+
         let mut default_headers = HeaderMap::new();
         default_headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
 
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
+            .https_only(!is_localhost)
             .build()
             .map_err(|e| ActualError::ApiError(format!("Failed to build HTTP client: {e}")))?;
 
@@ -144,7 +158,9 @@ impl ActualApiClient {
                 )),
             }
         } else {
-            let body = response.text().await.unwrap_or_default();
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            let truncated = &body_bytes[..body_bytes.len().min(4096)];
+            let body = String::from_utf8_lossy(truncated);
             ActualError::ApiError(format!("HTTP {status}: {body}"))
         }
     }
@@ -496,14 +512,33 @@ mod tests {
 
     #[test]
     fn test_new_trims_trailing_slash() {
-        let client = ActualApiClient::new("http://example.com/").unwrap();
-        assert_eq!(client.base_url, "http://example.com");
+        let client = ActualApiClient::new("https://example.com/").unwrap();
+        assert_eq!(client.base_url, "https://example.com");
     }
 
     #[test]
     fn test_new_returns_valid_client() {
-        let client = ActualApiClient::new("http://localhost");
+        let client = ActualApiClient::new("https://example.com");
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_new_rejects_http_non_localhost() {
+        let result = ActualApiClient::new("http://example.com");
+        assert!(
+            matches!(result, Err(ActualError::ConfigError(ref msg)) if msg.contains("HTTPS")),
+            "expected ConfigError for HTTP non-localhost URL, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_new_allows_localhost_http() {
+        let result = ActualApiClient::new("http://127.0.0.1:8080");
+        assert!(
+            result.is_ok(),
+            "localhost HTTP should be allowed for testing"
+        );
     }
 
     #[test]

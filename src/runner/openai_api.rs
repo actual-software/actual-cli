@@ -104,6 +104,7 @@ impl OpenAiApiRunner {
     pub fn new(api_key: String, model: String, timeout: Duration) -> Self {
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .https_only(true)
             .build()
             .expect("failed to build reqwest client");
         Self {
@@ -125,8 +126,21 @@ impl OpenAiApiRunner {
     }
 
     /// Override the base URL (used in tests to point at a mockito server).
+    ///
+    /// Rebuilds the inner `reqwest::Client` with `https_only` disabled when the
+    /// URL is a loopback address so that mock servers work in tests.
     #[cfg(test)]
     fn with_base_url(mut self, base_url: String) -> Self {
+        let is_localhost = base_url.starts_with("http://localhost")
+            || base_url.starts_with("http://127.0.0.1")
+            || base_url.starts_with("http://[::1]");
+        if is_localhost {
+            self.client = reqwest::Client::builder()
+                .timeout(self.timeout)
+                .https_only(false)
+                .build()
+                .expect("failed to build reqwest client for test");
+        }
         self.base_url = base_url;
         self
     }
@@ -195,7 +209,9 @@ impl TailoringRunner for OpenAiApiRunner {
         }
 
         if status.is_server_error() {
-            let body_text = response.text().await.unwrap_or_default();
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            let truncated = &body_bytes[..body_bytes.len().min(4096)];
+            let body_text = String::from_utf8_lossy(truncated).into_owned();
             return Err(ActualError::ClaudeSubprocessFailed {
                 message: format!("OpenAI API error: {status}"),
                 stderr: body_text,
