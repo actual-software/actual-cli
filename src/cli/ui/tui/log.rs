@@ -42,17 +42,37 @@ impl LogPane {
         self.buffer.is_empty()
     }
 
-    /// Render the last `height` lines, each truncated to `width` visible chars.
-    /// Returns a Vec of strings (one per line, from top to bottom).
-    /// If there are fewer than `height` lines, returns all of them.
-    pub fn render_to_string(&self, height: usize, width: usize) -> Vec<String> {
+    /// Render a window of `height` lines from the buffer, each truncated to
+    /// `width` visible chars.  Returns a Vec of strings (top to bottom).
+    ///
+    /// `scroll_offset` is the number of lines scrolled **up** from the bottom.
+    /// - `0` → pinned to the bottom (auto-scroll during sync).
+    /// - `n` → the bottom of the visible window is `n` lines above the last
+    ///   line, letting the user review earlier output.
+    ///
+    /// The offset is clamped so it never scrolls past the first line.
+    pub fn render_to_string(
+        &self,
+        height: usize,
+        width: usize,
+        scroll_offset: usize,
+    ) -> Vec<String> {
         let total = self.buffer.len();
-        let start = total.saturating_sub(height);
+        let clamped = scroll_offset.min(total.saturating_sub(1));
+        let bottom = total.saturating_sub(clamped);
+        let start = bottom.saturating_sub(height);
         self.buffer
             .iter()
             .skip(start)
+            .take(height)
             .map(|line| truncate_line(line, width))
             .collect()
+    }
+
+    /// Maximum scroll offset: how many lines the user can scroll up before the
+    /// first buffered line reaches the top of a `height`-row window.
+    pub fn max_scroll(&self, height: usize) -> usize {
+        self.buffer.len().saturating_sub(height)
     }
 }
 
@@ -107,7 +127,7 @@ mod tests {
         pane.push("third".to_string());
         // Buffer should only hold 2 items, oldest ("first") dropped
         assert_eq!(pane.len(), 2);
-        let rendered = pane.render_to_string(10, 100);
+        let rendered = pane.render_to_string(10, 100, 0);
         assert_eq!(rendered[0], "second");
         assert_eq!(rendered[1], "third");
     }
@@ -117,7 +137,7 @@ mod tests {
         let mut pane = LogPane::new();
         pane.push("line 1".to_string());
         pane.push("line 2".to_string());
-        let result = pane.render_to_string(10, 100);
+        let result = pane.render_to_string(10, 100, 0);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], "line 1");
         assert_eq!(result[1], "line 2");
@@ -130,7 +150,7 @@ mod tests {
             pane.push(format!("line {i}"));
         }
         // Ask for only 3 lines — should get last 3
-        let result = pane.render_to_string(3, 100);
+        let result = pane.render_to_string(3, 100, 0);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0], "line 7");
         assert_eq!(result[1], "line 8");
@@ -160,7 +180,7 @@ mod tests {
     fn test_render_with_truncation() {
         let mut pane = LogPane::new();
         pane.push("hello world".to_string());
-        let result = pane.render_to_string(5, 7);
+        let result = pane.render_to_string(5, 7, 0);
         assert_eq!(result[0], "hello …");
     }
 }
