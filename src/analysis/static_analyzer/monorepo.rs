@@ -2015,16 +2015,10 @@ mod tests {
         // beyond MAX_WALK_DEPTH levels deep. With depth 20, the walker sees
         // at most 20 levels, so we can have at most 20 "nested" directories
         // matched (one at each depth from 1..=20).
-        assert!(
-            result.len() <= MAX_WALK_DEPTH,
-            "expected at most {MAX_WALK_DEPTH} results but got {}",
-            result.len()
-        );
+        let count = result.len();
+        assert!(count <= MAX_WALK_DEPTH);
         // The walk must not be empty either — there are valid nested dirs
         // within the depth limit.
-        assert!(
-            !result.is_empty(),
-            "expected at least one match within depth limit"
-        );
+        assert!(count > 0);
     }
 }
