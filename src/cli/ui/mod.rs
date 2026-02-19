@@ -10,3 +10,4 @@ pub mod terminal;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod theme;
+pub mod tui;
