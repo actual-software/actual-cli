@@ -56,7 +56,7 @@ fn gradient_rgb(line_idx: usize, total_lines: usize) -> (u8, u8, u8) {
 /// When `use_color` is true each line is wrapped with 24-bit ANSI
 /// foreground-color escapes for the gradient. When false the lines
 /// are returned plain.
-fn render_banner(use_color: bool) -> Vec<String> {
+pub(crate) fn render_banner(use_color: bool) -> Vec<String> {
     let lines: Vec<&str> = BANNER.lines().collect();
     let total = lines.len();
 
