@@ -1242,6 +1242,114 @@ mod tests {
         );
     }
 
+    // --- Tests for send-fail (dropped receiver) warn branches ---
+
+    /// When the receiver is dropped before tailoring starts, sending
+    /// ProjectStarted, ProjectCompleted, and (on timeout) ProjectFailed events
+    /// all hit the `tracing::warn!` branch.  The operations should still
+    /// complete / return the correct result without panicking.
+    #[tokio::test]
+    async fn test_progress_events_dropped_receiver_success_path() {
+        let projects = vec![make_project("solo")];
+        let adrs = vec![make_adr("adr-001")];
+        let responses = vec![make_output_json(
+            "apps/solo/CLAUDE.md",
+            "Rules",
+            &["adr-001"],
+        )];
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(5));
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
+        };
+
+        // Drop the receiver immediately so all sends fail with is_err()=true,
+        // exercising the tracing::warn! branches for ProjectStarted and
+        // ProjectCompleted.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        drop(rx);
+
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, Some(tx)).await;
+        assert!(
+            result.is_ok(),
+            "dropped receiver should not abort tailoring: {result:?}"
+        );
+    }
+
+    /// When the receiver is dropped before tailoring starts and the project
+    /// fails, the ProjectFailed send also hits the warn branch.
+    #[tokio::test]
+    async fn test_progress_events_dropped_receiver_error_path() {
+        let projects = vec![make_project("bad")];
+        let adrs = vec![make_adr("adr-001")];
+
+        let responses = vec![MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+            message: "crashed".to_string(),
+            stderr: String::new(),
+        })];
+        let runner = ConcurrentMockRunner::with_responses(responses, Duration::from_millis(5));
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
+        };
+
+        // Drop receiver immediately so ProjectStarted + ProjectFailed sends
+        // both hit the is_err() branch.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        drop(rx);
+
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, Some(tx)).await;
+        assert!(
+            result.is_err(),
+            "expected error to propagate even with dropped receiver"
+        );
+    }
+
+    /// When the receiver is dropped before a timeout fires, the timeout
+    /// ProjectFailed send also hits the warn branch.
+    #[tokio::test]
+    async fn test_progress_events_dropped_receiver_timeout_path() {
+        tokio::time::pause();
+
+        let projects = vec![make_project("slow")];
+        let adrs = vec![make_adr("adr-001")];
+        let responses = vec![make_output_json(
+            "apps/slow/CLAUDE.md",
+            "Rules",
+            &["adr-001"],
+        )];
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_secs(10));
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(2),
+            output_format: &OutputFormat::ClaudeMd,
+        };
+
+        // Drop receiver so the timeout ProjectFailed send hits the warn branch.
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        drop(rx);
+
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, Some(tx)).await;
+        assert!(
+            matches!(result, Err(ActualError::ClaudeTimeout { seconds: 2 })),
+            "expected ClaudeTimeout even with dropped receiver: {result:?}"
+        );
+    }
+
     // --- Config validation tests ---
 
     #[test]

@@ -3384,6 +3384,42 @@ mod tests {
         assert_eq!(cached.cache_key, "disk-test-key");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_store_tailoring_cache_warns_on_disk_write_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        // Create a read-only directory so that save_to fails, exercising the
+        // "warning: failed to save tailoring cache" branch.
+        let dir = tempfile::tempdir().unwrap();
+        let ro_dir = dir.path().join("readonly");
+        std::fs::create_dir(&ro_dir).unwrap();
+        let cfg_path = ro_dir.join("config.yaml");
+
+        let mut config = crate::config::Config::default();
+        let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
+
+        // Make the directory read-only so save_to cannot write
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // store_tailoring_cache should not panic; it warns and returns
+        store_tailoring_cache(
+            &mut config,
+            &cfg_path,
+            Some("warn-test-key"),
+            dir.path(),
+            &output,
+        );
+
+        // In-memory cache is still populated even though disk write failed
+        assert!(
+            config.cached_tailoring.is_some(),
+            "in-memory cache should be set even if disk write failed"
+        );
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     // ── Tailoring cache round-trip test ──
 
     #[test]
