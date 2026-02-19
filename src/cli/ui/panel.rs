@@ -42,6 +42,9 @@ enum PanelRow {
     },
     /// Horizontal separator: `├───┤`.
     Separator,
+    /// Footer line: rendered with a separator above and muted (dim) text,
+    /// visually distinct from a plain [`PanelRow::Line`].
+    Footer(String),
 }
 
 /// A box-drawn panel with optional title and mixed content rows.
@@ -102,9 +105,10 @@ impl Panel {
         self
     }
 
-    /// Add a full-width content line (conventionally used as the last row before the bottom border).
+    /// Add a footer row: rendered with a separator above and muted text,
+    /// visually distinct from [`Panel::line`].
     pub fn footer(mut self, text: &str) -> Self {
-        self.rows.push(PanelRow::Line(text.to_string()));
+        self.rows.push(PanelRow::Footer(text.to_string()));
         self
     }
 
@@ -156,6 +160,27 @@ impl Panel {
                         theme::border("├"),
                         theme::border(fill),
                         theme::border("┤")
+                    );
+                }
+                PanelRow::Footer(text) => {
+                    // Separator above footer
+                    let fill: String = "─".repeat(inner + 2);
+                    let _ = writeln!(
+                        out,
+                        "{}{}{}",
+                        theme::border("├"),
+                        theme::border(fill),
+                        theme::border("┤")
+                    );
+                    // Muted footer text
+                    let line = Self::fit_content(text, inner);
+                    let _ = writeln!(
+                        out,
+                        "{} {}{} {}",
+                        theme::border("│"),
+                        theme::muted(line),
+                        Self::padding(inner, Self::visual_width(text).min(inner)),
+                        theme::border("│"),
                     );
                 }
             }
@@ -329,6 +354,10 @@ impl Panel {
                 PanelRow::Separator => {
                     let _ = writeln!(out, "---");
                 }
+                PanelRow::Footer(text) => {
+                    let _ = writeln!(out, "---");
+                    let _ = writeln!(out, "{text}");
+                }
             }
         }
 
@@ -498,15 +527,25 @@ mod tests {
     // ── 7. Footer ──
 
     #[test]
-    fn footer_renders_above_bottom_border() {
+    fn footer_renders_with_separator_above_and_muted_text() {
         let rendered = Panel::new()
             .line("content")
             .footer("Total: 5 items")
             .render(80);
         let p = plain(&rendered);
         let lines: Vec<&str> = p.lines().collect();
-        // Footer is the second-to-last line (before bottom border)
-        let footer_line = lines[lines.len() - 2];
+        // Structure: top(0) + content(1) + footer-sep(2) + footer-text(3) + bottom(4)
+        assert_eq!(lines.len(), 5, "should have 5 lines");
+        let sep_line = lines[2];
+        assert!(
+            sep_line.starts_with('├'),
+            "separator above footer should start with ├: {sep_line}"
+        );
+        assert!(
+            sep_line.ends_with('┤'),
+            "separator above footer should end with ┤: {sep_line}"
+        );
+        let footer_line = lines[3];
         assert!(
             footer_line.contains("Total: 5 items"),
             "footer should contain text: {footer_line}"
@@ -518,6 +557,32 @@ mod tests {
         assert!(
             footer_line.ends_with(" │"),
             "footer should have right border"
+        );
+    }
+
+    #[test]
+    fn footer_is_distinct_from_line() {
+        // A plain line should NOT insert a separator above it; a footer SHOULD.
+        let with_line = plain(&Panel::new().line("text").render(80));
+        let with_footer = plain(&Panel::new().footer("text").render(80));
+
+        let line_rows: Vec<&str> = with_line.lines().collect();
+        let footer_rows: Vec<&str> = with_footer.lines().collect();
+
+        // line: top + content + bottom = 3 rows
+        assert_eq!(line_rows.len(), 3, "line panel should have 3 rows");
+        // footer: top + separator + footer-text + bottom = 4 rows
+        assert_eq!(
+            footer_rows.len(),
+            4,
+            "footer panel should have 4 rows (sep + text)"
+        );
+
+        // The extra row in footer is the separator
+        assert!(
+            footer_rows[1].starts_with('├'),
+            "footer's extra row should be a separator: {}",
+            footer_rows[1]
         );
     }
 
@@ -715,7 +780,8 @@ mod tests {
         let long_footer = "F".repeat(200);
         let rendered = Panel::new().footer(&long_footer).render(50);
         let p = plain(&rendered);
-        let footer_line = p.lines().nth(1).expect("should have footer line");
+        // Footer now emits: top(0) + separator(1) + footer-text(2) + bottom(3)
+        let footer_line = p.lines().nth(2).expect("should have footer line");
         assert_eq!(
             footer_line.chars().count(),
             50,
@@ -760,8 +826,9 @@ mod tests {
         let p = plain(&rendered);
         let lines: Vec<&str> = p.lines().collect();
 
-        // Expected: top + line + sep + 3 kvs + sep + footer + bottom = 9 lines
-        assert_eq!(lines.len(), 9, "expected 9 lines");
+        // Expected: top + line + sep + 3 kvs + sep + footer-sep + footer-text + bottom = 10 lines
+        // (footer() now emits a separator row + a muted text row)
+        assert_eq!(lines.len(), 10, "expected 10 lines");
 
         // All lines should be exactly 60 chars
         for (i, line) in lines.iter().enumerate() {
