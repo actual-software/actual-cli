@@ -302,6 +302,37 @@ mod parse_tests {
         }
     }
 
+    // ---- parse_budget unit tests ----
+
+    #[test]
+    fn test_parse_budget_valid_zero() {
+        assert_eq!(parse_budget("0").unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_parse_budget_valid_positive() {
+        assert_eq!(parse_budget("1.5").unwrap(), 1.5);
+    }
+
+    #[test]
+    fn test_parse_budget_rejects_negative() {
+        let err = parse_budget("-1.0").unwrap_err();
+        assert!(err.contains("non-negative"), "message: {err}");
+    }
+
+    #[test]
+    fn test_parse_budget_rejects_infinite() {
+        // f64::INFINITY parses but is not finite
+        let err = parse_budget("inf").unwrap_err();
+        assert!(err.contains("non-negative"), "message: {err}");
+    }
+
+    #[test]
+    fn test_parse_budget_rejects_invalid_string() {
+        let err = parse_budget("not-a-number").unwrap_err();
+        assert!(err.contains("not a valid number"), "message: {err}");
+    }
+
     // ---- parse_model unit tests ----
 
     #[test]
