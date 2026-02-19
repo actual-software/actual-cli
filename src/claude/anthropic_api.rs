@@ -390,10 +390,17 @@ mod tests {
         }
     }
 
+    /// Mutex to serialize tests that mutate the `ANTHROPIC_API_KEY` environment variable.
+    ///
+    /// Rust tests run in parallel by default, so simultaneous mutations of the same
+    /// environment variable cause flaky failures.  Holding this mutex during any test
+    /// that reads or writes `ANTHROPIC_API_KEY` ensures they are ordered safely.
+    static ENV_KEY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // Test 6: from_env returns Err when ANTHROPIC_API_KEY not set
     #[test]
     fn test_from_env_missing_key() {
-        // Remove the env var to ensure it's not set
+        let _guard = ENV_KEY_MUTEX.lock().unwrap();
         std::env::remove_var("ANTHROPIC_API_KEY");
 
         let result =
@@ -409,6 +416,7 @@ mod tests {
     // Test 7: from_env succeeds when ANTHROPIC_API_KEY is set
     #[test]
     fn test_from_env_with_key() {
+        let _guard = ENV_KEY_MUTEX.lock().unwrap();
         std::env::set_var("ANTHROPIC_API_KEY", "sk-test-key-12345");
 
         let result =
@@ -466,6 +474,130 @@ mod tests {
         assert!(
             matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
             "expected ClaudeNotAuthenticated, got: {:?}",
+            result
+        );
+    }
+
+    // Test 10: invalid schema JSON maps to ClaudeOutputParse
+    #[tokio::test]
+    async fn test_invalid_schema_json_maps_to_parse_error() {
+        let server = Server::new_async().await;
+
+        // No mock needed — the error happens before the HTTP call.
+        let runner = make_runner(&server.url());
+        let result = runner
+            .run_tailoring("prompt", "NOT VALID JSON", None, None)
+            .await;
+
+        assert!(
+            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
+            "expected ClaudeOutputParse, got: {:?}",
+            result
+        );
+    }
+
+    // Test 11: 200 response with non-JSON body maps to ClaudeSubprocessFailed
+    #[tokio::test]
+    async fn test_200_non_json_body_maps_to_subprocess_failed() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "text/plain")
+            .with_body("this is not json")
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        assert!(
+            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
+            "expected ClaudeSubprocessFailed for non-JSON 200 body, got: {:?}",
+            result
+        );
+    }
+
+    // Test 12: tool_use input that doesn't match TailoringOutput schema maps to ClaudeOutputParse
+    #[tokio::test]
+    async fn test_invalid_tool_use_input_maps_to_parse_error() {
+        let mut server = Server::new_async().await;
+
+        // Return a tool_use block whose `input` cannot be deserialized as TailoringOutput.
+        let bad_input = serde_json::json!({ "unexpected_field": 42 });
+        let response_body = anthropic_tool_use_response(bad_input);
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        assert!(
+            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
+            "expected ClaudeOutputParse for bad tool input, got: {:?}",
+            result
+        );
+    }
+
+    // Test 13: connection refused maps to ClaudeSubprocessFailed
+    #[tokio::test]
+    async fn test_connection_refused_maps_to_subprocess_failed() {
+        // Point at a port that is not listening so reqwest returns a connection error.
+        let runner = make_runner("http://127.0.0.1:1");
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        assert!(
+            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
+            "expected ClaudeSubprocessFailed for connection refused, got: {:?}",
+            result
+        );
+    }
+
+    // Test 14: request timeout maps to ClaudeTimeout
+    #[tokio::test]
+    async fn test_request_timeout_maps_to_claude_timeout() {
+        // Bind a TCP listener that accepts connections but never sends data,
+        // so the request hangs until our very short timeout fires.
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind failed");
+        let port = listener.local_addr().unwrap().port();
+
+        // Spawn a thread that accepts the connection and sits on it so the HTTP
+        // request times out waiting for the response headers.
+        std::thread::spawn(move || {
+            // Accept one connection then drop it after a brief delay.
+            if let Ok((_stream, _)) = listener.accept() {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        });
+
+        // Use a 1 ms timeout — the request will time out before headers arrive.
+        let runner = AnthropicApiRunner::with_base_url(
+            "test-key".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            Duration::from_millis(1),
+            format!("http://127.0.0.1:{port}"),
+        );
+
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        assert!(
+            matches!(result, Err(ActualError::ClaudeTimeout { .. })),
+            "expected ClaudeTimeout, got: {:?}",
             result
         );
     }
