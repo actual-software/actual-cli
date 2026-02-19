@@ -22,6 +22,7 @@ fn run_auth() -> Result<(), ActualError> {
 pub(crate) fn check_auth(binary_path: &Path) -> Result<ClaudeAuthStatus, ActualError> {
     let output = std::process::Command::new(binary_path)
         .args(["auth", "status", "--json"])
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|e| ActualError::ClaudeSubprocessFailed {
             message: format!("failed to execute claude: {e}"),
@@ -45,31 +46,68 @@ pub(crate) fn check_auth(binary_path: &Path) -> Result<ClaudeAuthStatus, ActualE
 
 /// Check Claude Code authentication status with a timeout.
 ///
-/// Spawns a background thread to run `claude auth status --json` and waits
-/// for it to complete within `timeout`. Returns [`ActualError::ClaudeTimeout`]
-/// if the subprocess does not respond in time.
-///
-/// Use this instead of [`check_auth`] when you need a bounded wait. Note that
-/// on timeout the background thread continues running until the subprocess
-/// exits — threads cannot be forcibly killed.
+/// Uses `tokio::process::Command` with `kill_on_drop(true)` so that when the
+/// timeout fires, dropping the child handle sends SIGKILL and prevents orphaned
+/// processes. A single-threaded tokio runtime is created for this call so the
+/// function remains synchronous for callers in the CLI dispatch path.
 pub fn check_auth_with_timeout(
     binary_path: &Path,
     timeout: std::time::Duration,
 ) -> Result<ClaudeAuthStatus, ActualError> {
-    use std::sync::mpsc;
-
     let binary_path = binary_path.to_path_buf();
-    let (tx, rx) = mpsc::channel();
 
-    std::thread::spawn(move || {
-        let _ = tx.send(check_auth(&binary_path));
-    });
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ActualError::ClaudeSubprocessFailed {
+            message: format!("failed to build tokio runtime: {e}"),
+            stderr: String::new(),
+        })?;
 
-    rx.recv_timeout(timeout)
-        .map_err(|_| ActualError::ClaudeTimeout {
-            // Round up so sub-second timeouts display as "1s" rather than "0s".
-            seconds: timeout.as_secs_f64().ceil() as u64,
-        })?
+    rt.block_on(async move {
+        let mut cmd = tokio::process::Command::new(&binary_path);
+        cmd.args(["auth", "status", "--json"]);
+        cmd.stdin(std::process::Stdio::null());
+        // When the timeout future is dropped, the Child is dropped. With
+        // kill_on_drop(true) tokio sends SIGKILL, preventing orphaned processes.
+        cmd.kill_on_drop(true);
+
+        let child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| ActualError::ClaudeSubprocessFailed {
+                message: format!("failed to spawn claude: {e}"),
+                stderr: String::new(),
+            })?;
+
+        let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+
+        match result {
+            Ok(Ok(output)) => {
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    return Err(ActualError::ClaudeSubprocessFailed {
+                        message: format!(
+                            "claude auth status exited with code {}",
+                            output.status.code().unwrap_or(-1)
+                        ),
+                        stderr,
+                    });
+                }
+                let status: ClaudeAuthStatus = serde_json::from_slice(&output.stdout)?;
+                Ok(status)
+            }
+            Ok(Err(e)) => Err(ActualError::ClaudeSubprocessFailed {
+                message: format!("failed to wait for claude: {e}"),
+                stderr: String::new(),
+            }),
+            Err(_) => Err(ActualError::ClaudeTimeout {
+                // Round up so sub-second timeouts display as "1s" rather than "0s".
+                seconds: timeout.as_secs_f64().ceil() as u64,
+            }),
+        }
+    })
 }
 
 fn run_auth_with_binary(binary_path: &Path) -> Result<(), ActualError> {
