@@ -13,7 +13,6 @@
 
 use std::fmt::Write;
 
-use super::term_size;
 use super::theme;
 
 /// Authentication display info for the header bar.
@@ -86,19 +85,6 @@ fn format_auth_status(auth: Option<&AuthDisplay>) -> String {
             format!("{} ", theme::muted(&label).for_stderr())
         }
     }
-}
-
-/// Print the header bar to stderr, querying the terminal width.
-///
-/// Mirrors the pattern used by [`crate::branding::banner::print_banner`]:
-/// direct stderr output for branding/chrome that is not part of the
-/// testable data path.
-pub fn print_header_bar(auth: &AuthDisplay) {
-    let width = term_size::terminal_width();
-    eprint!(
-        "{}",
-        render_header_bar(width, env!("CARGO_PKG_VERSION"), Some(auth))
-    );
 }
 
 #[cfg(test)]
