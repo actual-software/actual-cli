@@ -1156,29 +1156,27 @@ mod tests {
         let adrs = vec![make_adr("adr-001")];
 
         // Use a semaphore with 0 permits and close it immediately so that
-        // any acquire() call will fail with AcquireError rather than blocking.
+        // any acquire() call fails with AcquireError.  The production code
+        // must convert that into ActualError::InternalError rather than panic.
         let semaphore = Semaphore::new(0);
         semaphore.close();
 
         let runner = ConcurrentMockRunner::new(vec![], Duration::from_millis(0));
 
-        let project_json =
-            crate::tailoring::invoke::serialize_json(&projects[0], "project").unwrap();
-        let batches = crate::tailoring::batch::create_batches(&adrs, 15);
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 15,
+            existing_claude_md_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
+        };
 
-        // Directly test the closed-semaphore path via the private function.
-        let futures: Vec<_> = batches
-            .iter()
-            .map(|_batch_adrs| async {
-                semaphore.acquire().await.map_err(|_| {
-                    ActualError::InternalError(
-                        "semaphore closed unexpectedly — this is a bug".to_string(),
-                    )
-                })
-            })
-            .collect();
-
-        let result: Result<Vec<_>, ActualError> = futures::future::try_join_all(futures).await;
+        // Call the private function directly — accessible inside the same
+        // module's test block.
+        let result =
+            tailor_single_project(&runner, &projects[0], &adrs, &config, &semaphore, None).await;
 
         // Must return InternalError, not panic
         let err = result.unwrap_err();
@@ -1191,9 +1189,5 @@ mod tests {
             msg.contains("semaphore closed unexpectedly"),
             "expected semaphore error message, got: {msg}"
         );
-
-        // Suppress unused-variable warnings for runner / project_json
-        drop(runner);
-        drop(project_json);
     }
 }
