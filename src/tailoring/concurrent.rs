@@ -5,10 +5,10 @@ use tokio::sync::Semaphore;
 
 use crate::analysis::types::Project;
 use crate::api::types::Adr;
-use crate::claude::TailoringRunner;
 use crate::error::ActualError;
 use crate::generation::merge::merge_outputs;
 use crate::generation::OutputFormat;
+use crate::runner::TailoringRunner;
 use crate::tailoring::batch::create_batches;
 use crate::tailoring::invoke::{invoke_tailoring, serialize_json};
 use crate::tailoring::types::{TailoringEvent, TailoringOutput};

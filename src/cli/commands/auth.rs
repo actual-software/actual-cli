@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use crate::claude::auth::ClaudeAuthStatus;
-use crate::claude::binary::find_claude_binary;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
+use crate::runner::auth::ClaudeAuthStatus;
+use crate::runner::binary::find_claude_binary;
 
 pub fn exec() -> Result<(), ActualError> {
     run_auth()

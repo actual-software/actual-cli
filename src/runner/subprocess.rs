@@ -189,7 +189,7 @@ impl TailoringRunner for CliClaudeRunner {
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError> {
-        use crate::claude::options::InvocationOptions;
+        use crate::runner::options::InvocationOptions;
 
         let mut opts = InvocationOptions::for_tailoring(model_override);
         opts.json_schema = Some(schema.to_string());

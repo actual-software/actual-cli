@@ -4,7 +4,7 @@ use std::path::Path;
 
 /// XOR key used to obfuscate sensitive string constants at compile time.
 /// Non-printable bytes so they don't appear in `strings` output.
-/// IMPORTANT: must stay in sync with src/claude/obfuscation.rs KEY constant.
+/// IMPORTANT: must stay in sync with src/runner/obfuscation.rs KEY constant.
 const KEY: &[u8] = &[
     0x17, 0x8F, 0x09, 0xAB, 0xDC, 0xE2, 0xF4, 0xD1, 0x0E, 0x93, 0xE1, 0xBF, 0xAA, 0x88, 0xCF, 0x1D,
     0xC7, 0xD6, 0x9E, 0x9A, 0xF2, 0xF5, 0x8B, 0xD4, 0xC7, 0xEC, 0x1C, 0x85, 0xEB, 0xB0, 0xA9, 0xFE,
@@ -26,8 +26,8 @@ fn bytes_literal(data: &[u8]) -> String {
 fn main() {
     // Tell Cargo to re-run this script if source files change.
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/claude/prompts.rs");
-    println!("cargo:rerun-if-changed=src/claude/schemas.rs");
+    println!("cargo:rerun-if-changed=src/runner/prompts.rs");
+    println!("cargo:rerun-if-changed=src/runner/schemas.rs");
 
     // --- Standard prompt template (ClaudeMd / AgentsMd) ---
     // Uses {0} .. {3} positional placeholders so it survives format!() at runtime:
