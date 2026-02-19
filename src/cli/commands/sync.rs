@@ -1971,6 +1971,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_run_sync_zero_batch_size_returns_config_error() {
+        // A config.yaml with batch_size: 0 should cause run_sync to return a ConfigError
+        // when it reaches the tailoring phase (ConcurrentTailoringConfig::new rejects 0).
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "matched_adrs": [{
+                    "id": "adr-001",
+                    "title": "Test ADR",
+                    "context": null,
+                    "policies": ["Do the thing"],
+                    "instructions": null,
+                    "category": {"id": "cat-1", "name": "General", "path": "General"},
+                    "applies_to": {"languages": ["rust"], "frameworks": []},
+                    "matched_projects": ["."]
+                }],
+                "metadata": {"total_matched": 1, "by_framework": {}, "deduplicated_count": 1}
+            }"#,
+            )
+            .create();
+
+        let dir = tempfile::tempdir().unwrap();
+        // Write a config that has batch_size: 0 (bypasses the dotpath guard which
+        // only runs on interactive set, not raw YAML deserialization).
+        std::fs::write(dir.path().join("config.yaml"), "batch_size: 0\n").unwrap();
+
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+        );
+        assert!(
+            matches!(result, Err(ActualError::ConfigError(_))),
+            "expected ConfigError for batch_size=0, got: {result:?}"
+        );
+    }
+
     // ── report_write_results tests ──
 
     #[test]
