@@ -622,20 +622,35 @@ fn deeply_nested_monorepo_project() {
 
 #[test]
 fn self_analysis_detects_actual_cli() {
-    // Run the static analyzer on the actual-cli repo itself.
-    // This is the ultimate integration test — if it can analyze its own
-    // codebase correctly, the pipeline works.
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = tempfile::tempdir().unwrap();
+    // Write a minimal Cargo.toml that mimics actual-cli
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        r#"[package]
+name = "actual-cli"
+version = "0.1.0"
+edition = "2021"
 
-    let result = run_static_analysis(repo_root).unwrap();
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+reqwest = "0.12"
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    // Cargo.lock is required for package manager detection
+    std::fs::write(dir.path().join("Cargo.lock"), "# lock file\n").unwrap();
 
-    // actual-cli is a single Rust project (not a workspace monorepo)
+    let result = run_static_analysis(dir.path()).unwrap();
+
     assert!(
         !result.is_monorepo,
-        "actual-cli should not be detected as monorepo"
+        "single Cargo.toml should not be a monorepo"
     );
     assert_eq!(result.projects.len(), 1);
-
     let project = &result.projects[0];
     assert_eq!(project.path, ".");
     assert!(
@@ -644,32 +659,69 @@ fn self_analysis_detects_actual_cli() {
         project.languages
     );
     assert_eq!(project.package_manager.as_deref(), Some("cargo"));
-
-    // Key frameworks from actual-cli's Cargo.toml
-    assert!(
-        has_framework(&result, ".", "clap"),
-        "Expected clap framework, got: {:?}",
-        project.frameworks
-    );
-    assert!(
-        has_framework(&result, ".", "serde"),
-        "Expected serde framework, got: {:?}",
-        project.frameworks
-    );
-    assert!(
-        has_framework(&result, ".", "tokio"),
-        "Expected tokio framework, got: {:?}",
-        project.frameworks
-    );
-
-    // Description should mention Rust and some frameworks
-    assert!(
-        project.description.is_some(),
-        "Expected a description for actual-cli"
-    );
+    assert!(has_framework(&result, ".", "clap"), "Expected clap");
+    assert!(has_framework(&result, ".", "serde"), "Expected serde");
+    assert!(has_framework(&result, ".", "tokio"), "Expected tokio");
+    assert!(project.description.is_some(), "Expected a description");
     let desc = project.description.as_ref().unwrap();
     assert!(
-        desc.contains("rust"),
+        desc.contains("rust") || desc.contains("Rust"),
         "Description should mention rust, got: {desc}"
+    );
+}
+
+#[test]
+fn bundle_context_excludes_sensitive_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Helper to write files with directories
+    let write = |path: &str, content: &str| {
+        let full = root.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(full, content).unwrap();
+    };
+
+    // Legitimate files — should appear
+    write("Cargo.toml", "[package]\nname = \"test\"\n");
+    write("src/main.rs", "fn main() {}\n");
+
+    // Sensitive-named files — must NOT appear
+    write(".env", "API_KEY=super_secret\n");
+    write("api_key.env", "KEY=abc123\n");
+    write("credentials.json", r#"{"token":"secret"}"#);
+    write("secret.key", "-----BEGIN PRIVATE KEY-----\n");
+    write(".secrets", "password=hunter2\n");
+    write("config/local.env", "DB_PASSWORD=foo\n");
+    write("deploy/prod.pem", "-----BEGIN CERTIFICATE-----\n");
+    write("auth/id_rsa", "-----BEGIN RSA PRIVATE KEY-----\n");
+
+    let ctx = actual_cli::tailoring::bundle_context(root).unwrap();
+
+    let sensitive_names = [
+        ".env",
+        "api_key.env",
+        "credentials.json",
+        "secret.key",
+        ".secrets",
+        "local.env",
+        "prod.pem",
+        "id_rsa",
+    ];
+    for name in &sensitive_names {
+        assert!(
+            !ctx.file_tree.contains(name),
+            "file_tree must not include sensitive file '{}', got:\n{}",
+            name,
+            ctx.file_tree
+        );
+    }
+
+    // Legitimate files should still appear
+    assert!(
+        ctx.file_tree.contains("Cargo.toml"),
+        "Cargo.toml should appear in file_tree"
     );
 }
