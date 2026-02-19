@@ -15,10 +15,11 @@ use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmatio
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::confirm_files;
 use crate::cli::ui::panel::Panel;
-use crate::cli::ui::progress::{SyncPhase, SyncPipeline};
+use crate::cli::ui::progress::SyncPhase;
 use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
+use crate::cli::ui::tui::renderer::TuiRenderer;
 use crate::config::paths::{load_from, save_to};
 use crate::config::rejections::{clear_rejections, get_rejections};
 use crate::config::types::CachedTailoring;
@@ -75,7 +76,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     print_banner(false);
 
     // 2. Create pipeline and check environment (git status)
-    let pipeline = SyncPipeline::new(false);
+    let mut pipeline = TuiRenderer::new(false, false);
     pipeline.start(SyncPhase::Environment, "Checking environment...");
     let is_git = get_git_head(root_dir).is_some();
     if is_git {
@@ -310,7 +311,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             run_tailoring_with_cancel(
                 tailor_fut,
                 &mut progress_rx,
-                &pipeline,
+                &mut pipeline,
                 project_count,
                 tokio::signal::ctrl_c(),
             )
@@ -376,7 +377,7 @@ fn tailoring_cache_skip_msg(applicable: usize) -> &'static str {
 /// and the function can be tested independently.
 fn apply_tailoring_event(
     event: TailoringEvent,
-    pipeline: &SyncPipeline,
+    pipeline: &mut TuiRenderer,
     completed: &mut usize,
     project_count: usize,
 ) {
@@ -410,7 +411,7 @@ fn apply_tailoring_event(
 async fn run_tailoring_with_cancel<F, C>(
     tailor_fut: F,
     progress_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TailoringEvent>,
-    pipeline: &SyncPipeline,
+    pipeline: &mut TuiRenderer,
     project_count: usize,
     cancel: C,
 ) -> Result<TailoringOutput, ActualError>
@@ -3893,13 +3894,13 @@ mod tests {
 
     #[test]
     fn test_apply_tailoring_event_project_started_is_noop() {
-        let pipeline = SyncPipeline::new(true); // quiet mode — no output
+        let mut pipeline = TuiRenderer::new(true, false); // quiet mode — no output
         let mut completed = 0usize;
         apply_tailoring_event(
             TailoringEvent::ProjectStarted {
                 project_name: "app".to_string(),
             },
-            &pipeline,
+            &mut pipeline,
             &mut completed,
             3,
         );
@@ -3909,7 +3910,7 @@ mod tests {
 
     #[test]
     fn test_apply_tailoring_event_project_completed_increments_counter() {
-        let pipeline = SyncPipeline::new(false);
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
         pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/3 projects done)...");
         let mut completed = 0usize;
         apply_tailoring_event(
@@ -3918,7 +3919,7 @@ mod tests {
                 files_generated: 2,
                 adrs_applied: 5,
             },
-            &pipeline,
+            &mut pipeline,
             &mut completed,
             3,
         );
@@ -3927,7 +3928,7 @@ mod tests {
 
     #[test]
     fn test_apply_tailoring_event_project_completed_multiple_times() {
-        let pipeline = SyncPipeline::new(false);
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
         pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/3 projects done)...");
         let mut completed = 0usize;
         for i in 1..=3usize {
@@ -3937,7 +3938,7 @@ mod tests {
                     files_generated: 1,
                     adrs_applied: 2,
                 },
-                &pipeline,
+                &mut pipeline,
                 &mut completed,
                 3,
             );
@@ -3947,7 +3948,7 @@ mod tests {
 
     #[test]
     fn test_apply_tailoring_event_project_failed_does_not_increment() {
-        let pipeline = SyncPipeline::new(false);
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
         pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/2 projects done)...");
         let mut completed = 0usize;
         apply_tailoring_event(
@@ -3955,7 +3956,7 @@ mod tests {
                 project_name: "bad-app".to_string(),
                 error: "timeout".to_string(),
             },
-            &pipeline,
+            &mut pipeline,
             &mut completed,
             2,
         );
@@ -3966,14 +3967,14 @@ mod tests {
     #[test]
     fn test_apply_tailoring_event_project_failed_quiet_mode() {
         // In quiet mode, println is a no-op — should not panic
-        let pipeline = SyncPipeline::new(true);
+        let mut pipeline = TuiRenderer::new(true, false);
         let mut completed = 0usize;
         apply_tailoring_event(
             TailoringEvent::ProjectFailed {
                 project_name: "bad-app".to_string(),
                 error: "crashed".to_string(),
             },
-            &pipeline,
+            &mut pipeline,
             &mut completed,
             1,
         );
@@ -3986,7 +3987,7 @@ mod tests {
     /// loop returns `UserCancelled` without waiting for the tailor future.
     #[tokio::test]
     async fn test_run_tailoring_with_cancel_returns_user_cancelled() {
-        let pipeline = SyncPipeline::new(true);
+        let mut pipeline = TuiRenderer::new(true, false);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
         drop(tx); // close sender so recv returns None
 
@@ -3996,7 +3997,7 @@ mod tests {
         // ctrl_c signal registration + user pressing Ctrl+C.
         let cancel = std::future::ready(Ok::<(), std::io::Error>(()));
 
-        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &pipeline, 0, cancel).await;
+        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 0, cancel).await;
 
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
@@ -4009,7 +4010,7 @@ mod tests {
     /// and returns the tailor result.
     #[tokio::test]
     async fn test_run_tailoring_with_cancel_ignores_ctrl_c_error() {
-        let pipeline = SyncPipeline::new(true);
+        let mut pipeline = TuiRenderer::new(true, false);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
 
         // Sequence: cancel fires (with Err) first, then tailor completes.
@@ -4036,7 +4037,7 @@ mod tests {
         drop(ready_rx);
         drop(tx);
 
-        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &pipeline, 0, cancel).await;
+        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 0, cancel).await;
 
         // The cancel Err path must be ignored — tailoring should complete normally
         assert!(
@@ -4049,7 +4050,7 @@ mod tests {
     /// future completes before all events have been received through `recv`.
     #[tokio::test]
     async fn test_run_tailoring_with_cancel_drains_buffered_events_on_completion() {
-        let pipeline = SyncPipeline::new(true);
+        let mut pipeline = TuiRenderer::new(true, false);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
 
         // Pre-buffer a completed event so it sits in the channel before the
@@ -4068,7 +4069,7 @@ mod tests {
         // cancel never fires
         let cancel = std::future::pending::<std::io::Result<()>>();
 
-        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &pipeline, 1, cancel).await;
+        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 1, cancel).await;
 
         assert!(result.is_ok(), "expected Ok result, got {result:?}");
         // Channel must be fully drained — no events left
