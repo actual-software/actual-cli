@@ -25,6 +25,12 @@ pub struct InvocationOptions {
     pub skip_permissions: bool,
 }
 
+/// Default model for the Claude CLI runner.
+///
+/// This is a short alias recognised by the Claude CLI (`claude --model sonnet`).
+/// It is **not** a valid model identifier for the Anthropic or OpenAI HTTP API runners,
+/// which require full model names (e.g. `"claude-sonnet-4-5"` or `"gpt-4o"`).
+/// See `sync_wiring.rs` for the API runner defaults.
 const DEFAULT_MODEL: &str = "sonnet";
 
 impl InvocationOptions {

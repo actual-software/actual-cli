@@ -1,8 +1,10 @@
+// Note: A CursorRunner is not feasible — Cursor has no headless/CLI/API mode.
+// Cursor users are supported via OutputFormat::CursorRules (output concern, not a runner concern).
+// See the investigation in the removed cursor_runner.rs for full findings.
 pub mod anthropic_api;
 pub mod auth;
 pub mod binary;
 pub mod codex_cli;
-pub mod cursor_runner;
 pub mod obfuscation;
 pub mod openai_api;
 pub mod options;
