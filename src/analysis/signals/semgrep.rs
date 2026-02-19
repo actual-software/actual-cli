@@ -28,7 +28,9 @@ fn canonicalize_with_context(path: &std::path::Path) -> Result<PathBuf> {
 struct CommandOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    success: bool,
+    /// The raw exit code from the process, or `None` if the process was
+    /// terminated by a signal (Unix) / could not be queried.
+    exit_code: Option<i32>,
 }
 
 /// Async scanner that invokes the semgrep CLI on batches of files.
@@ -115,6 +117,22 @@ impl SemgrepScanner {
         args
     }
 
+    /// Returns `true` when the semgrep output indicates an authentication /
+    /// login requirement.
+    ///
+    /// Semgrep exit code 7 is the canonical signal for "authentication
+    /// required".  When that is not available we fall back to specific
+    /// phrases that appear in real semgrep auth-error messages.  A bare
+    /// "login" substring is intentionally **not** matched because it fires
+    /// on legitimate stderr output such as "scanning login.py".
+    fn is_auth_error(exit_code: Option<i32>, stderr: &str) -> bool {
+        if exit_code == Some(7) {
+            return true;
+        }
+        let lower = stderr.to_ascii_lowercase();
+        lower.contains("semgrep login") || lower.contains("authentication required")
+    }
+
     /// Process raw command output into tool matches.
     fn process_output(
         output: &CommandOutput,
@@ -123,11 +141,11 @@ impl SemgrepScanner {
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         if stdout.trim().is_empty() {
-            if output.success {
+            if output.exit_code == Some(0) {
                 return Ok(vec![]);
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.to_ascii_lowercase().contains("login") {
+            if Self::is_auth_error(output.exit_code, &stderr) {
                 bail!(
                     "semgrep requires login (v1.100+). \
                      Try running `semgrep login` or use an older version. \
@@ -186,7 +204,7 @@ impl SemgrepScanner {
         let output = CommandOutput {
             stdout: raw_output.stdout,
             stderr: raw_output.stderr,
-            success: raw_output.status.success(),
+            exit_code: raw_output.status.code(),
         };
 
         Self::process_output(&output, &file_map)
@@ -643,7 +661,7 @@ mod tests {
         let output = CommandOutput {
             stdout: json.to_string().into_bytes(),
             stderr: Vec::new(),
-            success: true,
+            exit_code: Some(0),
         };
         let mut file_map = HashMap::new();
         file_map.insert(
@@ -660,7 +678,7 @@ mod tests {
         let output = CommandOutput {
             stdout: Vec::new(),
             stderr: Vec::new(),
-            success: true,
+            exit_code: Some(0),
         };
         let file_map = HashMap::new();
         let result = SemgrepScanner::process_output(&output, &file_map).unwrap();
@@ -672,7 +690,7 @@ mod tests {
         let output = CommandOutput {
             stdout: b"   \n  ".to_vec(),
             stderr: Vec::new(),
-            success: true,
+            exit_code: Some(0),
         };
         let file_map = HashMap::new();
         let result = SemgrepScanner::process_output(&output, &file_map).unwrap();
@@ -684,7 +702,7 @@ mod tests {
         let output = CommandOutput {
             stdout: Vec::new(),
             stderr: b"error occurred".to_vec(),
-            success: false,
+            exit_code: Some(1),
         };
         let file_map = HashMap::new();
         let result = SemgrepScanner::process_output(&output, &file_map);
@@ -692,56 +710,128 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("no JSON output"));
     }
 
+    // ---- is_auth_error / process_output auth detection tests ----
+
+    /// Exit code 7 is the canonical semgrep auth error — always treated as auth.
     #[test]
-    fn test_process_output_login_error_lowercase() {
+    fn test_process_output_auth_error_exit_code_7() {
         let output = CommandOutput {
             stdout: Vec::new(),
-            stderr: b"Please login to use semgrep".to_vec(),
-            success: false,
+            stderr: b"Please run `semgrep login` to authenticate".to_vec(),
+            exit_code: Some(7),
         };
         let file_map = HashMap::new();
         let result = SemgrepScanner::process_output(&output, &file_map);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("login"));
+        assert!(
+            err.contains("semgrep requires login"),
+            "expected auth error message, got: {err}"
+        );
     }
 
+    /// Exit code 7 triggers auth error even with an empty stderr.
     #[test]
-    fn test_process_output_login_error_capitalized() {
+    fn test_process_output_auth_error_exit_code_7_empty_stderr() {
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: Some(7),
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("semgrep requires login"),
+            "expected auth error message, got: {err}"
+        );
+    }
+
+    /// "semgrep login" phrase in stderr triggers auth error (non-7 exit).
+    #[test]
+    fn test_process_output_auth_error_semgrep_login_phrase() {
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: b"Please run semgrep login to continue".to_vec(),
+            exit_code: Some(1),
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("semgrep requires login"),
+            "expected auth error message, got: {err}"
+        );
+    }
+
+    /// "authentication required" phrase in stderr triggers auth error.
+    #[test]
+    fn test_process_output_auth_error_authentication_required_phrase() {
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: b"authentication required to use this feature".to_vec(),
+            exit_code: Some(1),
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("semgrep requires login"),
+            "expected auth error message, got: {err}"
+        );
+    }
+
+    /// Bare "login" in stderr (e.g. scanning login.py) must NOT trigger auth
+    /// error — it should fall through to the generic error.
+    #[test]
+    fn test_process_output_false_positive_login_word_in_stderr() {
+        let output = CommandOutput {
+            stdout: Vec::new(),
+            stderr: b"scanning login.py for vulnerabilities".to_vec(),
+            exit_code: Some(1),
+        };
+        let file_map = HashMap::new();
+        let result = SemgrepScanner::process_output(&output, &file_map);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no JSON output"),
+            "expected generic error, got: {err}"
+        );
+        assert!(
+            !err.contains("semgrep requires login"),
+            "should NOT produce auth error for bare 'login' word: {err}"
+        );
+    }
+
+    /// "Login required" (no "semgrep" prefix) is not specific enough — generic error.
+    #[test]
+    fn test_process_output_generic_login_required_is_not_auth_error() {
         let output = CommandOutput {
             stdout: Vec::new(),
             stderr: b"Login required for this operation".to_vec(),
-            success: false,
+            exit_code: Some(1),
         };
         let file_map = HashMap::new();
         let result = SemgrepScanner::process_output(&output, &file_map);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("login") || err.contains("Login"));
+        assert!(
+            err.contains("no JSON output"),
+            "expected generic error, got: {err}"
+        );
     }
 
+    /// Exit 0 with empty stdout is a clean success — no error regardless of stderr.
     #[test]
-    fn test_process_output_login_error_all_caps() {
+    fn test_process_output_exit_0_is_success_regardless_of_stderr() {
         let output = CommandOutput {
             stdout: Vec::new(),
-            stderr: b"LOGIN REQUIRED".to_vec(),
-            success: false,
-        };
-        let file_map = HashMap::new();
-        let result = SemgrepScanner::process_output(&output, &file_map);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("login") || err.contains("LOGIN"));
-    }
-
-    #[test]
-    fn test_process_output_login_on_success_is_ok() {
-        // When semgrep exits successfully (exit 0) with empty stdout,
-        // "login" in stderr should NOT cause an error — the command succeeded.
-        let output = CommandOutput {
-            stdout: Vec::new(),
-            stderr: b"login required".to_vec(),
-            success: true,
+            stderr: b"semgrep login".to_vec(),
+            exit_code: Some(0),
         };
         let file_map = HashMap::new();
         let result = SemgrepScanner::process_output(&output, &file_map).unwrap();
@@ -753,7 +843,7 @@ mod tests {
         let output = CommandOutput {
             stdout: b"not json".to_vec(),
             stderr: Vec::new(),
-            success: true,
+            exit_code: Some(0),
         };
         let file_map = HashMap::new();
         let result = SemgrepScanner::process_output(&output, &file_map);
@@ -768,11 +858,70 @@ mod tests {
         let output = CommandOutput {
             stdout: json.to_string().into_bytes(),
             stderr: b"warning: something".to_vec(),
-            success: false,
+            exit_code: Some(2),
         };
         let file_map = HashMap::new();
         let result = SemgrepScanner::process_output(&output, &file_map).unwrap();
         assert!(result.is_empty());
+    }
+
+    // ---- is_auth_error unit tests ----
+
+    #[test]
+    fn test_is_auth_error_exit_code_7_no_stderr() {
+        assert!(SemgrepScanner::is_auth_error(Some(7), ""));
+    }
+
+    #[test]
+    fn test_is_auth_error_exit_code_7_any_stderr() {
+        assert!(SemgrepScanner::is_auth_error(Some(7), "scanning login.py"));
+    }
+
+    #[test]
+    fn test_is_auth_error_semgrep_login_phrase_lowercase() {
+        assert!(SemgrepScanner::is_auth_error(
+            Some(1),
+            "please run semgrep login"
+        ));
+    }
+
+    #[test]
+    fn test_is_auth_error_semgrep_login_phrase_mixed_case() {
+        assert!(SemgrepScanner::is_auth_error(
+            Some(1),
+            "Run `Semgrep Login` to authenticate"
+        ));
+    }
+
+    #[test]
+    fn test_is_auth_error_authentication_required() {
+        assert!(SemgrepScanner::is_auth_error(
+            Some(1),
+            "Authentication Required to use this rule"
+        ));
+    }
+
+    #[test]
+    fn test_is_auth_error_bare_login_word_is_not_auth() {
+        assert!(!SemgrepScanner::is_auth_error(Some(1), "scanning login.py"));
+    }
+
+    #[test]
+    fn test_is_auth_error_unrelated_stderr_is_not_auth() {
+        assert!(!SemgrepScanner::is_auth_error(Some(1), "parse error"));
+    }
+
+    #[test]
+    fn test_is_auth_error_none_exit_code_no_phrase() {
+        assert!(!SemgrepScanner::is_auth_error(None, "some error"));
+    }
+
+    #[test]
+    fn test_is_auth_error_none_exit_code_with_phrase() {
+        assert!(SemgrepScanner::is_auth_error(
+            None,
+            "please run semgrep login"
+        ));
     }
 
     // ---- scanner creation tests ----
@@ -935,13 +1084,14 @@ EOJSON
         );
     }
 
+    /// Semgrep exits with code 7 (canonical auth error) → auth-specific message.
     #[tokio::test]
-    async fn test_scan_batch_script_login_error() {
+    async fn test_scan_batch_script_auth_error_exit_code_7() {
         let temp = tempfile::tempdir().unwrap();
-        let script_path = temp.path().join("fake_semgrep_login.sh");
+        let script_path = temp.path().join("fake_semgrep_auth7.sh");
         std::fs::write(
             &script_path,
-            "#!/bin/sh\necho 'Please login to continue' >&2\nexit 1",
+            "#!/bin/sh\necho 'Please run `semgrep login`' >&2\nexit 7",
         )
         .unwrap();
 
@@ -957,7 +1107,46 @@ EOJSON
             .scan_batch(&files, &[PathBuf::from("rules.yml")])
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("login"));
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("semgrep requires login"),
+            "expected auth error, got: {err}"
+        );
+    }
+
+    /// stderr mentioning "scanning login.py" with non-auth exit → generic error,
+    /// not the misleading auth error.
+    #[tokio::test]
+    async fn test_scan_batch_script_login_word_in_stderr_is_not_auth_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("fake_semgrep_login_file.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho 'scanning login.py for vulnerabilities' >&2\nexit 1",
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
+        let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
+        let result = scanner
+            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no JSON output"),
+            "expected generic error, got: {err}"
+        );
+        assert!(
+            !err.contains("semgrep requires login"),
+            "should not produce auth error for bare 'login' word: {err}"
+        );
     }
 
     #[tokio::test]
