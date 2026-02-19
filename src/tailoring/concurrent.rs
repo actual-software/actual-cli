@@ -100,10 +100,14 @@ pub async fn tailor_all_projects<R: TailoringRunner>(
                 .await
                 .map_err(|_| {
                     if let Some(ref t) = tx2 {
-                        let _ = t.send(TailoringEvent::ProjectFailed {
+                        if t.send(TailoringEvent::ProjectFailed {
                             project_name: project_name.clone(),
                             error: format!("timed out after {}s", timeout_dur.as_secs()),
-                        });
+                        })
+                        .is_err()
+                        {
+                            tracing::warn!("tailoring event dropped: receiver gone");
+                        }
                     }
                     ActualError::ClaudeTimeout {
                         seconds: timeout_dur.as_secs(),
@@ -134,9 +138,14 @@ async fn tailor_single_project<R: TailoringRunner>(
     progress_tx: Option<tokio::sync::mpsc::UnboundedSender<TailoringEvent>>,
 ) -> Result<TailoringOutput, ActualError> {
     if let Some(tx) = &progress_tx {
-        let _ = tx.send(TailoringEvent::ProjectStarted {
-            project_name: project.name.clone(),
-        });
+        if tx
+            .send(TailoringEvent::ProjectStarted {
+                project_name: project.name.clone(),
+            })
+            .is_err()
+        {
+            tracing::warn!("tailoring event dropped: receiver gone");
+        }
     }
 
     let project_json = serialize_json(project, "project")?;
@@ -169,20 +178,30 @@ async fn tailor_single_project<R: TailoringRunner>(
         Ok(outputs) => {
             let merged = merge_outputs(outputs);
             if let Some(tx) = &progress_tx {
-                let _ = tx.send(TailoringEvent::ProjectCompleted {
-                    project_name: project.name.clone(),
-                    files_generated: merged.summary.files_generated,
-                    adrs_applied: merged.summary.applicable,
-                });
+                if tx
+                    .send(TailoringEvent::ProjectCompleted {
+                        project_name: project.name.clone(),
+                        files_generated: merged.summary.files_generated,
+                        adrs_applied: merged.summary.applicable,
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("tailoring event dropped: receiver gone");
+                }
             }
             Ok(merged)
         }
         Err(e) => {
             if let Some(tx) = &progress_tx {
-                let _ = tx.send(TailoringEvent::ProjectFailed {
-                    project_name: project.name.clone(),
-                    error: e.to_string(),
-                });
+                if tx
+                    .send(TailoringEvent::ProjectFailed {
+                        project_name: project.name.clone(),
+                        error: e.to_string(),
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("tailoring event dropped: receiver gone");
+                }
             }
             Err(e)
         }

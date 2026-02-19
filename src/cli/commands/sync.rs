@@ -551,10 +551,13 @@ fn store_tailoring_cache(
     let Some(key) = cache_key else {
         return;
     };
-    // TailoringOutput derives Serialize with only String/Vec/i64 fields,
-    // so serde_yaml::to_value is infallible.
-    let tailoring_value =
-        serde_yaml::to_value(output).expect("TailoringOutput serialization is infallible");
+    let tailoring_value = match serde_yaml::to_value(output) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("warning: failed to serialize tailoring cache: {e}");
+            return;
+        }
+    };
     config.cached_tailoring = Some(CachedTailoring {
         cache_key: key.to_string(),
         repo_path: root_dir.to_string_lossy().to_string(),
@@ -563,7 +566,9 @@ fn store_tailoring_cache(
     });
     // Best-effort persist: if disk write fails, the in-memory cache is
     // still populated for subsequent operations in this process.
-    let _ = save_to(config, cfg_path);
+    if let Err(e) = save_to(config, cfg_path) {
+        eprintln!("warning: failed to save tailoring cache: {e}");
+    }
 }
 
 /// Compute a cache key for the tailoring step by hashing all inputs
@@ -821,12 +826,6 @@ fn find_existing_output_files(root_dir: &Path, format: &OutputFormat) -> String 
         })
         .collect();
     results.join("\n\n")
-}
-
-/// Backwards-compatible alias: scan for CLAUDE.md files (default format).
-#[allow(dead_code)]
-fn find_existing_claude_md(root_dir: &Path) -> String {
-    find_existing_output_files(root_dir, &OutputFormat::ClaudeMd)
 }
 
 /// Execute the confirm + write phase of the sync pipeline.
@@ -2667,12 +2666,12 @@ mod tests {
         );
     }
 
-    // ── find_existing_claude_md tests ──
+    // ── find_existing_output_files tests ──
 
     #[test]
     fn test_find_existing_claude_md_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(result.is_empty());
     }
 
@@ -2680,7 +2679,7 @@ mod tests {
     fn test_find_existing_claude_md_finds_root() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("CLAUDE.md"), "Root content").unwrap();
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(result.contains("Root content"));
         assert!(result.contains("CLAUDE.md"));
     }
@@ -2694,7 +2693,7 @@ mod tests {
             "Web content",
         )
         .unwrap();
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(result.contains("Web content"));
     }
 
@@ -2703,7 +2702,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         std::fs::write(dir.path().join(".git").join("CLAUDE.md"), "Git content").unwrap();
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(result.is_empty());
     }
 
@@ -2716,7 +2715,7 @@ mod tests {
             "Module content",
         )
         .unwrap();
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(result.is_empty());
     }
 
@@ -2725,7 +2724,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let content = "# My Rules\n\n<!-- managed:actual-start -->\n<!-- last-synced: 2024-01-01T00:00:00Z -->\n<!-- version: 1 -->\n<!-- adr-ids: abc-123,def-456 -->\n\n## Some Rules\n\nDo this.\n\n<!-- managed:actual-end -->";
         std::fs::write(dir.path().join("CLAUDE.md"), content).unwrap();
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(
             !result.contains("adr-ids"),
             "should strip adr-ids metadata: {result}"
@@ -2760,7 +2759,7 @@ mod tests {
         std::fs::create_dir(&unreadable).unwrap();
         std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
         // Should not panic, just skip the unreadable dir
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(result.is_empty());
         // Restore permissions for cleanup
         std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2775,7 +2774,7 @@ mod tests {
             "Vendor content",
         )
         .unwrap();
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(result.is_empty(), "should skip vendor directory");
     }
 
@@ -2788,7 +2787,7 @@ mod tests {
             "Pycache content",
         )
         .unwrap();
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(result.is_empty(), "should skip __pycache__ directory");
     }
 
@@ -2800,7 +2799,7 @@ mod tests {
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("CLAUDE.md"), "# Skip").unwrap();
         }
-        let result = find_existing_claude_md(dir.path());
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(
             result.is_empty(),
             "should skip all SKIP_DIRS directories, got: {result}"
