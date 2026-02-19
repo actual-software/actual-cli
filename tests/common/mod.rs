@@ -153,7 +153,8 @@ pub fn create_fake_claude_binary(
 }
 
 /// Create a fake Claude binary that distinguishes analysis from tailoring
-/// by checking whether `skipped_adrs` appears in the arguments.
+/// by checking whether `--json-schema` appears as an argument (tailoring
+/// invocations always pass `--json-schema`; analysis invocations never do).
 #[cfg(unix)]
 pub fn create_fake_claude_binary_with_tailoring(
     dir: &std::path::Path,
@@ -172,7 +173,14 @@ pub fn create_fake_claude_binary_with_tailoring(
          printf '%s\\n' '{auth}'\n\
          exit 0\n\
          elif [ \"$1\" = \"--print\" ]; then\n\
-         if echo \"$@\" | grep -q \"skipped_adrs\"; then\n\
+         _is_tailoring=0\n\
+         for _arg in \"$@\"; do\n\
+         if [ \"$_arg\" = \"--json-schema\" ]; then\n\
+         _is_tailoring=1\n\
+         break\n\
+         fi\n\
+         done\n\
+         if [ \"$_is_tailoring\" = \"1\" ]; then\n\
          printf '%s\\n' '{tailoring}'\n\
          exit 0\n\
          else\n\
@@ -229,7 +237,9 @@ pub fn create_fake_claude_binary_capturing(
 }
 
 /// Create a fake Claude binary that captures all args AND distinguishes
-/// analysis from tailoring (by checking for `skipped_adrs` in `$@`).
+/// analysis from tailoring by checking whether `--json-schema` appears as
+/// an argument (tailoring invocations always pass `--json-schema`; analysis
+/// invocations never do).
 ///
 /// Each invocation is written to `capture_file` with args delimited by `\x00`
 /// and invocations separated by `---INVOCATION---\n`. Use
@@ -261,7 +271,14 @@ elif [ "$1" = "--print" ]; then
     printf '%s\0' "$arg" >> '{capture}'
   done
   printf '\n' >> '{capture}'
-  if echo "$@" | grep -q "skipped_adrs"; then
+  _is_tailoring=0
+  for _arg in "$@"; do
+    if [ "$_arg" = "--json-schema" ]; then
+      _is_tailoring=1
+      break
+    fi
+  done
+  if [ "$_is_tailoring" = "1" ]; then
     printf '%s\n' '{tailoring}'
     exit 0
   else
