@@ -776,6 +776,23 @@ mod tests {
     }
 
     #[test]
+    fn plain_text_footer_renders_separator_and_text() {
+        // Footer in plain mode (width < MIN_PANEL_WIDTH) emits "---\n<text>\n"
+        let rendered = Panel::new().footer("summary line").render(30);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "plain footer should produce 2 lines (--- + text)"
+        );
+        assert_eq!(lines[0], "---", "first plain footer line should be ---");
+        assert_eq!(
+            lines[1], "summary line",
+            "second plain footer line should be the text"
+        );
+    }
+
+    #[test]
     fn long_footer_is_truncated() {
         let long_footer = "F".repeat(200);
         let rendered = Panel::new().footer(&long_footer).render(50);
