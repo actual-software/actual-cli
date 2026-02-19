@@ -16,6 +16,23 @@ const MAX_TOTAL_BYTES: usize = 32 * 1024; // 32KB
 /// Directories to exclude in addition to .gitignore-ignored paths.
 const EXCLUDED_DIRS: &[&str] = &["node_modules", "target", ".git", "dist", "build"];
 
+/// Filenames that should never be included in a context bundle (credentials, private keys, etc.).
+const SENSITIVE_EXACT_NAMES: &[&str] = &[".env", ".secrets", ".npmrc", ".pypirc", ".netrc"];
+
+/// File extensions that indicate sensitive content.
+const SENSITIVE_EXTENSIONS: &[&str] = &["env", "key", "pem", "p12", "pfx"];
+
+/// Filename substrings that indicate sensitive content.
+const SENSITIVE_NAME_SUBSTRINGS: &[&str] = &[
+    "credential",
+    "secret",
+    "id_rsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "private_key",
+    "privatekey",
+];
+
 /// Lock file patterns to exclude.
 const EXCLUDED_EXTENSIONS: &[&str] = &["lock"];
 
@@ -91,6 +108,35 @@ fn has_excluded_extension(path: &Path) -> bool {
     false
 }
 
+/// Check if a file contains sensitive information (credentials, private keys, etc.)
+/// and should never be included in a context bundle.
+fn is_sensitive_file(path: &std::path::Path) -> bool {
+    let file_name = match path.file_name() {
+        Some(n) => n.to_string_lossy().to_lowercase(),
+        None => return false,
+    };
+
+    if SENSITIVE_EXACT_NAMES.iter().any(|&p| file_name == p) {
+        return true;
+    }
+
+    if let Some(ext) = path.extension() {
+        let ext_lower = ext.to_string_lossy().to_lowercase();
+        if SENSITIVE_EXTENSIONS.contains(&ext_lower.as_str()) {
+            return true;
+        }
+    }
+
+    if SENSITIVE_NAME_SUBSTRINGS
+        .iter()
+        .any(|&s| file_name.contains(s))
+    {
+        return true;
+    }
+
+    false
+}
+
 /// Represents an entry in the file tree for sorting.
 #[derive(Eq, PartialEq)]
 struct TreeEntry {
@@ -155,6 +201,11 @@ fn build_file_tree(root: &Path) -> String {
         }
 
         let is_dir = path.is_dir();
+
+        // Skip sensitive files (credentials, private keys, etc.).
+        if !is_dir && is_sensitive_file(path) {
+            continue;
+        }
 
         // For files, skip non-UTF8 readable content (binary files).
         if !is_dir {
@@ -260,7 +311,7 @@ fn collect_key_files(root: &Path) -> Vec<(String, String)> {
     // --- Category 1: Package manifests ---
     for &name in MANIFEST_FILES {
         let path = root.join(name);
-        if path.is_file() && !is_excluded_dir(&path, root) {
+        if path.is_file() && !is_excluded_dir(&path, root) && !is_sensitive_file(&path) {
             if let Some(content) = read_file_truncated(&path) {
                 if content.len() > budget {
                     break;
@@ -277,7 +328,7 @@ fn collect_key_files(root: &Path) -> Vec<(String, String)> {
             break;
         }
         let path = root.join(name);
-        if path.is_file() && !is_excluded_dir(&path, root) {
+        if path.is_file() && !is_excluded_dir(&path, root) && !is_sensitive_file(&path) {
             if let Some(content) = read_file_truncated(&path) {
                 if content.len() > budget {
                     break;
@@ -332,6 +383,9 @@ fn find_entrypoints(root: &Path, max: usize) -> Vec<(String, PathBuf)> {
             continue;
         }
         if is_excluded_dir(path, root) || has_excluded_extension(path) {
+            continue;
+        }
+        if is_sensitive_file(path) {
             continue;
         }
         let file_name = path
