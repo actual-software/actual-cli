@@ -159,6 +159,17 @@ mod tests {
     }
 
     #[test]
+    fn confirm_with_cancel_default_wraps_confirm_result_in_some() {
+        // The default `confirm_with_cancel` delegates to `confirm` and wraps in `Some`.
+        // MockTerminal uses the default implementation (does not override it).
+        let term = MockTerminal::new(vec!["y"]);
+        assert_eq!(term.confirm_with_cancel("proceed?").unwrap(), Some(true));
+
+        let term = MockTerminal::new(vec!["n"]);
+        assert_eq!(term.confirm_with_cancel("proceed?").unwrap(), Some(false));
+    }
+
+    #[test]
     fn select_files_none_means_cancel() {
         let term = MockTerminal::new(vec![]).with_selection(None);
         let result = term.select_files("p", &[], &[]).unwrap();
