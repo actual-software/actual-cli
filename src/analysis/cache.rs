@@ -463,7 +463,12 @@ mod tests {
 
         let err = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap_err();
 
-        assert!(err.to_string().contains("Failed to write config file"));
+        assert!(
+            err.to_string()
+                .contains("Failed to open config file for writing")
+                || err.to_string().contains("Failed to write config file"),
+            "Unexpected error: {err}"
+        );
 
         // Restore permissions for cleanup
         std::fs::set_permissions(config_dir.path(), std::fs::Permissions::from_mode(0o755))

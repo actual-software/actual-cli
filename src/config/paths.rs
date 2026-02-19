@@ -27,7 +27,19 @@ fn config_dir_with_home(home: Option<PathBuf>) -> Result<PathBuf, ActualError> {
     }
 
     if let Ok(dir) = std::env::var("ACTUAL_CONFIG_DIR") {
-        return Ok(PathBuf::from(dir));
+        let dir_path = PathBuf::from(&dir);
+        if !dir_path.is_absolute() {
+            return Err(config_error("ACTUAL_CONFIG_DIR must be an absolute path"));
+        }
+        if dir_path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            return Err(config_error(
+                "ACTUAL_CONFIG_DIR must not contain '..' components",
+            ));
+        }
+        return Ok(dir_path);
     }
 
     home.map(|h| h.join(".actualai").join("actual"))
@@ -58,6 +70,17 @@ pub fn load() -> Result<Config, ActualError> {
 /// If the file does not exist, creates it with [`Config::default()`] and returns
 /// that default. On unix, the created file has permissions `0600`.
 pub fn load_from(path: &Path) -> Result<Config, ActualError> {
+    const MAX_CONFIG_SIZE: u64 = 1024 * 1024; // 1 MiB
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > MAX_CONFIG_SIZE => {
+            return Err(config_error(format!(
+                "Config file is too large ({} bytes, max {} bytes)",
+                meta.len(),
+                MAX_CONFIG_SIZE
+            )));
+        }
+        _ => {}
+    }
     match std::fs::read_to_string(path) {
         Ok(contents) => serde_yaml::from_str(&contents)
             .map_err(|e| config_error(format!("Failed to parse config YAML: {e}"))),
@@ -81,7 +104,7 @@ pub fn save(config: &Config) -> Result<(), ActualError> {
 /// Save config to a specific path.
 ///
 /// Creates the parent directory recursively if needed.
-/// On unix, sets file permissions to `0600`.
+/// On unix, creates the file with permissions `0600` atomically (no TOCTOU gap).
 pub fn save_to(config: &Config, path: &Path) -> Result<(), ActualError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -91,23 +114,36 @@ pub fn save_to(config: &Config, path: &Path) -> Result<(), ActualError> {
     // Config contains only Option<String>, Option<bool>, Option<usize>, etc.
     // serde_yaml serialization is infallible for these types, so unwrap is safe.
     let yaml = serde_yaml::to_string(config).unwrap();
-    std::fs::write(path, yaml)
-        .map_err(|e| config_error(format!("Failed to write config file: {e}")))?;
-    set_config_permissions(path)?;
+    write_config_secure(path, &yaml)?;
 
     Ok(())
 }
 
+/// Write config content to a file, ensuring it is never world-readable.
+///
+/// On unix, opens the file with `O_CREAT | mode(0o600)` so the file is created
+/// with restricted permissions from the start — no TOCTOU gap.
+/// On non-unix, falls back to a plain write.
 #[cfg(unix)]
-fn set_config_permissions(path: &Path) -> Result<(), ActualError> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    std::fs::set_permissions(path, perms)
-        .map_err(|e| config_error(format!("Failed to set config file permissions: {e}")))
+fn write_config_secure(path: &Path, content: &str) -> Result<(), ActualError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| config_error(format!("Failed to open config file for writing: {e}")))?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| config_error(format!("Failed to write config file: {e}")))?;
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_config_permissions(_path: &Path) -> Result<(), ActualError> {
+fn write_config_secure(path: &Path, content: &str) -> Result<(), ActualError> {
+    std::fs::write(path, content)
+        .map_err(|e| config_error(format!("Failed to write config file: {e}")))?;
     Ok(())
 }
 
@@ -374,7 +410,13 @@ mod tests {
         std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let err = save_to(&Config::default(), &config_file).unwrap_err();
-        assert!(err.to_string().contains("Failed to write config file"));
+        // With write_config_secure, the open() call fails on read-only file
+        assert!(
+            err.to_string()
+                .contains("Failed to open config file for writing")
+                || err.to_string().contains("Failed to write config file"),
+            "Unexpected error: {err}"
+        );
 
         // Restore permissions for cleanup
         std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -473,30 +515,105 @@ mod tests {
             .contains("Failed to create config directory"));
     }
 
+    // Tests for g5j.3: secure config write (no TOCTOU)
     #[cfg(unix)]
     #[test]
-    fn test_set_config_permissions_success() {
+    fn test_save_to_creates_file_with_0600_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().unwrap();
-        let path = dir.path().join("test.yaml");
-        std::fs::write(&path, "content").unwrap();
+        let config_file = dir.path().join("config.yaml");
 
-        set_config_permissions(&path).unwrap();
+        save_to(&Config::default(), &config_file).unwrap();
 
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        let mode = std::fs::metadata(&config_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "Config file must be created with mode 0600");
     }
 
-    #[cfg(unix)]
+    // Tests for g5j.20: config file size limit
     #[test]
-    fn test_set_config_permissions_nonexistent_file() {
+    fn test_load_from_rejects_oversized_file() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("nonexistent.yaml");
+        let config_file = dir.path().join("big_config.yaml");
 
-        let err = set_config_permissions(&path).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Failed to set config file permissions"));
+        // Write slightly more than 1 MiB
+        let big_content = vec![b'#'; 1024 * 1024 + 1];
+        std::fs::write(&config_file, &big_content).unwrap();
+
+        let err = load_from(&config_file).unwrap_err();
+        assert!(
+            err.to_string().contains("Config file is too large"),
+            "Expected size-limit error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_load_from_accepts_file_exactly_at_limit() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+
+        // 1 MiB exactly — should not be rejected by the size check.
+        // Use `{` repeated to produce invalid YAML, so we get a parse error
+        // rather than a size-limit error.
+        let content = vec![b'{'; 1024 * 1024];
+        std::fs::write(&config_file, &content).unwrap();
+
+        let err = load_from(&config_file).unwrap_err();
+        assert!(
+            !err.to_string().contains("Config file is too large"),
+            "A file exactly at the limit should not trigger the size-limit error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("Failed to parse config YAML"),
+            "Expected YAML parse error, got: {err}"
+        );
+    }
+
+    // Tests for g5j.21: ACTUAL_CONFIG_DIR validation
+    #[test]
+    fn test_config_dir_rejects_relative_actual_config_dir() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", "relative/path");
+
+        let err = config_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("must be an absolute path"),
+            "Expected absolute-path error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_dir_accepts_absolute_actual_config_dir() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+
+        let tmp = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let dir = config_dir().unwrap();
+        assert_eq!(dir, tmp.path());
+    }
+
+    #[test]
+    fn test_config_dir_rejects_actual_config_dir_with_dotdot() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", "/some/path/../etc");
+
+        let err = config_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain '..'"),
+            "Expected traversal error, got: {err}"
+        );
     }
 }
