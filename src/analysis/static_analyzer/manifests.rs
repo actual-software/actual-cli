@@ -389,7 +389,8 @@ fn parse_gemfile(project_dir: &Path, deps: &mut HashSet<String>) {
 /// Regex for matching `gem "name"` or `gem 'name'` in Gemfiles.
 fn regex_gem_name() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r#"gem\s+"([^"]+)"|gem\s+'([^']+)'"#).unwrap()
+        regex::Regex::new(r#"gem\s+"([^"]+)"|gem\s+'([^']+)'"#)
+            .expect("valid regex — this is a programmer error")
     });
     &RE
 }
@@ -432,21 +433,24 @@ fn parse_pom_xml(project_dir: &Path, deps: &mut HashSet<String>) {
 
 fn regex_pom_dependency() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?s)<dependency>.*?</dependency>").unwrap()
+        regex::Regex::new(r"(?s)<dependency>.*?</dependency>")
+            .expect("valid regex — this is a programmer error")
     });
     &RE
 }
 
 fn regex_pom_group_id() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"<groupId>\s*([^<\s]+)\s*</groupId>").unwrap()
+        regex::Regex::new(r"<groupId>\s*([^<\s]+)\s*</groupId>")
+            .expect("valid regex — this is a programmer error")
     });
     &RE
 }
 
 fn regex_pom_artifact_id() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"<artifactId>\s*([^<\s]+)\s*</artifactId>").unwrap()
+        regex::Regex::new(r"<artifactId>\s*([^<\s]+)\s*</artifactId>")
+            .expect("valid regex — this is a programmer error")
     });
     &RE
 }
@@ -482,7 +486,7 @@ fn regex_gradle_dependency() -> &'static regex::Regex {
         regex::Regex::new(
             r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|kapt|annotationProcessor|classpath)\s*(?:\(\s*"([^"]+)"\s*\)|'([^']+)'|\(\s*'([^']+)'\s*\))"#,
         )
-        .unwrap()
+        .expect("valid regex — this is a programmer error")
     });
     &RE
 }
@@ -580,14 +584,16 @@ fn parse_package_swift(project_dir: &Path, deps: &mut HashSet<String>) {
 
 fn regex_swift_package_name() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r#"\.package\s*\(\s*name\s*:\s*"([^"]+)""#).unwrap()
+        regex::Regex::new(r#"\.package\s*\(\s*name\s*:\s*"([^"]+)""#)
+            .expect("valid regex — this is a programmer error")
     });
     &RE
 }
 
 fn regex_swift_package_url() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r#"\.package\s*\(\s*url\s*:\s*"([^"]+)""#).unwrap()
+        regex::Regex::new(r#"\.package\s*\(\s*url\s*:\s*"([^"]+)""#)
+            .expect("valid regex — this is a programmer error")
     });
     &RE
 }
@@ -1702,5 +1708,22 @@ require github.com/another/indirect v4.0.0 // indirect
         assert!(info
             .dependencies
             .contains(&"com.squareup.okhttp3:okhttp".to_string()));
+    }
+
+    /// Verify that all static `LazyLock<Regex>` values in this module compile
+    /// and initialize without panicking. Touching each accessor triggers the
+    /// `LazyLock` initializer, so any invalid regex pattern would panic here
+    /// rather than silently during production analysis.
+    #[test]
+    fn test_static_regexes_all_initialize_without_panic() {
+        // Each call forces the LazyLock to run Regex::new(...).expect(...).
+        // If any pattern is invalid, this test will panic with a clear message.
+        let _ = regex_gem_name();
+        let _ = regex_pom_dependency();
+        let _ = regex_pom_group_id();
+        let _ = regex_pom_artifact_id();
+        let _ = regex_gradle_dependency();
+        let _ = regex_swift_package_name();
+        let _ = regex_swift_package_url();
     }
 }
