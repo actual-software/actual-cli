@@ -863,127 +863,44 @@ dependencies {
 
     // ── 4eo.5: tracing::warn! is emitted for malformed manifests ──
 
-    /// Helper: run a closure while capturing tracing events, return the
-    /// collected warning messages.
-    fn capture_warnings<F: FnOnce()>(f: F) -> Vec<String> {
-        use std::sync::{Arc, Mutex};
-        use tracing::Level;
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-
-        let warnings: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let warnings_clone = warnings.clone();
-
-        // Build a layer that captures WARN events.
-        struct Collector {
-            warnings: Arc<Mutex<Vec<String>>>,
-        }
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Collector {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _ctx: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if *event.metadata().level() == Level::WARN {
-                    let mut visitor = MessageVisitor(String::new());
-                    event.record(&mut visitor);
-                    self.warnings.lock().unwrap().push(visitor.0);
-                }
-            }
-        }
-
-        struct MessageVisitor(String);
-        impl tracing::field::Visit for MessageVisitor {
-            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                if field.name() == "message" {
-                    self.0 = value.to_string();
-                }
-            }
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    self.0 = format!("{value:?}");
-                }
-            }
-        }
-
-        let subscriber = tracing_subscriber::registry().with(Collector {
-            warnings: warnings_clone,
-        });
-
-        // Run the closure with the subscriber as default, then drop the guard
-        // so the subscriber (and its Arc clone) is released before we read the results.
-        {
-            let _guard = subscriber.set_default();
-            f();
-        }
-
-        let result = warnings.lock().unwrap().clone();
-        result
-    }
-
+    #[tracing_test::traced_test]
     #[test]
     fn test_malformed_package_json_emits_tracing_warn() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("package.json"), "not valid json at all").unwrap();
-
-        let warnings = capture_warnings(|| {
-            let info = parse_dependencies(dir.path());
-            // Malformed file → empty deps (no panic)
-            assert!(info.dependencies.is_empty());
-        });
-
-        assert!(
-            warnings.iter().any(|w| w.contains("package.json")),
-            "expected a warning mentioning 'package.json', got: {warnings:?}"
-        );
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+        assert!(logs_contain("package.json"));
     }
 
+    #[tracing_test::traced_test]
     #[test]
     fn test_malformed_cargo_toml_emits_tracing_warn() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("Cargo.toml"), "not valid toml [[[").unwrap();
-
-        let warnings = capture_warnings(|| {
-            let info = parse_dependencies(dir.path());
-            assert!(info.dependencies.is_empty());
-        });
-
-        assert!(
-            warnings.iter().any(|w| w.contains("Cargo.toml")),
-            "expected a warning mentioning 'Cargo.toml', got: {warnings:?}"
-        );
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+        assert!(logs_contain("Cargo.toml"));
     }
 
+    #[tracing_test::traced_test]
     #[test]
     fn test_malformed_pyproject_toml_emits_tracing_warn() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("pyproject.toml"), "[[[invalid").unwrap();
-
-        let warnings = capture_warnings(|| {
-            let info = parse_dependencies(dir.path());
-            assert!(info.dependencies.is_empty());
-        });
-
-        assert!(
-            warnings.iter().any(|w| w.contains("pyproject.toml")),
-            "expected a warning mentioning 'pyproject.toml', got: {warnings:?}"
-        );
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+        assert!(logs_contain("pyproject.toml"));
     }
 
+    #[tracing_test::traced_test]
     #[test]
     fn test_malformed_pipfile_emits_tracing_warn() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("Pipfile"), "[[[invalid").unwrap();
-
-        let warnings = capture_warnings(|| {
-            let info = parse_dependencies(dir.path());
-            assert!(info.dependencies.is_empty());
-        });
-
-        assert!(
-            warnings.iter().any(|w| w.contains("Pipfile")),
-            "expected a warning mentioning 'Pipfile', got: {warnings:?}"
-        );
+        let info = parse_dependencies(dir.path());
+        assert!(info.dependencies.is_empty());
+        assert!(logs_contain("Pipfile"));
     }
 
     #[test]
@@ -1786,10 +1703,7 @@ require github.com/another/indirect v4.0.0 // indirect
         .unwrap();
         let mut deps = std::collections::HashSet::new();
         parse_gradle_version_catalog(dir.path(), &mut deps);
-        assert!(
-            deps.is_empty(),
-            "expected no deps when [libraries] is absent, got: {deps:?}"
-        );
+        assert!(deps.is_empty());
     }
 
     #[test]
@@ -1889,10 +1803,7 @@ require github.com/another/indirect v4.0.0 // indirect
         write_file_of_size(&path, over_limit);
 
         let info = parse_dependencies(dir.path());
-        assert!(
-            info.dependencies.is_empty(),
-            "expected no deps from oversized package.json"
-        );
+        assert!(info.dependencies.is_empty());
     }
 
     #[test]
@@ -1903,10 +1814,7 @@ require github.com/another/indirect v4.0.0 // indirect
         write_file_of_size(&path, over_limit);
 
         let info = parse_dependencies(dir.path());
-        assert!(
-            info.dependencies.is_empty(),
-            "expected no deps from oversized Cargo.toml"
-        );
+        assert!(info.dependencies.is_empty());
     }
 
     #[test]
@@ -1917,10 +1825,7 @@ require github.com/another/indirect v4.0.0 // indirect
         write_file_of_size(&path, over_limit);
 
         let info = parse_dependencies(dir.path());
-        assert!(
-            info.dependencies.is_empty(),
-            "expected no deps from oversized requirements.txt"
-        );
+        assert!(info.dependencies.is_empty());
     }
 
     #[test]
@@ -1931,10 +1836,7 @@ require github.com/another/indirect v4.0.0 // indirect
         write_file_of_size(&path, over_limit);
 
         let result = super::read_manifest_file(&path);
-        assert!(
-            result.is_none(),
-            "read_manifest_file should return None for files exceeding the size limit"
-        );
+        assert!(result.is_none());
     }
 
     #[test]

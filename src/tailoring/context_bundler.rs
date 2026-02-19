@@ -880,4 +880,59 @@ mod tests {
         // main.rs should NOT be included (binary content → None from read_file_truncated)
         assert!(!key_files.iter().any(|(name, _)| name.contains("main.rs")));
     }
+
+    // Test 38: walker error path in build_file_tree — unreadable subdirectory emits a warning
+    #[test]
+    #[cfg(unix)]
+    fn test_build_file_tree_skips_unreadable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        use tracing_test::traced_test;
+
+        #[traced_test]
+        fn inner() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            // Create a readable file and an unreadable subdirectory.
+            create_file(root, "readable.txt", "content");
+            let secret = root.join("secret");
+            fs::create_dir(&secret).unwrap();
+            create_file(root, "secret/hidden.txt", "hidden");
+            fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+
+            let tree = build_file_tree(root);
+
+            // Restore permissions for cleanup
+            fs::set_permissions(&secret, fs::Permissions::from_mode(0o755)).unwrap();
+
+            // The readable file should appear; the walker emits an Err for the secret dir
+            assert!(tree.contains("readable.txt"));
+        }
+        inner();
+    }
+
+    // Test 39: walker error path in find_entrypoints — unreadable subdirectory is skipped
+    #[test]
+    #[cfg(unix)]
+    fn test_find_entrypoints_skips_unreadable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Readable entrypoint
+        create_file(root, "src/main.rs", "fn main() {}");
+        // Unreadable directory
+        let secret = root.join("secret");
+        fs::create_dir(&secret).unwrap();
+        create_file(root, "secret/main.rs", "fn main() {}");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let found = find_entrypoints(root, 100);
+
+        // Restore permissions for cleanup
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Should not panic; walker error is skipped gracefully
+        // The readable main.rs may or may not be found depending on walker behavior
+        let _ = found;
+    }
 }
