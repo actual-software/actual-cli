@@ -62,12 +62,8 @@ impl SemgrepScanner {
 
         for (i, (rel_path, content)) in files.iter().enumerate() {
             if content.len() > MAX_FILE_SIZE_BYTES {
-                bail!(
-                    "file too large for analysis: {} bytes (max {}): {:?}",
-                    content.len(),
-                    MAX_FILE_SIZE_BYTES,
-                    rel_path
-                );
+                let sz = content.len();
+                bail!("file too large for analysis: {sz} bytes (max {MAX_FILE_SIZE_BYTES}): {rel_path:?}");
             }
 
             let subdir = temp_dir.path().join(format!("f{i}"));
@@ -154,11 +150,8 @@ impl SemgrepScanner {
         }
 
         if files.len() > MAX_BATCH_FILES {
-            bail!(
-                "batch too large: {} files (max {})",
-                files.len(),
-                MAX_BATCH_FILES
-            );
+            let n = files.len();
+            bail!("batch too large: {n} files (max {MAX_BATCH_FILES})");
         }
 
         let batch_size: usize = files.iter().map(|(_, c)| c.len()).sum();
