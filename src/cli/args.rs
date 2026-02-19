@@ -132,6 +132,34 @@ fn parse_budget(s: &str) -> Result<f64, String> {
     Ok(val)
 }
 
+/// Parse and validate a model name, rejecting flag-like values and shell metacharacters.
+///
+/// Allowed: alphanumeric start, then alphanumeric, dots, underscores, slashes, or hyphens.
+/// Rejects anything starting with `-`, containing whitespace, shell metacharacters, or
+/// exceeding 100 characters.
+fn parse_model(s: &str) -> Result<String, String> {
+    if s.starts_with('-') {
+        return Err(format!("model name must not start with '-': {s:?}"));
+    }
+    if s.contains(char::is_whitespace) {
+        return Err(format!("model name must not contain whitespace: {s:?}"));
+    }
+    for c in s.chars() {
+        if matches!(
+            c,
+            '|' | '&' | ';' | '(' | ')' | '<' | '>' | '`' | '$' | '\\' | '!' | '\'' | '"'
+        ) {
+            return Err(format!(
+                "model name contains invalid character {c:?}: {s:?}"
+            ));
+        }
+    }
+    if s.len() > 100 {
+        return Err(format!("model name too long (max 100 chars): {s:?}"));
+    }
+    Ok(s.to_string())
+}
+
 /// ADR-powered CLAUDE.md generator
 #[derive(Parser, Debug)]
 #[command(name = "actual", version, about)]
@@ -176,7 +204,7 @@ pub struct SyncArgs {
     pub projects: Vec<String>,
 
     /// Override Claude Code model (e.g., "sonnet", "opus")
-    #[arg(long)]
+    #[arg(long, value_parser = parse_model)]
     pub model: Option<String>,
 
     /// Override the ADR bank API endpoint
@@ -255,4 +283,118 @@ pub struct ConfigSetArgs {
     pub key: String,
     /// Configuration value
     pub value: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    // ---- parse_model unit tests ----
+
+    #[test]
+    fn test_parse_model_valid() {
+        let valid = [
+            "sonnet",
+            "opus",
+            "o4-mini",
+            "gpt-4o",
+            "claude-3.5-sonnet",
+            "openai/o4-mini",
+            "provider/model-name_v2",
+            "codex-mini-latest",
+        ];
+        for m in &valid {
+            assert!(
+                parse_model(m).is_ok(),
+                "expected Ok for model {m:?}, got Err"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_model_rejects_flag_like() {
+        let err = parse_model("--allow-dangerously-skip-permissions").unwrap_err();
+        assert!(err.contains("must not start with '-'"), "message: {err}");
+    }
+
+    #[test]
+    fn test_parse_model_rejects_leading_dash() {
+        assert!(parse_model("-model").is_err());
+    }
+
+    #[test]
+    fn test_parse_model_rejects_whitespace() {
+        let err = parse_model("model name").unwrap_err();
+        assert!(err.contains("whitespace"), "message: {err}");
+    }
+
+    #[test]
+    fn test_parse_model_rejects_pipe() {
+        let err = parse_model("model|cmd").unwrap_err();
+        assert!(err.contains("invalid character"), "message: {err}");
+    }
+
+    #[test]
+    fn test_parse_model_rejects_semicolon() {
+        assert!(parse_model("model;cmd").is_err());
+    }
+
+    #[test]
+    fn test_parse_model_rejects_dollar() {
+        assert!(parse_model("model$var").is_err());
+    }
+
+    #[test]
+    fn test_parse_model_rejects_backtick() {
+        assert!(parse_model("model`cmd`").is_err());
+    }
+
+    #[test]
+    fn test_parse_model_rejects_too_long() {
+        let long_model = "a".repeat(101);
+        let err = parse_model(&long_model).unwrap_err();
+        assert!(err.contains("too long"), "message: {err}");
+    }
+
+    #[test]
+    fn test_parse_model_accepts_exactly_100_chars() {
+        // 1 char start + 99 valid chars = 100 total
+        let model = format!("a{}", "b".repeat(99));
+        assert_eq!(model.len(), 100);
+        assert!(parse_model(&model).is_ok());
+    }
+
+    // ---- Integration: clap rejects flag-like --model values ----
+
+    #[test]
+    fn test_cli_rejects_flag_like_model() {
+        let result = Cli::try_parse_from([
+            "actual",
+            "sync",
+            "--model",
+            "--allow-dangerously-skip-permissions",
+        ]);
+        assert!(
+            result.is_err(),
+            "expected clap to reject flag-like model name"
+        );
+    }
+
+    #[test]
+    fn test_cli_accepts_valid_model() {
+        let result = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"]);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        if let Ok(cli) = result {
+            if let Command::Sync(args) = cli.command {
+                assert_eq!(args.model, Some("claude-3.5-sonnet".to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn test_cli_rejects_model_with_shell_metacharacters() {
+        let result = Cli::try_parse_from(["actual", "sync", "--model", "model|cmd"]);
+        assert!(result.is_err(), "expected clap to reject model with '|'");
+    }
 }
