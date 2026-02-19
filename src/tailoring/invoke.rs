@@ -106,12 +106,23 @@ pub(crate) fn validate_and_filter_output(
                 file.path
             )));
         }
-        if std::path::Path::new(&file.path)
-            .components()
-            .any(|c| c == std::path::Component::ParentDir)
-        {
+        let has_unsafe_component = std::path::Path::new(&file.path).components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        });
+        if has_unsafe_component {
+            let is_absolute = std::path::Path::new(&file.path).is_absolute();
+            let reason = if is_absolute {
+                "absolute paths are not allowed"
+            } else {
+                "path contains path traversal components"
+            };
             return Err(ActualError::TailoringValidationError(format!(
-                "file path '{}' contains path traversal components",
+                "file path '{}': {reason}",
                 file.path
             )));
         }
