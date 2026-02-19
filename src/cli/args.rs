@@ -435,4 +435,46 @@ mod parse_tests {
         let result = Cli::try_parse_from(["actual", "sync", "--model", "model|cmd"]);
         assert!(result.is_err(), "expected clap to reject model with '|'");
     }
+
+    // ---- ConfigAction parsing tests ----
+
+    #[test]
+    fn test_config_show_parses() {
+        let cli = Cli::try_parse_from(["actual", "config", "show"]).unwrap();
+        let Command::Config(args) = cli.command else {
+            unreachable!("expected Config command")
+        };
+        assert!(matches!(args.action, ConfigAction::Show));
+    }
+
+    #[test]
+    fn test_config_path_parses() {
+        let cli = Cli::try_parse_from(["actual", "config", "path"]).unwrap();
+        let Command::Config(args) = cli.command else {
+            unreachable!("expected Config command")
+        };
+        assert!(matches!(args.action, ConfigAction::Path));
+    }
+
+    #[test]
+    fn test_config_set_parses() {
+        let cli =
+            Cli::try_parse_from(["actual", "config", "set", "options.batch_size", "5"]).unwrap();
+        let Command::Config(args) = cli.command else {
+            unreachable!("expected Config command")
+        };
+        let ConfigAction::Set(set_args) = args.action else {
+            unreachable!("expected Set action")
+        };
+        assert_eq!(set_args.key, "options.batch_size");
+        assert_eq!(set_args.value, "5");
+    }
+
+    // ---- parse_budget NaN test ----
+
+    #[test]
+    fn test_parse_budget_rejects_nan() {
+        let err = parse_budget("nan").unwrap_err();
+        assert!(err.contains("non-negative"), "message: {err}");
+    }
 }
