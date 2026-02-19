@@ -139,12 +139,12 @@ pub fn render_to<B: Backend>(
                 let max = log.max_scroll(log_height);
                 let scroll_hint = if max > 0 {
                     format!(
-                        "  j/k scroll  g/G top/bottom  q quit  [{}/{}]",
+                        "  ↑/↓ scroll  Home/End top/bottom  q quit  [{}/{}]",
                         scroll_offset.min(max),
                         max
                     )
                 } else {
-                    "  j/k scroll  q quit".to_string()
+                    "  ↑/↓ scroll  q quit".to_string()
                 };
                 log_lines.push(scroll_hint);
             }
@@ -169,7 +169,7 @@ pub fn render_to<B: Backend>(
             if let Some(cs) = confirm {
                 append_confirm_lines(&mut log_lines, cs);
             } else if hint {
-                log_lines.push("  j/k scroll  q quit".to_string());
+                log_lines.push("  ↑/↓ scroll  q quit".to_string());
             }
             let log_text = log_lines.join("\n");
             frame.render_widget(Paragraph::new(log_text), chunks[1]);
@@ -426,10 +426,12 @@ impl TuiRenderer {
                 let Ok(key) = source.next_key() else {
                     break;
                 };
-                // Conservative log-height estimate for max_scroll clamping.
-                // Exact height is only known inside render_to, but render_to
-                // clamps internally too, so this just avoids spinning past top.
-                let log_height: usize = 30;
+                // Use actual terminal height to correctly compute max_scroll.
+                // Subtract borders (2) + footer hint line (1) + steps row/condensed (varies).
+                // Using crossterm::terminal::size() for the live terminal dimensions.
+                let log_height: usize = crossterm::terminal::size()
+                    .map(|(_, rows)| (rows as usize).saturating_sub(4))
+                    .unwrap_or(20);
                 let max = self.log.max_scroll(log_height);
                 match (key.code, key.modifiers) {
                     // Quit
@@ -438,33 +440,33 @@ impl TuiRenderer {
                     | (KeyCode::Esc, _)
                     | (KeyCode::Enter, _) => break,
                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break,
-                    // Scroll down (towards newer output)
-                    (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
-                        self.draw();
-                    }
                     // Scroll up (towards older output)
-                    (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
                         self.scroll_offset = (self.scroll_offset + 1).min(max);
                         self.draw();
                     }
-                    // Half-page down
-                    (KeyCode::Char('d'), _) | (KeyCode::PageDown, _) => {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(log_height / 2);
+                    // Scroll down (towards newer output)
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
                         self.draw();
                     }
                     // Half-page up
-                    (KeyCode::Char('u'), _) | (KeyCode::PageUp, _) => {
+                    (KeyCode::PageUp, _) | (KeyCode::Char('u'), _) => {
                         self.scroll_offset = (self.scroll_offset + log_height / 2).min(max);
                         self.draw();
                     }
+                    // Half-page down
+                    (KeyCode::PageDown, _) | (KeyCode::Char('d'), _) => {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(log_height / 2);
+                        self.draw();
+                    }
                     // Jump to top
-                    (KeyCode::Char('g'), _) | (KeyCode::Home, _) => {
+                    (KeyCode::Home, _) | (KeyCode::Char('g'), _) => {
                         self.scroll_offset = max;
                         self.draw();
                     }
                     // Jump to bottom
-                    (KeyCode::Char('G'), _) | (KeyCode::End, _) => {
+                    (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
                         self.scroll_offset = 0;
                         self.draw();
                     }
