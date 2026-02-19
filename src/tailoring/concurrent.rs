@@ -20,7 +20,10 @@ pub struct ConcurrentTailoringConfig<'a> {
     /// Maximum number of ADRs per batch sent to a single invocation.
     pub batch_size: usize,
     /// Pre-existing output file paths to include as context.
-    pub existing_claude_md_paths: &'a str,
+    ///
+    /// Named generically to reflect that it applies to all output formats
+    /// (CLAUDE.md, AGENTS.md, etc.), not just CLAUDE.md. See actual-cli-bek.15.
+    pub existing_output_file_paths: &'a str,
     /// Optional model override for the Claude invocation.
     pub model_override: Option<&'a str>,
     /// Optional maximum budget in USD for each invocation.
@@ -40,7 +43,7 @@ impl<'a> ConcurrentTailoringConfig<'a> {
     pub fn new(
         concurrency: usize,
         batch_size: usize,
-        existing_claude_md_paths: &'a str,
+        existing_output_file_paths: &'a str,
         model_override: Option<&'a str>,
         max_budget_usd: Option<f64>,
         per_project_timeout: Duration,
@@ -54,7 +57,7 @@ impl<'a> ConcurrentTailoringConfig<'a> {
         Ok(Self {
             concurrency,
             batch_size,
-            existing_claude_md_paths,
+            existing_output_file_paths,
             model_override,
             max_budget_usd,
             per_project_timeout,
@@ -154,6 +157,10 @@ async fn tailor_single_project<R: TailoringRunner>(
     let futures: Vec<_> = batches
         .iter()
         .map(|batch_adrs| async {
+            // The semaphore is held in an Arc and never explicitly closed, so
+            // AcquireError is unreachable in practice. We convert it to
+            // InternalError rather than panicking, documenting the invariant.
+            // See actual-cli-bek.21.
             let _permit = semaphore.acquire().await.map_err(|_| {
                 ActualError::InternalError(
                     "semaphore closed unexpectedly — this is a bug".to_string(),
@@ -163,7 +170,7 @@ async fn tailor_single_project<R: TailoringRunner>(
                 runner,
                 batch_adrs,
                 &project_json,
-                config.existing_claude_md_paths,
+                config.existing_output_file_paths,
                 config.model_override,
                 config.max_budget_usd,
                 config.output_format,
@@ -421,7 +428,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 2,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -466,7 +473,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -512,7 +519,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 3,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -558,7 +565,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 3,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -622,7 +629,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 2,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -671,7 +678,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -743,7 +750,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 2,
             batch_size: 1,
-            existing_claude_md_paths: "existing context",
+            existing_output_file_paths: "existing context",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -840,7 +847,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 3,
             batch_size: 1,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -918,7 +925,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 2,
             batch_size: 1,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -967,7 +974,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(2),
@@ -1001,7 +1008,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(2),
@@ -1059,7 +1066,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 2,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -1136,7 +1143,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 2,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -1188,7 +1195,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
@@ -1217,7 +1224,7 @@ mod tests {
         let config = ConcurrentTailoringConfig {
             concurrency: 1,
             batch_size: 15,
-            existing_claude_md_paths: "",
+            existing_output_file_paths: "",
             model_override: None,
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
