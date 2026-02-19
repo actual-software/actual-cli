@@ -678,6 +678,46 @@ fn compute_tailoring_cache_key(
     format!("{:x}", hasher.finalize())
 }
 
+/// Strip non-printable ASCII control characters from server-controlled ADR content.
+///
+/// Keeps newlines (`\n`), carriage returns (`\r`), and tabs (`\t`) as they are
+/// legitimate in markdown, but removes other control characters (bytes < 0x20
+/// and DEL 0x7F) that could be used for terminal manipulation.
+fn strip_control_chars(s: &str) -> String {
+    s.chars()
+        .filter(|&c| c >= ' ' || c == '\n' || c == '\r' || c == '\t')
+        .filter(|&c| c != '\x7f')
+        .collect()
+}
+
+/// Validate a server-controlled project path before using it to construct output file paths.
+///
+/// Rejects paths that:
+/// - Contain `..` components (path traversal)
+/// - Start with `/` or `\` (absolute paths)
+/// - Contain null bytes
+fn validate_project_path(p: &str) -> Result<(), ActualError> {
+    if p.contains('\0') {
+        return Err(ActualError::InternalError(format!(
+            "project path '{p}' contains null bytes"
+        )));
+    }
+    if p.starts_with('/') || p.starts_with('\\') {
+        return Err(ActualError::InternalError(format!(
+            "project path '{p}' must be a relative path"
+        )));
+    }
+    if std::path::Path::new(p)
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(ActualError::InternalError(format!(
+            "project path '{p}' contains path traversal components"
+        )));
+    }
+    Ok(())
+}
+
 /// Convert raw ADRs into a [`TailoringOutput`] without Claude tailoring.
 ///
 /// Groups ADRs by their `matched_projects` field. Each group produces a
@@ -696,6 +736,14 @@ fn raw_adrs_to_output(adrs: &[crate::api::types::Adr], format: &OutputFormat) ->
                 .push(adr);
         } else {
             for project_path in &adr.matched_projects {
+                if validate_project_path(project_path).is_err() {
+                    eprintln!(
+                        "  warning: skipping invalid project path '{}' for ADR '{}'",
+                        console::strip_ansi_codes(project_path),
+                        adr.id
+                    );
+                    continue;
+                }
                 let file_path = if project_path == "." {
                     filename.to_string()
                 } else {
@@ -714,15 +762,18 @@ fn raw_adrs_to_output(adrs: &[crate::api::types::Adr], format: &OutputFormat) ->
 
             for adr in &adrs_for_file {
                 adr_ids.push(adr.id.clone());
-                let mut section = format!("## {}\n", adr.title);
+                let safe_title = strip_control_chars(&adr.title);
+                let mut section = format!("## {safe_title}\n");
                 for policy in &adr.policies {
-                    section.push_str(&format!("- {policy}\n"));
+                    let safe_policy = strip_control_chars(policy);
+                    section.push_str(&format!("- {safe_policy}\n"));
                 }
                 if let Some(instructions) = &adr.instructions {
                     if !instructions.is_empty() {
                         section.push('\n');
                         for instruction in instructions {
-                            section.push_str(&format!("- {instruction}\n"));
+                            let safe_instruction = strip_control_chars(instruction);
+                            section.push_str(&format!("- {safe_instruction}\n"));
                         }
                     }
                 }
@@ -852,8 +903,10 @@ pub fn confirm_and_write(
     if dry_run {
         if full {
             for file in &output.files {
-                term.write_line(&format!("── {} ──", file.path));
-                term.write_line(&file.content);
+                let safe_path = console::strip_ansi_codes(&file.path);
+                let safe_content = console::strip_ansi_codes(&file.content);
+                term.write_line(&format!("── {safe_path} ──"));
+                term.write_line(&safe_content);
                 term.write_line("── end ──");
             }
         }
@@ -916,13 +969,14 @@ fn report_write_results(
     let mut panel = Panel::titled("Results");
 
     for result in results {
+        let safe_path = console::strip_ansi_codes(&result.path);
         match result.action {
             WriteAction::Created => {
                 files_created += 1;
                 panel = panel.line(&format!(
                     "{} {}    created   v{}",
                     theme::success(&theme::SUCCESS),
-                    result.path,
+                    safe_path,
                     result.version
                 ));
             }
@@ -931,7 +985,7 @@ fn report_write_results(
                 panel = panel.line(&format!(
                     "{} {}    updated   v{}",
                     theme::success(&theme::SUCCESS),
-                    result.path,
+                    safe_path,
                     result.version
                 ));
             }
@@ -941,7 +995,7 @@ fn report_write_results(
                 panel = panel.line(&format!(
                     "{} {}    error     {}",
                     theme::error(&theme::ERROR),
-                    result.path,
+                    safe_path,
                     err_msg
                 ));
             }
@@ -2418,6 +2472,165 @@ mod tests {
         let output = raw_adrs_to_output(&adrs, &OutputFormat::AgentsMd);
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "AGENTS.md");
+    }
+
+    // ── validate_project_path tests ──
+
+    #[test]
+    fn test_validate_project_path_valid() {
+        assert!(validate_project_path("apps/web").is_ok());
+        assert!(validate_project_path(".").is_ok());
+        assert!(validate_project_path("services/api/v2").is_ok());
+    }
+
+    #[test]
+    fn test_validate_project_path_rejects_path_traversal() {
+        let result = validate_project_path("../secret");
+        assert!(result.is_err(), "expected error for path traversal");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("path traversal"),
+            "expected 'path traversal' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_project_path_rejects_absolute_slash() {
+        let result = validate_project_path("/etc/passwd");
+        assert!(result.is_err(), "expected error for absolute path");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("relative path"),
+            "expected 'relative path' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_project_path_rejects_absolute_backslash() {
+        let result = validate_project_path("\\windows\\system32");
+        assert!(
+            result.is_err(),
+            "expected error for backslash absolute path"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("relative path"),
+            "expected 'relative path' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_project_path_rejects_null_bytes() {
+        let result = validate_project_path("apps\0evil");
+        assert!(result.is_err(), "expected error for null bytes");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("null bytes"),
+            "expected 'null bytes' in: {msg}"
+        );
+    }
+
+    // ── strip_control_chars tests ──
+
+    #[test]
+    fn test_strip_control_chars_keeps_printable() {
+        let input = "Hello, World! 123 abc ABC";
+        assert_eq!(strip_control_chars(input), input);
+    }
+
+    #[test]
+    fn test_strip_control_chars_keeps_newline_tab_cr() {
+        let input = "line1\nline2\r\n\ttabbed";
+        assert_eq!(strip_control_chars(input), input);
+    }
+
+    #[test]
+    fn test_strip_control_chars_removes_control_chars() {
+        // ESC (0x1B), BEL (0x07), SOH (0x01)
+        let input = "hello\x1b[31mworld\x07\x01end";
+        let result = strip_control_chars(input);
+        assert!(!result.contains('\x1b'), "should strip ESC");
+        assert!(!result.contains('\x07'), "should strip BEL");
+        assert!(!result.contains('\x01'), "should strip SOH");
+        assert!(result.contains("hello"), "should keep 'hello'");
+        assert!(result.contains("world"), "should keep 'world'");
+        assert!(result.contains("end"), "should keep 'end'");
+    }
+
+    #[test]
+    fn test_strip_control_chars_removes_del() {
+        let input = "abc\x7fdef";
+        let result = strip_control_chars(input);
+        assert!(!result.contains('\x7f'), "should strip DEL");
+        assert_eq!(result, "abcdef");
+    }
+
+    #[test]
+    fn test_strip_control_chars_empty_string() {
+        assert_eq!(strip_control_chars(""), "");
+    }
+
+    // ── raw_adrs_to_output with invalid project paths tests ──
+
+    #[test]
+    fn test_raw_adrs_to_output_skips_traversal_project_path() {
+        // An ADR with a path-traversal project path should be skipped (no file for that project)
+        let adrs = vec![make_test_adr("adr-001", "Test ADR", vec!["../evil"])];
+        let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
+        // The invalid project path should be skipped; no file generated
+        assert!(
+            output.files.is_empty(),
+            "expected no files for traversal path"
+        );
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_skips_absolute_project_path() {
+        let adrs = vec![make_test_adr("adr-001", "Test ADR", vec!["/etc/passwd"])];
+        let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
+        assert!(
+            output.files.is_empty(),
+            "expected no files for absolute path"
+        );
+    }
+
+    #[test]
+    fn test_raw_adrs_to_output_strips_control_chars_from_content() {
+        // Use actual control chars (not full ANSI sequences) to verify stripping
+        let mut adr = make_test_adr("adr-001", "Test\x07ADR", vec![]);
+        adr.policies = vec!["Policy\x01with\x02bells".to_string()];
+        adr.instructions = Some(vec!["Instruction\x03normal".to_string()]);
+        let output = raw_adrs_to_output(&[adr], &OutputFormat::ClaudeMd);
+        assert_eq!(output.files.len(), 1);
+        let content = &output.files[0].content;
+        assert!(
+            !content.contains('\x07'),
+            "BEL should be stripped from title"
+        );
+        assert!(
+            !content.contains('\x01'),
+            "SOH should be stripped from policy"
+        );
+        assert!(
+            !content.contains('\x02'),
+            "STX should be stripped from policy"
+        );
+        assert!(
+            !content.contains('\x03'),
+            "ETX should be stripped from instruction"
+        );
+        assert!(
+            content.contains("TestADR"),
+            "title text should be preserved (without control char)"
+        );
+        assert!(
+            content.contains("Policy"),
+            "policy text should be preserved"
+        );
+        assert!(
+            content.contains("Instruction"),
+            "instruction text should be preserved"
+        );
     }
 
     // ── find_existing_claude_md tests ──

@@ -1,3 +1,5 @@
+use console;
+
 use crate::cli::ui::terminal::TerminalIO;
 use crate::error::ActualError;
 use crate::tailoring::types::{FileOutput, TailoringOutput};
@@ -35,7 +37,8 @@ pub fn confirm_files(
         .map(|file| {
             let count = file.adr_ids.len();
             let plural = if count == 1 { "" } else { "s" };
-            format!("{}  ({count} ADR{plural})", file.path)
+            let safe_path = console::strip_ansi_codes(&file.path);
+            format!("{safe_path}  ({count} ADR{plural})")
         })
         .collect();
 

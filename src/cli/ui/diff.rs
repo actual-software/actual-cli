@@ -3,6 +3,7 @@ use similar::{ChangeTag, TextDiff};
 use std::fmt::Write;
 
 use super::theme;
+use console;
 
 /// Per-file change summary for display formatting.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,12 +110,12 @@ pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<Vec<S
         }
         match change.tag() {
             ChangeTag::Delete => {
-                let line = change.value().trim_end_matches('\n');
+                let line = console::strip_ansi_codes(change.value().trim_end_matches('\n'));
                 lines.push(format!("{}", theme::error(format!("- {line}"))));
                 shown += 1;
             }
             ChangeTag::Insert => {
-                let line = change.value().trim_end_matches('\n');
+                let line = console::strip_ansi_codes(change.value().trim_end_matches('\n'));
                 lines.push(format!("{}", theme::success(format!("+ {line}"))));
                 shown += 1;
             }
@@ -139,11 +140,12 @@ pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<Vec<S
 /// Content-level diffs use tree-drawing prefixes (`├─` / `└─`).
 pub fn format_file_diff(diff: &FileDiff) -> String {
     let mut output = String::new();
+    let safe_path = console::strip_ansi_codes(&diff.path);
 
     match &diff.change {
         FileChange::NewFile { rule_count } => {
             let noun = if *rule_count == 1 { "rule" } else { "rules" };
-            let _ = writeln!(output, "{}  (new file) + {rule_count} {noun}", diff.path);
+            let _ = writeln!(output, "{safe_path}  (new file) + {rule_count} {noun}");
             if let Some(diff_lines) = format_content_diff("", &diff.new_content) {
                 append_tree_lines(&mut output, &diff_lines);
             }
@@ -155,8 +157,7 @@ pub fn format_file_diff(diff: &FileDiff) -> String {
         } => {
             let _ = writeln!(
                 output,
-                "{}  + {added} new  ~ {updated} upd  - {removed} rm",
-                diff.path
+                "{safe_path}  + {added} new  ~ {updated} upd  - {removed} rm",
             );
             if let Some(old) = &diff.old_content {
                 if let Some(diff_lines) = format_content_diff(old, &diff.new_content) {
@@ -165,7 +166,7 @@ pub fn format_file_diff(diff: &FileDiff) -> String {
             }
         }
         FileChange::NoChanges => {
-            let _ = writeln!(output, "{}  no changes", diff.path);
+            let _ = writeln!(output, "{safe_path}  no changes");
         }
     }
 

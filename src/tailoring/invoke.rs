@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use console;
 use serde::Serialize;
 
 use crate::api::types::Adr;
@@ -114,6 +115,8 @@ pub(crate) fn validate_and_filter_output(
                 file.path
             )));
         }
+        // Sanitize LLM-generated path to prevent ANSI injection in terminal output
+        file.path = console::strip_ansi_codes(&file.path).into_owned();
         let invalid_ids: Vec<String> = file
             .adr_ids
             .iter()
@@ -124,8 +127,12 @@ pub(crate) fn validate_and_filter_output(
             eprintln!(
                 "  warning: filtered {} hallucinated ADR ID(s) from '{}': {}",
                 invalid_ids.len(),
-                file.path,
-                invalid_ids.join(", ")
+                console::strip_ansi_codes(&file.path),
+                invalid_ids
+                    .iter()
+                    .map(|id| console::strip_ansi_codes(id).into_owned())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             file.adr_ids.retain(|id| valid_ids.contains(id.as_str()));
         }
