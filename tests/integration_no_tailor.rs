@@ -214,6 +214,13 @@ mod tests {
             .create();
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
+        // Write a config with recognizable fake API key values to verify they
+        // are not leaked into verbose output.
+        std::fs::write(
+            &env.config_path,
+            "anthropic_api_key: sk-ant-test12345\nopenai_api_key: sk-test-openai-67890\n",
+        )
+        .unwrap();
         env.cmd()
             .args([
                 "sync",
@@ -223,11 +230,61 @@ mod tests {
                 "--api-url",
                 &env.api_url,
             ])
+            .env("ANTHROPIC_API_KEY", "sk-ant-test12345")
+            .env("OPENAI_API_KEY", "sk-test-openai-67890")
             .assert()
             .success()
+            // Existing positive assertions (keep these):
             .stderr(predicate::str::contains("API request to:"))
             .stderr(predicate::str::contains("projects:"))
-            .stderr(predicate::str::contains("matched:"));
+            .stderr(predicate::str::contains("matched:"))
+            // Credential values must not appear in stderr
+            .stderr(predicate::str::contains("sk-ant-test12345").not())
+            .stderr(predicate::str::contains("sk-test-openai-67890").not())
+            // Credential values must not appear in stdout
+            .stdout(predicate::str::contains("sk-ant-test12345").not())
+            .stdout(predicate::str::contains("sk-test-openai-67890").not());
+    }
+
+    #[test]
+    fn verbose_does_not_leak_api_keys_in_output() {
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json("adr-001", "Test ADR", &["policy"], &[], &["."]);
+        let response = make_match_response_json(&format!("[{}]", adr));
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&response)
+            .create();
+
+        let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
+        // Write a config with recognizable fake API key values to ensure they
+        // never appear in any output, even in verbose mode.
+        std::fs::write(
+            &env.config_path,
+            "anthropic_api_key: sk-ant-test12345\nopenai_api_key: sk-test-openai-67890\n",
+        )
+        .unwrap();
+        env.cmd()
+            .args([
+                "sync",
+                "--force",
+                "--no-tailor",
+                "--verbose",
+                "--api-url",
+                &env.api_url,
+            ])
+            .env("ANTHROPIC_API_KEY", "sk-ant-test12345")
+            .env("OPENAI_API_KEY", "sk-test-openai-67890")
+            .assert()
+            .success()
+            // API key values must never appear in stderr
+            .stderr(predicate::str::contains("sk-ant-test12345").not())
+            .stderr(predicate::str::contains("sk-test-openai-67890").not())
+            // API key values must never appear in stdout
+            .stdout(predicate::str::contains("sk-ant-test12345").not())
+            .stdout(predicate::str::contains("sk-test-openai-67890").not());
     }
 
     #[test]
