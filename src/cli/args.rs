@@ -142,6 +142,10 @@ pub struct SyncArgs {
     #[arg(long, value_parser = parse_budget, allow_hyphen_values = true)]
     pub max_budget_usd: Option<f64>,
 
+    /// Disable the ratatui TUI and use plain line output instead
+    #[arg(long)]
+    pub no_tui: bool,
+
     /// Output file format to generate.
     ///
     /// Supported values:
@@ -507,5 +511,36 @@ mod parse_tests {
     fn test_parse_budget_rejects_nan() {
         let err = parse_budget("nan").unwrap_err();
         assert!(err.contains("non-negative"), "message: {err}");
+    }
+
+    // ---- --no-tui flag tests ----
+
+    /// Helper to extract no_tui from a parsed Sync command.
+    fn no_tui_from_command(cmd: Command) -> bool {
+        match cmd {
+            Command::Sync(args) => args.no_tui,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn test_no_tui_flag_absent_is_false() {
+        let cli =
+            Cli::try_parse_from(["actual", "sync"]).expect("sync without --no-tui should parse");
+        assert!(!no_tui_from_command(cli.command));
+    }
+
+    #[test]
+    fn test_no_tui_flag_present_is_true() {
+        let cli = Cli::try_parse_from(["actual", "sync", "--no-tui"])
+            .expect("sync with --no-tui should parse");
+        assert!(no_tui_from_command(cli.command));
+    }
+
+    #[test]
+    fn test_no_tui_from_non_sync_command_returns_false() {
+        // Exercises the `_ => false` arm of no_tui_from_command.
+        let cli = Cli::try_parse_from(["actual", "status"]).unwrap();
+        assert!(!no_tui_from_command(cli.command));
     }
 }

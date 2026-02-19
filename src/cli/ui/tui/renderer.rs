@@ -630,4 +630,43 @@ mod tests {
         // No start → elapsed should remain None
         assert!(r.steps.steps[3].elapsed.is_none());
     }
+
+    // ── SIGWINCH/resize test ──
+
+    #[test]
+    fn test_render_to_after_resize() {
+        // Start at wide layout (100 cols × 30 rows).
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+
+        // First draw at wide size — must not panic.
+        render_to(&mut terminal, &steps, &log).unwrap();
+        assert_eq!(terminal.size().unwrap().width, 100);
+
+        // Simulate a SIGWINCH / terminal resize: shrink to narrow layout (60 cols).
+        terminal.backend_mut().resize(60, 20);
+
+        // Second draw at narrow size — must not panic and must use new dimensions.
+        render_to(&mut terminal, &steps, &log).unwrap();
+        assert_eq!(terminal.size().unwrap().width, 60);
+        assert_eq!(terminal.size().unwrap().height, 20);
+    }
+
+    #[test]
+    fn test_render_to_resize_wide_to_narrow_boundary() {
+        // Start just above the 80-col breakpoint.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+
+        render_to(&mut terminal, &steps, &log).unwrap();
+
+        // Resize to just below the breakpoint — switches from wide to narrow layout.
+        terminal.backend_mut().resize(79, 24);
+        render_to(&mut terminal, &steps, &log).unwrap();
+        assert_eq!(terminal.size().unwrap().width, 79);
+    }
 }

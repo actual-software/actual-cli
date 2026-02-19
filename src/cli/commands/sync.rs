@@ -76,7 +76,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     print_banner(false);
 
     // 2. Create pipeline and check environment (git status)
-    let mut pipeline = TuiRenderer::new(false, false);
+    let mut pipeline = TuiRenderer::new(false, args.no_tui);
     pipeline.start(SyncPhase::Environment, "Checking environment...");
     let is_git = get_git_head(root_dir).is_some();
     if is_git {
@@ -1580,6 +1580,7 @@ mod tests {
             verbose: false,
             no_tailor,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         }
@@ -1597,6 +1598,7 @@ mod tests {
             verbose: false,
             no_tailor: false,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         }
@@ -1959,6 +1961,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -2889,6 +2892,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -2931,6 +2935,7 @@ mod tests {
             verbose: true,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -2974,6 +2979,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3038,6 +3044,7 @@ mod tests {
             verbose: true,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3065,6 +3072,7 @@ mod tests {
             verbose: false,
             no_tailor: false, // Triggers tailoring path
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3102,6 +3110,7 @@ mod tests {
             verbose: false,
             no_tailor: false, // triggers tailoring path
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3572,6 +3581,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3604,6 +3614,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3649,6 +3660,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3674,6 +3686,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3747,6 +3760,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3778,6 +3792,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3833,6 +3848,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
@@ -3866,6 +3882,7 @@ mod tests {
             verbose: false,
             no_tailor: true,
             max_budget_usd: None,
+            no_tui: false,
             output_format: None,
             runner: None,
         };
