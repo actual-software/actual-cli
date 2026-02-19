@@ -395,6 +395,142 @@ mod tests {
     }
 
     #[test]
+    fn path_traversal_rejected_end_to_end() {
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json(
+            "adr-001",
+            "Error Handling",
+            &["Use Result<T, E>"],
+            &[],
+            &["."],
+        );
+        let response = make_match_response_json(&format!("[{}]", adr));
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&response)
+            .create();
+
+        // Malicious path with path traversal components
+        let tailoring_json = make_tailoring_json(
+            &[(
+                "../../../tmp/pwned/CLAUDE.md",
+                "# Malicious content",
+                "Path traversal attempt",
+                &["adr-001"],
+            )],
+            &[],
+        );
+
+        let env =
+            TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
+        env.cmd()
+            .args(["sync", "--force", "--api-url", &env.api_url])
+            .assert()
+            .failure();
+
+        // The traversal target must not have been created
+        assert!(
+            !std::path::Path::new("../../../tmp/pwned/CLAUDE.md").exists(),
+            "relative traversal path must not exist"
+        );
+        assert!(
+            !std::path::Path::new("/tmp/pwned/CLAUDE.md").exists(),
+            "/tmp/pwned/CLAUDE.md must not have been created"
+        );
+    }
+
+    #[test]
+    fn absolute_path_rejected_end_to_end() {
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json(
+            "adr-001",
+            "Error Handling",
+            &["Use Result<T, E>"],
+            &[],
+            &["."],
+        );
+        let response = make_match_response_json(&format!("[{}]", adr));
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&response)
+            .create();
+
+        // Absolute path that does not end in CLAUDE.md — fails is_valid_output_path first
+        let tailoring_json = make_tailoring_json(
+            &[(
+                "/etc/malicious",
+                "# Malicious content",
+                "Absolute path attempt",
+                &["adr-001"],
+            )],
+            &[],
+        );
+
+        let env =
+            TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
+        env.cmd()
+            .args(["sync", "--force", "--api-url", &env.api_url])
+            .assert()
+            .failure();
+
+        // The absolute target must not have been created
+        assert!(
+            !std::path::Path::new("/etc/malicious").exists(),
+            "/etc/malicious must not exist"
+        );
+    }
+
+    #[test]
+    fn absolute_path_ending_in_claude_md_rejected_end_to_end() {
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json(
+            "adr-001",
+            "Error Handling",
+            &["Use Result<T, E>"],
+            &[],
+            &["."],
+        );
+        let response = make_match_response_json(&format!("[{}]", adr));
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&response)
+            .create();
+
+        // Absolute path ending in CLAUDE.md — passes is_valid_output_path and ParentDir check,
+        // but must be rejected by RootDir/Prefix component check in validate_and_filter_output.
+        let tailoring_json = make_tailoring_json(
+            &[(
+                "/tmp/pwned/CLAUDE.md",
+                "# Malicious content",
+                "Absolute path with valid filename",
+                &["adr-001"],
+            )],
+            &[],
+        );
+
+        // Ensure the target does not pre-exist
+        let _ = std::fs::remove_file("/tmp/pwned/CLAUDE.md");
+
+        let env =
+            TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
+        env.cmd()
+            .args(["sync", "--force", "--api-url", &env.api_url])
+            .assert()
+            .failure();
+
+        assert!(
+            !std::path::Path::new("/tmp/pwned/CLAUDE.md").exists(),
+            "/tmp/pwned/CLAUDE.md must not have been created"
+        );
+    }
+
+    #[test]
     fn tailored_content_replaces_existing_managed_section() {
         let mut server = mockito::Server::new();
         let adr = make_adr_json(
