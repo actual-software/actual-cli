@@ -494,26 +494,47 @@ fn compute_repo_key(root_dir: &Path) -> String {
 }
 
 fn compute_repo_key_with_timeout(root_dir: &Path, timeout: std::time::Duration) -> String {
-    use std::sync::mpsc;
-
     let root_dir_buf = root_dir.to_path_buf();
-    let (tx, rx) = mpsc::channel();
 
-    std::thread::spawn(move || {
-        let output = std::process::Command::new("git")
-            .args(["remote", "get-url", "origin"])
-            .current_dir(&root_dir_buf)
-            .output();
-        let _ = tx.send(output);
-    });
+    // Use tokio::process::Command with kill_on_drop(true) so that when the
+    // timeout fires the child is sent SIGKILL rather than left as an orphan.
+    // A single-threaded runtime is used to keep this function synchronous.
+    let url = (|| -> Option<String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
 
-    let input = rx
-        .recv_timeout(timeout)
-        .ok()
-        .and_then(|r| r.ok())
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|| root_dir.to_string_lossy().to_string());
+        rt.block_on(async move {
+            let mut cmd = tokio::process::Command::new("git");
+            cmd.args(["remote", "get-url", "origin"]);
+            cmd.current_dir(&root_dir_buf);
+            cmd.stdin(std::process::Stdio::null());
+            cmd.kill_on_drop(true);
+
+            let child = cmd
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .ok()?;
+
+            let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+
+            match result {
+                Ok(Ok(output)) if output.status.success() => {
+                    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                }
+                _ => None,
+            }
+        })
+    })();
+
+    let input = url.unwrap_or_else(|| root_dir.to_string_lossy().to_string());
 
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
