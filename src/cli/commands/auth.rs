@@ -58,16 +58,28 @@ pub fn check_auth_with_timeout(
     rt.block_on(check_auth_async(binary_path, timeout))
 }
 
+/// Convert a tokio runtime build error into an [`ActualError`].
+fn runtime_build_error(e: std::io::Error) -> ActualError {
+    ActualError::ClaudeSubprocessFailed {
+        message: format!("failed to build tokio runtime: {e}"),
+        stderr: String::new(),
+    }
+}
+
+/// Convert a `wait_with_output` I/O error into an [`ActualError`].
+fn wait_io_error(e: std::io::Error) -> ActualError {
+    ActualError::ClaudeSubprocessFailed {
+        message: format!("failed to wait for claude: {e}"),
+        stderr: String::new(),
+    }
+}
+
 /// Build a single-threaded tokio runtime.
 fn build_tokio_runtime() -> Result<tokio::runtime::Runtime, ActualError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| ActualError::ClaudeSubprocessFailed {
-            // LCOV_EXCL_LINE
-            message: format!("failed to build tokio runtime: {e}"), // LCOV_EXCL_LINE
-            stderr: String::new(),                                  // LCOV_EXCL_LINE
-        }) // LCOV_EXCL_LINE
+        .map_err(runtime_build_error)
 }
 
 /// Inner async logic for [`check_auth_with_timeout`].
@@ -99,11 +111,7 @@ async fn check_auth_async(
             // Round up so sub-second timeouts display as "1s" rather than "0s".
             seconds: timeout.as_secs_f64().ceil() as u64,
         })?
-        .map_err(|e| ActualError::ClaudeSubprocessFailed {
-            // LCOV_EXCL_LINE
-            message: format!("failed to wait for claude: {e}"), // LCOV_EXCL_LINE
-            stderr: String::new(),                              // LCOV_EXCL_LINE
-        })?; // LCOV_EXCL_LINE
+        .map_err(wait_io_error)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -568,5 +576,29 @@ mod tests {
         // This exercises the success path and ensures the function is reachable.
         let rt = build_tokio_runtime();
         assert!(rt.is_ok(), "expected runtime to build successfully");
+    }
+
+    #[test]
+    fn test_runtime_build_error_helper() {
+        // Exercises the runtime_build_error() conversion function, which is the
+        // only reachable coverage of that code path without OS-level trickery.
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "synthetic error");
+        let err = runtime_build_error(io_err);
+        assert!(
+            matches!(err, ActualError::ClaudeSubprocessFailed { ref message, .. } if message.contains("failed to build tokio runtime")),
+            "unexpected error variant: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_wait_io_error_helper() {
+        // Exercises the wait_io_error() conversion function, which is the
+        // only reachable coverage of that code path without OS-level trickery.
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe closed");
+        let err = wait_io_error(io_err);
+        assert!(
+            matches!(err, ActualError::ClaudeSubprocessFailed { ref message, .. } if message.contains("failed to wait for claude")),
+            "unexpected error variant: {err:?}"
+        );
     }
 }
