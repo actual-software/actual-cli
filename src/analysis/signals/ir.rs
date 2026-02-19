@@ -56,6 +56,16 @@ pub struct CanonicalIR {
     pub leaf_count: usize,
 }
 
+/// Sanitize a string for embedding in IR text by escaping newline and carriage
+/// return characters and stripping null bytes. This prevents adversarial inputs
+/// (e.g. file paths containing `\n`) from injecting extra lines into the
+/// line-based IR format.
+fn sanitize_ir_field(s: &str) -> String {
+    s.replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\x00', "")
+}
+
 /// Compute the SHA-256 hex digest of a string.
 fn sha256_hex(text: &str) -> String {
     let mut hasher = Sha256::new();
@@ -171,8 +181,8 @@ pub fn build_canonical_ir(file_key: &str, language: &str, matches: &[ToolMatch])
     let mut ir_lines = Vec::new();
 
     ir_lines.push("IRv2".to_string());
-    ir_lines.push(format!("FILE: {file_key}"));
-    ir_lines.push(format!("LANGUAGE: {language}"));
+    ir_lines.push(format!("FILE: {}", sanitize_ir_field(file_key)));
+    ir_lines.push(format!("LANGUAGE: {}", sanitize_ir_field(language)));
     ir_lines.push(format!("TAXONOMY: {TAXONOMY_VERSION_V2}"));
 
     for leaf_id in &sorted_leaf_ids {
@@ -190,15 +200,17 @@ pub fn build_canonical_ir(file_key: &str, language: &str, matches: &[ToolMatch])
         // Blank line before each LEAF block.
         ir_lines.push(String::new());
         ir_lines.push(format!(
-            "LEAF[{leaf_id}] {} (conf={:.3}):",
-            facet_data.facet_slot, facet_data.confidence,
+            "LEAF[{}] {} (conf={:.3}):",
+            sanitize_ir_field(leaf_id),
+            sanitize_ir_field(&facet_data.facet_slot),
+            facet_data.confidence,
         ));
 
         if facet_data.values.is_empty() {
             ir_lines.push("  - <detected>".to_string());
         } else {
             for value in &facet_data.values {
-                ir_lines.push(format!("  - {}", format_value(value)));
+                ir_lines.push(format!("  - {}", sanitize_ir_field(&format_value(value))));
             }
         }
 
@@ -741,5 +753,73 @@ mod tests {
         let json = serde_json::to_string(&summary).unwrap();
         let deserialized: SpanSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(summary, deserialized);
+    }
+
+    #[test]
+    fn ir_file_key_with_newlines_is_sanitized() {
+        // A file_key containing a newline would inject an extra line into the
+        // line-based IR format if not sanitized.
+        let file_key = "src/main.rs\nINJECTED_LINE";
+        let ir = build_canonical_ir(file_key, "rust", &[]);
+
+        // The literal newline must not produce an extra standalone line.
+        let lines: Vec<&str> = ir.ir_text.lines().collect();
+        assert!(
+            !lines.contains(&"INJECTED_LINE"),
+            "Injected line must not appear as a standalone IR line"
+        );
+
+        // The FILE header must be present with the escaped representation.
+        assert!(
+            ir.ir_text.contains("FILE: src/main.rs\\nINJECTED_LINE"),
+            "Newline in file_key must be escaped as \\n in IR text"
+        );
+    }
+
+    #[test]
+    fn ir_language_with_newlines_is_sanitized() {
+        let language = "rust\nINJECTED_LANG";
+        let ir = build_canonical_ir("f.rs", language, &[]);
+
+        let lines: Vec<&str> = ir.ir_text.lines().collect();
+        assert!(
+            !lines.contains(&"INJECTED_LANG"),
+            "Injected line must not appear as a standalone IR line"
+        );
+        assert!(
+            ir.ir_text.contains("LANGUAGE: rust\\nINJECTED_LANG"),
+            "Newline in language must be escaped as \\n in IR text"
+        );
+    }
+
+    #[test]
+    fn ir_value_with_newlines_is_sanitized() {
+        let matches = vec![make_match(
+            "rule",
+            "slot",
+            "1",
+            serde_json::json!("line1\nINJECTED_VALUE"),
+            0.9,
+        )];
+        let ir = build_canonical_ir("f.rs", "rust", &matches);
+
+        let lines: Vec<&str> = ir.ir_text.lines().collect();
+        assert!(
+            !lines.contains(&"INJECTED_VALUE"),
+            "Injected line from value must not appear as a standalone IR line"
+        );
+        assert!(
+            ir.ir_text.contains("line1\\nINJECTED_VALUE"),
+            "Newline in value must be escaped as \\n in IR text"
+        );
+    }
+
+    #[test]
+    fn sanitize_ir_field_escapes_control_characters() {
+        assert_eq!(sanitize_ir_field("a\nb"), "a\\nb");
+        assert_eq!(sanitize_ir_field("a\rb"), "a\\rb");
+        assert_eq!(sanitize_ir_field("a\x00b"), "ab");
+        assert_eq!(sanitize_ir_field("normal"), "normal");
+        assert_eq!(sanitize_ir_field("a\r\n\x00b"), "a\\r\\nb");
     }
 }
