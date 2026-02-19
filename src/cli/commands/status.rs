@@ -1,17 +1,19 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::api::DEFAULT_API_URL;
 use crate::branding::banner::print_banner;
 use crate::cli::args::StatusArgs;
 use crate::cli::commands::auth::check_auth_with_timeout;
+use crate::cli::commands::sync::resolve_cwd;
 use crate::cli::ui::header::{render_header_bar, AuthDisplay};
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::cli::ui::theme;
 use crate::config;
-use crate::config::types::Config;
+use crate::config::types::{Config, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY};
 use crate::error::ActualError;
 use crate::generation::markers;
+use crate::generation::OutputFormat;
 use crate::runner::binary::find_claude_binary;
 
 pub fn exec(args: &StatusArgs) -> Result<(), ActualError> {
@@ -23,15 +25,16 @@ fn load_and_run(args: &StatusArgs) -> Result<(), ActualError> {
     let config_exists = config_path.exists();
     let cfg = config::paths::load()?;
     let cwd = resolve_cwd();
-    run_status(args, &cfg, &config_path, config_exists, &cwd);
+    let output_format = cfg.output_format.clone().unwrap_or_default();
+    run_status(
+        args,
+        &cfg,
+        &config_path,
+        config_exists,
+        &cwd,
+        &output_format,
+    );
     Ok(())
-}
-
-/// Resolve the current working directory, falling back to `"."` if unavailable
-/// (e.g. the directory was deleted while the process was running).
-fn resolve_cwd() -> PathBuf {
-    let fallback = PathBuf::from(".");
-    std::env::current_dir().unwrap_or(fallback)
 }
 
 /// Attempt to detect authentication status gracefully with a timeout.
@@ -57,6 +60,7 @@ fn run_status(
     config_path: &Path,
     config_exists: bool,
     cwd: &Path,
+    output_format: &OutputFormat,
 ) {
     let stderr_width = term_size::terminal_width();
     let width = term_size::terminal_width();
@@ -75,8 +79,8 @@ fn run_status(
         format_config_section(cfg, config_path, config_exists, args.verbose, width)
     );
 
-    // CLAUDE.md files panel
-    println!("{}", format_claude_md_section(cwd, width));
+    // Output files panel (format-aware)
+    println!("{}", format_output_files_section(cwd, output_format, width));
 
     // Verbose details panel
     if args.verbose {
@@ -122,18 +126,21 @@ fn format_config_section(
     panel.render(width)
 }
 
-fn format_claude_md_section(cwd: &Path, width: usize) -> String {
-    let files = super::find_claude_md_files(cwd);
+fn format_output_files_section(cwd: &Path, format: &OutputFormat, width: usize) -> String {
+    let files = super::find_output_files(cwd, format);
+    let filename = format.filename();
+    let panel_title = format!("{filename} Files");
 
     if files.is_empty() {
-        let panel = Panel::titled("CLAUDE.md Files").line(&format!(
-            "No CLAUDE.md files found. Run {} to generate.",
+        let panel = Panel::titled(&panel_title).line(&format!(
+            "No {} files found. Run {} to generate.",
+            filename,
             theme::hint("`actual sync`")
         ));
         return panel.render(width);
     }
 
-    let mut panel = Panel::titled("CLAUDE.md Files");
+    let mut panel = Panel::titled(&panel_title);
     let mut managed_count: usize = 0;
     let mut unmanaged_count: usize = 0;
 
@@ -192,8 +199,8 @@ fn format_verbose_section(cfg: &Config, width: usize) -> String {
         format!("{}", theme::warning("disabled"))
     };
 
-    let batch_size = cfg.batch_size.unwrap_or(15);
-    let concurrency = cfg.concurrency.unwrap_or(3);
+    let batch_size = cfg.batch_size.unwrap_or(DEFAULT_BATCH_SIZE);
+    let concurrency = cfg.concurrency.unwrap_or(DEFAULT_CONCURRENCY);
 
     let rejected_adrs_value = if let Some(ref rejected) = cfg.rejected_adrs {
         let total: usize = rejected.values().map(|v| v.len()).sum();
@@ -494,12 +501,12 @@ mod tests {
         assert!(p.contains('│'), "should contain vertical border character");
     }
 
-    // ─── format_claude_md_section ────────────────────────────────
+    // ─── format_output_files_section ────────────────────────────────
 
     #[test]
-    fn test_format_claude_md_section_empty() {
+    fn test_format_output_files_section_empty() {
         let dir = tempdir().unwrap();
-        let output = format_claude_md_section(dir.path(), 80);
+        let output = format_output_files_section(dir.path(), &OutputFormat::ClaudeMd, 80);
         let p = plain(&output);
         assert!(
             p.contains("CLAUDE.md Files"),
@@ -516,10 +523,25 @@ mod tests {
     }
 
     #[test]
-    fn test_format_claude_md_section_unmanaged() {
+    fn test_format_output_files_section_agents_md_empty() {
+        let dir = tempdir().unwrap();
+        let output = format_output_files_section(dir.path(), &OutputFormat::AgentsMd, 80);
+        let p = plain(&output);
+        assert!(
+            p.contains("AGENTS.md Files"),
+            "should have panel title for agents-md: {p}"
+        );
+        assert!(
+            p.contains("No AGENTS.md files found"),
+            "should show empty message for agents-md: {p}"
+        );
+    }
+
+    #[test]
+    fn test_format_output_files_section_unmanaged() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("CLAUDE.md"), "# No markers").unwrap();
-        let output = format_claude_md_section(dir.path(), 80);
+        let output = format_output_files_section(dir.path(), &OutputFormat::ClaudeMd, 80);
         let p = plain(&output);
         assert!(p.contains("unmanaged"), "should show 'unmanaged': {p}");
         assert!(p.contains("0 managed"), "should show 0 managed count: {p}");
@@ -530,11 +552,11 @@ mod tests {
     }
 
     #[test]
-    fn test_format_claude_md_section_managed() {
+    fn test_format_output_files_section_managed() {
         let dir = tempdir().unwrap();
         let managed = markers::wrap_in_markers("test content", 2, &[]);
         std::fs::write(dir.path().join("CLAUDE.md"), &managed).unwrap();
-        let output = format_claude_md_section(dir.path(), 80);
+        let output = format_output_files_section(dir.path(), &OutputFormat::ClaudeMd, 80);
         let p = plain(&output);
         assert!(p.contains("managed"), "should show 'managed': {p}");
         assert!(p.contains("v2"), "should show version: {p}");
@@ -547,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_claude_md_section_managed_version_without_last_synced() {
+    fn test_format_output_files_section_managed_version_without_last_synced() {
         let dir = tempdir().unwrap();
         // Managed section with version but without last-synced metadata
         let content = format!(
@@ -556,7 +578,7 @@ mod tests {
             markers::END_MARKER
         );
         std::fs::write(dir.path().join("CLAUDE.md"), &content).unwrap();
-        let output = format_claude_md_section(dir.path(), 80);
+        let output = format_output_files_section(dir.path(), &OutputFormat::ClaudeMd, 80);
         let p = plain(&output);
         assert!(p.contains("v3"), "should show version: {p}");
         assert!(
@@ -566,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_claude_md_section_managed_no_metadata() {
+    fn test_format_output_files_section_managed_no_metadata() {
         let dir = tempdir().unwrap();
         // Managed section but without version/last-synced metadata
         let content = format!(
@@ -575,7 +597,7 @@ mod tests {
             markers::END_MARKER
         );
         std::fs::write(dir.path().join("CLAUDE.md"), &content).unwrap();
-        let output = format_claude_md_section(dir.path(), 80);
+        let output = format_output_files_section(dir.path(), &OutputFormat::ClaudeMd, 80);
         let p = plain(&output);
         assert!(
             p.contains("managed"),
@@ -585,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_claude_md_section_summary_counts() {
+    fn test_format_output_files_section_summary_counts() {
         let dir = tempdir().unwrap();
         // Create one managed and one unmanaged file
         let managed = markers::wrap_in_markers("test content", 1, &[]);
@@ -593,7 +615,7 @@ mod tests {
         let sub = dir.path().join("sub");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("CLAUDE.md"), "# Unmanaged").unwrap();
-        let output = format_claude_md_section(dir.path(), 80);
+        let output = format_output_files_section(dir.path(), &OutputFormat::ClaudeMd, 80);
         let p = plain(&output);
         assert!(p.contains("1 managed"), "should show 1 managed count: {p}");
         assert!(
@@ -892,6 +914,7 @@ mod tests {
             &config_path,
             true,
             dir.path(),
+            &OutputFormat::ClaudeMd,
         );
     }
 
@@ -906,6 +929,7 @@ mod tests {
             &config_path,
             true,
             dir.path(),
+            &OutputFormat::ClaudeMd,
         );
     }
 }

@@ -57,6 +57,7 @@ pub(crate) fn find_output_files(root: &Path, format: &OutputFormat) -> Vec<PathB
 }
 
 /// Backwards-compatible alias: find all `CLAUDE.md` files (default format).
+#[cfg(test)]
 pub(crate) fn find_claude_md_files(root: &Path) -> Vec<PathBuf> {
     find_output_files(root, &OutputFormat::ClaudeMd)
 }
