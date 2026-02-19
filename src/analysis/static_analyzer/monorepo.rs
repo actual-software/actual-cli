@@ -377,6 +377,11 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
     }))
 }
 
+/// Maximum directory depth the walker will descend into. This prevents
+/// unbounded recursion and potential OOM on pathological repository layouts
+/// with deeply nested directory trees.
+const MAX_WALK_DEPTH: usize = 20;
+
 /// Expand glob patterns relative to root and build project info for each match.
 ///
 /// Supports negation patterns (prefixed with `!`) which exclude matching directories
@@ -386,6 +391,9 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 /// directories that are gitignored. This prevents catastrophic slowdowns when
 /// glob patterns like `apps/**` would otherwise recurse into tens of thousands
 /// of nested directories.
+///
+/// The walker is limited to [`MAX_WALK_DEPTH`] levels of nesting to guard
+/// against infinite recursion or OOM on deeply nested directory trees.
 ///
 /// Uses `fs::canonicalize` to resolve symlinks and reject entries that escape
 /// the repo root.
@@ -416,9 +424,11 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
     // Walk the filesystem respecting .gitignore rules. This is the key
     // performance fix: the walker skips gitignored directories (node_modules,
     // .next, dist, etc.) without ever descending into them.
+    // max_depth guards against OOM / infinite-loop on deeply nested repos.
     let walker = WalkBuilder::new(root)
         .hidden(false) // Don't skip hidden dirs — let .gitignore decide
         .follow_links(false) // Don't follow symlinks (security: prevents escaping root)
+        .max_depth(Some(MAX_WALK_DEPTH))
         .build();
 
     let mut projects = Vec::new();
@@ -1984,5 +1994,37 @@ mod tests {
 
         let info = detect_monorepo(root).unwrap();
         assert!(!info.is_monorepo);
+    }
+
+    #[test]
+    fn walk_depth_limit_prevents_deep_descent() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create 25 levels of nested "nested" directories (exceeds MAX_WALK_DEPTH of 20)
+        let mut dir = root.path().to_path_buf();
+        for _ in 0..25 {
+            dir = dir.join("nested");
+            std::fs::create_dir_all(&dir).unwrap();
+        }
+
+        // Use a glob pattern that would match any "nested" directory at any depth
+        let patterns = vec!["nested".to_string()];
+        let result = expand_glob_patterns(root.path(), &patterns);
+
+        // The walk must complete (no hang) and must not return directories
+        // beyond MAX_WALK_DEPTH levels deep. With depth 20, the walker sees
+        // at most 20 levels, so we can have at most 20 "nested" directories
+        // matched (one at each depth from 1..=20).
+        assert!(
+            result.len() <= MAX_WALK_DEPTH,
+            "expected at most {MAX_WALK_DEPTH} results but got {}",
+            result.len()
+        );
+        // The walk must not be empty either — there are valid nested dirs
+        // within the depth limit.
+        assert!(
+            !result.is_empty(),
+            "expected at least one match within depth limit"
+        );
     }
 }
