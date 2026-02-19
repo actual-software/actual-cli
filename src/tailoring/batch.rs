@@ -10,6 +10,15 @@ use crate::api::types::Adr;
 /// category is greedily packed into the current batch if it fits; otherwise a
 /// new batch is started.
 pub fn create_batches(adrs: &[Adr], batch_size: usize) -> Vec<Vec<Adr>> {
+    // A batch_size of 0 is treated as "no limit" — return all ADRs in one batch.
+    if batch_size == 0 {
+        return if adrs.is_empty() {
+            vec![]
+        } else {
+            vec![adrs.to_vec()]
+        };
+    }
+
     // Group ADRs by category.id, preserving insertion order via BTreeMap.
     let mut by_category: BTreeMap<&str, Vec<&Adr>> = BTreeMap::new();
     for adr in adrs {
@@ -144,6 +153,26 @@ mod tests {
     #[test]
     fn test_batch_empty_input() {
         let batches = create_batches(&[], 10);
+        assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn test_batch_size_zero_returns_one_batch() {
+        // batch_size = 0 should not panic; all ADRs end up in a single batch.
+        let adrs: Vec<Adr> = (0..5)
+            .map(|i| make_adr(&format!("z-{i}"), "cat-z", "Category Z"))
+            .collect();
+
+        let batches = create_batches(&adrs, 0);
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 5);
+    }
+
+    #[test]
+    fn test_batch_size_zero_empty_input_returns_empty() {
+        // batch_size = 0 with no ADRs should return an empty vec (not a vec with an empty batch).
+        let batches = create_batches(&[], 0);
         assert!(batches.is_empty());
     }
 
