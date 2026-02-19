@@ -25,6 +25,14 @@ pub struct AnthropicApiRunner {
     base_url: String,
 }
 
+/// Map a reqwest client build error into an [`ActualError`].
+fn map_client_build_error(e: reqwest::Error) -> ActualError {
+    ActualError::ClaudeSubprocessFailed {
+        message: format!("Failed to initialize HTTP client: {e}"),
+        stderr: String::new(),
+    }
+}
+
 impl AnthropicApiRunner {
     /// Create a new runner with an explicit API key.
     pub fn new(api_key: String, model: String, timeout: Duration) -> Result<Self, ActualError> {
@@ -45,10 +53,7 @@ impl AnthropicApiRunner {
             .timeout(timeout)
             .https_only(!is_localhost)
             .build()
-            .map_err(|e| ActualError::ClaudeSubprocessFailed {
-                message: format!("Failed to initialize HTTP client: {e}"),
-                stderr: String::new(),
-            })?;
+            .map_err(map_client_build_error)?;
         Ok(Self {
             api_key,
             model,
@@ -621,6 +626,31 @@ mod tests {
         match result {
             Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
                 assert!(message.contains("structured result"));
+            }
+            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+        }
+    }
+
+    // Test 7: map_client_build_error formats the error message correctly
+    #[tokio::test]
+    async fn test_map_client_build_error_formats_message() {
+        // Obtain a reqwest::Error from a real failed network operation so we can
+        // pass it to map_client_build_error and verify the output format.
+        let client = reqwest::Client::builder().build().unwrap();
+        let err = client
+            .get("http://127.0.0.1:1/") // port 1 is reserved, always refused
+            .send()
+            .await
+            .unwrap_err();
+
+        let mapped = map_client_build_error(err);
+        match mapped {
+            ActualError::ClaudeSubprocessFailed { message, stderr } => {
+                assert!(
+                    message.contains("Failed to initialize HTTP client"),
+                    "expected 'Failed to initialize HTTP client' prefix in: {message}"
+                );
+                assert!(stderr.is_empty(), "expected empty stderr, got: {stderr}");
             }
             other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
         }
