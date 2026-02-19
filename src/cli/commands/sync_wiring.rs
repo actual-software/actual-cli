@@ -17,7 +17,7 @@ use clap::ValueEnum as _;
 use crate::cli::args::{RunnerChoice, SyncArgs};
 use crate::cli::commands::auth::check_auth_with_timeout;
 use crate::cli::commands::sync::{resolve_cwd, run_sync};
-use crate::cli::ui::header::{print_header_bar, AuthDisplay};
+use crate::cli::ui::header::AuthDisplay;
 use crate::cli::ui::real_terminal::RealTerminal;
 use crate::config::paths::{config_path, load_from};
 use crate::error::ActualError;
@@ -82,17 +82,23 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 authenticated: auth_status.logged_in,
                 email: auth_status.email.clone(),
             };
-            print_header_bar(&auth_display);
             let runner =
                 CliClaudeRunner::new(binary_path, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
-            run_sync(args, &root_dir, &cfg_path, &term, &runner)
+            run_sync(
+                args,
+                &root_dir,
+                &cfg_path,
+                &term,
+                &runner,
+                Some(&auth_display),
+            )
         }
         RunnerChoice::AnthropicApi => {
             let api_key = resolve_api_key("ANTHROPIC_API_KEY", cfg.anthropic_api_key.as_deref())?;
-            print_header_bar(&AuthDisplay {
+            let auth_display = AuthDisplay {
                 authenticated: true,
                 email: Some("Anthropic API".to_string()),
-            });
+            };
             // Full API model name — unlike the Claude CLI alias in options.rs DEFAULT_MODEL,
             // the Anthropic HTTP API requires the complete model identifier.
             let model = args
@@ -103,14 +109,21 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .to_string();
             let runner =
                 AnthropicApiRunner::new(api_key, model, Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
-            run_sync(args, &root_dir, &cfg_path, &term, &runner)
+            run_sync(
+                args,
+                &root_dir,
+                &cfg_path,
+                &term,
+                &runner,
+                Some(&auth_display),
+            )
         }
         RunnerChoice::OpenAiApi => {
             let api_key = resolve_api_key("OPENAI_API_KEY", cfg.openai_api_key.as_deref())?;
-            print_header_bar(&AuthDisplay {
+            let auth_display = AuthDisplay {
                 authenticated: true,
                 email: Some("OpenAI API".to_string()),
-            });
+            };
             // Full API model name — the OpenAI HTTP API requires the complete model identifier,
             // unlike the Claude CLI alias in options.rs DEFAULT_MODEL.
             let model = args
@@ -121,14 +134,21 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .to_string();
             let runner =
                 OpenAiApiRunner::new(api_key, model, Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
-            run_sync(args, &root_dir, &cfg_path, &term, &runner)
+            run_sync(
+                args,
+                &root_dir,
+                &cfg_path,
+                &term,
+                &runner,
+                Some(&auth_display),
+            )
         }
         RunnerChoice::CodexCli => {
             let binary_path = find_codex_binary()?;
-            print_header_bar(&AuthDisplay {
+            let auth_display = AuthDisplay {
                 authenticated: true,
                 email: None,
-            });
+            };
             let model = args
                 .model
                 .as_deref()
@@ -140,7 +160,14 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 model,
                 Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             );
-            run_sync(args, &root_dir, &cfg_path, &term, &runner)
+            run_sync(
+                args,
+                &root_dir,
+                &cfg_path,
+                &term,
+                &runner,
+                Some(&auth_display),
+            )
         }
     }
 }

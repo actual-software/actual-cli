@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal};
+use std::io::{self, BufWriter, IsTerminal};
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -222,12 +222,18 @@ impl TuiRenderer {
     }
 
     /// Attempt crossterm TUI setup. Returns `None` on any failure.
+    ///
+    /// The backend is wrapped in [`BufWriter`] so that ratatui's per-cell writes
+    /// are buffered and flushed as a single atomic write per frame, eliminating
+    /// visible tearing on slow terminals.
     fn try_setup_tui() -> Option<Mode> {
         enable_raw_mode().ok()?;
         execute!(io::stderr(), EnterAlternateScreen, Hide).ok()?;
-        Terminal::new(ratatui::backend::CrosstermBackend::new(io::stderr()))
-            .ok()
-            .map(|t| Mode::Tui(Box::new(TuiTerminalImpl(t)) as Box<dyn TuiTerminal>))
+        Terminal::new(ratatui::backend::CrosstermBackend::new(BufWriter::new(
+            io::stderr(),
+        )))
+        .ok()
+        .map(|t| Mode::Tui(Box::new(TuiTerminalImpl(t)) as Box<dyn TuiTerminal>))
     }
 
     /// Construct a renderer in Tui mode using the given backend (for tests).

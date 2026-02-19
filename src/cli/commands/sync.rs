@@ -14,6 +14,7 @@ use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::format_project_summary;
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::confirm_files;
+use crate::cli::ui::header::{render_header_bar, AuthDisplay};
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::progress::SyncPhase;
 use crate::cli::ui::term_size;
@@ -60,23 +61,33 @@ pub(crate) fn resolve_cwd() -> std::path::PathBuf {
 
 /// Core sync logic.
 ///
-/// Accepts injected `root_dir`, `term`, and `runner` so unit tests can avoid
-/// `RealTerminal` (which blocks on stdin) and control the working directory,
-/// Claude runner, and user input.
+/// Accepts injected `root_dir`, `term`, `runner`, and `auth_display` so unit
+/// tests can avoid `RealTerminal` (which blocks on stdin) and control the
+/// working directory, Claude runner, and user input.
+///
+/// `auth_display` is pushed into the TUI log pane as part of the header bar
+/// that follows the banner.  Pass `None` in tests to skip the header.
 pub(crate) fn run_sync<R: TailoringRunner>(
     args: &SyncArgs,
     root_dir: &Path,
     cfg_path: &Path,
     term: &dyn TerminalIO,
     runner: &R,
+    auth_display: Option<&AuthDisplay>,
 ) -> Result<(), ActualError> {
     // ── Phase 1: env check + analysis ──
 
-    // 1. Create pipeline and push banner lines into the log pane
+    // 1. Create pipeline; push banner + header bar into the log pane so all
+    //    branding chrome appears inside the TUI alternate screen.
     let mut pipeline = TuiRenderer::new(false, args.no_tui);
     let use_color = console::colors_enabled_stderr();
     for line in render_banner(use_color) {
         pipeline.println(&line);
+    }
+    let width = term_size::terminal_width();
+    let header = render_header_bar(width, env!("CARGO_PKG_VERSION"), auth_display);
+    for line in header.lines() {
+        pipeline.println(line);
     }
     pipeline.start(SyncPhase::Environment, "Checking environment...");
     let is_git = get_git_head(root_dir).is_some();
@@ -110,10 +121,14 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 
     // 5. Confirmation (unless --force)
     if args.force {
-        // Show project summary even in --force mode for visibility
-        let width = term_size::terminal_width();
-        let summary = format_project_summary(&analysis, width);
-        pipeline.suspend(|| eprintln!("{summary}"));
+        // Show project summary even in --force mode for visibility.
+        // Use pipeline.println() so the output stays inside the TUI log pane
+        // rather than triggering a LeaveAlternateScreen/re-enter flash.
+        let summary_width = term_size::terminal_width();
+        let summary = format_project_summary(&analysis, summary_width);
+        for line in summary.lines() {
+            pipeline.println(line);
+        }
     } else {
         let action = pipeline.confirm_project(&analysis, term)?;
         if matches!(action, ConfirmAction::Reject) {
@@ -932,8 +947,14 @@ pub fn confirm_and_write(
         });
     }
 
-    // Step 4: Run confirmation (if not dry-run)
-    let confirmed = pipeline.suspend(|| confirm_files(output, force, term))?;
+    // Step 4: Run confirmation (if not dry-run).
+    // When force=true, confirm_files returns all files immediately without
+    // any interactive prompt, so there is no need to suspend the TUI.
+    let confirmed = if force {
+        confirm_files(output, force, term)?
+    } else {
+        pipeline.suspend(|| confirm_files(output, force, term))?
+    };
     let files_rejected = output.files.len() - confirmed.len();
 
     if confirmed.is_empty() {
@@ -1754,6 +1775,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(result.is_ok(), "run_sync with --force should succeed");
         // Output (including "No files to write.") now goes through pipeline.println()
@@ -1773,6 +1795,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1794,6 +1817,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1815,6 +1839,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1835,6 +1860,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
@@ -1856,6 +1882,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1877,6 +1904,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         )
         .unwrap();
         // Verify no CLAUDE.md was created
@@ -1914,6 +1942,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -1934,6 +1963,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::ConfigError(_))),
@@ -2047,6 +2077,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(matches!(result, Err(ActualError::ConfigError(_))));
     }
@@ -2104,6 +2135,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
 
         assert!(
@@ -2152,6 +2184,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::ConfigError(_))),
@@ -3005,6 +3038,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::ApiError(_))),
@@ -3060,6 +3094,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
@@ -3104,6 +3139,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
@@ -3141,7 +3177,7 @@ mod tests {
             output_format: None,
             runner: None,
         };
-        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
         // Verify rejections were cleared
@@ -3206,7 +3242,7 @@ mod tests {
             output_format: None,
             runner: None,
         };
-        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner);
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None);
         // adr-001 is rejected, so no ADRs remain → "No files to write."
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
@@ -3240,6 +3276,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(result.is_err(), "expected tailoring to fail");
     }
@@ -3278,6 +3315,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -3743,7 +3781,7 @@ mod tests {
             output_format: None,
             runner: None,
         };
-        run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
 
         // Verify cache was stored
         let loaded = load_from(&cfg_path).unwrap();
@@ -3779,7 +3817,7 @@ mod tests {
 
         // Provide "y" for project confirmation and select all files
         let term2 = MockTerminal::new(vec!["y"]).with_selection(Some(vec![0]));
-        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
+        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None);
         assert!(
             result.is_ok(),
             "expected cache hit run to succeed: {result:?}"
@@ -3822,7 +3860,7 @@ mod tests {
             output_format: None,
             runner: None,
         };
-        run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
 
         let loaded = load_from(&cfg_path).unwrap();
         let first_time = loaded.cached_tailoring.as_ref().unwrap().tailored_at;
@@ -3848,7 +3886,7 @@ mod tests {
             output_format: None,
             runner: None,
         };
-        run_sync(&args2, dir.path(), &cfg_path, &term2, &runner).unwrap();
+        run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None).unwrap();
 
         // Cache should have been updated with a newer timestamp
         let loaded2 = load_from(&cfg_path).unwrap();
@@ -3922,7 +3960,7 @@ mod tests {
             output_format: None,
             runner: None,
         };
-        run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
 
         // Verify that cache was stored and applicable == 0
         let loaded = load_from(&cfg_path).unwrap();
@@ -3954,7 +3992,7 @@ mod tests {
             output_format: None,
             runner: None,
         };
-        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
+        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None);
         assert!(
             result.is_ok(),
             "expected cache-hit run with 0 applicable to succeed: {result:?}"
@@ -4010,7 +4048,7 @@ mod tests {
             output_format: None,
             runner: None,
         };
-        run_sync(&args, dir.path(), &cfg_path, &term, &runner).unwrap();
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
 
         // Verify that cache was stored and applicable > 0
         let loaded = load_from(&cfg_path).unwrap();
@@ -4044,7 +4082,7 @@ mod tests {
             output_format: None,
             runner: None,
         };
-        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner);
+        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None);
         assert!(
             result.is_ok(),
             "expected cache-hit run with files to succeed: {result:?}"
