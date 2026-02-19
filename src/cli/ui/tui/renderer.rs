@@ -107,16 +107,22 @@ pub struct TuiRenderer {
     mode: Mode,
     pub steps: StepsPane,
     pub log: LogPane,
-    starts: [Option<Instant>; 4],
+    starts: [Option<Instant>; 5],
     created_at: Instant,
 }
 
 impl TuiRenderer {
     pub fn new(quiet: bool, no_tui: bool) -> Self {
-        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let steps = StepsPane::new(&[
+            "Environment",
+            "Analysis",
+            "Fetch ADRs",
+            "Tailoring",
+            "Write Files",
+        ]);
         let log = LogPane::new();
         let created_at = Instant::now();
-        let starts = [None; 4];
+        let starts = [None; 5];
 
         let mode = if quiet {
             Mode::Quiet
@@ -154,9 +160,15 @@ impl TuiRenderer {
     pub(crate) fn new_with_tui<B: Backend + Send + 'static>(terminal: Terminal<B>) -> Self {
         Self {
             mode: Mode::Tui(Box::new(TuiTerminalImpl(terminal))),
-            steps: StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]),
+            steps: StepsPane::new(&[
+                "Environment",
+                "Analysis",
+                "Fetch ADRs",
+                "Tailoring",
+                "Write Files",
+            ]),
             log: LogPane::new(),
-            starts: [None; 4],
+            starts: [None; 5],
             created_at: Instant::now(),
         }
     }
@@ -168,6 +180,7 @@ impl TuiRenderer {
             SyncPhase::Analysis => 1,
             SyncPhase::Fetch => 2,
             SyncPhase::Tailor => 3,
+            SyncPhase::Write => 4,
         }
     }
 
@@ -326,7 +339,13 @@ mod tests {
     fn test_render_to_wide() {
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let steps = StepsPane::new(&[
+            "Environment",
+            "Analysis",
+            "Fetch ADRs",
+            "Tailoring",
+            "Write Files",
+        ]);
         let log = LogPane::new();
         render_to(&mut terminal, &steps, &log).unwrap();
     }
@@ -335,7 +354,13 @@ mod tests {
     fn test_render_to_narrow() {
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let steps = StepsPane::new(&[
+            "Environment",
+            "Analysis",
+            "Fetch ADRs",
+            "Tailoring",
+            "Write Files",
+        ]);
         let log = LogPane::new();
         render_to(&mut terminal, &steps, &log).unwrap();
     }
@@ -344,7 +369,13 @@ mod tests {
     fn test_render_to_exactly_80_cols() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let steps = StepsPane::new(&[
+            "Environment",
+            "Analysis",
+            "Fetch ADRs",
+            "Tailoring",
+            "Write Files",
+        ]);
         let mut log = LogPane::new();
         log.push("a log line".to_string());
         render_to(&mut terminal, &steps, &log).unwrap();
@@ -355,7 +386,13 @@ mod tests {
         use std::time::Duration;
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let mut steps = StepsPane::new(&[
+            "Environment",
+            "Analysis",
+            "Fetch ADRs",
+            "Tailoring",
+            "Write Files",
+        ]);
         steps.steps[0].status = StepStatus::Success;
         steps.steps[0].elapsed = Some(Duration::from_millis(100));
         steps.steps[1].status = StepStatus::Running { tick: 3 };
@@ -476,6 +513,15 @@ mod tests {
         // Tailor: skip
         r.skip(SyncPhase::Tailor, "no tailoring");
         assert_eq!(r.steps.steps[3].status, StepStatus::Skipped);
+
+        // Write: start → success
+        r.start(SyncPhase::Write, "writing...");
+        assert!(matches!(
+            r.steps.steps[4].status,
+            StepStatus::Running { .. }
+        ));
+        r.success(SyncPhase::Write, "2 created · 0 updated · 0 failed");
+        assert_eq!(r.steps.steps[4].status, StepStatus::Success);
     }
 
     #[test]
@@ -505,13 +551,14 @@ mod tests {
     fn test_finish_remaining_skips_waiting_and_running() {
         let mut r = TuiRenderer::new(false, true);
         r.start(SyncPhase::Environment, "checking...");
-        // Analysis, Fetch, Tailor remain Waiting
+        // Analysis, Fetch, Tailor, Write remain Waiting
         r.finish_remaining();
 
         assert_eq!(r.steps.steps[0].status, StepStatus::Skipped);
         assert_eq!(r.steps.steps[1].status, StepStatus::Skipped);
         assert_eq!(r.steps.steps[2].status, StepStatus::Skipped);
         assert_eq!(r.steps.steps[3].status, StepStatus::Skipped);
+        assert_eq!(r.steps.steps[4].status, StepStatus::Skipped);
     }
 
     #[test]
@@ -521,12 +568,13 @@ mod tests {
         r.success(SyncPhase::Environment, "done");
         r.start(SyncPhase::Analysis, "analyzing...");
         r.error(SyncPhase::Analysis, "failed");
-        r.finish_remaining(); // should only skip Fetch and Tailor
+        r.finish_remaining(); // should only skip Fetch, Tailor, and Write
 
         assert_eq!(r.steps.steps[0].status, StepStatus::Success);
         assert_eq!(r.steps.steps[1].status, StepStatus::Error);
         assert_eq!(r.steps.steps[2].status, StepStatus::Skipped);
         assert_eq!(r.steps.steps[3].status, StepStatus::Skipped);
+        assert_eq!(r.steps.steps[4].status, StepStatus::Skipped);
     }
 
     // ── println tests ──
@@ -638,7 +686,13 @@ mod tests {
         // Start at wide layout (100 cols × 30 rows).
         let backend = TestBackend::new(100, 30);
         let mut terminal = Terminal::new(backend).unwrap();
-        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let steps = StepsPane::new(&[
+            "Environment",
+            "Analysis",
+            "Fetch ADRs",
+            "Tailoring",
+            "Write Files",
+        ]);
         let log = LogPane::new();
 
         // First draw at wide size — must not panic.
@@ -659,7 +713,13 @@ mod tests {
         // Start just above the 80-col breakpoint.
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let steps = StepsPane::new(&[
+            "Environment",
+            "Analysis",
+            "Fetch ADRs",
+            "Tailoring",
+            "Write Files",
+        ]);
         let log = LogPane::new();
 
         render_to(&mut terminal, &steps, &log).unwrap();
