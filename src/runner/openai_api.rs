@@ -38,6 +38,7 @@ fn map_send_error(e: reqwest::Error, timeout: Duration) -> ActualError {
 /// Implements [`TailoringRunner`] by calling `POST /v1/responses` with a
 /// JSON schema constraint, so the model always returns well-formed
 /// [`TailoringOutput`] JSON without tool calls or multi-turn agentic loops.
+#[derive(Debug)]
 pub struct OpenAiApiRunner {
     api_key: String,
     model: String,
@@ -101,28 +102,22 @@ struct ContentItem {
 
 impl OpenAiApiRunner {
     /// Create a new runner with an explicit API key and model.
-    pub fn new(api_key: String, model: String, timeout: Duration) -> Self {
+    pub fn new(api_key: String, model: String, timeout: Duration) -> Result<Self, ActualError> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .https_only(true)
             .build()
-            .expect("failed to build reqwest client");
-        Self {
+            .map_err(|e| ActualError::ClaudeSubprocessFailed {
+                message: format!("Failed to initialize HTTP client: {e}"),
+                stderr: String::new(),
+            })?;
+        Ok(Self {
             api_key,
             model,
             client,
             timeout,
             base_url: "https://api.openai.com".to_string(),
-        }
-    }
-
-    /// Create a runner by reading `OPENAI_API_KEY` from the environment.
-    ///
-    /// Returns `Err(ActualError::ClaudeNotAuthenticated)` when the variable is unset.
-    pub fn from_env(model: String, timeout: Duration) -> Result<Self, ActualError> {
-        let api_key =
-            std::env::var("OPENAI_API_KEY").map_err(|_| ActualError::ClaudeNotAuthenticated)?;
-        Ok(Self::new(api_key, model, timeout))
+        })
     }
 
     /// Override the base URL (used in tests to point at a mockito server).
@@ -209,7 +204,10 @@ impl TailoringRunner for OpenAiApiRunner {
         }
 
         if status.is_server_error() {
-            let body_bytes = response.bytes().await.unwrap_or_default();
+            let body_bytes = response
+                .bytes()
+                .await
+                .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
             let truncated = &body_bytes[..body_bytes.len().min(4096)];
             let body_text = String::from_utf8_lossy(truncated).into_owned();
             return Err(ActualError::ClaudeSubprocessFailed {
@@ -328,6 +326,7 @@ mod tests {
             "gpt-4o".to_string(),
             Duration::from_secs(10),
         )
+        .expect("failed to build test runner")
         .with_base_url(server.url())
     }
 
@@ -503,21 +502,15 @@ mod tests {
         mock.assert_async().await;
     }
 
-    /// Serializes tests that mutate `OPENAI_API_KEY` to avoid data races.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    // Test 6: from_env returns Err when OPENAI_API_KEY is not set
+    // Test 6: new() constructs successfully with default config
     #[test]
-    fn test_from_env_missing_key() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        // SAFETY: protected by ENV_MUTEX; no concurrent env access in tests.
-        unsafe { std::env::remove_var("OPENAI_API_KEY") };
-
-        let result = OpenAiApiRunner::from_env("gpt-4o".to_string(), Duration::from_secs(10));
-        assert!(
-            matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
-            "expected ClaudeNotAuthenticated when OPENAI_API_KEY is unset"
+    fn test_new_constructs_successfully() {
+        let result = OpenAiApiRunner::new(
+            "test-key".to_string(),
+            "gpt-4o".to_string(),
+            Duration::from_secs(10),
         );
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
     }
 
     // Test 7: HTTP 403 also maps to ClaudeNotAuthenticated
@@ -614,20 +607,6 @@ mod tests {
             result
         );
         mock.assert_async().await;
-    }
-
-    // Test 10: from_env succeeds when OPENAI_API_KEY is set
-    #[test]
-    fn test_from_env_success() {
-        let _guard = ENV_MUTEX.lock().unwrap();
-        // SAFETY: protected by ENV_MUTEX; no concurrent env access in tests.
-        unsafe { std::env::set_var("OPENAI_API_KEY", "test-key-from-env") };
-
-        let result = OpenAiApiRunner::from_env("gpt-4o".to_string(), Duration::from_secs(10));
-        assert!(result.is_ok(), "expected Ok when OPENAI_API_KEY is set");
-
-        // Clean up after the test.
-        unsafe { std::env::remove_var("OPENAI_API_KEY") };
     }
 
     // Test 11: refusal with no refusal field falls back to "unknown reason"
@@ -899,6 +878,7 @@ mod tests {
             "gpt-4o".to_string(),
             Duration::from_secs(10),
         )
+        .expect("failed to build test runner")
         .with_base_url("http://127.0.0.1:1".to_string()); // port 1 is reserved, always refused
 
         let result = runner
@@ -997,6 +977,7 @@ mod tests {
             "gpt-4o".to_string(),
             Duration::from_millis(1),
         )
+        .expect("failed to build test runner")
         .with_base_url(format!("http://{addr}"));
 
         let result = runner
@@ -1030,6 +1011,7 @@ mod tests {
             "gpt-4o".to_string(),
             Duration::from_secs(10),
         )
+        .expect("failed to build test runner")
         .with_base_url("https://api.example.com".to_string());
 
         assert_eq!(runner.base_url, "https://api.example.com");

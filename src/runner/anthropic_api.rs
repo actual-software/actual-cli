@@ -27,12 +27,17 @@ pub struct AnthropicApiRunner {
 
 impl AnthropicApiRunner {
     /// Create a new runner with an explicit API key.
-    pub fn new(api_key: String, model: String, timeout: Duration) -> Self {
+    pub fn new(api_key: String, model: String, timeout: Duration) -> Result<Self, ActualError> {
         Self::with_base_url(api_key, model, timeout, ANTHROPIC_API_BASE.to_string())
     }
 
     /// Create a runner with a custom base URL (used in tests to point at a mock server).
-    fn with_base_url(api_key: String, model: String, timeout: Duration, base_url: String) -> Self {
+    fn with_base_url(
+        api_key: String,
+        model: String,
+        timeout: Duration,
+        base_url: String,
+    ) -> Result<Self, ActualError> {
         let is_localhost = base_url.starts_with("http://localhost")
             || base_url.starts_with("http://127.0.0.1")
             || base_url.starts_with("http://[::1]");
@@ -40,23 +45,17 @@ impl AnthropicApiRunner {
             .timeout(timeout)
             .https_only(!is_localhost)
             .build()
-            .expect("failed to build reqwest client");
-        Self {
+            .map_err(|e| ActualError::ClaudeSubprocessFailed {
+                message: format!("Failed to initialize HTTP client: {e}"),
+                stderr: String::new(),
+            })?;
+        Ok(Self {
             api_key,
             model,
             client,
             timeout,
             base_url,
-        }
-    }
-
-    /// Create a runner by reading `ANTHROPIC_API_KEY` from the environment.
-    ///
-    /// Returns `Err(ActualError::ClaudeNotAuthenticated)` if the variable is not set.
-    pub fn from_env(model: String, timeout: Duration) -> Result<Self, ActualError> {
-        let api_key =
-            std::env::var("ANTHROPIC_API_KEY").map_err(|_| ActualError::ClaudeNotAuthenticated)?;
-        Ok(Self::new(api_key, model, timeout))
+        })
     }
 
     /// POST to the Anthropic Messages API and return the parsed JSON response body.
@@ -98,7 +97,10 @@ impl AnthropicApiRunner {
         }
 
         if status.is_server_error() {
-            let body_bytes = response.bytes().await.unwrap_or_default();
+            let body_bytes = response
+                .bytes()
+                .await
+                .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
             let truncated = &body_bytes[..body_bytes.len().min(4096)];
             let body = String::from_utf8_lossy(truncated).into_owned();
             return Err(ActualError::ClaudeSubprocessFailed {
@@ -212,6 +214,7 @@ mod tests {
             Duration::from_secs(10),
             server_url.to_string(),
         )
+        .expect("failed to build test runner")
     }
 
     /// Build a minimal valid TailoringOutput JSON value.
@@ -403,40 +406,15 @@ mod tests {
         }
     }
 
-    /// Mutex to serialize tests that mutate the `ANTHROPIC_API_KEY` environment variable.
-    ///
-    /// Rust tests run in parallel by default, so simultaneous mutations of the same
-    /// environment variable cause flaky failures.  Holding this mutex during any test
-    /// that reads or writes `ANTHROPIC_API_KEY` ensures they are ordered safely.
-    static ENV_KEY_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    // Test 6: from_env returns Err when ANTHROPIC_API_KEY not set
+    // Test 6: new() constructs successfully with default config
     #[test]
-    fn test_from_env_missing_key() {
-        let _guard = ENV_KEY_MUTEX.lock().unwrap();
-        std::env::remove_var("ANTHROPIC_API_KEY");
-
-        let result =
-            AnthropicApiRunner::from_env("claude-sonnet-4-5".to_string(), Duration::from_secs(30));
-
-        assert!(matches!(result, Err(ActualError::ClaudeNotAuthenticated)));
-    }
-
-    // Test 7: from_env succeeds when ANTHROPIC_API_KEY is set
-    #[test]
-    fn test_from_env_with_key() {
-        let _guard = ENV_KEY_MUTEX.lock().unwrap();
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-test-key-12345");
-
-        let result =
-            AnthropicApiRunner::from_env("claude-sonnet-4-5".to_string(), Duration::from_secs(30));
-
+    fn test_new_constructs_successfully() {
+        let result = AnthropicApiRunner::new(
+            "sk-test-key".to_string(),
+            "claude-sonnet-4-5".to_string(),
+            Duration::from_secs(30),
+        );
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
-        let runner = result.unwrap();
-        assert_eq!(runner.api_key, "sk-test-key-12345");
-
-        // Clean up
-        std::env::remove_var("ANTHROPIC_API_KEY");
     }
 
     // Test 8: model_override is respected
@@ -599,7 +577,8 @@ mod tests {
             "claude-sonnet-4-5".to_string(),
             Duration::from_millis(1),
             format!("http://127.0.0.1:{port}"),
-        );
+        )
+        .expect("failed to build test runner");
 
         let schema = r#"{"type":"object"}"#;
         let result = runner.run_tailoring("prompt", schema, None, None).await;
