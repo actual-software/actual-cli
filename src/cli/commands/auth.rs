@@ -81,32 +81,29 @@ pub fn check_auth_with_timeout(
                 stderr: String::new(),
             })?;
 
-        let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-
-        match result {
-            Ok(Ok(output)) => {
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    return Err(ActualError::ClaudeSubprocessFailed {
-                        message: format!(
-                            "claude auth status exited with code {}",
-                            output.status.code().unwrap_or(-1)
-                        ),
-                        stderr,
-                    });
-                }
-                let status: ClaudeAuthStatus = serde_json::from_slice(&output.stdout)?;
-                Ok(status)
-            }
-            Ok(Err(e)) => Err(ActualError::ClaudeSubprocessFailed {
-                message: format!("failed to wait for claude: {e}"),
-                stderr: String::new(),
-            }),
-            Err(_) => Err(ActualError::ClaudeTimeout {
+        let output = tokio::time::timeout(timeout, child.wait_with_output())
+            .await
+            .map_err(|_| ActualError::ClaudeTimeout {
                 // Round up so sub-second timeouts display as "1s" rather than "0s".
                 seconds: timeout.as_secs_f64().ceil() as u64,
-            }),
+            })?
+            .map_err(|e| ActualError::ClaudeSubprocessFailed {
+                message: format!("failed to wait for claude: {e}"),
+                stderr: String::new(),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(ActualError::ClaudeSubprocessFailed {
+                message: format!(
+                    "claude auth status exited with code {}",
+                    output.status.code().unwrap_or(-1)
+                ),
+                stderr,
+            });
         }
+        let status: ClaudeAuthStatus = serde_json::from_slice(&output.stdout)?;
+        Ok(status)
     })
 }
 
@@ -428,5 +425,58 @@ mod tests {
             result.unwrap_err(),
             ActualError::ClaudeNotAuthenticated
         ));
+    }
+
+    #[test]
+    fn test_check_auth_with_timeout_spawn_failure() {
+        // Non-existent binary → spawn fails immediately
+        let result = check_auth_with_timeout(
+            Path::new("/nonexistent/binary/that/does/not/exist"),
+            std::time::Duration::from_secs(5),
+        );
+        assert!(
+            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
+            "expected ClaudeSubprocessFailed, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_check_auth_with_timeout_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(
+            dir.path(),
+            r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "user@example.com"}"#,
+            0,
+        );
+        let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        let status = result.unwrap();
+        assert!(status.logged_in);
+        assert_eq!(status.auth_method.as_deref(), Some("claude.ai"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_check_auth_with_timeout_subprocess_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(dir.path(), "error output", 1);
+        let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
+        assert!(
+            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
+            "expected ClaudeSubprocessFailed, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_check_auth_with_timeout_invalid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = create_fake_binary(dir.path(), "not json", 0);
+        let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
+        assert!(
+            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
+            "expected ClaudeOutputParse, got: {result:?}"
+        );
     }
 }
