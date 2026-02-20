@@ -449,7 +449,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             config.concurrency.unwrap_or(DEFAULT_CONCURRENCY),
             config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
             &existing_paths,
-            args.model.as_deref(),
+            args.model.as_deref().or(config.model.as_deref()),
             args.max_budget_usd.or(config.max_budget_usd),
             Duration::from_secs(
                 config
