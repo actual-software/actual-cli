@@ -13,6 +13,7 @@ use ratatui::{
     Terminal,
 };
 
+use super::gradient::paint_gradient_border;
 use super::log::LogPane;
 use super::steps::{StepStatus, StepsPane};
 use crate::analysis::confirm::ConfirmAction;
@@ -114,6 +115,7 @@ const BANNER_BOX_HEIGHT: u16 = 15;
 pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>) -> io::Result<()> {
     let size = terminal.size()?;
     let cols = size.width;
+    let use_color = console::colors_enabled_stderr();
     terminal.draw(|frame| {
         let area = frame.area();
         if cols >= 80 {
@@ -155,6 +157,9 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             );
             frame.render_widget(Clear, left_chunks[0]);
             frame.render_widget(banner_widget, left_chunks[0]);
+            if use_color {
+                paint_gradient_border(frame.buffer_mut(), left_chunks[0]);
+            }
 
             // Steps box (bottom-left)
             let step_inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
@@ -164,6 +169,9 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 .block(Block::default().borders(Borders::ALL).title("Steps"));
             frame.render_widget(Clear, left_chunks[1]);
             frame.render_widget(step_widget, left_chunks[1]);
+            if use_color {
+                paint_gradient_border(frame.buffer_mut(), left_chunks[1]);
+            }
 
             // ── Right column: output pane ──
             // Reserve one line for the footer hint so it is always visible.
@@ -198,6 +206,9 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 .block(Block::default().borders(Borders::ALL).title("Output"));
             frame.render_widget(Clear, h_chunks[1]);
             frame.render_widget(log_widget, h_chunks[1]);
+            if use_color {
+                paint_gradient_border(frame.buffer_mut(), h_chunks[1]);
+            }
         } else {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
