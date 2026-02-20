@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use crate::analysis::cache::{get_git_head, run_analysis_cached};
+use crate::analysis::cache::{get_git_branch, get_git_head, run_analysis_cached};
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
@@ -82,7 +82,35 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 
     pipeline.start(SyncPhase::Environment, "Checking environment...");
 
-    // Check authentication status and log it
+    // Load config early so we can show server URL and cache status in the
+    // Environment step output. Falls back to default if the config is missing
+    // or unreadable (non-fatal — errors surface later when config is required).
+    let config = load_from(cfg_path).unwrap_or_default();
+
+    // Resolve effective API server URL (CLI flag > config > default).
+    // Store as an owned String so it remains valid after config is reloaded in Phase 2.
+    let env_api_url: String = args
+        .api_url
+        .as_deref()
+        .or(config.api_url.as_deref())
+        .unwrap_or(DEFAULT_API_URL)
+        .to_owned();
+
+    // Helper: strip the home directory prefix and replace with "~".
+    let home_dir = dirs::home_dir();
+    let tilde = |p: &Path| -> String {
+        if let Some(ref home) = home_dir {
+            if let Ok(rel) = p.strip_prefix(home) {
+                return format!("~/{}", rel.display());
+            }
+        }
+        p.display().to_string()
+    };
+
+    // Blank line for visual breathing room.
+    pipeline.println("");
+
+    // Auth row
     match auth_display {
         Some(a) if a.authenticated => {
             let email_part = a
@@ -90,38 +118,90 @@ pub(crate) fn run_sync<R: TailoringRunner>(
                 .as_deref()
                 .map(|e| format!(" ({})", console::strip_ansi_codes(e)))
                 .unwrap_or_default();
-            pipeline.println(&format!("  {} Authenticated{email_part}", theme::SUCCESS));
+            pipeline.println(&format!(
+                "  {:<9} {} Authenticated{email_part}",
+                "Auth",
+                theme::SUCCESS
+            ));
         }
         Some(_) => {
             pipeline.println(&format!(
-                "  {} Not authenticated — run `actual login`",
+                "  {:<9} {} Not authenticated — run `actual login`",
+                "Auth",
                 theme::ERROR
             ));
         }
         None => {
-            pipeline.println("  - Auth status unknown");
+            pipeline.println(&format!("  {:<9} - Status unknown", "Auth"));
         }
     }
 
-    // Log the config path being used
-    pipeline.println(&format!("  Config: {}", cfg_path.display()));
+    // Server row
+    pipeline.println(&format!("  {:<9} {}", "Server", env_api_url));
 
-    // Log the working directory
-    pipeline.println(&format!("  Working dir: {}", root_dir.display()));
+    // Config path row (tilde-collapsed)
+    pipeline.println(&format!("  {:<9} {}", "Config", tilde(cfg_path)));
 
-    // Check git repository
-    let is_git = get_git_head(root_dir).is_some();
+    // Working directory row (tilde-collapsed)
+    pipeline.println(&format!("  {:<9} {}", "Workdir", tilde(root_dir)));
+
+    // Git branch + caching status
+    let git_head = get_git_head(root_dir);
+    let is_git = git_head.is_some();
     if is_git {
+        if let Some(branch) = get_git_branch(root_dir) {
+            pipeline.println(&format!("  {:<9} {}", "Branch", branch));
+        }
         pipeline.println(&format!(
-            "  {} Git repository detected — analysis caching enabled",
+            "  {:<9} {} Repository detected — caching enabled",
+            "Git",
             theme::SUCCESS
         ));
-        pipeline.success(SyncPhase::Environment, "Environment OK");
+
+        // Cache status row
+        match &config.cached_analysis {
+            Some(ca) if ca.repo_path == root_dir.to_string_lossy().as_ref() => {
+                let age = chrono::Utc::now()
+                    .signed_duration_since(ca.analyzed_at)
+                    .num_seconds();
+                let age_str = if age < 60 {
+                    format!("{age}s ago")
+                } else if age < 3600 {
+                    format!("{}m ago", age / 60)
+                } else if age < 86400 {
+                    format!("{}h ago", age / 3600)
+                } else {
+                    format!("{}d ago", age / 86400)
+                };
+                pipeline.println(&format!(
+                    "  {:<9} {} Analysis cached ({})",
+                    "Cache",
+                    theme::SUCCESS,
+                    age_str
+                ));
+            }
+            _ => {
+                pipeline.println(&format!(
+                    "  {:<9} {} No cache — full analysis will run",
+                    "Cache",
+                    theme::WARN
+                ));
+            }
+        }
     } else {
         pipeline.println(&format!(
-            "  {} Not a git repository — analysis caching disabled",
+            "  {:<9} {} Not a git repository — caching disabled",
+            "Git",
             theme::WARN
         ));
+    }
+
+    // Blank line for visual breathing room.
+    pipeline.println("");
+
+    if is_git {
+        pipeline.success(SyncPhase::Environment, "Environment OK");
+    } else {
         pipeline.warn(
             SyncPhase::Environment,
             "Not a git repository (analysis caching disabled)",
@@ -167,7 +247,8 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 
     // ── Phase 2: fetch + tailor ──
 
-    // 2a. Load config and handle --reset-rejections
+    // 2a. Reload config from disk (to pick up any external changes) and handle --reset-rejections.
+    // Note: config was already loaded above for the Environment step; reload here for freshness.
     let mut config = load_from(cfg_path)?;
     let repo_key = compute_repo_key(root_dir);
 
