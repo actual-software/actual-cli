@@ -82,7 +82,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     let mut pipeline = TuiRenderer::new(false, args.no_tui);
     let use_color = console::colors_enabled_stderr();
     for line in render_banner(use_color) {
-        pipeline.println(&line);
+        pipeline.println(&console::strip_ansi_codes(&line));
     }
     let width = term_size::terminal_width();
     let header = render_header_bar(width, env!("CARGO_PKG_VERSION"), auth_display);

@@ -83,11 +83,20 @@ impl Default for LogPane {
 }
 
 /// Truncate a line to `width` visible characters, appending `…` if truncated.
+///
+/// Uses `console::measure_text_width` to measure visible width (ignoring ANSI
+/// escape codes) so that lines containing ANSI sequences are measured correctly.
+/// If truncation is needed the ANSI codes are stripped from the output so that
+/// the truncated result is always plain text.
 fn truncate_line(line: &str, width: usize) -> String {
-    if line.chars().count() <= width {
+    let visible = console::measure_text_width(line);
+    if visible <= width {
         line.to_string()
     } else {
-        let truncated: String = line.chars().take(width.saturating_sub(1)).collect();
+        // Strip ANSI codes, then take the first (width - 1) visible chars and
+        // append an ellipsis so the result fits within `width` columns.
+        let stripped = console::strip_ansi_codes(line);
+        let truncated: String = stripped.chars().take(width.saturating_sub(1)).collect();
         format!("{truncated}…")
     }
 }
@@ -182,5 +191,18 @@ mod tests {
         pane.push("hello world".to_string());
         let result = pane.render_to_string(5, 7, 0);
         assert_eq!(result[0], "hello …");
+    }
+
+    #[test]
+    fn test_truncate_line_strips_ansi_for_measurement() {
+        // A line with ANSI codes that is visually 5 chars wide but many bytes long
+        let ansi_line = "\x1b[38;2;0;251;126mhello\x1b[0m";
+        let result = truncate_line(ansi_line, 10); // 10 wide — should NOT truncate
+                                                   // Should return the original (fits within width)
+        assert!(!result.ends_with('…'));
+
+        let result2 = truncate_line(ansi_line, 3); // 3 wide — should truncate
+        assert!(result2.ends_with('…'));
+        assert!(!result2.contains('\x1b')); // no ANSI in truncated output
     }
 }

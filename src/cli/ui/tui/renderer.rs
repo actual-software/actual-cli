@@ -9,7 +9,7 @@ use crossterm::{
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
 
@@ -136,6 +136,7 @@ pub fn render_to<B: Backend>(
             let step_text = step_lines.join("\n");
             let step_widget = Paragraph::new(step_text)
                 .block(Block::default().borders(Borders::ALL).title("Steps"));
+            frame.render_widget(Clear, chunks[0]);
             frame.render_widget(step_widget, chunks[0]);
 
             // Reserve one line for the footer hint so it is always visible.
@@ -162,6 +163,7 @@ pub fn render_to<B: Backend>(
             let log_text = log_lines.join("\n");
             let log_widget = Paragraph::new(log_text)
                 .block(Block::default().borders(Borders::ALL).title("Output"));
+            frame.render_widget(Clear, chunks[1]);
             frame.render_widget(log_widget, chunks[1]);
         } else {
             let chunks = Layout::default()
@@ -170,6 +172,7 @@ pub fn render_to<B: Backend>(
                 .split(area);
 
             let condensed = steps.render_condensed(area.width as usize);
+            frame.render_widget(Clear, chunks[0]);
             frame.render_widget(Paragraph::new(condensed), chunks[0]);
 
             let log_inner_height = chunks[1].height as usize;
@@ -193,6 +196,7 @@ pub fn render_to<B: Backend>(
                 log_lines.push(scroll_hint);
             }
             let log_text = log_lines.join("\n");
+            frame.render_widget(Clear, chunks[1]);
             frame.render_widget(Paragraph::new(log_text), chunks[1]);
         }
     })?;
