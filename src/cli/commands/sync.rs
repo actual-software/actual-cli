@@ -247,7 +247,9 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             let count = r.matched_adrs.len();
             pipeline.success(SyncPhase::Fetch, &format!("Fetched {count} ADRs"));
             if count == 0 {
-                pipeline.println(&zero_adr_context_message(&request));
+                for line in zero_adr_context_lines(&request) {
+                    pipeline.println(&line);
+                }
             }
             r
         }
@@ -743,15 +745,15 @@ fn compute_tailoring_cache_key(
     format!("{:x}", hasher.finalize())
 }
 
-/// Produce a contextual follow-up message for a zero-ADR fetch result.
+/// Produce contextual follow-up lines for a zero-ADR fetch result.
 ///
-/// Examines the languages and frameworks in the match request and returns a
-/// human-readable explanation of *why* no ADRs were matched:
+/// Examines the languages and frameworks in the match request and returns one
+/// or more indented lines explaining *why* no ADRs were matched:
 ///
 /// - No languages detected → indicates the repo language is not recognized.
 /// - Languages but no frameworks → only general ADRs were eligible.
 /// - Languages + frameworks → the combination has no ADR coverage yet.
-fn zero_adr_context_message(request: &crate::api::types::MatchRequest) -> String {
+fn zero_adr_context_lines(request: &crate::api::types::MatchRequest) -> Vec<String> {
     let mut langs: Vec<&str> = request
         .projects
         .iter()
@@ -771,18 +773,18 @@ fn zero_adr_context_message(request: &crate::api::types::MatchRequest) -> String
     fws.sort_unstable();
 
     if langs.is_empty() {
-        "No supported programming languages detected \u{2014} unable to match ADRs".to_string()
+        vec!["  No supported languages detected \u{2014} unable to match ADRs".to_string()]
     } else if fws.is_empty() {
-        format!(
-            "Detected: {} \u{2014} no frameworks found; only general ADRs were eligible",
-            langs.join(", ")
-        )
+        vec![
+            format!("  Languages: {}", langs.join(", ")),
+            "  No frameworks detected; only general ADRs were eligible".to_string(),
+        ]
     } else {
-        format!(
-            "Detected: {} with {} \u{2014} no ADRs available for this combination yet",
-            langs.join(", "),
-            fws.join(", ")
-        )
+        vec![
+            format!("  Languages: {}", langs.join(", ")),
+            format!("  Frameworks: {}", fws.join(", ")),
+            "  No ADRs available for this stack yet".to_string(),
+        ]
     }
 }
 
@@ -4473,9 +4475,10 @@ mod tests {
     #[test]
     fn test_zero_adr_context_message_no_languages() {
         let req = make_match_request(vec![make_match_project(vec![], vec![])]);
-        let msg = zero_adr_context_message(&req);
+        let lines = zero_adr_context_lines(&req);
+        let msg = lines.join("\n");
         assert!(
-            msg.contains("No supported programming languages detected"),
+            msg.contains("No supported languages detected"),
             "unexpected message: {msg}"
         );
         assert!(
@@ -4487,13 +4490,14 @@ mod tests {
     #[test]
     fn test_zero_adr_context_message_languages_no_frameworks() {
         let req = make_match_request(vec![make_match_project(vec!["typescript"], vec![])]);
-        let msg = zero_adr_context_message(&req);
+        let lines = zero_adr_context_lines(&req);
+        let msg = lines.join("\n");
         assert!(
-            msg.contains("Detected: typescript"),
+            msg.contains("Languages: typescript"),
             "unexpected message: {msg}"
         );
         assert!(
-            msg.contains("no frameworks found"),
+            msg.contains("No frameworks detected"),
             "unexpected message: {msg}"
         );
         assert!(
@@ -4508,13 +4512,18 @@ mod tests {
             vec!["typescript"],
             vec![("nextjs", "web-frontend")],
         )]);
-        let msg = zero_adr_context_message(&req);
+        let lines = zero_adr_context_lines(&req);
+        let msg = lines.join("\n");
         assert!(
-            msg.contains("Detected: typescript with nextjs"),
+            msg.contains("Languages: typescript"),
             "unexpected message: {msg}"
         );
         assert!(
-            msg.contains("no ADRs available for this combination yet"),
+            msg.contains("Frameworks: nextjs"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            msg.contains("No ADRs available for this stack yet"),
             "unexpected message: {msg}"
         );
     }
@@ -4526,7 +4535,8 @@ mod tests {
             make_match_project(vec!["typescript"], vec![]),
             make_match_project(vec!["typescript"], vec![]),
         ]);
-        let msg = zero_adr_context_message(&req);
+        let lines = zero_adr_context_lines(&req);
+        let msg = lines.join("\n");
         // "typescript" should appear exactly once
         assert_eq!(
             msg.matches("typescript").count(),
@@ -4538,7 +4548,8 @@ mod tests {
     #[test]
     fn test_zero_adr_context_message_multiple_languages_sorted() {
         let req = make_match_request(vec![make_match_project(vec!["rust", "typescript"], vec![])]);
-        let msg = zero_adr_context_message(&req);
+        let lines = zero_adr_context_lines(&req);
+        let msg = lines.join("\n");
         // Languages should be sorted alphabetically
         let rust_pos = msg.find("rust").unwrap();
         let ts_pos = msg.find("typescript").unwrap();
@@ -4552,9 +4563,10 @@ mod tests {
     fn test_zero_adr_context_message_empty_request() {
         // No projects at all
         let req = make_match_request(vec![]);
-        let msg = zero_adr_context_message(&req);
+        let lines = zero_adr_context_lines(&req);
+        let msg = lines.join("\n");
         assert!(
-            msg.contains("No supported programming languages detected"),
+            msg.contains("No supported languages detected"),
             "empty request should produce no-languages message: {msg}"
         );
     }
