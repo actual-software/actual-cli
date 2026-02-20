@@ -4618,43 +4618,37 @@ mod tests {
         );
     }
 
-    /// Verify that the heartbeat timer updates the spinner message with elapsed
-    /// seconds even when no progress events arrive.  Use tokio::time::pause()
-    /// so the test advances time without actually sleeping.
+    /// Verify that the heartbeat timer arm executes and updates the spinner
+    /// message.  Use a tailor future that first sleeps briefly (forcing at
+    /// least one heartbeat tick), then completes — so the heartbeat body is
+    /// covered in the same task as the function under test.
     #[tokio::test]
     async fn test_run_tailoring_with_cancel_heartbeat_updates_message() {
         tokio::time::pause();
         let mut pipeline = TuiRenderer::new(false, true); // plain mode
-        pipeline.start(
-            SyncPhase::Tailor,
-            "Tailoring ADRs (0/0 projects done, 0s)...",
-        );
+        pipeline.start(SyncPhase::Tailor, "initial message");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        drop(tx);
 
-        // Tailor future that completes after we advance time.
-        let (fire_tx, fire_rx) = tokio::sync::oneshot::channel::<()>();
         let output = make_output(vec![]);
+        // Tailor future: sleep 150ms (> one 100ms heartbeat tick) then return.
         let tailor_fut = async move {
-            let _ = fire_rx.await;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             Ok::<TailoringOutput, ActualError>(output)
         };
         let cancel = std::future::pending::<std::io::Result<()>>();
 
-        // Spawn the loop so it runs concurrently with time-advance.
-        let handle = tokio::spawn(async move {
-            run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 0, cancel).await
-        });
+        // Advance time so the interval fires before the sleep finishes.
+        // tokio::time::pause() makes all timers advance in lockstep.
+        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 2, cancel).await;
 
-        // Advance time by 5 seconds — multiple heartbeat ticks should fire.
-        tokio::time::advance(std::time::Duration::from_secs(5)).await;
-
-        // Now let the tailor future complete and drain the channel.
-        let _ = fire_tx.send(());
-        drop(tx);
-
-        // The loop must complete successfully.
-        let result = handle.await.unwrap();
         assert!(result.is_ok(), "expected Ok result, got {result:?}");
+        // The heartbeat must have updated the step message (index 3 = Tailor).
+        let msg = &pipeline.steps.steps[3].message;
+        assert!(
+            msg.contains("projects done"),
+            "expected heartbeat message, got: {msg}"
+        );
     }
 
     // ── zero_adr_context_message tests ──
