@@ -283,6 +283,68 @@ mod tests {
     }
 
     #[test]
+    fn test_color_for_y_at_frame_start() {
+        // y == frame_area.y → offset 0 → GRADIENT_START
+        let frame_area = Rect::new(0, 0, 10, 10);
+        let color = color_for_y(0, frame_area);
+        let expected =
+            ratatui::style::Color::Rgb(GRADIENT_START.0, GRADIENT_START.1, GRADIENT_START.2);
+        assert_eq!(
+            color, expected,
+            "y=0 in a frame starting at 0 should give GRADIENT_START"
+        );
+    }
+
+    #[test]
+    fn test_color_for_y_at_frame_end() {
+        // y == frame_area.y + frame_area.height - 1 → offset height-1 → GRADIENT_END
+        let frame_area = Rect::new(0, 0, 10, 10);
+        let color = color_for_y(9, frame_area);
+        let expected = ratatui::style::Color::Rgb(GRADIENT_END.0, GRADIENT_END.1, GRADIENT_END.2);
+        assert_eq!(
+            color, expected,
+            "y=9 in a 10-row frame should give GRADIENT_END"
+        );
+    }
+
+    #[test]
+    fn test_color_for_y_saturating_sub_prevents_underflow() {
+        // y < frame_area.y → saturating_sub gives 0 → GRADIENT_START (no panic)
+        let frame_area = Rect::new(0, 5, 10, 10);
+        let color = color_for_y(0, frame_area);
+        let expected =
+            ratatui::style::Color::Rgb(GRADIENT_START.0, GRADIENT_START.1, GRADIENT_START.2);
+        assert_eq!(color, expected, "y below frame start should not underflow");
+    }
+
+    #[test]
+    fn test_color_for_y_matches_paint_gradient_border_at_same_row() {
+        // color_for_y should produce the same color as paint_gradient_border for the same row.
+        let mut buf = make_buf(10, 5);
+        let area = Rect::new(0, 0, 10, 5);
+        let frame_area = Rect::new(0, 0, 10, 5);
+        paint_gradient_border(&mut buf, area, frame_area);
+
+        // Top row (y=0): compare paint_gradient_border output with color_for_y
+        let border_color = buf[(0u16, 0u16)].style().fg;
+        let fn_color = color_for_y(0, frame_area);
+        assert_eq!(
+            border_color,
+            Some(fn_color),
+            "color_for_y and border color should match at y=0"
+        );
+
+        // Bottom row (y=4)
+        let border_color_bottom = buf[(0u16, 4u16)].style().fg;
+        let fn_color_bottom = color_for_y(4, frame_area);
+        assert_eq!(
+            border_color_bottom,
+            Some(fn_color_bottom),
+            "color_for_y and border color should match at y=4"
+        );
+    }
+
+    #[test]
     fn test_paint_gradient_border_color_from_frame_not_box() {
         // A box placed in the middle of a frame should NOT start with GRADIENT_START —
         // it should use a mid-gradient color based on its frame position.
