@@ -1244,7 +1244,7 @@ mod tests {
         assert!(!dir.path().join("CLAUDE.md").exists());
 
         // Diff summary should be displayed in the log pane
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("Changes"),
             "expected changes panel in log: {log_text}"
@@ -1279,7 +1279,7 @@ mod tests {
         assert_eq!(result.files_created, 0);
 
         // Full content should be displayed in the log pane
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("── CLAUDE.md ──"),
             "expected file header in log: {log_text}"
@@ -1331,7 +1331,7 @@ mod tests {
 
         assert_eq!(result.files_created, 0, "dry-run must not write files");
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             !log_text.as_bytes().contains(&0x1Bu8),
             "dry-run --full output must not contain ESC (0x1B)"
@@ -1450,7 +1450,7 @@ mod tests {
         assert!(dir.path().join("CLAUDE.md").exists());
 
         // Error should be reported in log pane
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("bad/CLAUDE.md"),
             "expected failed file path in log: {log_text}"
@@ -1490,7 +1490,7 @@ mod tests {
         assert!(content.contains("Brand new rules"));
 
         // Verify diff output showed new file in log pane
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("new file"),
             "expected 'new file' in log: {log_text}"
@@ -1601,7 +1601,7 @@ mod tests {
         assert!(!dir.path().join("CLAUDE.md").exists());
         assert!(!dir.path().join("apps/web/CLAUDE.md").exists());
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("No files to write."),
             "expected 'No files to write.' in log: {log_text}"
@@ -1650,7 +1650,7 @@ mod tests {
         assert_eq!(result.files_rejected, 1, "expected 1 rejected (apps/api)");
 
         // Verify summary line in log pane (now uses · separators in panel footer)
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("1 created")
                 && log_text.contains("1 updated")
@@ -1681,7 +1681,7 @@ mod tests {
         )
         .unwrap();
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("Results"),
             "expected Results panel title in log: {log_text}"
@@ -2211,7 +2211,7 @@ mod tests {
         assert_eq!(updated, 0);
         assert_eq!(failed, 1);
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("unknown error"),
             "expected 'unknown error' fallback in log: {log_text}"
@@ -2235,7 +2235,7 @@ mod tests {
         assert_eq!(updated, 0);
         assert_eq!(failed, 0);
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("CLAUDE.md") && log_text.contains("created"),
             "expected created message in log: {log_text}"
@@ -2259,7 +2259,7 @@ mod tests {
         assert_eq!(updated, 1);
         assert_eq!(failed, 0);
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("apps/web/CLAUDE.md") && log_text.contains("updated"),
             "expected updated message in log: {log_text}"
@@ -2283,7 +2283,7 @@ mod tests {
         assert_eq!(updated, 0);
         assert_eq!(failed, 1);
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         assert!(
             log_text.contains("permission denied"),
             "expected error message in log: {log_text}"
@@ -2336,7 +2336,7 @@ mod tests {
 
         report_write_results(&results, 0, Duration::from_secs(3), &mut pipeline, 80);
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
         assert!(
             stripped.contains("Results"),
@@ -2368,7 +2368,7 @@ mod tests {
 
         report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
         assert!(
             stripped.contains('\u{251c}') && stripped.contains('\u{2524}'), // ├ and ┤
@@ -2388,7 +2388,7 @@ mod tests {
 
         report_write_results(&results, 0, Duration::from_millis(7300), &mut pipeline, 80);
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
         assert!(
             stripped.contains("[7.3s total]"),
@@ -2416,7 +2416,7 @@ mod tests {
 
         report_write_results(&results, 1, Duration::from_secs(2), &mut pipeline, 80);
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
         assert!(
             stripped.contains("\u{00b7}"),
@@ -2462,7 +2462,7 @@ mod tests {
         assert_eq!(updated, 1);
         assert_eq!(failed, 1);
 
-        let log_text = pipeline.log.render_to_string(1000, 200, 0).join("\n");
+        let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
         // Verify all file entries
         assert!(stripped.contains("CLAUDE.md") && stripped.contains("updated"));

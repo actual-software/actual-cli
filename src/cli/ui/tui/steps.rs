@@ -56,16 +56,18 @@ impl StepsPane {
     }
 
     /// Render a single step as a string, truncated to `width` visible chars.
-    /// Format: `{icon} {label:<12} {message}  {elapsed}`
-    pub fn render_step(step: &Step, width: usize) -> String {
+    /// If `selected` is true, a `▶` prefix is prepended (consuming 2 chars of width).
+    /// Format: `[▶ ]{icon} {label:<12} {message}  {elapsed}`
+    pub fn render_step(step: &Step, width: usize, selected: bool) -> String {
         let icon = Self::status_icon(step.status);
         let elapsed_str = match step.elapsed {
             Some(d) => format!(" [{:.1}s]", d.as_secs_f64()),
             None => String::new(),
         };
+        let prefix = if selected { "▶ " } else { "  " };
         let base = format!(
-            "{} {:<12} {}{}",
-            icon, step.label, step.message, elapsed_str
+            "{}{} {:<12} {}{}",
+            prefix, icon, step.label, step.message, elapsed_str
         );
         // Truncate to width (simple char-level truncation; no ANSI codes here)
         if base.chars().count() <= width {
@@ -77,10 +79,12 @@ impl StepsPane {
     }
 
     /// Render all steps as a Vec of lines (one per step).
-    pub fn render_lines(&self, width: usize) -> Vec<String> {
+    /// `selected` optionally highlights one step with a `▶` prefix.
+    pub fn render_lines(&self, width: usize, selected: Option<usize>) -> Vec<String> {
         self.steps
             .iter()
-            .map(|s| Self::render_step(s, width))
+            .enumerate()
+            .map(|(i, s)| Self::render_step(s, width, selected == Some(i)))
             .collect()
     }
 
@@ -190,7 +194,7 @@ mod tests {
             message: "ok".to_string(),
             elapsed: None,
         };
-        let rendered = StepsPane::render_step(&step, 200);
+        let rendered = StepsPane::render_step(&step, 200, false);
         assert!(rendered.contains('○'));
         assert!(rendered.contains("Env"));
         assert!(rendered.contains("ok"));
@@ -208,7 +212,7 @@ mod tests {
             message: "done".to_string(),
             elapsed: Some(Duration::from_secs_f64(1.5)),
         };
-        let rendered = StepsPane::render_step(&step, 200);
+        let rendered = StepsPane::render_step(&step, 200, false);
         assert!(rendered.contains('✔'));
         assert!(rendered.contains("Analysis"));
         assert!(rendered.contains("done"));
@@ -226,7 +230,7 @@ mod tests {
             elapsed: None,
         };
         // Use a very small width to force truncation
-        let rendered = StepsPane::render_step(&step, 10);
+        let rendered = StepsPane::render_step(&step, 10, false);
         // Should end with ellipsis and be at most 10 visible chars
         assert!(rendered.ends_with('…'));
         assert!(rendered.chars().count() <= 10);
@@ -242,10 +246,10 @@ mod tests {
             message: String::new(),
             elapsed: None,
         };
-        let rendered = StepsPane::render_step(&step, 200);
+        let rendered = StepsPane::render_step(&step, 200, false);
         let char_count = rendered.chars().count();
         // Render again at exact width — should not truncate
-        let rendered2 = StepsPane::render_step(&step, char_count);
+        let rendered2 = StepsPane::render_step(&step, char_count, false);
         assert!(!rendered2.ends_with('…'));
     }
 
@@ -254,7 +258,7 @@ mod tests {
     #[test]
     fn test_render_lines() {
         let pane = StepsPane::new(&["Env", "Fetch ADRs"]);
-        let lines = pane.render_lines(200);
+        let lines = pane.render_lines(200, None);
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("Env"));
         assert!(lines[1].contains("Fetc")); // label truncated in format but label is full
