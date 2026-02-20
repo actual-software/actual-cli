@@ -172,6 +172,16 @@ pub struct SyncArgs {
     /// Can also be set permanently via: actual config set runner anthropic-api
     #[arg(long, value_enum, value_name = "RUNNER")]
     pub runner: Option<RunnerChoice>,
+
+    /// Stream Claude Code subprocess stderr to the display in real time.
+    ///
+    /// When the 30-second hang warning fires, stderr output captured so far
+    /// is shown. Without this flag only a generic tip is displayed.
+    ///
+    /// Useful for diagnosing hangs — permission prompts, auth failures, and
+    /// other Claude Code diagnostics appear on stderr.
+    #[arg(long)]
+    pub show_errors: bool,
 }
 
 /// Arguments for the `status` command

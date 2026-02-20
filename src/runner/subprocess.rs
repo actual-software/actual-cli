@@ -39,6 +39,15 @@ pub trait TailoringRunner: Send + Sync {
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError>;
+
+    /// Register a channel sender to receive subprocess stderr lines in real time.
+    ///
+    /// Called once before tailoring begins when `--show-errors` is active.
+    /// The default implementation is a no-op — override only for runners that
+    /// spawn a subprocess and can stream its stderr (i.e. [`CliClaudeRunner`]).
+    fn set_stderr_tx(&self, _tx: tokio::sync::mpsc::UnboundedSender<String>) {
+        // Default: no-op. API-backed runners don't have a subprocess stderr.
+    }
 }
 
 /// Trait for running Claude Code and deserializing output.
@@ -62,6 +71,12 @@ pub struct CliClaudeRunner {
     timeout: Duration,
     /// Optional override for the max-turns limit (overrides the default in `InvocationOptions`).
     max_turns_override: Option<u32>,
+    /// Optional channel sender for streaming subprocess stderr lines in real time.
+    ///
+    /// Set via [`TailoringRunner::set_stderr_tx`] when `--show-errors` is active.
+    /// Uses interior mutability so the runner can be configured after construction
+    /// while still satisfying the `&self` constraint on trait methods.
+    stderr_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
 }
 
 impl CliClaudeRunner {
@@ -70,6 +85,7 @@ impl CliClaudeRunner {
             binary_path,
             timeout,
             max_turns_override: None,
+            stderr_tx: std::sync::Mutex::new(None),
         }
     }
 
@@ -165,10 +181,17 @@ pub(crate) fn resolve_output(
 ///
 /// Extracted from the `ClaudeRunner` impl so the trait method is a
 /// thin delegation.
+///
+/// When `stderr_tx` is `Some`, stderr is intercepted by a background task that
+/// forwards each line to the channel in real time (for `--show-errors` live
+/// streaming).  The bytes are also collected and merged back into `output.stderr`
+/// so error messages are still available to [`parse_output`] when the process
+/// exits non-zero.
 async fn run_subprocess<T: DeserializeOwned>(
     binary_path: &std::path::Path,
     timeout: Duration,
     args: &[String],
+    stderr_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<T, ActualError> {
     let mut cmd = Command::new(binary_path);
     cmd.arg("--print");
@@ -178,15 +201,51 @@ async fn run_subprocess<T: DeserializeOwned>(
     // on drop, preventing orphaned processes.
     cmd.kill_on_drop(true);
 
-    let child = cmd
+    let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| io_err("Failed to spawn Claude Code", e))?;
 
+    // If stderr streaming is requested, take the stderr handle from the child and
+    // forward each line to the caller's channel in a background task.  The task
+    // also collects all bytes so they can be merged back into `output.stderr` for
+    // error reporting once the process exits.
+    let stderr_join: Option<tokio::task::JoinHandle<Vec<u8>>> = if let Some(tx) = stderr_tx {
+        child.stderr.take().map(|stderr_handle| {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut reader = BufReader::new(stderr_handle);
+                let mut line = String::new();
+                let mut all_bytes = Vec::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    all_bytes.extend_from_slice(line.as_bytes());
+                    // Trim trailing newline before sending so callers receive
+                    // clean single-line strings.
+                    let _ = tx.send(line.trim_end().to_string());
+                    line.clear();
+                }
+                all_bytes
+            })
+        })
+    } else {
+        None
+    };
+
     let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-    let output = resolve_output(result, timeout)?;
+    let mut output = resolve_output(result, timeout)?;
+
+    // Wait for the stderr streaming task and merge its bytes back into
+    // `output.stderr` so [`parse_output`] can include them in error messages.
+    // (`wait_with_output` yields an empty `output.stderr` when the handle was taken.)
+    if let Some(join) = stderr_join {
+        if let Ok(bytes) = join.await {
+            if !bytes.is_empty() {
+                output.stderr = bytes;
+            }
+        }
+    }
 
     parse_output(output)
 }
@@ -212,13 +271,20 @@ impl TailoringRunner for CliClaudeRunner {
         args.push("-p".to_string());
         args.push(prompt.to_string());
 
-        run_subprocess(&self.binary_path, self.timeout, &args).await
+        // Clone the stderr sender (if any) so it can be moved into the subprocess.
+        let stderr_tx = self.stderr_tx.lock().unwrap().clone();
+        run_subprocess(&self.binary_path, self.timeout, &args, stderr_tx).await
+    }
+
+    fn set_stderr_tx(&self, tx: tokio::sync::mpsc::UnboundedSender<String>) {
+        *self.stderr_tx.lock().unwrap() = Some(tx);
     }
 }
 
 impl ClaudeRunner for CliClaudeRunner {
     async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError> {
-        run_subprocess(&self.binary_path, self.timeout, args).await
+        // Analysis invocations don't need stderr streaming — pass None.
+        run_subprocess(&self.binary_path, self.timeout, args, None).await
     }
 }
 
