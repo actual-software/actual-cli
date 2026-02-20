@@ -275,6 +275,37 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
+    /// Extract `(project_name, batch_count)` from a `ProjectStarted` event.
+    /// Panics if the event is not `ProjectStarted`.
+    fn project_started_fields(event: &TailoringEvent) -> (&str, usize) {
+        match event {
+            TailoringEvent::ProjectStarted {
+                project_name,
+                batch_count,
+            } => (project_name.as_str(), *batch_count),
+            other => panic!("expected ProjectStarted, got {other:?}"),
+        }
+    }
+
+    /// Extract `(project_name, batch_index, batch_count, adr_count)` from a
+    /// `BatchCompleted` event.  Panics if the event is not `BatchCompleted`.
+    fn batch_completed_fields(event: &TailoringEvent) -> (&str, usize, usize, usize) {
+        match event {
+            TailoringEvent::BatchCompleted {
+                project_name,
+                batch_index,
+                batch_count,
+                adr_count,
+            } => (
+                project_name.as_str(),
+                *batch_index,
+                *batch_count,
+                *adr_count,
+            ),
+            other => panic!("expected BatchCompleted, got {other:?}"),
+        }
+    }
+
     /// Tracks concurrent execution: records (entry_time, exit_time) for each call.
     struct ConcurrencyTracker {
         /// (entry_time, exit_time) for each call, in order of entry.
@@ -1267,15 +1298,9 @@ mod tests {
             .filter(|e| matches!(e, TailoringEvent::ProjectStarted { .. }))
             .collect();
         assert_eq!(started.len(), 1, "expected 1 ProjectStarted event");
-        let TailoringEvent::ProjectStarted {
-            project_name,
-            batch_count,
-        } = &started[0]
-        else {
-            panic!("expected ProjectStarted event");
-        };
-        assert_eq!(project_name, "mono");
-        assert_eq!(*batch_count, 2, "expected 2 batches for mono");
+        let (ps_name, ps_batch_count) = project_started_fields(&started[0]);
+        assert_eq!(ps_name, "mono");
+        assert_eq!(ps_batch_count, 2, "expected 2 batches for mono");
 
         // Verify 2 BatchCompleted events, each with batch_count=2
         let batch_events: Vec<_> = events
@@ -1284,22 +1309,14 @@ mod tests {
             .collect();
         assert_eq!(batch_events.len(), 2, "expected 2 BatchCompleted events");
         for event in &batch_events {
-            let TailoringEvent::BatchCompleted {
-                project_name,
-                batch_index,
-                batch_count,
-                adr_count,
-            } = event
-            else {
-                panic!("expected BatchCompleted event");
-            };
-            assert_eq!(project_name, "mono");
-            assert_eq!(*batch_count, 2);
+            let (bc_name, bc_index, bc_count, bc_adrs) = batch_completed_fields(event);
+            assert_eq!(bc_name, "mono");
+            assert_eq!(bc_count, 2);
             assert!(
-                *batch_index == 1 || *batch_index == 2,
-                "unexpected batch_index: {batch_index}"
+                bc_index == 1 || bc_index == 2,
+                "unexpected batch_index: {bc_index}"
             );
-            assert_eq!(*adr_count, 1, "each batch has 1 ADR");
+            assert_eq!(bc_adrs, 1, "each batch has 1 ADR");
         }
 
         // Verify exactly 1 ProjectCompleted event
@@ -1650,5 +1667,27 @@ mod tests {
         let cfg = result.unwrap();
         assert_eq!(cfg.batch_size, 15);
         assert_eq!(cfg.concurrency, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected ProjectStarted")]
+    fn test_project_started_fields_panics_on_wrong_variant() {
+        let wrong = TailoringEvent::ProjectCompleted {
+            project_name: "x".to_string(),
+            files_generated: 0,
+            adrs_applied: 0,
+        };
+        project_started_fields(&wrong);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected BatchCompleted")]
+    fn test_batch_completed_fields_panics_on_wrong_variant() {
+        let wrong = TailoringEvent::ProjectCompleted {
+            project_name: "x".to_string(),
+            files_generated: 0,
+            adrs_applied: 0,
+        };
+        batch_completed_fields(&wrong);
     }
 }
