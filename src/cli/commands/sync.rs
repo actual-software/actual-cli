@@ -117,18 +117,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     // Load config early so we can show server URL and cache status in the
     // Environment step output. Falls back to default if the config is missing
     // or unreadable (non-fatal — errors surface later when config is required).
-    // Gap 6: log a warning when the config file exists but cannot be parsed so
-    // the user can see it in the tracing log rather than silently getting defaults.
-    let config = match load_from(cfg_path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "failed to load config from {}: {e} — using defaults",
-                cfg_path.display()
-            );
-            Default::default()
-        }
-    };
+    let config = load_config_with_fallback(cfg_path);
 
     // Resolve effective API server URL (CLI flag > config > default).
     // Store as an owned String so it remains valid after config is reloaded in Phase 2.
@@ -706,7 +695,9 @@ where
     heartbeat.tick().await;
 
     // Gap 2: track when the last progress event arrived so we can detect hangs.
-    let mut last_event_time = std::time::Instant::now();
+    // Uses tokio::time::Instant so the threshold is testable with
+    // tokio::time::pause() / tokio::time::advance().
+    let mut last_event_time = tokio::time::Instant::now();
     // Latch: emit the hang warning at most once per tailoring run to avoid
     // flooding the log pane with repeated messages.
     let mut hang_warned = false;
@@ -724,7 +715,7 @@ where
             }
             Some(event) = progress_rx.recv() => {
                 // Reset hang tracking on every progress event.
-                last_event_time = std::time::Instant::now();
+                last_event_time = tokio::time::Instant::now();
                 apply_tailoring_event(event, pipeline, &mut completed);
             }
             result = &mut cancel => {
@@ -1435,6 +1426,26 @@ fn report_write_results(
     }
 
     (files_created, files_updated, files_failed)
+}
+
+/// Load config from `path`, falling back to `Config::default()` if the file
+/// cannot be parsed.  A `tracing::warn!` is emitted on failure so the message
+/// appears in the log file (TUI mode) or stderr (plain mode).
+///
+/// This early load is non-fatal: if the config is unreadable or corrupt the
+/// run continues with defaults and the second, hard `load_from(cfg_path)?`
+/// call in Phase 2 will surface a proper error to the user.
+pub(crate) fn load_config_with_fallback(cfg_path: &std::path::Path) -> crate::config::Config {
+    match load_from(cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "failed to load config from {}: {e} — using defaults",
+                cfg_path.display()
+            );
+            Default::default()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5139,6 +5150,178 @@ mod tests {
     fn test_format_cache_age_days() {
         assert_eq!(format_cache_age(86400), "1d ago");
         assert_eq!(format_cache_age(172800), "2d ago");
+    }
+
+    // ── Gap 6: load_config_with_fallback returns default on error ──
+
+    /// Verify that `load_config_with_fallback` returns `Config::default()` when
+    /// the config file contains invalid YAML, exercising the `Err` branch that
+    /// emits a `tracing::warn!` instead of hard-failing.
+    #[test]
+    fn test_load_config_with_fallback_returns_default_on_invalid_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+
+        // Write deliberately invalid YAML so `load_from` returns Err.
+        std::fs::write(&cfg_path, ": invalid: yaml: [[[").unwrap();
+
+        // Must not panic or propagate the error; must return the default config.
+        let config = load_config_with_fallback(&cfg_path);
+        assert_eq!(
+            config,
+            crate::config::Config::default(),
+            "expected default config when YAML is invalid"
+        );
+    }
+
+    // ── Gap 1: subprocess stderr is surfaced in the TUI log pane ──
+
+    /// A runner that immediately returns `ClaudeSubprocessFailed` with a
+    /// non-empty stderr so we can verify the stderr-surfacing branch in
+    /// `run_sync` (lines 521-527).
+    struct FailingRunner {
+        stderr: String,
+    }
+
+    impl TailoringRunner for FailingRunner {
+        async fn run_tailoring(
+            &self,
+            _prompt: &str,
+            _schema: &str,
+            _model_override: Option<&str>,
+            _max_budget_usd: Option<f64>,
+        ) -> Result<TailoringOutput, ActualError> {
+            Err(ActualError::ClaudeSubprocessFailed {
+                message: "subprocess exited with code 1".to_string(),
+                stderr: self.stderr.clone(),
+            })
+        }
+    }
+
+    /// Verify that when tailoring fails with `ClaudeSubprocessFailed` and
+    /// non-empty stderr, `run_sync` returns `Err` and the stderr branch is
+    /// exercised (Gap 1 coverage).
+    #[test]
+    fn test_run_sync_tailoring_subprocess_failed_with_stderr_surfaces_output() {
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = FailingRunner {
+            stderr: "error: quota exceeded\nretry after 60s".to_string(),
+        };
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: false, // must reach the tailoring path
+            max_budget_usd: None,
+            no_tui: false,
+            output_format: None,
+            runner: None,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "expected tailoring failure to propagate as Err"
+        );
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                ActualError::ClaudeSubprocessFailed { .. }
+            ),
+            "expected ClaudeSubprocessFailed error"
+        );
+    }
+
+    // ── Gap 7: --verbose surfaces per-file reasoning ──
+
+    /// Verify that when `--verbose` is set and tailoring returns files with
+    /// non-empty reasoning, `run_sync` prints `[path]: reasoning` lines.
+    #[test]
+    fn test_run_sync_verbose_surfaces_reasoning_per_file() {
+        // VALID_TAILORING_JSON has reasoning = "Root rules" for CLAUDE.md.
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_TAILORING_JSON);
+        let args = SyncArgs {
+            dry_run: true, // don't write files
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: true, // must hit the reasoning loop (lines 537-544)
+            no_tailor: false,
+            max_budget_usd: None,
+            no_tui: false,
+            output_format: None,
+            runner: None,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+        );
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+    }
+
+    // ── Gap 2: hang detection warning fires after timeout ──
+
+    /// Verify that when no progress events arrive for ≥ HANG_WARN_SECS the
+    /// hang-warning is emitted exactly once to the TUI log pane (Gap 2
+    /// coverage for lines 721-731).
+    #[tokio::test]
+    async fn test_run_tailoring_with_cancel_hang_warning_fires_after_timeout() {
+        tokio::time::pause();
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode → log pane populated
+        pipeline.start(SyncPhase::Tailor, "initial");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        drop(tx); // close sender; recv() will return None once the channel is drained
+
+        // Tailor future: sleep long enough for multiple heartbeat ticks + the
+        // HANG_WARN_SECS threshold to elapse, then return Ok.
+        let output = make_output(vec![]);
+        let hang_secs = HANG_WARN_SECS;
+        let tailor_fut = async move {
+            // Sleep past the hang threshold so the heartbeat arm fires and
+            // detects the elapsed time.
+            tokio::time::sleep(std::time::Duration::from_secs(hang_secs + 1)).await;
+            Ok::<TailoringOutput, ActualError>(output)
+        };
+        let cancel = std::future::pending::<std::io::Result<()>>();
+
+        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 0, cancel).await;
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        // The warning must appear exactly once in the TUI log pane (index 3 = Tailor).
+        let logged = pipeline.logs[3].render_to_string(200, 500, 0);
+        let warn_lines: Vec<_> = logged
+            .iter()
+            .filter(|l| l.contains("No output received"))
+            .collect();
+        assert_eq!(
+            warn_lines.len(),
+            1,
+            "expected exactly one hang warning line, got: {logged:?}"
+        );
     }
 
     // ── tilde_collapse unit tests ──
