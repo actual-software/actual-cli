@@ -5236,12 +5236,50 @@ mod tests {
             result.is_err(),
             "expected tailoring failure to propagate as Err"
         );
+        let err = result.unwrap_err();
         assert!(
-            matches!(
-                result.unwrap_err(),
-                ActualError::ClaudeSubprocessFailed { .. }
-            ),
-            "expected ClaudeSubprocessFailed error"
+            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
+            "expected ClaudeSubprocessFailed error, got: {err:?}"
+        );
+    }
+
+    /// Same as above but with empty stderr — exercises the `stderr.is_empty()`
+    /// guard branch (line 516) that skips printing when there is nothing to show.
+    #[test]
+    fn test_run_sync_tailoring_subprocess_failed_empty_stderr_no_output() {
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = FailingRunner {
+            stderr: String::new(), // empty stderr — must not print "Subprocess output:"
+        };
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+            no_tui: false,
+            output_format: None,
+            runner: None,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+        );
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
+            "expected ClaudeSubprocessFailed, got: {err:?}"
         );
     }
 
