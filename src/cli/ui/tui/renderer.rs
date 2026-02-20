@@ -171,7 +171,14 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 "  ↑/↓ move  Space toggle  Enter confirm  Esc cancel".to_string()
             } else {
                 // Post-sync review mode: scroll/quit hint
-                let max = ctx.log.max_scroll(approx_log_height);
+                let approx_log_width = if cols >= 80 {
+                    content_area.width.saturating_sub(LEFT_COL_WIDTH + 2) as usize
+                } else {
+                    content_area.width.saturating_sub(2) as usize
+                };
+                let max = ctx
+                    .log
+                    .max_scroll_wrapped(approx_log_height, approx_log_width);
                 if max > 0 {
                     format!(
                         "  ↑/↓ scroll  Home/End top/bottom  q quit  [{}/{}]",
@@ -650,20 +657,26 @@ impl TuiRenderer {
                 // render_to uses: outer layout gives 1 row to footer hint.
                 //   Wide (>=80): content = rows-1, box borders = -2, OUTPUT_PADDING = -2 → log = rows-5
                 //   Narrow (<80): content = rows-1, condensed row = -1 → log = rows-2
-                let log_height: usize = crossterm::terminal::size()
+                let (log_height, log_width): (usize, usize) = crossterm::terminal::size()
                     .map(|(cols, rows)| {
                         let rows = rows as usize;
-                        if cols >= 80 {
+                        let height = if cols >= 80 {
                             rows.saturating_sub(5)
                         } else {
                             rows.saturating_sub(2)
-                        }
+                        };
+                        let width = if cols >= 80 {
+                            (cols as usize).saturating_sub(LEFT_COL_WIDTH as usize + 2)
+                        } else {
+                            (cols as usize).saturating_sub(2)
+                        };
+                        (height, width)
                     })
-                    .unwrap_or(20);
+                    .unwrap_or((20, 80));
                 let n_steps = self.steps.steps.len();
                 let cur = self.selected_step.unwrap_or(self.active_step);
                 let log_idx = self.selected_step.unwrap_or(self.active_step);
-                let max = self.logs[log_idx].max_scroll(log_height);
+                let max = self.logs[log_idx].max_scroll_wrapped(log_height, log_width);
                 match (key.code, key.modifiers) {
                     // Quit
                     (KeyCode::Char('q'), _)
