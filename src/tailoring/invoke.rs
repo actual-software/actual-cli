@@ -9,12 +9,33 @@ use crate::generation::OutputFormat;
 use crate::runner::prompts::tailoring_prompt;
 use crate::runner::schemas::tailoring_output_schema;
 use crate::runner::TailoringRunner;
+use crate::tailoring::context_bundler::RepoBundleContext;
 use crate::tailoring::types::TailoringOutput;
+
+/// Format a [`RepoBundleContext`] into a string suitable for injection into the prompt.
+///
+/// The output is a series of `=== <name> ===` sections: first the file tree,
+/// then each key file's content.
+fn format_bundle_context(ctx: &RepoBundleContext) -> String {
+    let mut out = String::new();
+    out.push_str("=== file_tree ===\n");
+    out.push_str(&ctx.file_tree);
+    out.push('\n');
+    for (path, content) in &ctx.key_files {
+        out.push_str(&format!("\n=== {path} ===\n{content}\n"));
+    }
+    out
+}
 
 /// Invoke Claude to tailor ADRs for the given project context.
 ///
 /// Builds the prompt and schema, calls the runner, validates the output,
 /// and retries once on JSON parse failure.
+///
+/// If `root_dir` is `Some`, the repository context is pre-bundled via
+/// [`bundle_context`] and injected into the prompt. On failure, bundling is
+/// skipped with a warning and tailoring continues without bundled context.
+#[allow(clippy::too_many_arguments)]
 pub async fn invoke_tailoring<R: TailoringRunner>(
     runner: &R,
     adrs: &[Adr],
@@ -23,9 +44,35 @@ pub async fn invoke_tailoring<R: TailoringRunner>(
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
     format: &OutputFormat,
+    root_dir: Option<&std::path::Path>,
 ) -> Result<TailoringOutput, ActualError> {
+    // Bundle repository context if a root directory is provided.
+    let bundled_context_owned;
+    let bundled_context = if let Some(dir) = root_dir {
+        match crate::tailoring::context_bundler::bundle_context(dir) {
+            Ok(ctx) => {
+                bundled_context_owned = format_bundle_context(&ctx);
+                &bundled_context_owned
+            }
+            Err(e) => {
+                tracing::warn!("context bundling failed, continuing without it: {e}");
+                bundled_context_owned = String::new();
+                &bundled_context_owned
+            }
+        }
+    } else {
+        bundled_context_owned = String::new();
+        &bundled_context_owned
+    };
+
     let adr_json = serialize_json(adrs, "ADRs")?;
-    let prompt = build_prompt(&adr_json, projects_json, existing_output_paths, format)?;
+    let prompt = build_prompt(
+        &adr_json,
+        projects_json,
+        existing_output_paths,
+        format,
+        bundled_context,
+    )?;
     let schema = tailoring_output_schema()?;
     let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
 
@@ -61,8 +108,15 @@ pub(crate) fn build_prompt(
     projects_json: &str,
     existing_output_paths: &str,
     format: &OutputFormat,
+    bundled_context: &str,
 ) -> Result<String, ActualError> {
-    tailoring_prompt(projects_json, existing_output_paths, adr_json, format)
+    tailoring_prompt(
+        projects_json,
+        existing_output_paths,
+        adr_json,
+        format,
+        bundled_context,
+    )
 }
 
 /// Returns `true` if `path` is a valid output file path for the given `format`.
@@ -266,6 +320,7 @@ mod tests {
             None,
             None,
             &OutputFormat::ClaudeMd,
+            None,
         )
         .await;
 
@@ -306,6 +361,7 @@ mod tests {
             None,
             None,
             &OutputFormat::ClaudeMd,
+            None,
         )
         .await;
 
@@ -347,6 +403,7 @@ mod tests {
             None,
             None,
             &OutputFormat::ClaudeMd,
+            None,
         )
         .await;
 
@@ -385,6 +442,7 @@ mod tests {
             None,
             None,
             &OutputFormat::ClaudeMd,
+            None,
         )
         .await;
 
@@ -422,6 +480,7 @@ mod tests {
             None,
             None,
             &OutputFormat::ClaudeMd,
+            None,
         )
         .await;
 
@@ -444,6 +503,7 @@ mod tests {
             None,
             None,
             &OutputFormat::ClaudeMd,
+            None,
         )
         .await;
 
@@ -487,7 +547,7 @@ mod tests {
     #[test]
     fn test_build_prompt_with_valid_input() {
         let adr_json = r#"[{"id":"adr-001"},{"id":"adr-002"}]"#;
-        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd)
+        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd, "")
             .expect("build_prompt must succeed for valid obfuscated constant");
 
         // The prompt should contain the ADR JSON
@@ -530,6 +590,7 @@ mod tests {
             None,
             None,
             &OutputFormat::ClaudeMd,
+            None,
         )
         .await;
 
@@ -560,6 +621,7 @@ mod tests {
             None,
             None,
             &OutputFormat::ClaudeMd,
+            None,
         )
         .await;
 
@@ -599,6 +661,7 @@ mod tests {
             None,
             None,
             &OutputFormat::AgentsMd,
+            None,
         )
         .await;
 
@@ -636,6 +699,7 @@ mod tests {
             None,
             None,
             &OutputFormat::AgentsMd,
+            None,
         )
         .await;
 
@@ -673,6 +737,7 @@ mod tests {
             None,
             None,
             &OutputFormat::AgentsMd,
+            None,
         )
         .await;
 
@@ -716,6 +781,7 @@ mod tests {
             None,
             None,
             &OutputFormat::CursorRules,
+            None,
         )
         .await;
 
@@ -753,6 +819,7 @@ mod tests {
             None,
             None,
             &OutputFormat::CursorRules,
+            None,
         )
         .await;
 
@@ -793,6 +860,7 @@ mod tests {
             None,
             None,
             &OutputFormat::CursorRules,
+            None,
         )
         .await;
 
@@ -834,10 +902,100 @@ mod tests {
             None,
             None,
             &OutputFormat::CursorRules,
+            None,
         )
         .await;
 
         let err = result.unwrap_err();
         assert!(matches!(err, ActualError::TailoringValidationError(_)));
+    }
+
+    // ── bundled context tests ──
+
+    #[test]
+    fn test_format_bundle_context_with_key_files() {
+        let ctx = RepoBundleContext {
+            file_tree: "src/\n  main.rs\n".to_string(),
+            key_files: vec![
+                ("src/main.rs".to_string(), "fn main() {}".to_string()),
+                ("Cargo.toml".to_string(), "[package]".to_string()),
+            ],
+        };
+        let formatted = format_bundle_context(&ctx);
+        assert!(formatted.contains("=== file_tree ===\n"));
+        assert!(formatted.contains("src/\n  main.rs\n"));
+        assert!(formatted.contains("=== src/main.rs ===\n"));
+        assert!(formatted.contains("fn main() {}"));
+        assert!(formatted.contains("=== Cargo.toml ===\n"));
+        assert!(formatted.contains("[package]"));
+    }
+
+    #[tokio::test]
+    async fn test_bundled_context_ok_path_uses_real_dir() {
+        // Use a real temp dir so bundle_context succeeds and exercises the Ok branch.
+        let dir = tempfile::tempdir().unwrap();
+        // Write a minimal Cargo.toml so the bundler finds something.
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
+
+        let adrs = vec![make_adr("adr-001")];
+        let json = valid_output_json(&["adr-001"]);
+        let runner = MockTailoringRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+            Some(dir.path()),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "invoke_tailoring with real dir must succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_bundled_context_included_in_prompt() {
+        let adr_json = r#"[{"id":"adr-001"}]"#;
+        let bundled_context = "=== file_tree ===\nsrc/\n  main.rs\n";
+        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd, bundled_context)
+            .expect("build_prompt must succeed for valid obfuscated constant");
+        assert!(
+            prompt.contains(bundled_context),
+            "prompt must contain the bundled context string"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bundled_context_error_handled_gracefully() {
+        // Pass a nonexistent path as root_dir — bundle_context will fail, but
+        // invoke_tailoring must still succeed (graceful degradation).
+        let adrs = vec![make_adr("adr-001")];
+        let json = valid_output_json(&["adr-001"]);
+        let runner = MockTailoringRunner::single(&json);
+
+        let nonexistent = std::path::Path::new("/nonexistent/path/that/does/not/exist");
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+            Some(nonexistent),
+        )
+        .await;
+
+        // Should succeed despite bundling failing — graceful degradation
+        assert!(
+            result.is_ok(),
+            "invoke_tailoring must not fail when context bundling fails: {result:?}"
+        );
     }
 }

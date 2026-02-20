@@ -446,6 +446,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             args.max_budget_usd.or(config.max_budget_usd),
             Duration::from_secs(config.invocation_timeout_secs.unwrap_or(600).max(1)),
             &output_format,
+            Some(root_dir),
         )?;
 
         let (progress_tx, mut progress_rx) =
