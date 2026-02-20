@@ -4453,20 +4453,41 @@ mod tests {
     // ── apply_tailoring_event tests ──
 
     #[test]
-    fn test_apply_tailoring_event_project_started_is_noop() {
+    fn test_apply_tailoring_event_project_started_does_not_increment_counter() {
         let mut pipeline = TuiRenderer::new(true, false); // quiet mode — no output
         let mut completed = 0usize;
         apply_tailoring_event(
             TailoringEvent::ProjectStarted {
                 project_name: "app".to_string(),
-                batch_count: 1,
+                batch_count: 2,
             },
             &mut pipeline,
             &mut completed,
             3,
         );
-        // ProjectStarted should not increment the counter
+        // ProjectStarted prints a log line but does not increment the completed counter
         assert_eq!(completed, 0);
+    }
+
+    #[test]
+    fn test_apply_tailoring_event_batch_completed_does_not_increment_counter() {
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/2 projects done)...");
+        let mut completed = 0usize;
+        apply_tailoring_event(
+            TailoringEvent::BatchCompleted {
+                project_name: "my-app".to_string(),
+                batch_index: 1,
+                batch_count: 2,
+                adr_count: 5,
+            },
+            &mut pipeline,
+            &mut completed,
+            2,
+        );
+        // BatchCompleted ticks the spinner and logs a line but does NOT increment
+        // the project-level completed counter
+        assert_eq!(completed, 0, "BatchCompleted must not increment project counter");
     }
 
     #[test]
