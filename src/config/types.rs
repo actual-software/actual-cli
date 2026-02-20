@@ -7,7 +7,7 @@ use crate::generation::OutputFormat;
 pub const DEFAULT_BATCH_SIZE: usize = 15;
 
 /// Default maximum concurrent projects during tailoring.
-pub const DEFAULT_CONCURRENCY: usize = 3;
+pub const DEFAULT_CONCURRENCY: usize = 10;
 
 /// Default per-project tailoring timeout in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
@@ -50,7 +50,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_size: Option<usize>,
 
-    /// Max concurrent projects during tailoring (default: 3).
+    /// Max concurrent projects during tailoring (default: 10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency: Option<usize>,
 
