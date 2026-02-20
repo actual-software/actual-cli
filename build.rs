@@ -60,9 +60,11 @@ understand the current state, but only generate content for the managed section)
 
 ## Instructions
 
-1. **Tailor each ADR**: Examine the repository to verify applicability. Reference \
-   actual paths, files, and patterns. Identify conflicts with existing code. Merge \
-   duplicates. Keep policies concise (1-2 sentences each).
+1. **Tailor each ADR**: Use the pre-bundled repository context above as your \
+   primary source of truth. Reference actual paths, files, and patterns from it. \
+   Identify conflicts with existing code. Merge duplicates. Keep policies concise \
+   (1-2 sentences each). Only use Read/Glob/Grep tools for targeted lookups of \
+   specific files NOT already included in the pre-bundled context.
 
 2. **Skip inapplicable ADRs**: If an ADR doesn't apply (e.g., it recommends Tailwind \
    but the project uses styled-components), mark it as skipped with a reason.
@@ -112,9 +114,11 @@ understand the current state, but only generate content for the managed section)
 
 ## Instructions
 
-1. **Tailor each ADR**: Examine the repository to verify applicability. Reference \
-   actual paths, files, and patterns. Identify conflicts with existing code. Merge \
-   duplicates. Keep policies concise (1-2 sentences each).
+1. **Tailor each ADR**: Use the pre-bundled repository context above as your \
+   primary source of truth. Reference actual paths, files, and patterns from it. \
+   Identify conflicts with existing code. Merge duplicates. Keep policies concise \
+   (1-2 sentences each). Only use Read/Glob/Grep tools for targeted lookups of \
+   specific files NOT already included in the pre-bundled context.
 
 2. **Skip inapplicable ADRs**: If an ADR doesn't apply (e.g., it recommends Tailwind \
    but the project uses styled-components), mark it as skipped with a reason.

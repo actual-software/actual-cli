@@ -183,6 +183,31 @@ mod tests {
     }
 
     #[test]
+    fn prompt_instructs_to_use_pre_bundled_context() {
+        let prompt =
+            tailoring_prompt_decoded("", "", "[]", "CLAUDE.md", "").expect("decode must succeed");
+        assert!(
+            prompt.contains("pre-bundled repository context"),
+            "prompt must instruct Claude to use pre-bundled context first"
+        );
+        assert!(
+            prompt.contains("targeted lookups"),
+            "prompt must restrict tool use to targeted lookups"
+        );
+    }
+
+    #[test]
+    fn cursor_rules_prompt_instructs_to_use_pre_bundled_context() {
+        let path = ".cursor/rules/actual-policies.mdc";
+        let prompt =
+            cursor_rules_prompt_decoded("", "", "[]", path, "").expect("decode must succeed");
+        assert!(
+            prompt.contains("pre-bundled repository context"),
+            "cursor prompt must instruct Claude to use pre-bundled context first"
+        );
+    }
+
+    #[test]
     fn decode_returns_err_for_invalid_utf8() {
         // XOR 0xFF and 0xFE with the key — produce bytes that after decoding
         // are not valid UTF-8 regardless of the key, by constructing a known
