@@ -453,14 +453,9 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 
         // In TUI mode (raw mode active) the terminal consumes keyboard input,
         // so OS-level SIGINT from Ctrl+C may not reach the process reliably.
-        // `sync_kb_poller` spawns a background thread that polls crossterm for
-        // quit keys and signals cancellation via a oneshot channel.
-        let (kb_poller, kb_cancel_rx) = if pipeline.is_tui() {
-            let (poller, rx) = super::sync_kb_poller::spawn();
-            (Some(poller), Some(rx))
-        } else {
-            (None, None)
-        };
+        // `sync_kb_poller::setup` optionally spawns a background poller thread
+        // and returns a combined OS-signal + keyboard cancel future.
+        let (kb_poller, cancel) = super::sync_kb_poller::setup(pipeline.is_tui());
 
         let result = rt.block_on(async {
             let tailor_fut = tailor_all_projects(
@@ -470,18 +465,6 @@ pub(crate) fn run_sync<R: TailoringRunner>(
                 &tailoring_config,
                 Some(progress_tx),
             );
-            // Build a combined cancel future: fires on OS ctrl+c OR keyboard q/ctrl+c.
-            let cancel = async {
-                tokio::select! {
-                    r = tokio::signal::ctrl_c() => r,
-                    r = async {
-                        match kb_cancel_rx {
-                            Some(rx) => rx.await.map_err(|_| std::io::Error::other("keyboard cancel channel closed")),
-                            None => std::future::pending().await,
-                        }
-                    } => r,
-                }
-            };
             run_tailoring_with_cancel(
                 tailor_fut,
                 &mut progress_rx,
@@ -492,10 +475,8 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             .await
         });
 
-        // Signal the keyboard poller to stop and wait for the thread to exit.
-        if let Some(poller) = kb_poller {
-            poller.stop_and_join();
-        }
+        // The keyboard poller (if started) is signalled to stop via its Drop impl.
+        drop(kb_poller);
         match result {
             Ok(output) => {
                 pipeline.success(
