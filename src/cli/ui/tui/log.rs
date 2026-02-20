@@ -140,7 +140,7 @@ pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
     // Collect words (non-space content) by splitting on ASCII space.
     let words: Vec<&str> = plain.split(' ').collect();
 
-    for (i, word) in words.iter().enumerate() {
+    for word in &words {
         let word_width = console::measure_text_width(word);
 
         if current_width == 0 {
@@ -161,27 +161,24 @@ pub fn wrap_line(line: &str, width: usize) -> Vec<String> {
             let needed = current_width + 1 + word_width;
             if needed <= width {
                 // Fits on current line (with space separator).
-                if i > 0 {
-                    current.push(' ');
-                    current_width += 1;
-                }
+                current.push(' ');
+                current_width += 1;
                 current.push_str(word);
                 current_width += word_width;
+            } else if word_width <= width {
+                // Word fits on a fresh line but not on the current one.
+                result.push(current.clone());
+                current = word.to_string();
+                current_width = word_width;
             } else {
-                // Flush current line, start new one with this word.
+                // Word alone exceeds width — flush current line, then hard break.
                 result.push(current.clone());
                 current = String::new();
                 current_width = 0;
-
-                if word_width <= width {
-                    current.push_str(word);
-                    current_width = word_width;
-                } else {
-                    hard_break_into(&mut result, word, width);
-                    if let Some(last) = result.pop() {
-                        current = last;
-                        current_width = console::measure_text_width(&current);
-                    }
+                hard_break_into(&mut result, word, width);
+                if let Some(last) = result.pop() {
+                    current = last;
+                    current_width = console::measure_text_width(&current);
                 }
             }
         }
@@ -298,11 +295,8 @@ mod tests {
         let result = wrap_line("hello world", 7);
         assert_eq!(result.len(), 2);
         for part in &result {
-            assert!(
-                console::measure_text_width(part) <= 7,
-                "part {:?} exceeds width 7",
-                part
-            );
+            let w = console::measure_text_width(part);
+            assert!(w <= 7);
         }
         // Both words must be present somewhere
         let joined = result.join(" ");
@@ -315,13 +309,32 @@ mod tests {
         let word = "a".repeat(20);
         let result = wrap_line(&word, 5);
         // Should produce 4 chunks of 5 chars each
-        assert_eq!(result.len(), 4, "expected 4 parts, got: {:?}", result);
+        assert_eq!(result.len(), 4);
         for part in &result {
-            assert!(
-                console::measure_text_width(part) <= 5,
-                "part {:?} exceeds width 5",
-                part
-            );
+            let w = console::measure_text_width(part);
+            assert!(w <= 5);
+        }
+    }
+
+    #[test]
+    fn test_wrap_line_multiple_words_fit_on_same_line() {
+        // "hi there world" at width=10: "hi there" (8) fits, "world" starts new line
+        let result = wrap_line("hi there world", 10);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "hi there");
+        assert_eq!(result[1], "world");
+    }
+
+    #[test]
+    fn test_wrap_line_hard_break_mid_line() {
+        // "ab" fits at width=5, then "aaaaaaaaaa" (10 chars) doesn't fit
+        // at all on current or new line — must hard-break
+        let result = wrap_line("ab aaaaaaaaaa", 5);
+        // "ab" → line 1; "aaaaa" → line 2; "aaaaa" → line 3
+        assert_eq!(result.len(), 3);
+        for part in &result {
+            let w = console::measure_text_width(part);
+            assert!(w <= 5);
         }
     }
 
@@ -345,18 +358,10 @@ mod tests {
         pane.push("hello world".to_string());
         let result = pane.render_to_string(10, 5, 0);
         // "hello world" at width=5 should produce 2 display lines
-        assert_eq!(
-            result.len(),
-            2,
-            "expected 2 display lines, got: {:?}",
-            result
-        );
+        assert_eq!(result.len(), 2);
         for part in &result {
-            assert!(
-                console::measure_text_width(part) <= 5,
-                "part {:?} exceeds width 5",
-                part
-            );
+            let w = console::measure_text_width(part);
+            assert!(w <= 5);
         }
     }
 
