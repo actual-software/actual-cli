@@ -278,32 +278,26 @@ mod tests {
 
     #[test]
     fn test_tailoring_event_batch_started_fields() {
+        let category_name = "Security".to_string();
+        let adr_titles = vec!["Use HTTPS".to_string(), "Validate inputs".to_string()];
         let event = TailoringEvent::BatchStarted {
             project_name: "repo".to_string(),
             batch_index: 2,
             batch_count: 3,
             adr_count: 2,
-            category_name: "Security".to_string(),
-            adr_titles: vec!["Use HTTPS".to_string(), "Validate inputs".to_string()],
+            category_name: category_name.clone(),
+            adr_titles: adr_titles.clone(),
         };
-        let TailoringEvent::BatchStarted {
-            ref category_name,
-            ref adr_titles,
-            batch_index,
-            batch_count,
-            adr_count,
-            ..
-        } = event
-        else {
-            unreachable!("event is always BatchStarted");
+        // Verify fields via equality with expected value
+        let expected = TailoringEvent::BatchStarted {
+            project_name: "repo".to_string(),
+            batch_index: 2,
+            batch_count: 3,
+            adr_count: 2,
+            category_name,
+            adr_titles,
         };
-        assert_eq!(category_name, "Security");
-        assert_eq!(adr_titles.len(), 2);
-        assert_eq!(adr_titles[0], "Use HTTPS");
-        assert_eq!(adr_titles[1], "Validate inputs");
-        assert_eq!(batch_index, 2);
-        assert_eq!(batch_count, 3);
-        assert_eq!(adr_count, 2);
+        assert_eq!(event, expected);
     }
 
     #[test]
