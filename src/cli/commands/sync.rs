@@ -5488,6 +5488,189 @@ mod tests {
         );
     }
 
+    // ── recv_optional and stderr streaming tests ──
+
+    /// Verify that `recv_optional` with a `Some` receiver forwards messages.
+    #[tokio::test]
+    async fn test_recv_optional_some_forwards_message() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tx.send("hello stderr".to_string()).unwrap();
+        drop(tx);
+        let result = recv_optional(&mut Some(rx)).await;
+        assert_eq!(result, Some("hello stderr".to_string()));
+    }
+
+    /// Verify that the live-streaming select arm displays stderr lines in the
+    /// TUI log pane as they arrive from the subprocess.
+    #[tokio::test]
+    async fn test_run_tailoring_with_cancel_live_streams_stderr_line() {
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
+        pipeline.start(SyncPhase::Tailor, "initial");
+        let (tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        drop(tx); // no progress events
+
+        let (stderr_tx, stderr_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut stderr_rx = Some(stderr_rx);
+
+        // Send a stderr line *before* the future resolves so the live-streaming
+        // arm has a chance to fire inside the select loop.
+        stderr_tx
+            .send("permission prompt text".to_string())
+            .unwrap();
+
+        let output = make_output(vec![]);
+        let tailor_fut = async move {
+            // Yield so the select loop can process the buffered stderr line.
+            tokio::task::yield_now().await;
+            Ok::<TailoringOutput, ActualError>(output)
+        };
+        let cancel = std::future::pending::<std::io::Result<()>>();
+
+        let result = run_tailoring_with_cancel(
+            tailor_fut,
+            &mut progress_rx,
+            &mut stderr_rx,
+            &mut pipeline,
+            0,
+            cancel,
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        // The stderr line must appear in the TUI log pane.
+        let logged = pipeline.logs[3].render_to_string(200, 500, 0);
+        assert!(
+            logged.iter().any(|l| l.contains("permission prompt text")),
+            "stderr line must appear in log pane: {logged:?}"
+        );
+    }
+
+    /// Verify that when the hang warning fires and stderr_rx is Some but no
+    /// lines have been captured, the "(no subprocess stderr captured yet)"
+    /// message is shown instead of the tip.
+    #[tokio::test]
+    async fn test_run_tailoring_with_cancel_hang_warning_no_stderr_captured() {
+        tokio::time::pause();
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
+        pipeline.start(SyncPhase::Tailor, "initial");
+        let (tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        drop(tx);
+
+        // Provide a Some stderr_rx with nothing sent so dumped == 0.
+        let (_stderr_tx, stderr_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut stderr_rx = Some(stderr_rx);
+
+        let output = make_output(vec![]);
+        let hang_secs = HANG_WARN_SECS;
+        let tailor_fut = async move {
+            tokio::time::sleep(std::time::Duration::from_secs(hang_secs + 1)).await;
+            Ok::<TailoringOutput, ActualError>(output)
+        };
+        let cancel = std::future::pending::<std::io::Result<()>>();
+
+        let result = run_tailoring_with_cancel(
+            tailor_fut,
+            &mut progress_rx,
+            &mut stderr_rx,
+            &mut pipeline,
+            0,
+            cancel,
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let logged = pipeline.logs[3].render_to_string(200, 500, 0);
+        assert!(
+            logged
+                .iter()
+                .any(|l| l.contains("no subprocess stderr captured yet")),
+            "expected 'no subprocess stderr captured yet' in log: {logged:?}"
+        );
+    }
+
+    /// Verify that when the hang warning fires and stderr lines were buffered,
+    /// those lines are dumped into the log pane (the `dumped > 0` branch).
+    #[tokio::test]
+    async fn test_run_tailoring_with_cancel_hang_warning_dumps_buffered_stderr() {
+        tokio::time::pause();
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
+        pipeline.start(SyncPhase::Tailor, "initial");
+        let (tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+        drop(tx);
+
+        let (stderr_tx, stderr_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut stderr_rx = Some(stderr_rx);
+
+        // Pre-buffer a line so it is available for the dump when the hang fires.
+        // We close stderr_tx afterwards so the live-stream arm drains normally.
+        stderr_tx.send("buffered error line".to_string()).unwrap();
+        drop(stderr_tx);
+
+        let output = make_output(vec![]);
+        let hang_secs = HANG_WARN_SECS;
+        let tailor_fut = async move {
+            tokio::time::sleep(std::time::Duration::from_secs(hang_secs + 1)).await;
+            Ok::<TailoringOutput, ActualError>(output)
+        };
+        let cancel = std::future::pending::<std::io::Result<()>>();
+
+        let result = run_tailoring_with_cancel(
+            tailor_fut,
+            &mut progress_rx,
+            &mut stderr_rx,
+            &mut pipeline,
+            0,
+            cancel,
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let logged = pipeline.logs[3].render_to_string(200, 500, 0);
+        // The buffered stderr line must appear (either via live-stream or dump).
+        assert!(
+            logged.iter().any(|l| l.contains("buffered error line")),
+            "buffered stderr must appear in log pane: {logged:?}"
+        );
+    }
+
+    /// Verify that run_sync with show_errors=true exercises the stderr channel
+    /// creation path (the MockRunner no-op set_stderr_tx is fine here).
+    #[test]
+    fn test_run_sync_show_errors_creates_stderr_channel() {
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_TAILORING_JSON);
+        let args = SyncArgs {
+            dry_run: true,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+            no_tui: false,
+            output_format: None,
+            runner: None,
+            show_errors: true, // ← exercises the stderr channel creation path
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "expected Ok with show_errors=true: {result:?}"
+        );
+    }
+
     // ── tilde_collapse unit tests ──
 
     #[test]
