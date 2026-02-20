@@ -4625,7 +4625,10 @@ mod tests {
     async fn test_run_tailoring_with_cancel_heartbeat_updates_message() {
         tokio::time::pause();
         let mut pipeline = TuiRenderer::new(false, true); // plain mode
-        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/0 projects done, 0s)...");
+        pipeline.start(
+            SyncPhase::Tailor,
+            "Tailoring ADRs (0/0 projects done, 0s)...",
+        );
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
 
         // Tailor future that completes after we advance time.
