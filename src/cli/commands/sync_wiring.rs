@@ -7,6 +7,8 @@
 
 use std::time::Duration;
 
+/// Default per-subprocess timeout.  This is also the fallback when
+/// `invocation_timeout_secs` is not set in the config file.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
@@ -71,6 +73,13 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
         RunnerChoice::ClaudeCli
     };
 
+    // Resolve the per-subprocess timeout: config value takes precedence over the
+    // compiled-in default.  The same value is used regardless of which runner is
+    // active so that `invocation_timeout_secs` has a consistent meaning across
+    // all runner backends.
+    let subprocess_timeout =
+        Duration::from_secs(cfg.invocation_timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
+
     match runner {
         RunnerChoice::ClaudeCli => {
             let binary_path = find_claude_binary()?;
@@ -82,8 +91,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 authenticated: auth_status.logged_in,
                 email: auth_status.email.clone(),
             };
-            let runner =
-                CliClaudeRunner::new(binary_path, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+            let runner = CliClaudeRunner::new(binary_path, subprocess_timeout);
             run_sync(
                 args,
                 &root_dir,
@@ -107,8 +115,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .or(cfg.model.as_deref())
                 .unwrap_or(DEFAULT_ANTHROPIC_MODEL)
                 .to_string();
-            let runner =
-                AnthropicApiRunner::new(api_key, model, Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
+            let runner = AnthropicApiRunner::new(api_key, model, subprocess_timeout)?;
             run_sync(
                 args,
                 &root_dir,
@@ -132,8 +139,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .or(cfg.model.as_deref())
                 .unwrap_or(DEFAULT_OPENAI_MODEL)
                 .to_string();
-            let runner =
-                OpenAiApiRunner::new(api_key, model, Duration::from_secs(DEFAULT_TIMEOUT_SECS))?;
+            let runner = OpenAiApiRunner::new(api_key, model, subprocess_timeout)?;
             run_sync(
                 args,
                 &root_dir,
@@ -155,11 +161,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .or(cfg.model.as_deref())
                 .unwrap_or(DEFAULT_CODEX_MODEL)
                 .to_string();
-            let runner = CodexCliRunner::new(
-                binary_path,
-                model,
-                Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-            );
+            let runner = CodexCliRunner::new(binary_path, model, subprocess_timeout);
             run_sync(
                 args,
                 &root_dir,
