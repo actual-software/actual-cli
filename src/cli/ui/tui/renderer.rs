@@ -763,6 +763,11 @@ impl TuiRenderer {
         }
     }
 
+    /// Returns `true` when running in full TUI mode (crossterm raw mode).
+    pub fn is_tui(&self) -> bool {
+        matches!(self.mode, Mode::Tui(_))
+    }
+
     /// Return the wall-clock time elapsed since this renderer was created.
     pub fn total_elapsed(&self) -> Duration {
         self.created_at.elapsed()

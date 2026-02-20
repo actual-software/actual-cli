@@ -451,6 +451,49 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
 
+        // In TUI mode (raw mode active) the terminal consumes keyboard input, so
+        // OS-level SIGINT from Ctrl+C may not reach the process reliably.  Spawn
+        // a background thread that polls crossterm for `q` or `Ctrl+C` key events
+        // and signals cancellation via a oneshot channel.
+        //
+        // A shared `stop` flag lets the main thread tell the poller to exit once
+        // tailoring completes (so the thread doesn't wait for a keypress forever).
+        let (kb_cancel_tx, kb_cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kb_thread = if pipeline.is_tui() {
+            let stop_flag = stop.clone();
+            let handle = std::thread::spawn(move || {
+                use crossterm::event::{poll, read, Event, KeyCode, KeyModifiers};
+                loop {
+                    if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    // Poll with a short timeout so the thread wakes frequently
+                    // to check the stop flag.
+                    if let Ok(true) = poll(std::time::Duration::from_millis(100)) {
+                        if let Ok(Event::Key(key)) = read() {
+                            let quit = matches!(
+                                key.code,
+                                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc
+                            ) || matches!(
+                                (key.code, key.modifiers),
+                                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL)
+                            );
+                            if quit {
+                                let _ = kb_cancel_tx.send(());
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            Some(handle)
+        } else {
+            // Not in TUI mode — drop the sender so the oneshot never fires.
+            drop(kb_cancel_tx);
+            None
+        };
+
         let result = rt.block_on(async {
             let tailor_fut = tailor_all_projects(
                 runner,
@@ -459,15 +502,29 @@ pub(crate) fn run_sync<R: TailoringRunner>(
                 &tailoring_config,
                 Some(progress_tx),
             );
+            // Build a combined cancel future: fires on OS ctrl+c OR keyboard q/ctrl+c.
+            let cancel = async {
+                tokio::select! {
+                    r = tokio::signal::ctrl_c() => r,
+                    r = kb_cancel_rx => r.map_err(|_| std::io::Error::other("keyboard cancel channel closed")),
+                }
+            };
             run_tailoring_with_cancel(
                 tailor_fut,
                 &mut progress_rx,
                 &mut pipeline,
                 project_count,
-                tokio::signal::ctrl_c(),
+                cancel,
             )
             .await
         });
+
+        // Signal the keyboard poller to stop, then join.  The thread wakes every
+        // 100 ms to check the flag, so this completes quickly.
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = kb_thread {
+            let _ = handle.join();
+        }
         match result {
             Ok(output) => {
                 pipeline.success(
@@ -488,6 +545,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             }
             Err(e) => {
                 pipeline.error(SyncPhase::Tailor, &format!("Tailoring failed: {e}"));
+                pipeline.finish_remaining();
                 return Err(e);
             }
         }
@@ -525,10 +583,10 @@ fn tailoring_cache_skip_msg(applicable: usize) -> &'static str {
 
 /// Apply a single [`TailoringEvent`] to the progress pipeline.
 ///
-/// Updates the spinner message and prints per-project status lines as projects
-/// complete or fail. This is extracted from the select loop so that both the
-/// real-time event path and the drain-on-completion path share the same logic
-/// and the function can be tested independently.
+/// Updates the spinner message and prints per-project and per-batch status
+/// lines as work progresses. This is extracted from the select loop so that
+/// both the real-time event path and the drain-on-completion path share the
+/// same logic and the function can be tested independently.
 fn apply_tailoring_event(
     event: TailoringEvent,
     pipeline: &mut TuiRenderer,
@@ -536,15 +594,47 @@ fn apply_tailoring_event(
     project_count: usize,
 ) {
     match event {
+        TailoringEvent::ProjectStarted {
+            ref project_name,
+            batch_count,
+        } => {
+            let batch_label = if batch_count == 1 {
+                "1 batch".to_string()
+            } else {
+                format!("{batch_count} batches")
+            };
+            pipeline.println(&format!("  \u{25b6} {project_name} ({batch_label})"));
+        }
+        TailoringEvent::BatchCompleted {
+            ref project_name,
+            batch_index,
+            batch_count,
+            adr_count,
+        } => {
+            let adr_label = if adr_count == 1 { "ADR" } else { "ADRs" };
+            // Tick the spinner so it keeps moving during long-running batch work.
+            pipeline.update_message(
+                SyncPhase::Tailor,
+                &format!("Tailoring ADRs ({completed}/{project_count} projects done)..."),
+            );
+            pipeline.println(&format!(
+                "    \u{2714} {project_name}: batch {batch_index}/{batch_count} ({adr_count} {adr_label})"
+            ));
+        }
         TailoringEvent::ProjectCompleted {
-            ref project_name, ..
+            ref project_name,
+            files_generated,
+            ..
         } => {
             *completed += 1;
             pipeline.update_message(
                 SyncPhase::Tailor,
                 &format!("Tailoring ADRs ({completed}/{project_count} projects done)..."),
             );
-            pipeline.println(&format!("  \u{2714} {project_name}"));
+            let file_label = if files_generated == 1 { "file" } else { "files" };
+            pipeline.println(&format!(
+                "  \u{2714} {project_name} done \u{2192} {files_generated} {file_label}"
+            ));
         }
         TailoringEvent::ProjectFailed {
             ref project_name,
@@ -552,7 +642,6 @@ fn apply_tailoring_event(
         } => {
             pipeline.println(&format!("  \u{2716} {project_name}: {error}"));
         }
-        TailoringEvent::ProjectStarted { .. } => {}
     }
 }
 
@@ -4370,6 +4459,7 @@ mod tests {
         apply_tailoring_event(
             TailoringEvent::ProjectStarted {
                 project_name: "app".to_string(),
+                batch_count: 1,
             },
             &mut pipeline,
             &mut completed,
