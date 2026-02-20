@@ -106,6 +106,11 @@ pub struct Config {
     /// Fallback OpenAI API key (used when runner = "openai-api" and OPENAI_API_KEY not set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_api_key: Option<String>,
+
+    /// Maximum number of agentic turns per tailoring invocation (default: 5).
+    /// Only applies to the claude-cli runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
 }
 
 /// Telemetry configuration.
@@ -187,6 +192,7 @@ mod tests {
             runner: None,
             anthropic_api_key: None,
             openai_api_key: None,
+            max_turns: Some(10),
         };
 
         let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");

@@ -90,6 +90,11 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 email: auth_status.email.clone(),
             };
             let runner = CliClaudeRunner::new(binary_path, subprocess_timeout);
+            let runner = if let Some(t) = cfg.max_turns {
+                runner.with_max_turns(t)
+            } else {
+                runner
+            };
             run_sync(
                 args,
                 &root_dir,

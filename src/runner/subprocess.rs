@@ -60,6 +60,8 @@ pub struct CliClaudeRunner {
     binary_path: PathBuf,
     /// Maximum time to wait for subprocess completion.
     timeout: Duration,
+    /// Optional override for the max-turns limit (overrides the default in `InvocationOptions`).
+    max_turns_override: Option<u32>,
 }
 
 impl CliClaudeRunner {
@@ -67,7 +69,14 @@ impl CliClaudeRunner {
         Self {
             binary_path,
             timeout,
+            max_turns_override: None,
         }
+    }
+
+    /// Set an explicit max-turns limit, overriding the default from `InvocationOptions`.
+    pub fn with_max_turns(mut self, max_turns: u32) -> Self {
+        self.max_turns_override = Some(max_turns);
+        self
     }
 }
 
@@ -193,6 +202,9 @@ impl TailoringRunner for CliClaudeRunner {
         use crate::runner::options::InvocationOptions;
 
         let mut opts = InvocationOptions::for_tailoring(model_override);
+        if let Some(t) = self.max_turns_override {
+            opts.max_turns = t;
+        }
         opts.json_schema = Some(schema.to_string());
         opts.max_budget_usd = max_budget_usd;
 
@@ -463,6 +475,13 @@ mod tests {
         assert_eq!(lines[0], "--print");
         assert_eq!(lines[1], "--model");
         assert_eq!(lines[2], "opus");
+    }
+
+    #[test]
+    fn test_with_max_turns_overrides_default() {
+        let runner = CliClaudeRunner::new(PathBuf::from("/fake/binary"), Duration::from_secs(10))
+            .with_max_turns(3);
+        assert_eq!(runner.max_turns_override, Some(3));
     }
 
     #[test]
