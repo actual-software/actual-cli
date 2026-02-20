@@ -253,9 +253,9 @@ mod tests {
             "expected package manager in: {plain}"
         );
         // Panel box characters
-        assert!(plain.contains('┌'), "expected panel top border in: {plain}");
+        assert!(plain.contains('╭'), "expected panel top border in: {plain}");
         assert!(
-            plain.contains('└'),
+            plain.contains('╰'),
             "expected panel bottom border in: {plain}"
         );
         assert!(
