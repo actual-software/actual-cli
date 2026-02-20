@@ -121,12 +121,51 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
     terminal.draw(|frame| {
         let area = frame.area();
         let frame_area = area;
+
+        // ── Outer vertical split: content area on top, footer hint row on bottom ──
+        let has_hint = ctx.hint || ctx.confirm.is_some();
+        let outer_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(if has_hint {
+                vec![Constraint::Fill(1), Constraint::Length(1)]
+            } else {
+                vec![Constraint::Fill(1), Constraint::Length(0)]
+            })
+            .split(area);
+        let content_area = outer_chunks[0];
+        let footer_area = outer_chunks[1];
+
+        // ── Footer hint row ──
+        if has_hint {
+            // Compute log_height for scroll position display (approximate).
+            // For the wide layout: content minus 2 borders.
+            let approx_log_height = content_area.height.saturating_sub(2) as usize;
+            let hint_text = if ctx.confirm.is_some() {
+                // Confirm mode: show key hints
+                "  ← → select  Enter confirm".to_string()
+            } else {
+                // Post-sync review mode: scroll/quit hint
+                let max = ctx.log.max_scroll(approx_log_height);
+                if max > 0 {
+                    format!(
+                        "  ↑/↓ scroll  Home/End top/bottom  q quit  [{}/{}]",
+                        ctx.scroll_offset.min(max),
+                        max
+                    )
+                } else {
+                    "  q to quit".to_string()
+                }
+            };
+            frame.render_widget(Clear, footer_area);
+            frame.render_widget(Paragraph::new(hint_text), footer_area);
+        }
+
         if cols >= 80 {
             // ── Horizontal split: left (banner + steps) | right (output) ──
             let h_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(LEFT_COL_WIDTH), Constraint::Fill(1)])
-                .split(area);
+                .split(content_area);
 
             // ── Left column: vertical split — banner box on top, steps below ──
             let left_chunks = Layout::default()
@@ -211,41 +250,19 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             }
 
             // ── Right column: output pane ──
-            // Reserve one line for the footer hint so it is always visible,
-            // and two lines for top/bottom padding inside the Output section.
-            let log_inner_height = h_chunks[1].height.saturating_sub(2) as usize;
-            let footer_height: usize = if ctx.confirm.is_some() || ctx.hint {
-                1
-            } else {
-                0
-            };
             // Reserve 2 lines for padding (top + bottom) inside the Output box.
             const OUTPUT_PADDING: usize = 2;
-            let log_height = log_inner_height
-                .saturating_sub(footer_height)
-                .saturating_sub(OUTPUT_PADDING);
+            let log_inner_height = h_chunks[1].height.saturating_sub(2) as usize;
+            let log_height = log_inner_height.saturating_sub(OUTPUT_PADDING);
             let log_width = h_chunks[1].width.saturating_sub(2) as usize;
             let mut log_lines = ctx
                 .log
                 .render_to_string(log_height, log_width, ctx.scroll_offset);
-            // Insert one blank line at the top and bottom for visual breathing room.
+            // Insert one blank line at the top for visual breathing room.
             log_lines.insert(0, String::new());
             if let Some(cs) = ctx.confirm {
                 log_lines.push(String::new());
                 append_confirm_lines(&mut log_lines, cs);
-            } else if ctx.hint {
-                log_lines.push(String::new());
-                let max = ctx.log.max_scroll(log_height);
-                let scroll_hint = if max > 0 {
-                    format!(
-                        "  ↑/↓ scroll  Home/End top/bottom  q quit  [{}/{}]",
-                        ctx.scroll_offset.min(max),
-                        max
-                    )
-                } else {
-                    "  q to quit".to_string()
-                };
-                log_lines.push(scroll_hint);
             } else {
                 log_lines.push(String::new());
             }
@@ -265,37 +282,19 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(1), Constraint::Fill(1)])
-                .split(area);
+                .split(content_area);
 
             let condensed = ctx.steps.render_condensed(area.width as usize);
             frame.render_widget(Clear, chunks[0]);
             frame.render_widget(Paragraph::new(condensed), chunks[0]);
 
             let log_inner_height = chunks[1].height as usize;
-            let footer_height: usize = if ctx.confirm.is_some() || ctx.hint {
-                1
-            } else {
-                0
-            };
-            let log_height = log_inner_height.saturating_sub(footer_height);
             let log_width = area.width as usize;
-            let mut log_lines = ctx
-                .log
-                .render_to_string(log_height, log_width, ctx.scroll_offset);
+            let mut log_lines =
+                ctx.log
+                    .render_to_string(log_inner_height, log_width, ctx.scroll_offset);
             if let Some(cs) = ctx.confirm {
                 append_confirm_lines(&mut log_lines, cs);
-            } else if ctx.hint {
-                let max = ctx.log.max_scroll(log_height);
-                let scroll_hint = if max > 0 {
-                    format!(
-                        "  ↑/↓ scroll  Home/End top/bottom  q quit  [{}/{}]",
-                        ctx.scroll_offset.min(max),
-                        max
-                    )
-                } else {
-                    "  q to quit".to_string()
-                };
-                log_lines.push(scroll_hint);
             }
             let log_text = log_lines.join("\n");
             frame.render_widget(Clear, chunks[1]);
@@ -605,13 +604,16 @@ impl TuiRenderer {
                     break;
                 };
                 // Compute log_height matching render_to's formula exactly.
+                // render_to uses: outer layout gives 1 row to footer hint.
+                //   Wide (>=80): content = rows-1, box borders = -2, OUTPUT_PADDING = -2 → log = rows-5
+                //   Narrow (<80): content = rows-1, condensed row = -1 → log = rows-2
                 let log_height: usize = crossterm::terminal::size()
                     .map(|(cols, rows)| {
                         let rows = rows as usize;
                         if cols >= 80 {
-                            rows.saturating_sub(3)
+                            rows.saturating_sub(5)
                         } else {
-                            rows.saturating_sub(1)
+                            rows.saturating_sub(2)
                         }
                     })
                     .unwrap_or(20);

@@ -101,6 +101,29 @@ pub fn get_git_head(repo_path: &Path) -> Option<String> {
     parse_git_head_output(output)
 }
 
+/// Get the current branch name for a git repository.
+///
+/// Returns `None` if the path is not a git repo, git is not installed,
+/// the repo is in detached HEAD state, or the command fails for any reason.
+pub fn get_git_branch(repo_path: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8(output.stdout).ok()?;
+    let trimmed = branch.trim();
+    // "HEAD" means detached HEAD state — not a named branch
+    if trimmed.is_empty() || trimmed == "HEAD" {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 /// Serialize a value to a YAML [`serde_yaml::Value`], mapping any serialization
 /// error to [`ActualError::ConfigError`].
 fn serialize_for_cache<T: serde::Serialize>(value: &T) -> Result<serde_yaml::Value, ActualError> {
@@ -321,6 +344,33 @@ mod tests {
         let dir = tempdir().unwrap();
 
         let result = get_git_head(dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_get_git_branch_returns_branch_for_git_repo() {
+        let dir = tempdir().unwrap();
+        create_git_repo(dir.path());
+
+        let result = get_git_branch(dir.path());
+        // The default branch name depends on git config (typically "main" or "master")
+        assert!(result.is_some(), "expected a branch name for a git repo");
+        let branch = result.unwrap();
+        assert!(!branch.is_empty());
+        assert_ne!(branch, "HEAD");
+    }
+
+    #[test]
+    fn test_get_git_branch_returns_none_for_non_git_dir() {
+        let dir = tempdir().unwrap();
+
+        let result = get_git_branch(dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_get_git_branch_returns_none_for_nonexistent_path() {
+        let result = get_git_branch(Path::new("/nonexistent/path/that/does/not/exist"));
         assert_eq!(result, None);
     }
 
