@@ -72,7 +72,7 @@ pub async fn invoke_tailoring<R: TailoringRunner>(
         existing_output_paths,
         format,
         bundled_context,
-    )?;
+    );
     let schema = tailoring_output_schema()?;
     let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
 
@@ -103,13 +103,18 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
 }
 
 /// Build the tailoring prompt string from the input data.
+///
+/// # Panics
+///
+/// Panics if the obfuscated prompt constant is malformed (build artifact mismatch).
+/// This is a programmer error and should never happen in a correctly built binary.
 pub(crate) fn build_prompt(
     adr_json: &str,
     projects_json: &str,
     existing_output_paths: &str,
     format: &OutputFormat,
     bundled_context: &str,
-) -> Result<String, ActualError> {
+) -> String {
     tailoring_prompt(
         projects_json,
         existing_output_paths,
@@ -117,6 +122,7 @@ pub(crate) fn build_prompt(
         format,
         bundled_context,
     )
+    .expect("tailoring prompt constant is malformed (build artifact mismatch)")
 }
 
 /// Returns `true` if `path` is a valid output file path for the given `format`.
@@ -547,8 +553,7 @@ mod tests {
     #[test]
     fn test_build_prompt_with_valid_input() {
         let adr_json = r#"[{"id":"adr-001"},{"id":"adr-002"}]"#;
-        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd, "")
-            .expect("build_prompt must succeed for valid obfuscated constant");
+        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd, "");
 
         // The prompt should contain the ADR JSON
         assert!(
@@ -1005,8 +1010,7 @@ mod tests {
     fn test_bundled_context_included_in_prompt() {
         let adr_json = r#"[{"id":"adr-001"}]"#;
         let bundled_context = "=== file_tree ===\nsrc/\n  main.rs\n";
-        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd, bundled_context)
-            .expect("build_prompt must succeed for valid obfuscated constant");
+        let prompt = build_prompt(adr_json, "{}", "", &OutputFormat::ClaudeMd, bundled_context);
         assert!(
             prompt.contains(bundled_context),
             "prompt must contain the bundled context string"
