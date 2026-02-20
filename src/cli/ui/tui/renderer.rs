@@ -132,20 +132,21 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 .split(h_chunks[0]);
 
             // Banner box (top-left)
-            let inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
+            let inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2); // 42
             let banner_lines: Vec<&str> = BANNER.lines().collect();
+            // Uniform pad: center the widest line; apply the same pad to every line.
+            // This preserves the relative indentation baked into the art.
+            let max_art_width = banner_lines
+                .iter()
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0);
+            let uniform_pad = inner_width.saturating_sub(max_art_width) / 2;
+            let pad_str = " ".repeat(uniform_pad);
             let mut padded_banner: Vec<String> = Vec::with_capacity(banner_lines.len() + 2);
             padded_banner.push(String::new()); // blank line above art
             for l in &banner_lines {
-                let chars: Vec<char> = l.chars().collect();
-                let line = if chars.len() > inner_width {
-                    chars[..inner_width].iter().collect::<String>()
-                } else {
-                    l.to_string()
-                };
-                // Center the line within inner_width
-                let pad = inner_width.saturating_sub(line.chars().count()) / 2;
-                padded_banner.push(format!("{}{}", " ".repeat(pad), line));
+                padded_banner.push(format!("{pad_str}{l}"));
             }
             padded_banner.push(String::new()); // blank line below art
             let banner_text = padded_banner.join("\n");
