@@ -9,11 +9,13 @@ use crossterm::{
 use ratatui::{
     backend::Backend,
     layout::{Constraint, Direction, Layout},
+    style::Style,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Terminal,
 };
 
-use super::gradient::paint_gradient_border;
+use super::gradient::{color_for_y, paint_gradient_border};
 use super::log::LogPane;
 use super::steps::{StepStatus, StepsPane};
 use crate::analysis::confirm::ConfirmAction;
@@ -144,19 +146,43 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 .unwrap_or(0);
             let uniform_pad = inner_width.saturating_sub(max_art_width) / 2;
             let pad_str = " ".repeat(uniform_pad);
+
+            // Build padded strings (blank + art lines + blank)
             let mut padded_banner: Vec<String> = Vec::with_capacity(banner_lines.len() + 2);
             padded_banner.push(String::new()); // blank line above art
             for l in &banner_lines {
                 padded_banner.push(format!("{pad_str}{l}"));
             }
             padded_banner.push(String::new()); // blank line below art
-            let banner_text = padded_banner.join("\n");
+
             let version_title = format!(" actual v{} ", ctx.version);
-            let banner_widget = Paragraph::new(banner_text).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(version_title.as_str()),
-            );
+
+            let banner_widget = if use_color {
+                // Build colored Lines — each line's color is determined by its absolute y in the frame.
+                // Content starts at left_chunks[0].y + 1 (inside the top border).
+                let content_y_start = left_chunks[0].y + 1;
+                let colored_lines: Vec<Line<'_>> = padded_banner
+                    .iter()
+                    .enumerate()
+                    .map(|(i, text)| {
+                        let abs_y = content_y_start + i as u16;
+                        let color = color_for_y(abs_y, frame_area);
+                        Line::from(Span::styled(text.clone(), Style::default().fg(color)))
+                    })
+                    .collect();
+                Paragraph::new(colored_lines).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(version_title.as_str()),
+                )
+            } else {
+                let banner_text = padded_banner.join("\n");
+                Paragraph::new(banner_text).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(version_title.as_str()),
+                )
+            };
             frame.render_widget(Clear, left_chunks[0]);
             frame.render_widget(banner_widget, left_chunks[0]);
             if use_color {
