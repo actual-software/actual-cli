@@ -170,6 +170,7 @@ async fn run_subprocess<T: DeserializeOwned>(
     cmd.kill_on_drop(true);
 
     let child = cmd
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
