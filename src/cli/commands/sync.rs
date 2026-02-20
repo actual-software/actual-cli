@@ -631,7 +631,11 @@ fn apply_tailoring_event(
                 SyncPhase::Tailor,
                 &format!("Tailoring ADRs ({completed}/{project_count} projects done)..."),
             );
-            let file_label = if files_generated == 1 { "file" } else { "files" };
+            let file_label = if files_generated == 1 {
+                "file"
+            } else {
+                "files"
+            };
             pipeline.println(&format!(
                 "  \u{2714} {project_name} done \u{2192} {files_generated} {file_label}"
             ));
@@ -4487,7 +4491,10 @@ mod tests {
         );
         // BatchCompleted ticks the spinner and logs a line but does NOT increment
         // the project-level completed counter
-        assert_eq!(completed, 0, "BatchCompleted must not increment project counter");
+        assert_eq!(
+            completed, 0,
+            "BatchCompleted must not increment project counter"
+        );
     }
 
     #[test]
