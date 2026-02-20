@@ -474,8 +474,12 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         // In TUI mode (raw mode active) the terminal consumes keyboard input,
         // so OS-level SIGINT from Ctrl+C may not reach the process reliably.
         // `sync_kb_poller::setup` optionally spawns a background poller thread
-        // and returns a combined OS-signal + keyboard cancel future.
-        let (kb_poller, cancel) = super::sync_kb_poller::setup(pipeline.is_tui());
+        // and returns a combined OS-signal + keyboard cancel future, plus a
+        // nav channel receiver for arrow-key navigation during execution.
+        let (kb_poller, nav_rx, cancel) = super::sync_kb_poller::setup(pipeline.is_tui());
+        if let Some(rx) = nav_rx {
+            pipeline.set_nav_rx(rx);
+        }
 
         let result = rt.block_on(async {
             let tailor_fut = tailor_all_projects(

@@ -26,6 +26,26 @@ use crate::cli::ui::progress::SyncPhase;
 use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 
+/// Navigation command produced by the background keyboard poller during execution.
+///
+/// Commands are sent via an `mpsc` channel and drained in each `draw()` call
+/// so navigation is applied without blocking the main render loop.
+#[derive(Debug, Clone, Copy)]
+pub enum NavCmd {
+    /// Move the viewed step one up.
+    StepUp,
+    /// Move the viewed step one down (clamped to `active_step`).
+    StepDown,
+    /// Scroll the log pane up (toward older content).
+    ScrollUp,
+    /// Scroll the log pane down (toward newer content).
+    ScrollDown,
+    /// Jump to the top of the log pane (oldest content).
+    ScrollTop,
+    /// Jump to the bottom of the log pane (newest content, follow mode).
+    ScrollBottom,
+}
+
 /// Abstraction over crossterm event reading so the event loop can be tested
 /// without a real terminal.
 pub(crate) trait EventSource {
@@ -369,10 +389,14 @@ pub struct TuiRenderer {
     file_select_state: Option<FileSelectState>,
     /// Which step is highlighted in review mode (None = show active_step's log).
     selected_step: Option<usize>,
+    /// Which step the user is viewing during execution (None = follow active_step).
+    viewing_step: Option<usize>,
     /// Lines scrolled up from the bottom of the log pane (0 = pinned to bottom).
     scroll_offset: usize,
     /// Version string shown in the banner box title.
     version: String,
+    /// Receives navigation commands from the background keyboard poller during execution.
+    nav_rx: Option<std::sync::mpsc::Receiver<NavCmd>>,
 }
 
 impl TuiRenderer {
@@ -417,8 +441,10 @@ impl TuiRenderer {
             confirm_state: None,
             file_select_state: None,
             selected_step: None,
+            viewing_step: None,
             scroll_offset: 0,
             version: version.to_string(),
+            nav_rx: None,
         }
     }
 
@@ -468,8 +494,80 @@ impl TuiRenderer {
             confirm_state: None,
             file_select_state: None,
             selected_step: None,
+            viewing_step: None,
             scroll_offset: 0,
             version: "0.0.0-test".to_string(),
+            nav_rx: None,
+        }
+    }
+
+    /// Set the navigation command receiver.  Called from `sync.rs` after the
+    /// background keyboard poller is started.
+    pub fn set_nav_rx(&mut self, rx: std::sync::mpsc::Receiver<NavCmd>) {
+        self.nav_rx = Some(rx);
+    }
+
+    /// Drain all pending [`NavCmd`]s from the channel and apply each one.
+    fn apply_nav_cmds(&mut self) {
+        // We can't hold a borrow on self.nav_rx while also calling handle_nav_cmd(self, …),
+        // so we collect first, then process.
+        let cmds: Vec<NavCmd> = match &self.nav_rx {
+            Some(rx) => {
+                let mut buf = Vec::new();
+                while let Ok(cmd) = rx.try_recv() {
+                    buf.push(cmd);
+                }
+                buf
+            }
+            None => return,
+        };
+        for cmd in cmds {
+            self.handle_nav_cmd(cmd);
+        }
+    }
+
+    /// Apply a single [`NavCmd`] to the renderer state.
+    fn handle_nav_cmd(&mut self, cmd: NavCmd) {
+        let n_steps = self.steps.steps.len();
+        if n_steps == 0 {
+            return;
+        }
+        let cur = self.viewing_step.unwrap_or(self.active_step);
+        match cmd {
+            NavCmd::StepUp => {
+                let next = cur.saturating_sub(1);
+                if next != cur {
+                    self.viewing_step = Some(next);
+                    self.scroll_offset = 0;
+                }
+            }
+            NavCmd::StepDown => {
+                // Cannot navigate past the active step during execution.
+                let max = self.active_step;
+                let next = (cur + 1).min(max);
+                if next != cur {
+                    self.viewing_step = Some(next);
+                    self.scroll_offset = 0;
+                }
+                // If we've reached the active step, snap back to follow mode.
+                if self.viewing_step == Some(self.active_step) {
+                    self.viewing_step = None;
+                }
+            }
+            NavCmd::ScrollUp => {
+                // Scroll up by half a page (fixed heuristic).
+                self.scroll_offset = self.scroll_offset.saturating_add(5);
+            }
+            NavCmd::ScrollDown => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(5);
+            }
+            NavCmd::ScrollTop => {
+                // usize::MAX is clamped by render_to_string's own clamp logic.
+                self.scroll_offset = usize::MAX;
+            }
+            NavCmd::ScrollBottom => {
+                self.scroll_offset = 0;
+            }
         }
     }
 
@@ -503,6 +601,11 @@ impl TuiRenderer {
         self.steps.steps[idx].status = StepStatus::Running { tick: 0 };
         self.steps.steps[idx].message = String::new();
         self.logs[idx].push(message.to_string());
+        // Once there is navigable history (at least one completed step before this one),
+        // enable the footer hint so the user knows they can use arrow keys.
+        if idx > 0 {
+            self.hint = true;
+        }
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ○ {message}");
@@ -637,6 +740,9 @@ impl TuiRenderer {
     fn wait_for_keypress_impl(&mut self, source: &mut dyn EventSource) {
         use crossterm::event::{KeyCode, KeyModifiers};
         if let Mode::Tui(_) = &self.mode {
+            // Entering post-sync review mode: clear viewing_step so selected_step
+            // takes over cleanly (viewing_step is only for mid-execution navigation).
+            self.viewing_step = None;
             // Default to the most recently active step.
             self.selected_step = Some(self.active_step);
             self.hint = true;
@@ -988,10 +1094,21 @@ impl TuiRenderer {
     /// performed here before switching modes so the Drop impl does not try to
     /// clean up a terminal that is no longer in Tui mode.
     fn draw(&mut self) {
+        // Drain any pending navigation commands before rendering.
+        self.apply_nav_cmds();
+
         // Build the context and attempt the draw while the Tui borrow is active,
         // then handle any error after the borrow is released.
         let draw_error = if let Mode::Tui(ref mut terminal) = self.mode {
-            let log_idx = self.selected_step.unwrap_or(self.active_step);
+            // During execution, `viewing_step` overrides `selected_step` for log display.
+            // In post-sync review mode only `selected_step` is set.
+            let log_idx = self
+                .viewing_step
+                .or(self.selected_step)
+                .unwrap_or(self.active_step);
+            // The selection indicator follows `viewing_step` during execution,
+            // falling back to `selected_step` in post-sync review mode.
+            let selected = self.viewing_step.or(self.selected_step);
             let ctx = RenderContext {
                 steps: &self.steps,
                 log: &self.logs[log_idx],
@@ -999,7 +1116,7 @@ impl TuiRenderer {
                 file_select: self.file_select_state.as_ref(),
                 hint: self.hint,
                 scroll_offset: self.scroll_offset,
-                selected: self.selected_step,
+                selected,
                 version: &self.version,
             };
             terminal.draw_frame(ctx).err().map(|e| e.to_string())
@@ -2234,6 +2351,202 @@ mod tests {
         assert!(
             r.file_select_state.is_none(),
             "state must be cleared on error"
+        );
+    }
+
+    // ── NavCmd / handle_nav_cmd tests ──
+
+    #[test]
+    fn test_handle_nav_cmd_step_up_sets_viewing_step() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // Advance to step 2 so there is history to navigate.
+        r.start(SyncPhase::Environment, "env");
+        r.success(SyncPhase::Environment, "ok");
+        r.start(SyncPhase::Analysis, "analysis");
+        // active_step is now 1; navigate up.
+        r.handle_nav_cmd(NavCmd::StepUp);
+        assert_eq!(
+            r.viewing_step,
+            Some(0),
+            "StepUp from 1 should set viewing_step=0"
+        );
+    }
+
+    #[test]
+    fn test_handle_nav_cmd_step_up_at_zero_does_nothing() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "env");
+        // active_step=0, viewing_step=None → cur=0; StepUp should be a no-op.
+        r.handle_nav_cmd(NavCmd::StepUp);
+        assert_eq!(
+            r.viewing_step, None,
+            "StepUp at step 0 should leave viewing_step as None"
+        );
+    }
+
+    #[test]
+    fn test_handle_nav_cmd_step_down_snaps_to_follow_mode_at_active() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "env");
+        r.success(SyncPhase::Environment, "ok");
+        r.start(SyncPhase::Analysis, "analysis");
+        // Navigate up, then back down to active_step — should snap to follow mode.
+        r.handle_nav_cmd(NavCmd::StepUp);
+        assert_eq!(r.viewing_step, Some(0));
+        r.handle_nav_cmd(NavCmd::StepDown);
+        assert_eq!(
+            r.viewing_step, None,
+            "StepDown back to active_step should restore follow mode"
+        );
+    }
+
+    #[test]
+    fn test_handle_nav_cmd_step_down_cannot_exceed_active_step() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "env");
+        // active_step=0; pressing StepDown should be a no-op (cannot go past active).
+        r.handle_nav_cmd(NavCmd::StepDown);
+        assert_eq!(
+            r.viewing_step, None,
+            "StepDown past active_step should not move"
+        );
+    }
+
+    #[test]
+    fn test_handle_nav_cmd_scroll_up_increases_offset() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.scroll_offset = 0;
+        r.handle_nav_cmd(NavCmd::ScrollUp);
+        assert!(
+            r.scroll_offset > 0,
+            "ScrollUp should increase scroll_offset"
+        );
+    }
+
+    #[test]
+    fn test_handle_nav_cmd_scroll_down_decreases_offset() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.scroll_offset = 10;
+        r.handle_nav_cmd(NavCmd::ScrollDown);
+        assert!(
+            r.scroll_offset < 10,
+            "ScrollDown should decrease scroll_offset"
+        );
+    }
+
+    #[test]
+    fn test_handle_nav_cmd_scroll_down_at_zero_stays_at_zero() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.scroll_offset = 0;
+        r.handle_nav_cmd(NavCmd::ScrollDown);
+        assert_eq!(r.scroll_offset, 0, "ScrollDown at 0 should not underflow");
+    }
+
+    #[test]
+    fn test_handle_nav_cmd_scroll_top_sets_max_offset() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.scroll_offset = 3;
+        r.handle_nav_cmd(NavCmd::ScrollTop);
+        assert_eq!(
+            r.scroll_offset,
+            usize::MAX,
+            "ScrollTop should set scroll_offset to usize::MAX"
+        );
+    }
+
+    #[test]
+    fn test_handle_nav_cmd_scroll_bottom_clears_offset() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.scroll_offset = 20;
+        r.handle_nav_cmd(NavCmd::ScrollBottom);
+        assert_eq!(
+            r.scroll_offset, 0,
+            "ScrollBottom should reset scroll_offset to 0"
+        );
+    }
+
+    #[test]
+    fn test_apply_nav_cmds_drains_channel() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // Start two phases so navigation is meaningful.
+        r.start(SyncPhase::Environment, "env");
+        r.success(SyncPhase::Environment, "ok");
+        r.start(SyncPhase::Analysis, "analysis");
+
+        let (tx, rx) = std::sync::mpsc::channel::<NavCmd>();
+        r.set_nav_rx(rx);
+
+        tx.send(NavCmd::StepUp).unwrap();
+        tx.send(NavCmd::StepUp).unwrap(); // already at 0 after first — second is no-op
+
+        r.apply_nav_cmds();
+        assert_eq!(
+            r.viewing_step,
+            Some(0),
+            "apply_nav_cmds should drain all commands"
+        );
+    }
+
+    #[test]
+    fn test_set_nav_rx_no_channel_does_not_panic() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // No nav_rx set — apply_nav_cmds must not panic.
+        r.apply_nav_cmds();
+    }
+
+    #[test]
+    fn test_hint_enabled_when_second_phase_starts() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "env");
+        assert!(!r.hint, "hint should be false before first phase advances");
+        r.success(SyncPhase::Environment, "ok");
+        r.start(SyncPhase::Analysis, "analysis");
+        assert!(r.hint, "hint should be true once active_step > 0");
+    }
+
+    #[test]
+    fn test_viewing_step_cleared_on_wait_for_keypress() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "env");
+        r.success(SyncPhase::Environment, "ok");
+        r.start(SyncPhase::Analysis, "analysis");
+        r.viewing_step = Some(0);
+
+        // Feed 'q' to immediately exit wait_for_keypress_impl.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![q]);
+        r.wait_for_keypress_impl(&mut source);
+
+        assert_eq!(
+            r.viewing_step, None,
+            "viewing_step must be cleared when entering post-sync review mode"
         );
     }
 }
