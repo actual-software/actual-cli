@@ -604,6 +604,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_absolute_path_validation_error() {
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "/etc/CLAUDE.md".to_string(),
+                content: "# Rules".to_string(),
+                reasoning: "Root level rules".to_string(),
+                adr_ids: vec!["adr-001".to_string()],
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockTailoringRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+            None,
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("absolute paths are not allowed"),
+            "expected 'absolute paths are not allowed' in: {msg}"
+        );
+        assert!(matches!(err, ActualError::TailoringValidationError(_)));
+    }
+
+    #[tokio::test]
     async fn test_non_parse_error_not_retried() {
         let adrs = vec![make_adr("adr-001")];
         let runner = MockTailoringRunner::new(vec![MockResponse::Error(
