@@ -1548,6 +1548,79 @@ mod tests {
 
     // --- Config validation tests ---
 
+    // --- Test: batch-level error propagates when one of multiple batches fails ---
+
+    #[tokio::test]
+    async fn test_batch_error_propagates_from_stream() {
+        // 1 project with 2 ADRs split into 2 batches (batch_size=1).
+        // The second batch returns an error; this exercises the
+        // `Err(e) => { stream_error = Some(e); break; }` path in tailor_project.
+        let projects = vec![make_project("mono")];
+        let adr1 = Adr {
+            id: "adr-001".to_string(),
+            title: "ADR 001".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-a".to_string(),
+                name: "Category A".to_string(),
+                path: "Category A".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adr2 = Adr {
+            id: "adr-002".to_string(),
+            title: "ADR 002".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-b".to_string(),
+                name: "Category B".to_string(),
+                path: "Category B".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adrs = vec![adr1, adr2];
+
+        // First batch succeeds; second batch fails.
+        let responses = vec![
+            MockResponse::Json(make_output_json("CLAUDE.md", "Batch 1 rules", &["adr-001"])),
+            MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+                message: "batch 2 crashed".to_string(),
+                stderr: String::new(),
+            }),
+        ];
+
+        let runner = ConcurrentMockRunner::with_responses(responses, Duration::from_millis(5));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 2,
+            batch_size: 1, // forces 2 separate batches for the single project
+            existing_output_file_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
+        };
+
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("batch 2 crashed"),
+            "expected batch error to propagate, got: {err}"
+        );
+    }
+
     #[test]
     fn test_config_new_zero_batch_size_returns_config_error() {
         let fmt = OutputFormat::ClaudeMd;
