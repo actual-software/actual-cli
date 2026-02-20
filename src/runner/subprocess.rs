@@ -240,10 +240,9 @@ async fn run_subprocess<T: DeserializeOwned>(
     // `output.stderr` so [`parse_output`] can include them in error messages.
     // (`wait_with_output` yields an empty `output.stderr` when the handle was taken.)
     if let Some(join) = stderr_join {
-        if let Ok(bytes) = join.await {
-            if !bytes.is_empty() {
-                output.stderr = bytes;
-            }
+        let bytes = join.await.unwrap_or_default();
+        if !bytes.is_empty() {
+            output.stderr = bytes;
         }
     }
 
@@ -820,10 +819,7 @@ mod tests {
         let result = runner
             .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
             .await;
-        let err = result.unwrap_err();
-        let ActualError::ClaudeSubprocessFailed { stderr, .. } = err else {
-            panic!("expected ClaudeSubprocessFailed, got {err:?}");
-        };
+        let (_, stderr) = subprocess_failed(result.unwrap_err());
         assert!(
             stderr.contains("fatal subprocess error"),
             "stderr bytes must be merged into error, got: {stderr:?}"

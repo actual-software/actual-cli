@@ -668,6 +668,23 @@ fn apply_tailoring_event(event: TailoringEvent, pipeline: &mut TuiRenderer, comp
 /// Claude Code may be hanging (e.g. waiting for a permission prompt).
 const HANG_WARN_SECS: u64 = 30;
 
+/// Drain all lines currently buffered in `rx` into the pipeline log pane,
+/// returning the number of lines emitted.
+///
+/// Called when the hang warning fires so that any stderr that arrived since
+/// the last live-stream tick is surfaced to the user immediately.
+fn dump_buffered_stderr_lines(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    pipeline: &mut TuiRenderer,
+) -> usize {
+    let mut dumped = 0usize;
+    while let Ok(line) = rx.try_recv() {
+        pipeline.println(&format!("  [stderr] {line}"));
+        dumped += 1;
+    }
+    dumped
+}
+
 /// Wait for the next line from an optional unbounded receiver.
 ///
 /// When `rx` is `None`, the returned future is permanently pending,
@@ -791,12 +808,7 @@ where
                     // via the live-streaming arm yet (e.g. lines that raced with
                     // the heartbeat tick).
                     if let Some(ref mut rx) = stderr_rx {
-                        let mut dumped = 0usize;
-                        while let Ok(line) = rx.try_recv() {
-                            pipeline.println(&format!("  [stderr] {line}"));
-                            dumped += 1;
-                        }
-                        if dumped == 0 {
+                        if dump_buffered_stderr_lines(rx, pipeline) == 0 {
                             pipeline.println(
                                 "  (no subprocess stderr captured yet)",
                             );
@@ -5498,6 +5510,44 @@ mod tests {
         drop(tx);
         let result = recv_optional(&mut Some(rx)).await;
         assert_eq!(result, Some("hello stderr".to_string()));
+    }
+
+    /// Verify `dump_buffered_stderr_lines` returns the number of lines dumped
+    /// and writes each one to the pipeline log (the `dumped > 0` branch).
+    #[test]
+    fn test_dump_buffered_stderr_lines_with_content() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tx.send("line one".to_string()).unwrap();
+        tx.send("line two".to_string()).unwrap();
+        drop(tx); // close sender so channel is drained
+
+        let mut pipeline = TuiRenderer::new(false, true);
+        pipeline.start(SyncPhase::Tailor, "initial");
+
+        let dumped = dump_buffered_stderr_lines(&mut rx, &mut pipeline);
+        assert_eq!(dumped, 2, "expected 2 lines dumped");
+
+        // SyncPhase::Tailor maps to logs[3]
+        let logged = pipeline.logs[3].render_to_string(200, 500, 0);
+        assert!(
+            logged.iter().any(|l| l.contains("line one")),
+            "first line must appear in log: {logged:?}"
+        );
+        assert!(
+            logged.iter().any(|l| l.contains("line two")),
+            "second line must appear in log: {logged:?}"
+        );
+    }
+
+    /// Verify `dump_buffered_stderr_lines` returns 0 when the channel is empty.
+    #[test]
+    fn test_dump_buffered_stderr_lines_empty() {
+        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut pipeline = TuiRenderer::new(false, true);
+        pipeline.start(SyncPhase::Tailor, "initial");
+
+        let dumped = dump_buffered_stderr_lines(&mut rx, &mut pipeline);
+        assert_eq!(dumped, 0, "expected 0 lines dumped when channel is empty");
     }
 
     /// Verify that the live-streaming select arm displays stderr lines in the
