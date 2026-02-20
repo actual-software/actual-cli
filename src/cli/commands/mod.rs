@@ -208,6 +208,14 @@ mod tests {
         assert_eq!(code, 1);
     }
 
+    #[test]
+    fn test_handle_result_credit_balance_too_low_returns_exit_code_3() {
+        let code = handle_result(Err(ActualError::CreditBalanceTooLow {
+            message: "Credit balance is too low".to_string(),
+        }));
+        assert_eq!(code, 3);
+    }
+
     // ── find_output_files tests ──
 
     #[test]
