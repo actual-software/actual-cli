@@ -301,16 +301,10 @@ const REPETITIVE_LINE_THRESHOLD: usize = 3;
 /// Classify an error result from the Claude Code subprocess into a more
 /// specific `ActualError` variant when possible.
 ///
-/// Currently detects credit/billing errors by checking `is_error == true`
-/// combined with the `subtype` being `"error"` (not `"error_max_turns"` or
-/// other known subtypes). This is the most structural signal available from
-/// the Claude Code CLI, which does not expose granular error codes.
-///
 /// When the subprocess entered a repetitive error loop (detected by
 /// `repetitive_message` being `Some`), we treat this as a billing/quota
 /// error since that is the primary cause of such loops.
 fn classify_subprocess_error(
-    is_error: bool,
     subtype: Option<&str>,
     result_text: &str,
     stderr: &str,
@@ -333,15 +327,8 @@ fn classify_subprocess_error(
         };
     }
 
-    // For `is_error == true` with subtype "error", check if stderr was also
-    // repetitive. If not, it's a generic subprocess failure.
-    if is_error {
-        return ActualError::ClaudeSubprocessFailed {
-            message: format!("Claude Code returned an error: {result_text}"),
-            stderr: stderr.to_string(),
-        };
-    }
-
+    // Generic subprocess failure — covers `is_error == true` without a special
+    // subtype as well as any other unexpected combination.
     ActualError::ClaudeSubprocessFailed {
         message: format!("Claude Code returned an error: {result_text}"),
         stderr: stderr.to_string(),
@@ -504,7 +491,6 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                 let stderr_bytes = stderr_task.await.unwrap_or_default();
                 let stderr_str = String::from_utf8_lossy(&stderr_bytes).to_string();
                 Err(classify_subprocess_error(
-                    envelope.is_error == Some(true),
                     envelope.subtype.as_deref(),
                     &detail,
                     &stderr_str,
@@ -1667,7 +1653,6 @@ mod tests {
     #[test]
     fn test_classify_subprocess_error_with_repetitive_msg() {
         let err = classify_subprocess_error(
-            true,
             Some("error"),
             "error detail",
             "",
@@ -1683,13 +1668,8 @@ mod tests {
     /// returns `ClaudeSubprocessFailed`.
     #[test]
     fn test_classify_subprocess_error_without_repetitive_msg() {
-        let err = classify_subprocess_error(
-            true,
-            Some("error"),
-            "Something went wrong",
-            "stderr output",
-            None,
-        );
+        let err =
+            classify_subprocess_error(Some("error"), "Something went wrong", "stderr output", None);
         assert!(
             matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
             "expected ClaudeSubprocessFailed, got: {err:?}"
@@ -1701,8 +1681,7 @@ mod tests {
     #[test]
     fn test_classify_subprocess_error_max_turns_not_credit() {
         // error_max_turns should NOT map to CreditBalanceTooLow.
-        let err =
-            classify_subprocess_error(false, Some("error_max_turns"), "Hit max turns", "", None);
+        let err = classify_subprocess_error(Some("error_max_turns"), "Hit max turns", "", None);
         assert!(
             matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
             "expected ClaudeSubprocessFailed for error_max_turns, got: {err:?}"
