@@ -22,7 +22,9 @@ use crate::cli::ui::theme;
 use crate::cli::ui::tui::renderer::TuiRenderer;
 use crate::config::paths::{load_from, save_to};
 use crate::config::rejections::{clear_rejections, get_rejections};
-use crate::config::types::{CachedTailoring, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY};
+use crate::config::types::{
+    CachedTailoring, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_SECS,
+};
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::writer::{write_files, WriteAction, WriteResult};
@@ -444,7 +446,12 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             &existing_paths,
             args.model.as_deref(),
             args.max_budget_usd.or(config.max_budget_usd),
-            Duration::from_secs(config.invocation_timeout_secs.unwrap_or(600).max(1)),
+            Duration::from_secs(
+                config
+                    .invocation_timeout_secs
+                    .unwrap_or(DEFAULT_TIMEOUT_SECS)
+                    .max(1),
+            ),
             &output_format,
         )?;
 
