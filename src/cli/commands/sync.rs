@@ -1918,6 +1918,57 @@ mod tests {
         );
     }
 
+    // ── auth_display branch tests ──
+
+    #[test]
+    fn test_run_sync_auth_display_authenticated_with_email() {
+        // Exercises the Some(a) if a.authenticated branch with an email address.
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let auth = AuthDisplay {
+            authenticated: true,
+            email: Some("user@example.com".to_string()),
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            Some(&auth),
+        );
+        assert!(result.is_ok(), "authenticated auth_display should succeed");
+    }
+
+    #[test]
+    fn test_run_sync_auth_display_not_authenticated() {
+        // Exercises the Some(_) branch when authenticated = false.
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let auth = AuthDisplay {
+            authenticated: false,
+            email: None,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            Some(&auth),
+        );
+        assert!(
+            result.is_ok(),
+            "not-authenticated auth_display should still complete sync"
+        );
+    }
+
     #[test]
     fn test_run_sync_dry_run_writes_no_files() {
         let server = mock_api_server();
