@@ -477,9 +477,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         // and returns a combined OS-signal + keyboard cancel future, plus a
         // nav channel receiver for arrow-key navigation during execution.
         let (kb_poller, nav_rx, cancel) = super::sync_kb_poller::setup(pipeline.is_tui());
-        if let Some(rx) = nav_rx {
-            pipeline.set_nav_rx(rx);
-        }
+        pipeline.set_nav_rx_opt(nav_rx);
 
         let result = rt.block_on(async {
             let tailor_fut = tailor_all_projects(
