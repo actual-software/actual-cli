@@ -637,7 +637,7 @@ mod tests {
         assert!(p.contains("Batch size"), "should show Batch size: {p}");
         assert!(p.contains("15"), "should show default batch size: {p}");
         assert!(p.contains("Concurrency"), "should show Concurrency: {p}");
-        assert!(p.contains("3"), "should show default concurrency: {p}");
+        assert!(p.contains("10"), "should show default concurrency: {p}");
         assert!(
             p.contains("Rejected ADRs"),
             "should show Rejected ADRs: {p}"
