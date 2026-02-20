@@ -579,11 +579,17 @@ impl TuiRenderer {
     }
 
     /// Update the message for an active phase and advance the spinner tick.
+    ///
+    /// The `message` string is intentionally not displayed in the step row or the
+    /// output log pane.  Setting `step.message` would pollute the Steps pane with
+    /// transient progress text; pushing to the log pane would flood it with one
+    /// entry every 100 ms during tailoring.  Instead we update `step.elapsed` so
+    /// the step row shows a live `[Xs]` counter while the phase is running.
     pub fn update_message(&mut self, phase: SyncPhase, message: &str) {
         let idx = Self::phase_idx(phase);
-        // Update the step row message inline (Steps pane), not the Output log.
-        // This mirrors what the old SyncPipeline did with bar.set_message().
-        self.steps.steps[idx].message = message.to_string();
+        let _ = message; // progress text is intentionally discarded (see doc comment)
+                         // Show live elapsed in the step row while the phase is running.
+        self.steps.steps[idx].elapsed = self.starts[idx].map(|s| s.elapsed());
         if let StepStatus::Running { ref mut tick } = self.steps.steps[idx].status {
             *tick = tick.wrapping_add(1);
         }
@@ -1298,10 +1304,12 @@ mod tests {
         let mut r = TuiRenderer::new(false, true);
         r.start(SyncPhase::Tailor, "initial");
         r.update_message(SyncPhase::Tailor, "updated message");
-        // update_message must NOT push to the log pane (start pushes "initial", so log stays at len==1).
+        // message is discarded — log pane unchanged (start pushed "initial", len stays 1).
         assert_eq!(r.logs[3].len(), 1);
-        // step.message must be set to the new message (inline on the step row).
-        assert_eq!(r.steps.steps[3].message, "updated message");
+        // step.message must remain empty (progress text is not shown in the step row).
+        assert_eq!(r.steps.steps[3].message, "");
+        // elapsed must be updated for the live [Xs] counter in the step row.
+        assert!(r.steps.steps[3].elapsed.is_some());
         // tick should have advanced
         assert!(matches!(
             r.steps.steps[3].status,
@@ -1311,15 +1319,15 @@ mod tests {
 
     #[test]
     fn test_update_message_non_running_step() {
-        // update_message on a non-Running step should set step.message without
+        // update_message on a non-Running step should update elapsed without
         // panicking (the tick increment branch is skipped for non-Running steps).
         let mut r = TuiRenderer::new(false, true);
         // Step is Waiting — not Running
         r.update_message(SyncPhase::Environment, "some message");
-        // Must NOT push to the log pane.
+        // message is discarded — log pane must remain empty.
         assert_eq!(r.logs[0].len(), 0);
-        // step.message must be set.
-        assert_eq!(r.steps.steps[0].message, "some message");
+        // step.message must remain empty.
+        assert_eq!(r.steps.steps[0].message, "");
     }
 
     #[test]
