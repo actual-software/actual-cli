@@ -417,7 +417,8 @@ impl TuiRenderer {
         self.active_step = idx;
         self.starts[idx] = Some(Instant::now());
         self.steps.steps[idx].status = StepStatus::Running { tick: 0 };
-        self.steps.steps[idx].message = message.to_string();
+        self.steps.steps[idx].message = String::new();
+        self.logs[idx].push(message.to_string());
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ○ {message}");
@@ -428,8 +429,9 @@ impl TuiRenderer {
     pub fn success(&mut self, phase: SyncPhase, message: &str) {
         let idx = Self::phase_idx(phase);
         self.steps.steps[idx].status = StepStatus::Success;
-        self.steps.steps[idx].message = message.to_string();
+        self.steps.steps[idx].message = String::new();
         self.steps.steps[idx].elapsed = self.starts[idx].map(|s| s.elapsed());
+        self.logs[idx].push(message.to_string());
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ✔ {message}");
@@ -440,7 +442,8 @@ impl TuiRenderer {
     pub fn skip(&mut self, phase: SyncPhase, message: &str) {
         let idx = Self::phase_idx(phase);
         self.steps.steps[idx].status = StepStatus::Skipped;
-        self.steps.steps[idx].message = message.to_string();
+        self.steps.steps[idx].message = String::new();
+        self.logs[idx].push(message.to_string());
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ─ {message}");
@@ -451,8 +454,9 @@ impl TuiRenderer {
     pub fn error(&mut self, phase: SyncPhase, message: &str) {
         let idx = Self::phase_idx(phase);
         self.steps.steps[idx].status = StepStatus::Error;
-        self.steps.steps[idx].message = message.to_string();
+        self.steps.steps[idx].message = String::new();
         self.steps.steps[idx].elapsed = self.starts[idx].map(|s| s.elapsed());
+        self.logs[idx].push(message.to_string());
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ✖ {message}");
@@ -463,8 +467,9 @@ impl TuiRenderer {
     pub fn warn(&mut self, phase: SyncPhase, message: &str) {
         let idx = Self::phase_idx(phase);
         self.steps.steps[idx].status = StepStatus::Warn;
-        self.steps.steps[idx].message = message.to_string();
+        self.steps.steps[idx].message = String::new();
         self.steps.steps[idx].elapsed = self.starts[idx].map(|s| s.elapsed());
+        self.logs[idx].push(message.to_string());
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ⚠ {message}");
