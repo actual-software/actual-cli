@@ -3,16 +3,18 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::error::ActualError;
 use crate::tailoring::types::TailoringOutput;
 
-/// Envelope returned by Claude Code when invoked with `--print --output-format json`.
+/// Envelope returned by Claude Code when invoked with `--print`.
 ///
-/// The actual structured output (matching the `--json-schema`) is nested inside
-/// the `structured_output` field. The top-level JSON contains metadata such as
-/// `type`, `subtype`, `is_error`, `result`, etc.
+/// With `--output-format json` this is the only line on stdout.
+/// With `--output-format stream-json` this is the final line (type = "result").
+/// The actual structured output (matching `--json-schema`) is in `structured_output`.
 #[derive(Deserialize)]
 struct ClaudeEnvelope<T> {
     #[serde(rename = "type")]
@@ -40,13 +42,74 @@ pub trait TailoringRunner: Send + Sync {
         max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError>;
 
-    /// Register a channel sender to receive subprocess stderr lines in real time.
+    /// Register a channel for streaming subprocess events (tool calls, stderr lines).
     ///
-    /// Called once before tailoring begins when `--show-errors` is active.
-    /// The default implementation is a no-op — override only for runners that
-    /// spawn a subprocess and can stream its stderr (i.e. [`CliClaudeRunner`]).
-    fn set_stderr_tx(&self, _tx: tokio::sync::mpsc::UnboundedSender<String>) {
-        // Default: no-op. API-backed runners don't have a subprocess stderr.
+    /// Each message is a human-readable summary line such as
+    /// `"Claude: Read src/app.tsx"` or `"[stderr] some error"`.
+    /// A default no-op implementation is provided so test fakes do not need to
+    /// implement this method.
+    fn set_event_tx(&self, _tx: UnboundedSender<String>) {}
+}
+
+/// Format a single `stream-json` stdout line into a concise human-readable
+/// summary for display in the TUI, or `None` for events that are not worth
+/// showing (e.g., raw text tokens, user tool-result messages, result events).
+///
+/// Recognised event types:
+/// - `system / init` → `"Claude Code started (model: <m>)"`
+/// - `assistant` with `tool_use` content → `"Claude: <Tool> <path|pattern>"`
+/// - Everything else → `None` (suppressed to avoid noise)
+pub(crate) fn format_stream_event(line: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let event_type = value["type"].as_str()?;
+
+    match event_type {
+        "system" => {
+            let model = value["model"].as_str().unwrap_or("unknown");
+            Some(format!("Claude Code started (model: {model})"))
+        }
+        "assistant" => {
+            let content = value["message"]["content"].as_array()?;
+            let tool_uses: Vec<String> = content
+                .iter()
+                .filter_map(|item| {
+                    if item["type"].as_str() != Some("tool_use") {
+                        return None;
+                    }
+                    let name = item["name"].as_str()?;
+                    let summary = match name {
+                        "Read" | "Write" | "Edit" => {
+                            let path = item["input"]["file_path"]
+                                .as_str()
+                                .or_else(|| item["input"]["path"].as_str())
+                                .unwrap_or("?");
+                            format!("{name} {path}")
+                        }
+                        "MultiEdit" => {
+                            let path = item["input"]["file_path"].as_str().unwrap_or("?");
+                            format!("MultiEdit {path}")
+                        }
+                        "Glob" => {
+                            let pattern = item["input"]["pattern"].as_str().unwrap_or("*");
+                            format!("Glob {pattern}")
+                        }
+                        "Grep" => {
+                            let pattern = item["input"]["pattern"].as_str().unwrap_or("?");
+                            format!("Grep {pattern}")
+                        }
+                        other => other.to_string(),
+                    };
+                    Some(summary)
+                })
+                .collect();
+
+            if tool_uses.is_empty() {
+                None // text-only messages are too noisy
+            } else {
+                Some(format!("Claude: {}", tool_uses.join(", ")))
+            }
+        }
+        _ => None,
     }
 }
 
@@ -71,12 +134,9 @@ pub struct CliClaudeRunner {
     timeout: Duration,
     /// Optional override for the max-turns limit (overrides the default in `InvocationOptions`).
     max_turns_override: Option<u32>,
-    /// Optional channel sender for streaming subprocess stderr lines in real time.
-    ///
-    /// Set via [`TailoringRunner::set_stderr_tx`] when `--show-errors` is active.
-    /// Uses interior mutability so the runner can be configured after construction
-    /// while still satisfying the `&self` constraint on trait methods.
-    stderr_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
+    /// Optional sender for streaming subprocess events.  Set via
+    /// [`TailoringRunner::set_event_tx`] before calling `run_tailoring`.
+    event_tx: std::sync::Mutex<Option<UnboundedSender<String>>>,
 }
 
 impl CliClaudeRunner {
@@ -85,7 +145,7 @@ impl CliClaudeRunner {
             binary_path,
             timeout,
             max_turns_override: None,
-            stderr_tx: std::sync::Mutex::new(None),
+            event_tx: std::sync::Mutex::new(None),
         }
     }
 
@@ -181,17 +241,10 @@ pub(crate) fn resolve_output(
 ///
 /// Extracted from the `ClaudeRunner` impl so the trait method is a
 /// thin delegation.
-///
-/// When `stderr_tx` is `Some`, stderr is intercepted by a background task that
-/// forwards each line to the channel in real time (for `--show-errors` live
-/// streaming).  The bytes are also collected and merged back into `output.stderr`
-/// so error messages are still available to [`parse_output`] when the process
-/// exits non-zero.
 async fn run_subprocess<T: DeserializeOwned>(
     binary_path: &std::path::Path,
     timeout: Duration,
     args: &[String],
-    stderr_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<T, ActualError> {
     let mut cmd = Command::new(binary_path);
     cmd.arg("--print");
@@ -201,6 +254,37 @@ async fn run_subprocess<T: DeserializeOwned>(
     // on drop, preventing orphaned processes.
     cmd.kill_on_drop(true);
 
+    let child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| io_err("Failed to spawn Claude Code", e))?;
+
+    let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    let output = resolve_output(result, timeout)?;
+
+    parse_output(output)
+}
+
+/// Spawn the binary in streaming mode (`--output-format stream-json`), read
+/// stdout line-by-line, forward formatted event summaries to `event_tx`, and
+/// return the structured output extracted from the final `"type":"result"` event.
+///
+/// Stderr is drained concurrently in a background task and each line is
+/// forwarded to `event_tx` prefixed with `"[stderr] "` so callers see it in
+/// the same channel as tool-call events.
+async fn run_subprocess_streaming<T: DeserializeOwned>(
+    binary_path: &std::path::Path,
+    timeout: Duration,
+    args: &[String],
+    event_tx: Option<UnboundedSender<String>>,
+) -> Result<T, ActualError> {
+    let mut cmd = Command::new(binary_path);
+    cmd.arg("--print");
+    cmd.args(args);
+    cmd.kill_on_drop(true);
+
     let mut child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -208,45 +292,81 @@ async fn run_subprocess<T: DeserializeOwned>(
         .spawn()
         .map_err(|e| io_err("Failed to spawn Claude Code", e))?;
 
-    // If stderr streaming is requested, take the stderr handle from the child and
-    // forward each line to the caller's channel in a background task.  The task
-    // also collects all bytes so they can be merged back into `output.stderr` for
-    // error reporting once the process exits.
-    let stderr_join: Option<tokio::task::JoinHandle<Vec<u8>>> = if let Some(tx) = stderr_tx {
-        child.stderr.take().map(|stderr_handle| {
-            tokio::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut reader = BufReader::new(stderr_handle);
-                let mut line = String::new();
-                let mut all_bytes = Vec::new();
-                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-                    all_bytes.extend_from_slice(line.as_bytes());
-                    // Trim trailing newline before sending so callers receive
-                    // clean single-line strings.
-                    let _ = tx.send(line.trim_end().to_string());
-                    line.clear();
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+
+    // Drain stderr in a background task; forward each line to event_tx.
+    let event_tx_for_stderr = event_tx.clone();
+    let stderr_task: tokio::task::JoinHandle<Vec<u8>> = tokio::spawn(async move {
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        let mut all_bytes: Vec<u8> = Vec::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(tx) = &event_tx_for_stderr {
+                let _ = tx.send(format!("[stderr] {line}"));
+            }
+            all_bytes.extend_from_slice(line.as_bytes());
+            all_bytes.push(b'\n');
+        }
+        all_bytes
+    });
+
+    // Read stdout line-by-line, forwarding formatted summaries and looking for
+    // the final "type":"result" event.
+    let find_result = async move {
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(tx) = &event_tx {
+                if let Some(summary) = format_stream_event(&line) {
+                    let _ = tx.send(summary);
                 }
-                all_bytes
-            })
-        })
-    } else {
-        None
+            }
+            if let Ok(envelope) = serde_json::from_str::<ClaudeEnvelope<T>>(&line) {
+                if envelope.result_type.as_deref() == Some("result") {
+                    return Ok(Some(envelope));
+                }
+            }
+        }
+        Ok::<_, std::io::Error>(None)
     };
 
-    let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-    let mut output = resolve_output(result, timeout)?;
-
-    // Wait for the stderr streaming task and merge its bytes back into
-    // `output.stderr` so [`parse_output`] can include them in error messages.
-    // (`wait_with_output` yields an empty `output.stderr` when the handle was taken.)
-    if let Some(join) = stderr_join {
-        let bytes = join.await.unwrap_or_default();
-        if !bytes.is_empty() {
-            output.stderr = bytes;
+    match tokio::time::timeout(timeout, find_result).await {
+        Ok(Ok(Some(envelope))) => {
+            if envelope.is_error == Some(true)
+                || envelope.subtype.as_deref() == Some("error_max_turns")
+            {
+                let detail = envelope
+                    .result
+                    .unwrap_or_else(|| "unknown error".to_string());
+                let stderr_bytes = stderr_task.await.unwrap_or_default();
+                let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+                Err(ActualError::ClaudeSubprocessFailed {
+                    message: format!("Claude Code returned an error: {detail}"),
+                    stderr,
+                })
+            } else {
+                envelope
+                    .structured_output
+                    .ok_or_else(|| ActualError::ClaudeSubprocessFailed {
+                        message: "Claude Code envelope missing structured_output field".to_string(),
+                        stderr: String::new(),
+                    })
+            }
         }
+        Ok(Ok(None)) => {
+            let stderr_bytes = stderr_task.await.unwrap_or_default();
+            let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+            Err(ActualError::ClaudeSubprocessFailed {
+                message: "Claude Code exited without producing a result".to_string(),
+                stderr,
+            })
+        }
+        Ok(Err(e)) => Err(io_err("Failed to read Claude Code output", e)),
+        Err(_) => Err(ActualError::ClaudeTimeout {
+            seconds: timeout.as_secs(),
+        }),
     }
-
-    parse_output(output)
 }
 
 impl TailoringRunner for CliClaudeRunner {
@@ -270,20 +390,19 @@ impl TailoringRunner for CliClaudeRunner {
         args.push("-p".to_string());
         args.push(prompt.to_string());
 
-        // Clone the stderr sender (if any) so it can be moved into the subprocess.
-        let stderr_tx = self.stderr_tx.lock().unwrap().clone();
-        run_subprocess(&self.binary_path, self.timeout, &args, stderr_tx).await
+        let event_tx = self.event_tx.lock().unwrap().clone();
+        run_subprocess_streaming(&self.binary_path, self.timeout, &args, event_tx).await
     }
 
-    fn set_stderr_tx(&self, tx: tokio::sync::mpsc::UnboundedSender<String>) {
-        *self.stderr_tx.lock().unwrap() = Some(tx);
+    fn set_event_tx(&self, tx: UnboundedSender<String>) {
+        *self.event_tx.lock().unwrap() = Some(tx);
     }
 }
 
 impl ClaudeRunner for CliClaudeRunner {
     async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError> {
-        // Analysis invocations don't need stderr streaming — pass None.
-        run_subprocess(&self.binary_path, self.timeout, args, None).await
+        // Analysis invocations don't need event streaming — pass no event_tx.
+        run_subprocess(&self.binary_path, self.timeout, args).await
     }
 }
 
@@ -341,6 +460,20 @@ mod tests {
         assert_eq!(result["num"], 42);
     }
 
+    /// Build a stream-json result line for the given structured output JSON value.
+    ///
+    /// The fake Claude subprocess scripts emit this as the final line on stdout
+    /// when `--output-format stream-json` is in effect.
+    fn stream_result_line(structured_output: serde_json::Value) -> String {
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "structured_output": structured_output
+        })
+        .to_string()
+    }
+
     /// Verify that `CliClaudeRunner::run_tailoring` passes `--json-schema` and `-p`
     /// args correctly, constructing the right subprocess invocation from a
     /// `(prompt, schema)` pair.
@@ -351,7 +484,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let args_file = dir.path().join("captured-args.txt");
-        // Script captures all args to a file, then emits a minimal valid TailoringOutput.
+        // Script captures all args to a file, then emits a minimal valid TailoringOutput
+        // wrapped in a stream-json result envelope (required by run_subprocess_streaming).
         let tailoring_json = serde_json::json!({
             "files": [],
             "skipped_adrs": [],
@@ -362,10 +496,11 @@ mod tests {
                 "files_generated": 0
             }
         });
+        let result_line = stream_result_line(tailoring_json);
         let script_content = format!(
             "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{}'\n",
             args_file.display(),
-            tailoring_json
+            result_line
         );
         let script = dir.path().join("fake-claude.sh");
         std::fs::write(&script, script_content).unwrap();
@@ -423,10 +558,11 @@ mod tests {
                 "files_generated": 0
             }
         });
+        let result_line = stream_result_line(tailoring_json);
         let script_content = format!(
             "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{}'\n",
             args_file.display(),
-            tailoring_json
+            result_line
         );
         let script = dir.path().join("fake-claude.sh");
         std::fs::write(&script, script_content).unwrap();
@@ -735,26 +871,295 @@ mod tests {
         assert_eq!(parsed.count, 99);
     }
 
-    // ── stderr streaming tests ──
+    // ── format_stream_event tests ──
 
-    /// Verify that `set_stderr_tx` stores the sender in the runner's mutex.
     #[test]
-    fn test_set_stderr_tx_stores_sender() {
-        let runner = CliClaudeRunner::new(PathBuf::from("/fake/binary"), Duration::from_secs(10));
-        assert!(runner.stderr_tx.lock().unwrap().is_none(), "initially None");
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        runner.set_stderr_tx(tx);
-        assert!(
-            runner.stderr_tx.lock().unwrap().is_some(),
-            "stored after set_stderr_tx"
+    fn test_format_stream_event_system_init() {
+        let line = r#"{"type":"system","model":"claude-sonnet-4-5"}"#;
+        assert_eq!(
+            format_stream_event(line),
+            Some("Claude Code started (model: claude-sonnet-4-5)".to_string())
         );
     }
 
-    /// Verify that stderr lines written by the subprocess are forwarded to the
-    /// channel registered via `set_stderr_tx`.
+    #[test]
+    fn test_format_stream_event_system_unknown_model() {
+        let line = r#"{"type":"system"}"#;
+        assert_eq!(
+            format_stream_event(line),
+            Some("Claude Code started (model: unknown)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_read_tool() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {"file_path": "src/main.rs"}
+                }]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: Read src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_write_tool() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Write",
+                    "input": {"file_path": "CLAUDE.md"}
+                }]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: Write CLAUDE.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_glob_tool() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Glob",
+                    "input": {"pattern": "**/*.rs"}
+                }]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: Glob **/*.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_grep_tool() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Grep",
+                    "input": {"pattern": "fn main"}
+                }]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: Grep fn main".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_unknown_tool() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "SomeFutureTool",
+                    "input": {}
+                }]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: SomeFutureTool".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_text_only_suppressed() {
+        // Text-only assistant messages are suppressed (too noisy)
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "Thinking about the task..."
+                }]
+            }
+        })
+        .to_string();
+        assert_eq!(format_stream_event(&line), None);
+    }
+
+    #[test]
+    fn test_format_stream_event_result_suppressed() {
+        // Result events are not forwarded (handled separately)
+        let line =
+            r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{}}"#;
+        assert_eq!(format_stream_event(line), None);
+    }
+
+    #[test]
+    fn test_format_stream_event_invalid_json_suppressed() {
+        assert_eq!(format_stream_event("not json at all"), None);
+    }
+
+    #[test]
+    fn test_format_stream_event_multiple_tools() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "a.rs"}},
+                    {"type": "tool_use", "name": "Glob", "input": {"pattern": "*.toml"}}
+                ]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: Read a.rs, Glob *.toml".to_string())
+        );
+    }
+
+    // ── run_subprocess_streaming tests ──
+
+    /// Verify that run_subprocess_streaming returns an error when the subprocess
+    /// exits without emitting any result event.
     #[tokio::test]
     #[cfg(unix)]
-    async fn test_cli_runner_streams_stderr_lines() {
+    async fn test_run_subprocess_streaming_no_result_event() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        // Outputs something but no result event
+        std::fs::write(&script, "#!/bin/sh\necho 'hello world'\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result: Result<serde_json::Value, _> =
+            run_subprocess_streaming(&script, Duration::from_secs(5), &[], None).await;
+        let (message, _) = subprocess_failed(result.unwrap_err());
+        assert!(
+            message.contains("exited without producing a result"),
+            "unexpected message: {message}"
+        );
+    }
+
+    /// Verify that run_subprocess_streaming times out correctly.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_subprocess_streaming_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 10\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result: Result<serde_json::Value, _> =
+            run_subprocess_streaming(&script, Duration::from_millis(100), &[], None).await;
+        assert_eq!(timeout_seconds(result.unwrap_err()), 0);
+    }
+
+    /// Verify that run_subprocess_streaming forwards stderr lines to event_tx.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_subprocess_streaming_forwards_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        let tailoring_json = serde_json::json!({
+            "files": [],
+            "skipped_adrs": [],
+            "summary": {
+                "total_input": 0,
+                "applicable": 0,
+                "not_applicable": 0,
+                "files_generated": 0
+            }
+        });
+        let result_line = stream_result_line(tailoring_json);
+        let script_content = format!("#!/bin/sh\necho 'err line' >&2\necho '{}'\n", result_line);
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let _result: crate::tailoring::types::TailoringOutput =
+            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx))
+                .await
+                .unwrap();
+
+        // Collect all messages; the stderr line should be prefixed with "[stderr] "
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            messages.push(msg);
+        }
+        assert!(
+            messages.iter().any(|m| m == "[stderr] err line"),
+            "expected '[stderr] err line' in messages, got: {messages:?}"
+        );
+    }
+
+    /// Verify that run_subprocess_streaming returns an error for error result events.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_subprocess_streaming_error_result() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        let error_line = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": "Something went wrong",
+            "structured_output": null
+        })
+        .to_string();
+        std::fs::write(&script, format!("#!/bin/sh\necho '{}'\n", error_line)).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result: Result<serde_json::Value, _> =
+            run_subprocess_streaming(&script, Duration::from_secs(5), &[], None).await;
+        let (message, _) = subprocess_failed(result.unwrap_err());
+        assert!(
+            message.contains("returned an error"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("Something went wrong"),
+            "unexpected message: {message}"
+        );
+    }
+
+    // ── set_event_tx tests ──
+
+    /// Verify that `set_event_tx` stores the sender in the runner's mutex.
+    #[test]
+    fn test_set_event_tx_stores_sender() {
+        let runner = CliClaudeRunner::new(PathBuf::from("/fake/binary"), Duration::from_secs(10));
+        assert!(runner.event_tx.lock().unwrap().is_none(), "initially None");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        runner.set_event_tx(tx);
+        assert!(
+            runner.event_tx.lock().unwrap().is_some(),
+            "stored after set_event_tx"
+        );
+    }
+
+    /// Verify that tool-call events from the subprocess are forwarded via event_tx.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_streams_tool_call_events() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
@@ -769,60 +1174,47 @@ mod tests {
                 "files_generated": 0
             }
         });
-        // Script writes two lines to stderr then emits valid tailoring output on stdout.
+        let result_line = stream_result_line(tailoring_json);
+        // Emit a system event, then a tool-call event, then the result.
+        let system_line = r#"{"type":"system","model":"claude-sonnet-4-5"}"#;
+        let tool_line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Read",
+                    "input": {"file_path": "src/main.rs"}
+                }]
+            }
+        })
+        .to_string();
         let script_content = format!(
-            "#!/bin/sh\necho 'line one' >&2\necho 'line two' >&2\necho '{}'\n",
-            tailoring_json
+            "#!/bin/sh\necho '{}'\necho '{}'\necho '{}'\n",
+            system_line, tool_line, result_line
         );
         std::fs::write(&script, script_content).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        runner.set_stderr_tx(tx);
+        runner.set_event_tx(tx);
 
         let result = runner
             .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
             .await;
         assert!(result.is_ok(), "expected Ok: {result:?}");
 
-        // Both stderr lines must have been forwarded to the channel.
-        let line1 = rx.try_recv().expect("first stderr line must be in channel");
-        let line2 = rx
-            .try_recv()
-            .expect("second stderr line must be in channel");
-        assert_eq!(line1, "line one");
-        assert_eq!(line2, "line two");
-    }
-
-    /// Verify that when `set_stderr_tx` is active and the subprocess exits
-    /// non-zero, the collected stderr bytes are merged into the error so callers
-    /// can still read them from `ClaudeSubprocessFailed.stderr`.
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn test_cli_runner_stderr_merged_into_error_when_streaming() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("fake-claude.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\necho 'fatal subprocess error' >&2\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        runner.set_stderr_tx(tx);
-
-        let result = runner
-            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
-            .await;
-        let (_, stderr) = subprocess_failed(result.unwrap_err());
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            events.push(msg);
+        }
         assert!(
-            stderr.contains("fatal subprocess error"),
-            "stderr bytes must be merged into error, got: {stderr:?}"
+            events.iter().any(|e| e.contains("Claude Code started")),
+            "missing system event: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.contains("Read src/main.rs")),
+            "missing tool-call event: {events:?}"
         );
     }
 }

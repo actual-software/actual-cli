@@ -155,6 +155,9 @@ pub fn create_fake_claude_binary(
 /// Create a fake Claude binary that distinguishes analysis from tailoring
 /// by checking whether `--json-schema` appears as an argument (tailoring
 /// invocations always pass `--json-schema`; analysis invocations never do).
+///
+/// The tailoring response is wrapped in a `stream-json` result envelope so the
+/// production `run_subprocess_streaming` code can parse it correctly.
 #[cfg(unix)]
 pub fn create_fake_claude_binary_with_tailoring(
     dir: &std::path::Path,
@@ -166,7 +169,17 @@ pub fn create_fake_claude_binary_with_tailoring(
     let script = dir.join("fake-claude");
     let auth = shell_single_quote_escape(auth_json);
     let analysis = shell_single_quote_escape(analysis_json);
-    let tailoring = shell_single_quote_escape(tailoring_json);
+    // Wrap the tailoring payload in a stream-json result envelope so
+    // `run_subprocess_streaming` can extract `structured_output`.
+    let tailoring_value: serde_json::Value =
+        serde_json::from_str(tailoring_json).expect("tailoring_json must be valid JSON");
+    let envelope = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "structured_output": tailoring_value,
+    });
+    let tailoring = shell_single_quote_escape(&envelope.to_string());
     let script_content = format!(
         "#!/bin/sh\n\
          if [ \"$1\" = \"auth\" ]; then\n\
@@ -244,6 +257,9 @@ pub fn create_fake_claude_binary_capturing(
 /// Each invocation is written to `capture_file` with args delimited by `\x00`
 /// and invocations separated by `---INVOCATION---\n`. Use
 /// [`parse_captured_invocations`] to parse the output.
+///
+/// The tailoring response is wrapped in a `stream-json` result envelope so the
+/// production `run_subprocess_streaming` code can parse it correctly.
 #[cfg(unix)]
 pub fn create_fake_claude_binary_capturing_with_tailoring(
     dir: &std::path::Path,
@@ -256,7 +272,16 @@ pub fn create_fake_claude_binary_capturing_with_tailoring(
     let script = dir.join("fake-claude");
     let auth = shell_single_quote_escape(auth_json);
     let analysis = shell_single_quote_escape(analysis_json);
-    let tailoring = shell_single_quote_escape(tailoring_json);
+    // Wrap the tailoring payload in a stream-json result envelope.
+    let tailoring_value: serde_json::Value =
+        serde_json::from_str(tailoring_json).expect("tailoring_json must be valid JSON");
+    let envelope = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "structured_output": tailoring_value,
+    });
+    let tailoring = shell_single_quote_escape(&envelope.to_string());
     // Escape the capture path so it is safe inside single quotes.
     let capture = shell_single_quote_escape(capture_file.to_str().unwrap());
     // Use printf with \0 delimiters between args and a clear invocation separator

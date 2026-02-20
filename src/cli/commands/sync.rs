@@ -464,17 +464,12 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
 
-        // When --show-errors is active, create a side-channel for subprocess
-        // stderr.  The sender is registered with the runner so it can forward
-        // lines in real time; the receiver is passed to the select! loop.
-        let mut stderr_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>> =
-            if args.show_errors {
-                let (stderr_tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-                runner.set_stderr_tx(stderr_tx);
-                Some(rx)
-            } else {
-                None
-            };
+        // Set up a streaming event channel so the runner can forward real-time
+        // tool-call summaries and stderr lines from the Claude Code subprocess.
+        // This channel is used to reset the hang-detection timer on every event
+        // and to show progress in the TUI while Claude is working.
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        runner.set_event_tx(event_tx);
 
         // In TUI mode (raw mode active) the terminal consumes keyboard input,
         // so OS-level SIGINT from Ctrl+C may not reach the process reliably.
@@ -493,7 +488,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             run_tailoring_with_cancel(
                 tailor_fut,
                 &mut progress_rx,
-                &mut stderr_rx,
+                &mut event_rx,
                 &mut pipeline,
                 project_count,
                 cancel,
@@ -668,36 +663,6 @@ fn apply_tailoring_event(event: TailoringEvent, pipeline: &mut TuiRenderer, comp
 /// Claude Code may be hanging (e.g. waiting for a permission prompt).
 const HANG_WARN_SECS: u64 = 30;
 
-/// Drain all lines currently buffered in `rx` into the pipeline log pane,
-/// returning the number of lines emitted.
-///
-/// Called when the hang warning fires so that any stderr that arrived since
-/// the last live-stream tick is surfaced to the user immediately.
-fn dump_buffered_stderr_lines(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-    pipeline: &mut TuiRenderer,
-) -> usize {
-    let mut dumped = 0usize;
-    while let Ok(line) = rx.try_recv() {
-        pipeline.println(&format!("  [stderr] {line}"));
-        dumped += 1;
-    }
-    dumped
-}
-
-/// Wait for the next line from an optional unbounded receiver.
-///
-/// When `rx` is `None`, the returned future is permanently pending,
-/// effectively disabling the caller's `select!` arm without any overhead.
-async fn recv_optional(
-    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
-) -> Option<String> {
-    match rx {
-        Some(r) => r.recv().await,
-        None => std::future::pending::<Option<String>>().await,
-    }
-}
-
 /// Drive the tailoring future to completion while processing progress events,
 /// with support for cancellation via a caller-supplied future.
 ///
@@ -709,19 +674,15 @@ async fn recv_optional(
 /// time display updating even when Claude is thinking and no progress events
 /// are flowing.
 ///
-/// Gap 2: if no progress events arrive within [`HANG_WARN_SECS`] seconds, a
-/// one-time warning is emitted to the TUI log pane.  This makes it visible
-/// when Claude Code is blocked on a permission prompt (stdin is /dev/null so
-/// the subprocess would hang silently until the 10-minute timeout fires).
-///
-/// When `stderr_rx` is `Some` (`--show-errors` is active), subprocess stderr
-/// lines are streamed live to the TUI log pane.  On hang, any buffered stderr
-/// lines are also dumped.  Without the flag, a tip to re-run with `--show-errors`
-/// is shown instead.
+/// Hang detection: if neither a batch-level [`TailoringEvent`] nor a
+/// subprocess stream event arrives within [`HANG_WARN_SECS`] seconds, a
+/// one-time warning is emitted.  Stream events (tool calls, stderr lines) from
+/// the Claude Code subprocess reset the timer, so the warning only fires when
+/// the subprocess is genuinely silent — not merely slow.
 async fn run_tailoring_with_cancel<F, C>(
     tailor_fut: F,
     progress_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TailoringEvent>,
-    stderr_rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
     pipeline: &mut TuiRenderer,
     project_count: usize,
     cancel: C,
@@ -743,35 +704,33 @@ where
     // Consume the first immediate tick so the interval doesn't fire right away.
     heartbeat.tick().await;
 
-    // Gap 2: track when the last progress event arrived so we can detect hangs.
+    // Track when the last event (batch-level OR stream) arrived to detect hangs.
     // Uses tokio::time::Instant so the threshold is testable with
     // tokio::time::pause() / tokio::time::advance().
     let mut last_event_time = tokio::time::Instant::now();
-    // Latch: emit the hang warning at most once per tailoring run to avoid
-    // flooding the log pane with repeated messages.
+    // Latch: emit the hang warning at most once per tailoring run.
     let mut hang_warned = false;
 
     loop {
         tokio::select! {
             result = &mut tailor_fut => {
                 // Drain any remaining events before breaking.
-                // No need to update last_event_time here — hang detection is
-                // only relevant while tailoring is still in progress.
                 while let Ok(event) = progress_rx.try_recv() {
                     apply_tailoring_event(event, pipeline, &mut completed);
                 }
                 break result;
             }
             Some(event) = progress_rx.recv() => {
-                // Reset hang tracking on every progress event.
+                // Reset hang tracking on every batch-level progress event.
                 last_event_time = tokio::time::Instant::now();
                 apply_tailoring_event(event, pipeline, &mut completed);
             }
-            // Live-stream stderr lines from the subprocess when --show-errors is
-            // active.  recv_optional() returns a permanently-pending future when
-            // stderr_rx is None, so this arm is a no-op without the flag.
-            Some(line) = recv_optional(stderr_rx) => {
-                pipeline.println(&format!("  [stderr] {line}"));
+            Some(line) = event_rx.recv() => {
+                // Reset hang tracking on every subprocess stream event (tool
+                // calls, stderr lines). Show tool-call summaries in the TUI so
+                // the user can see what Claude is working on.
+                last_event_time = tokio::time::Instant::now();
+                pipeline.println(&format!("  {line}"));
             }
             result = &mut cancel => {
                 if result.is_ok() {
@@ -790,34 +749,19 @@ where
                     ),
                 );
 
-                // Gap 2: warn once if no progress events have arrived for
-                // HANG_WARN_SECS.  This typically means Claude Code is blocked
-                // on a permission prompt (stdin is /dev/null so it will never
-                // receive input — the hang will persist until the timeout fires).
+                // Warn once if neither batch-level nor stream events have arrived
+                // for HANG_WARN_SECS. With stream-json this means the subprocess
+                // has gone completely silent — not even a tool-call event.
                 if !hang_warned && last_event_time.elapsed().as_secs() >= HANG_WARN_SECS {
                     hang_warned = true;
                     pipeline.println(&format!(
                         "  \u{26a0} No output received in {HANG_WARN_SECS}s \u{2014} \
-        Claude Code may be waiting for a permission prompt"
+        Claude Code subprocess is unresponsive"
                     ));
                     tracing::warn!(
-                        "no tailoring progress events for {HANG_WARN_SECS}s — \
-        Claude Code may be waiting for a permission prompt"
+                        "no tailoring events for {HANG_WARN_SECS}s — \
+        Claude Code subprocess is unresponsive"
                     );
-                    // Dump any stderr lines that arrived but haven't been shown
-                    // via the live-streaming arm yet (e.g. lines that raced with
-                    // the heartbeat tick).
-                    if let Some(ref mut rx) = stderr_rx {
-                        if dump_buffered_stderr_lines(rx, pipeline) == 0 {
-                            pipeline.println(
-                                "  (no subprocess stderr captured yet)",
-                            );
-                        }
-                    } else {
-                        pipeline.println(
-                            "  Tip: re-run with --show-errors to see Claude Code output",
-                        );
-                    }
                 }
             }
         }
@@ -4853,16 +4797,10 @@ mod tests {
         // ctrl_c signal registration + user pressing Ctrl+C.
         let cancel = std::future::ready(Ok::<(), std::io::Error>(()));
 
-        let mut stderr_rx = None;
-        let result = run_tailoring_with_cancel(
-            tailor_fut,
-            &mut rx,
-            &mut stderr_rx,
-            &mut pipeline,
-            0,
-            cancel,
-        )
-        .await;
+        let (_etx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let result =
+            run_tailoring_with_cancel(tailor_fut, &mut rx, &mut event_rx, &mut pipeline, 0, cancel)
+                .await;
 
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
@@ -4902,16 +4840,10 @@ mod tests {
         drop(ready_rx);
         drop(tx);
 
-        let mut stderr_rx = None;
-        let result = run_tailoring_with_cancel(
-            tailor_fut,
-            &mut rx,
-            &mut stderr_rx,
-            &mut pipeline,
-            0,
-            cancel,
-        )
-        .await;
+        let (_etx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let result =
+            run_tailoring_with_cancel(tailor_fut, &mut rx, &mut event_rx, &mut pipeline, 0, cancel)
+                .await;
 
         // The cancel Err path must be ignored — tailoring should complete normally
         assert!(
@@ -4944,16 +4876,10 @@ mod tests {
         // cancel never fires
         let cancel = std::future::pending::<std::io::Result<()>>();
 
-        let mut stderr_rx = None;
-        let result = run_tailoring_with_cancel(
-            tailor_fut,
-            &mut rx,
-            &mut stderr_rx,
-            &mut pipeline,
-            1,
-            cancel,
-        )
-        .await;
+        let (_etx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let result =
+            run_tailoring_with_cancel(tailor_fut, &mut rx, &mut event_rx, &mut pipeline, 1, cancel)
+                .await;
 
         assert!(result.is_ok(), "expected Ok result, got {result:?}");
         // Channel must be fully drained — no events left
@@ -4985,16 +4911,10 @@ mod tests {
 
         // Advance time so the interval fires before the sleep finishes.
         // tokio::time::pause() makes all timers advance in lockstep.
-        let mut stderr_rx = None;
-        let result = run_tailoring_with_cancel(
-            tailor_fut,
-            &mut rx,
-            &mut stderr_rx,
-            &mut pipeline,
-            2,
-            cancel,
-        )
-        .await;
+        let (_etx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let result =
+            run_tailoring_with_cancel(tailor_fut, &mut rx, &mut event_rx, &mut pipeline, 2, cancel)
+                .await;
 
         assert!(result.is_ok(), "expected Ok result, got {result:?}");
         // The heartbeat must have updated the live elapsed (step row shows [Xs]).
@@ -5474,16 +5394,10 @@ mod tests {
         };
         let cancel = std::future::pending::<std::io::Result<()>>();
 
-        let mut stderr_rx = None;
-        let result = run_tailoring_with_cancel(
-            tailor_fut,
-            &mut rx,
-            &mut stderr_rx,
-            &mut pipeline,
-            0,
-            cancel,
-        )
-        .await;
+        let (_etx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let result =
+            run_tailoring_with_cancel(tailor_fut, &mut rx, &mut event_rx, &mut pipeline, 0, cancel)
+                .await;
 
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
@@ -5500,77 +5414,28 @@ mod tests {
         );
     }
 
-    // ── recv_optional and stderr streaming tests ──
+    // ── event streaming tests ──
 
-    /// Verify that `recv_optional` with a `Some` receiver forwards messages.
+    /// Verify that the event_rx select arm displays stream events in the TUI log
+    /// pane as they arrive from the subprocess.
     #[tokio::test]
-    async fn test_recv_optional_some_forwards_message() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        tx.send("hello stderr".to_string()).unwrap();
-        drop(tx);
-        let result = recv_optional(&mut Some(rx)).await;
-        assert_eq!(result, Some("hello stderr".to_string()));
-    }
-
-    /// Verify `dump_buffered_stderr_lines` returns the number of lines dumped
-    /// and writes each one to the pipeline log (the `dumped > 0` branch).
-    #[test]
-    fn test_dump_buffered_stderr_lines_with_content() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        tx.send("line one".to_string()).unwrap();
-        tx.send("line two".to_string()).unwrap();
-        drop(tx); // close sender so channel is drained
-
-        let mut pipeline = TuiRenderer::new(false, true);
-        pipeline.start(SyncPhase::Tailor, "initial");
-
-        let dumped = dump_buffered_stderr_lines(&mut rx, &mut pipeline);
-        assert_eq!(dumped, 2, "expected 2 lines dumped");
-
-        // SyncPhase::Tailor maps to logs[3]
-        let logged = pipeline.logs[3].render_to_string(200, 500, 0);
-        assert!(
-            logged.iter().any(|l| l.contains("line one")),
-            "first line must appear in log: {logged:?}"
-        );
-        assert!(
-            logged.iter().any(|l| l.contains("line two")),
-            "second line must appear in log: {logged:?}"
-        );
-    }
-
-    /// Verify `dump_buffered_stderr_lines` returns 0 when the channel is empty.
-    #[test]
-    fn test_dump_buffered_stderr_lines_empty() {
-        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let mut pipeline = TuiRenderer::new(false, true);
-        pipeline.start(SyncPhase::Tailor, "initial");
-
-        let dumped = dump_buffered_stderr_lines(&mut rx, &mut pipeline);
-        assert_eq!(dumped, 0, "expected 0 lines dumped when channel is empty");
-    }
-
-    /// Verify that the live-streaming select arm displays stderr lines in the
-    /// TUI log pane as they arrive from the subprocess.
-    #[tokio::test]
-    async fn test_run_tailoring_with_cancel_live_streams_stderr_line() {
+    async fn test_run_tailoring_with_cancel_live_streams_event_line() {
         let mut pipeline = TuiRenderer::new(false, true); // plain mode
         pipeline.start(SyncPhase::Tailor, "initial");
         let (tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
         drop(tx); // no progress events
 
-        let (stderr_tx, stderr_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let mut stderr_rx = Some(stderr_rx);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-        // Send a stderr line *before* the future resolves so the live-streaming
+        // Send an event line *before* the future resolves so the streaming
         // arm has a chance to fire inside the select loop.
-        stderr_tx
-            .send("permission prompt text".to_string())
+        event_tx
+            .send("Claude: Read src/main.rs".to_string())
             .unwrap();
 
         let output = make_output(vec![]);
         let tailor_fut = async move {
-            // Yield so the select loop can process the buffered stderr line.
+            // Yield so the select loop can process the buffered event line.
             tokio::task::yield_now().await;
             Ok::<TailoringOutput, ActualError>(output)
         };
@@ -5579,7 +5444,7 @@ mod tests {
         let result = run_tailoring_with_cancel(
             tailor_fut,
             &mut progress_rx,
-            &mut stderr_rx,
+            &mut event_rx,
             &mut pipeline,
             0,
             cancel,
@@ -5587,87 +5452,51 @@ mod tests {
         .await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
-        // The stderr line must appear in the TUI log pane.
-        let logged = pipeline.logs[3].render_to_string(200, 500, 0);
-        assert!(
-            logged.iter().any(|l| l.contains("permission prompt text")),
-            "stderr line must appear in log pane: {logged:?}"
-        );
-    }
-
-    /// Verify that when the hang warning fires and stderr_rx is Some but no
-    /// lines have been captured, the "(no subprocess stderr captured yet)"
-    /// message is shown instead of the tip.
-    #[tokio::test]
-    async fn test_run_tailoring_with_cancel_hang_warning_no_stderr_captured() {
-        tokio::time::pause();
-        let mut pipeline = TuiRenderer::new(false, true); // plain mode
-        pipeline.start(SyncPhase::Tailor, "initial");
-        let (tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
-        drop(tx);
-
-        // Provide a Some stderr_rx with nothing sent so dumped == 0.
-        let (_stderr_tx, stderr_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let mut stderr_rx = Some(stderr_rx);
-
-        let output = make_output(vec![]);
-        let hang_secs = HANG_WARN_SECS;
-        let tailor_fut = async move {
-            tokio::time::sleep(std::time::Duration::from_secs(hang_secs + 1)).await;
-            Ok::<TailoringOutput, ActualError>(output)
-        };
-        let cancel = std::future::pending::<std::io::Result<()>>();
-
-        let result = run_tailoring_with_cancel(
-            tailor_fut,
-            &mut progress_rx,
-            &mut stderr_rx,
-            &mut pipeline,
-            0,
-            cancel,
-        )
-        .await;
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
-
+        // The event line must appear in the TUI log pane.
         let logged = pipeline.logs[3].render_to_string(200, 500, 0);
         assert!(
             logged
                 .iter()
-                .any(|l| l.contains("no subprocess stderr captured yet")),
-            "expected 'no subprocess stderr captured yet' in log: {logged:?}"
+                .any(|l| l.contains("Claude: Read src/main.rs")),
+            "event line must appear in log pane: {logged:?}"
         );
     }
 
-    /// Verify that when the hang warning fires and stderr lines were buffered,
-    /// those lines are dumped into the log pane (the `dumped > 0` branch).
+    /// Verify that receiving an event line resets the hang-detection timer so
+    /// the warning does NOT fire when the future completes before the threshold.
+    ///
+    /// The future completes after (HANG_WARN_SECS - 5) seconds — below the
+    /// threshold — so no warning is emitted.  We also verify the event appears
+    /// in the log pane (confirming the event_rx arm actually fired).
     #[tokio::test]
-    async fn test_run_tailoring_with_cancel_hang_warning_dumps_buffered_stderr() {
+    async fn test_run_tailoring_with_cancel_event_resets_hang_timer() {
         tokio::time::pause();
         let mut pipeline = TuiRenderer::new(false, true); // plain mode
         pipeline.start(SyncPhase::Tailor, "initial");
         let (tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
         drop(tx);
 
-        let (stderr_tx, stderr_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let mut stderr_rx = Some(stderr_rx);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-        // Pre-buffer a line so it is available for the dump when the hang fires.
-        // We close stderr_tx afterwards so the live-stream arm drains normally.
-        stderr_tx.send("buffered error line".to_string()).unwrap();
-        drop(stderr_tx);
-
-        let output = make_output(vec![]);
         let hang_secs = HANG_WARN_SECS;
+        let output = make_output(vec![]);
+        // Tailor completes before the hang threshold so no warning is expected.
         let tailor_fut = async move {
-            tokio::time::sleep(std::time::Duration::from_secs(hang_secs + 1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(hang_secs - 5)).await;
             Ok::<TailoringOutput, ActualError>(output)
         };
         let cancel = std::future::pending::<std::io::Result<()>>();
 
+        // Pre-buffer an event so the event_rx arm fires when the loop starts.
+        event_tx
+            .send("Claude: Read src/app.tsx".to_string())
+            .unwrap();
+        drop(event_tx);
+
         let result = run_tailoring_with_cancel(
             tailor_fut,
             &mut progress_rx,
-            &mut stderr_rx,
+            &mut event_rx,
             &mut pipeline,
             0,
             cancel,
@@ -5676,17 +5505,25 @@ mod tests {
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
         let logged = pipeline.logs[3].render_to_string(200, 500, 0);
-        // The buffered stderr line must appear (either via live-stream or dump).
+        // No hang warning — the future completed before HANG_WARN_SECS elapsed.
+        let has_hang_warn = logged.iter().any(|l| l.contains("No output received"));
         assert!(
-            logged.iter().any(|l| l.contains("buffered error line")),
-            "buffered stderr must appear in log pane: {logged:?}"
+            !has_hang_warn,
+            "hang warning must not fire before threshold: {logged:?}"
+        );
+        // Event must have been shown in the log pane.
+        assert!(
+            logged
+                .iter()
+                .any(|l| l.contains("Claude: Read src/app.tsx")),
+            "event line must appear in log pane: {logged:?}"
         );
     }
 
-    /// Verify that run_sync with show_errors=true exercises the stderr channel
-    /// creation path (the MockRunner no-op set_stderr_tx is fine here).
+    /// Verify that run_sync creates the event channel and calls set_event_tx on
+    /// the runner (the MockRunner no-op implementation is fine here).
     #[test]
-    fn test_run_sync_show_errors_creates_stderr_channel() {
+    fn test_run_sync_creates_event_channel() {
         let server = mock_api_server_with_adrs();
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
@@ -5705,7 +5542,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
-            show_errors: true, // ← exercises the stderr channel creation path
+            show_errors: false,
         };
         let result = run_sync(
             &args,
@@ -5717,7 +5554,7 @@ mod tests {
         );
         assert!(
             result.is_ok(),
-            "expected Ok with show_errors=true: {result:?}"
+            "expected Ok with event channel wiring: {result:?}"
         );
     }
 
