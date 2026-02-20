@@ -63,6 +63,7 @@ jobs:
           # Exclude main.rs (thin binary wrapper with process::exit),
           # real_terminal.rs (console::Term I/O wrapper with untestable OS
           # error paths), sync_wiring.rs (CliClaudeRunner instantiation),
+          # sync_kb_poller.rs (crossterm TTY poller, only runs on real TTY),
           # and test files from coverage measurement.
           cargo llvm-cov --workspace --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_wiring\.rs|sync_kb_poller\.rs|tui/renderer\.rs)' --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
           COV_EXIT=${PIPESTATUS[0]}
