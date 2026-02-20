@@ -16,29 +16,67 @@ use std::sync::{
 
 use tokio::sync::oneshot;
 
-/// A guard that keeps the keyboard poller thread alive.
-/// Drop it (or call `stop_and_join`) to cleanly shut the thread down.
+/// Guard returned by [`setup`].  Signals the poller thread to stop when
+/// dropped.  When no thread was started (non-TUI mode) this is a no-op.
 pub struct KbPoller {
-    stop: Arc<AtomicBool>,
-    handle: std::thread::JoinHandle<()>,
+    inner: Option<KbPollerInner>,
 }
 
-impl KbPoller {
-    /// Signal the poller thread to stop and wait for it to exit.
-    pub fn stop_and_join(self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.handle.join();
+struct KbPollerInner {
+    stop: Arc<AtomicBool>,
+    _handle: std::thread::JoinHandle<()>,
+}
+
+impl Drop for KbPoller {
+    fn drop(&mut self) {
+        if let Some(inner) = &self.inner {
+            inner.stop.store(true, Ordering::Relaxed);
+            // The thread wakes every 100 ms and will exit after seeing the flag.
+            // We don't join here because `JoinHandle::join` requires ownership.
+        }
     }
 }
 
-/// Spawn a background keyboard-poller thread.
+/// Set up the keyboard-cancel poller.
 ///
-/// Returns a `(KbPoller, oneshot::Receiver<()>)` pair.  The receiver fires
-/// when the user presses a quit key (`q`, `Q`, `Esc`, `Ctrl+C`).
+/// When `is_tui` is `true`, spawns a background crossterm-poller thread and
+/// returns a cancel future that fires on `q`/`Esc`/`Ctrl+C` **or** OS SIGINT.
 ///
-/// Call [`KbPoller::stop_and_join`] once tailoring completes (regardless of
-/// whether the user cancelled) to cleanly shut the thread down.
-pub fn spawn() -> (KbPoller, oneshot::Receiver<()>) {
+/// When `is_tui` is `false`, returns a no-op guard and a cancel future that
+/// only fires on OS SIGINT.
+///
+/// Drop the returned [`KbPoller`] once tailoring completes; it will signal
+/// the poller thread (if any) to stop.
+pub fn setup(
+    is_tui: bool,
+) -> (
+    KbPoller,
+    impl std::future::Future<Output = std::io::Result<()>>,
+) {
+    let (kb_poller, kb_cancel_rx) = if is_tui {
+        let (inner, rx) = spawn_thread();
+        (KbPoller { inner: Some(inner) }, Some(rx))
+    } else {
+        (KbPoller { inner: None }, None)
+    };
+
+    let cancel_fut = async move {
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r,
+            r = async {
+                match kb_cancel_rx {
+                    Some(rx) => rx.await.map_err(|_| std::io::Error::other("keyboard cancel channel closed")),
+                    None => std::future::pending().await,
+                }
+            } => r,
+        }
+    };
+
+    (kb_poller, cancel_fut)
+}
+
+/// Spawn the background crossterm-poller thread.
+fn spawn_thread() -> (KbPollerInner, oneshot::Receiver<()>) {
     let (tx, rx) = oneshot::channel::<()>();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = stop.clone();
@@ -69,5 +107,11 @@ pub fn spawn() -> (KbPoller, oneshot::Receiver<()>) {
         }
     });
 
-    (KbPoller { stop, handle }, rx)
+    (
+        KbPollerInner {
+            stop,
+            _handle: handle,
+        },
+        rx,
+    )
 }
