@@ -440,7 +440,10 @@ impl TuiRenderer {
         if let Mode::Quiet = &self.mode {
             return;
         }
-        self.logs[self.active_step].push(line.to_string());
+        // LogPane is rendered by ratatui which does not interpret raw ANSI escape
+        // sequences — strip them before storing so they don't appear as literal text.
+        let plain = console::strip_ansi_codes(line);
+        self.logs[self.active_step].push(plain.into_owned());
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("{line}");
@@ -962,6 +965,18 @@ mod tests {
         let mut r = TuiRenderer::new(true, false);
         r.println("should be ignored");
         assert_eq!(r.logs[0].len(), 0);
+    }
+
+    #[test]
+    fn test_println_strips_ansi_codes() {
+        let mut r = TuiRenderer::new(false, true); // Plain mode
+        let ansi_line = "\x1b[38;2;0;251;126mhello\x1b[0m";
+        r.println(ansi_line);
+        let stored = r.logs[0].render_to_string(10, 100, 0);
+        assert_eq!(
+            stored[0], "hello",
+            "ANSI codes should be stripped from log storage"
+        );
     }
 
     // ── suspend tests ──
