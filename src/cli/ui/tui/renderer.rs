@@ -781,9 +781,16 @@ impl TuiRenderer {
     }
 
     /// Redraw the TUI. No-op in Plain and Quiet modes.
+    ///
+    /// Gap 4: draw errors are logged via `tracing::error!` and the renderer
+    /// falls back to [`Mode::Plain`] so subsequent output is still visible.
+    /// The terminal cleanup (`disable_raw_mode` + `LeaveAlternateScreen`) is
+    /// performed here before switching modes so the Drop impl does not try to
+    /// clean up a terminal that is no longer in Tui mode.
     fn draw(&mut self) {
-        if let Mode::Tui(ref mut terminal) = self.mode {
-            // In review mode, show the selected step's log; otherwise show active step's log.
+        // Build the context and attempt the draw while the Tui borrow is active,
+        // then handle any error after the borrow is released.
+        let draw_error = if let Mode::Tui(ref mut terminal) = self.mode {
             let log_idx = self.selected_step.unwrap_or(self.active_step);
             let ctx = RenderContext {
                 steps: &self.steps,
@@ -794,7 +801,18 @@ impl TuiRenderer {
                 selected: self.selected_step,
                 version: &self.version,
             };
-            let _ = terminal.draw_frame(ctx);
+            terminal.draw_frame(ctx).err().map(|e| e.to_string())
+        } else {
+            None
+        };
+
+        if let Some(err_msg) = draw_error {
+            tracing::error!("TUI draw failed: {err_msg}; falling back to plain output");
+            // Clean up terminal state before switching to plain mode so the
+            // Drop impl does not attempt a double-cleanup.
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stderr(), LeaveAlternateScreen, Show);
+            self.mode = Mode::Plain;
         }
     }
 }

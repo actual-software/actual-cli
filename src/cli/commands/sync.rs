@@ -118,7 +118,18 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     // Load config early so we can show server URL and cache status in the
     // Environment step output. Falls back to default if the config is missing
     // or unreadable (non-fatal — errors surface later when config is required).
-    let config = load_from(cfg_path).unwrap_or_default();
+    // Gap 6: log a warning when the config file exists but cannot be parsed so
+    // the user can see it in the tracing log rather than silently getting defaults.
+    let config = match load_from(cfg_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "failed to load config from {}: {e} — using defaults",
+                cfg_path.display()
+            );
+            Default::default()
+        }
+    };
 
     // Resolve effective API server URL (CLI flag > config > default).
     // Store as an owned String so it remains valid after config is reloaded in Phase 2.
@@ -504,11 +515,34 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             }
             Err(e) => {
                 pipeline.error(SyncPhase::Tailor, &format!("Tailoring failed: {e}"));
+                // Gap 1: surface subprocess stderr directly in the TUI log pane
+                // so the user sees Claude Code diagnostics (quota errors, auth
+                // failures, rate limits, etc.) rather than just the exit-code summary.
+                if let crate::error::ActualError::ClaudeSubprocessFailed { stderr, .. } = &e {
+                    if !stderr.is_empty() {
+                        pipeline.println("  Subprocess output:");
+                        for line in console::strip_ansi_codes(stderr).lines() {
+                            pipeline.println(&format!("    {line}"));
+                        }
+                    }
+                }
                 pipeline.finish_remaining();
                 return Err(e);
             }
         }
     };
+
+    // Gap 7: surface the AI reasoning per file when --verbose is set, so
+    // the user can see why the model generated each output file.
+    if args.verbose {
+        for file in &output.files {
+            if !file.reasoning.is_empty() {
+                let safe_path = console::strip_ansi_codes(&file.path);
+                let safe_reasoning = console::strip_ansi_codes(&file.reasoning);
+                pipeline.println(&format!("  [{safe_path}]: {safe_reasoning}"));
+            }
+        }
+    }
 
     // ── Phase 3: confirm + write (fully implemented) ──
     // pipeline stays alive through confirm+write so output goes into the TUI
@@ -598,6 +632,10 @@ fn apply_tailoring_event(event: TailoringEvent, pipeline: &mut TuiRenderer, comp
     }
 }
 
+/// How long to wait with no progress events before warning the user that
+/// Claude Code may be hanging (e.g. waiting for a permission prompt).
+const HANG_WARN_SECS: u64 = 30;
+
 /// Drive the tailoring future to completion while processing progress events,
 /// with support for cancellation via a caller-supplied future.
 ///
@@ -608,6 +646,11 @@ fn apply_tailoring_event(event: TailoringEvent, pipeline: &mut TuiRenderer, comp
 /// A 100 ms heartbeat timer keeps the TUI spinner animating and the elapsed
 /// time display updating even when Claude is thinking and no progress events
 /// are flowing.
+///
+/// Gap 2: if no progress events arrive within [`HANG_WARN_SECS`] seconds, a
+/// one-time warning is emitted to the TUI log pane.  This makes it visible
+/// when Claude Code is blocked on a permission prompt (stdin is /dev/null so
+/// the subprocess would hang silently until the 10-minute timeout fires).
 async fn run_tailoring_with_cancel<F, C>(
     tailor_fut: F,
     progress_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TailoringEvent>,
@@ -632,16 +675,26 @@ where
     // Consume the first immediate tick so the interval doesn't fire right away.
     heartbeat.tick().await;
 
+    // Gap 2: track when the last progress event arrived so we can detect hangs.
+    let mut last_event_time = std::time::Instant::now();
+    // Latch: emit the hang warning at most once per tailoring run to avoid
+    // flooding the log pane with repeated messages.
+    let mut hang_warned = false;
+
     loop {
         tokio::select! {
             result = &mut tailor_fut => {
-                // Drain any remaining events before breaking
+                // Drain any remaining events before breaking.
+                // No need to update last_event_time here — hang detection is
+                // only relevant while tailoring is still in progress.
                 while let Ok(event) = progress_rx.try_recv() {
                     apply_tailoring_event(event, pipeline, &mut completed);
                 }
                 break result;
             }
             Some(event) = progress_rx.recv() => {
+                // Reset hang tracking on every progress event.
+                last_event_time = std::time::Instant::now();
                 apply_tailoring_event(event, pipeline, &mut completed);
             }
             result = &mut cancel => {
@@ -660,6 +713,22 @@ where
                         "Tailoring ADRs ({completed}/{project_count} projects done, {elapsed}s)..."
                     ),
                 );
+
+                // Gap 2: warn once if no progress events have arrived for
+                // HANG_WARN_SECS.  This typically means Claude Code is blocked
+                // on a permission prompt (stdin is /dev/null so it will never
+                // receive input — the hang will persist until the timeout fires).
+                if !hang_warned && last_event_time.elapsed().as_secs() >= HANG_WARN_SECS {
+                    hang_warned = true;
+                    pipeline.println(&format!(
+                        "  \u{26a0} No output received in {HANG_WARN_SECS}s \u{2014} \
+        Claude Code may be waiting for a permission prompt"
+                    ));
+                    tracing::warn!(
+                        "no tailoring progress events for {HANG_WARN_SECS}s — \
+        Claude Code may be waiting for a permission prompt"
+                    );
+                }
             }
         }
     }
@@ -762,7 +831,10 @@ fn serialize_tailoring_output<T: serde::Serialize>(output: &T) -> Option<serde_y
     match serde_yaml::to_value(output) {
         Ok(v) => Some(v),
         Err(e) => {
-            eprintln!("warning: failed to serialize tailoring cache: {e}");
+            // Gap 5: route through tracing so the warning is visible in the log
+            // file (TUI mode) or stderr (plain mode) rather than being lost when
+            // the TUI alternate screen is active.
+            tracing::warn!("failed to serialize tailoring cache: {e}");
             None
         }
     }
@@ -798,8 +870,9 @@ fn store_tailoring_cache<T: serde::Serialize>(
     });
     // Best-effort persist: if disk write fails, the in-memory cache is
     // still populated for subsequent operations in this process.
+    // Gap 5: use tracing so the warning reaches the log file in TUI mode.
     if let Err(e) = save_to(config, cfg_path) {
-        eprintln!("warning: failed to save tailoring cache: {e}");
+        tracing::warn!("failed to save tailoring cache: {e}");
     }
 }
 
