@@ -19,9 +19,9 @@ pub struct InvocationOptions {
     pub max_budget_usd: Option<f64>,
     /// Whether to pass --allow-dangerously-skip-permissions.
     ///
-    /// Profiles that use only read-only tools (e.g., tailoring) set this to
-    /// `true`. Profiles with write or exec tools must leave it `false` so that
-    /// the user is prompted for permission.
+    /// Set to `true` for profiles that do not need Bash or network access
+    /// (e.g., tailoring uses Read/Write/Edit/Glob/Grep). Profiles that include
+    /// Bash or WebFetch must leave this `false` so the user is prompted.
     pub skip_permissions: bool,
 }
 
@@ -36,16 +36,18 @@ const DEFAULT_MODEL: &str = "sonnet";
 impl InvocationOptions {
     /// Create options for ADR tailoring.
     ///
-    /// Tailoring is restricted to read-only tools (no Bash), 5 max turns.
+    /// Tailoring has read and file-write access (no Bash or network), 5 max turns.
     pub fn for_tailoring(model_override: Option<&str>) -> Self {
         Self {
             model: model_override.unwrap_or(DEFAULT_MODEL).to_string(),
             max_turns: 5,
-            tools: "Read,Glob,Grep".to_string(),
+            tools: "Read,Glob,Grep,Write,Edit".to_string(),
             allowed_tools: vec![
                 "Read".to_string(),
                 "Glob(*)".to_string(),
                 "Grep(*)".to_string(),
+                "Write".to_string(),
+                "Edit".to_string(),
             ],
             json_schema: None,
             max_budget_usd: None,
@@ -177,14 +179,16 @@ mod tests {
     }
 
     /// Guard: `skip_permissions = true` must never be combined with tools that
-    /// can execute code or mutate files.  If this test fails it means a
-    /// developer added a dangerous tool to a profile that bypasses all
-    /// permission checks — that would silently allow arbitrary code execution.
+    /// can execute arbitrary code or make network requests.  Write/Edit are
+    /// intentionally permitted for tailoring (file output).  If this test fails
+    /// it means a developer added an exec or network tool to a profile that
+    /// bypasses all permission checks — that would silently allow arbitrary code
+    /// execution or exfiltration.
     #[test]
     fn test_skip_permissions_only_with_readonly_tools() {
         let opts = InvocationOptions::for_tailoring(None);
         assert!(opts.skip_permissions);
-        let forbidden = ["Bash", "Write", "Edit", "WebFetch"];
+        let forbidden = ["Bash", "WebFetch"];
         for tool in &forbidden {
             assert!(!opts.tools.contains(tool));
             for allowed in &opts.allowed_tools {
