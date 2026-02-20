@@ -1174,7 +1174,7 @@ pub fn confirm_and_write(
         })
         .collect();
 
-    // Step 2: Display diff summary in a panel
+    // Step 2: Display diff summary
     let summary = format_diff_summary(&diffs);
     if !summary.is_empty() {
         for line in summary.lines() {
