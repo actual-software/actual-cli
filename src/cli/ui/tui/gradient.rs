@@ -22,6 +22,15 @@ fn gradient_rgb(y_offset: u16, height: u16) -> (u8, u8, u8) {
     )
 }
 
+/// Returns the gradient [`Color`] for a given absolute `y` position within the full
+/// terminal `frame_area`. Uses the same formula as `paint_gradient_border` so logo
+/// text colors are continuous with the border gradient.
+pub fn color_for_y(y: u16, frame_area: Rect) -> ratatui::style::Color {
+    let offset = y.saturating_sub(frame_area.y);
+    let (r, g, b) = gradient_rgb(offset, frame_area.height);
+    ratatui::style::Color::Rgb(r, g, b)
+}
+
 /// Paint the border cells of a `Borders::ALL` box with a green→teal gradient
 /// that is continuous across the full terminal frame.
 ///
