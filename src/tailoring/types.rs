@@ -13,6 +13,22 @@ pub enum TailoringEvent {
         /// Total number of batches that will be processed for this project.
         batch_count: usize,
     },
+    /// A single batch within a project started (emitted after semaphore acquired,
+    /// before invocation begins).
+    BatchStarted {
+        /// Human-readable project name.
+        project_name: String,
+        /// 1-based index of this batch within the project (1..=batch_count).
+        batch_index: usize,
+        /// Total number of batches for this project.
+        batch_count: usize,
+        /// Number of ADRs in this batch.
+        adr_count: usize,
+        /// Category name shared by all ADRs in this batch.
+        category_name: String,
+        /// Titles of ADRs in this batch.
+        adr_titles: Vec<String>,
+    },
     /// A single batch within a project completed successfully.
     BatchCompleted {
         /// Human-readable project name.
@@ -23,6 +39,16 @@ pub enum TailoringEvent {
         batch_count: usize,
         /// Number of ADRs in this batch.
         adr_count: usize,
+        /// Number of ADRs that were applicable (applied) in this batch.
+        applied_count: usize,
+        /// Number of ADRs that were not applicable (skipped) in this batch.
+        skipped_count: usize,
+        /// Skipped ADRs: (adr_id, reason), truncated to first 3 if many.
+        skipped_adrs: Vec<(String, String)>,
+        /// Output file paths produced by this batch.
+        file_paths: Vec<String>,
+        /// Wall-clock duration of the invocation in seconds.
+        elapsed_secs: u64,
     },
     /// A project finished successfully.
     ProjectCompleted {
@@ -32,6 +58,8 @@ pub enum TailoringEvent {
         files_generated: usize,
         /// Number of ADRs that were applicable (not skipped) for this project.
         adrs_applied: usize,
+        /// Merged output file paths for this project.
+        file_paths: Vec<String>,
     },
     /// A project failed.
     ProjectFailed {
@@ -121,6 +149,7 @@ mod tests {
             project_name: "web-app".to_string(),
             files_generated: 3,
             adrs_applied: 5,
+            file_paths: vec!["CLAUDE.md".to_string()],
         };
         let cloned = event.clone();
         assert_eq!(event, cloned);
@@ -158,6 +187,11 @@ mod tests {
             batch_index: 2,
             batch_count: 4,
             adr_count: 10,
+            applied_count: 8,
+            skipped_count: 2,
+            skipped_adrs: vec![("adr-1".to_string(), "not applicable".to_string())],
+            file_paths: vec!["CLAUDE.md".to_string()],
+            elapsed_secs: 42,
         };
         let cloned = event.clone();
         assert_eq!(event, cloned);
@@ -182,11 +216,17 @@ mod tests {
             batch_index: 1,
             batch_count: 1,
             adr_count: 5,
+            applied_count: 5,
+            skipped_count: 0,
+            skipped_adrs: vec![],
+            file_paths: vec![],
+            elapsed_secs: 10,
         };
         let completed = TailoringEvent::ProjectCompleted {
             project_name: "app".to_string(),
             files_generated: 1,
             adrs_applied: 1,
+            file_paths: vec![],
         };
         let failed = TailoringEvent::ProjectFailed {
             project_name: "app".to_string(),
@@ -198,6 +238,61 @@ mod tests {
         assert_ne!(batch_completed, completed);
         assert_ne!(batch_completed, failed);
         assert_ne!(completed, failed);
+    }
+
+    #[test]
+    fn test_tailoring_event_batch_started_debug_clone_eq() {
+        let event = TailoringEvent::BatchStarted {
+            project_name: "my-app".to_string(),
+            batch_index: 1,
+            batch_count: 2,
+            adr_count: 3,
+            category_name: "Error Handling".to_string(),
+            adr_titles: vec!["ADR 001".to_string(), "ADR 002".to_string()],
+        };
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+        let debug = format!("{:?}", event);
+        assert!(
+            debug.contains("BatchStarted"),
+            "expected variant in: {debug}"
+        );
+        assert!(debug.contains("my-app"), "expected name in: {debug}");
+        assert!(
+            debug.contains("Error Handling"),
+            "expected category_name in: {debug}"
+        );
+    }
+
+    #[test]
+    fn test_tailoring_event_batch_started_fields() {
+        let event = TailoringEvent::BatchStarted {
+            project_name: "repo".to_string(),
+            batch_index: 2,
+            batch_count: 3,
+            adr_count: 2,
+            category_name: "Security".to_string(),
+            adr_titles: vec!["Use HTTPS".to_string(), "Validate inputs".to_string()],
+        };
+        if let TailoringEvent::BatchStarted {
+            category_name,
+            adr_titles,
+            batch_index,
+            batch_count,
+            adr_count,
+            ..
+        } = &event
+        {
+            assert_eq!(category_name, "Security");
+            assert_eq!(adr_titles.len(), 2);
+            assert_eq!(adr_titles[0], "Use HTTPS");
+            assert_eq!(adr_titles[1], "Validate inputs");
+            assert_eq!(*batch_index, 2);
+            assert_eq!(*batch_count, 3);
+            assert_eq!(*adr_count, 2);
+        } else {
+            panic!("expected BatchStarted variant");
+        }
     }
 
     #[test]

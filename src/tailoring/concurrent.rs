@@ -168,6 +168,15 @@ async fn tailor_single_project<R: TailoringRunner>(
             // because the FnMut closure cannot move the same String into multiple
             // async blocks.
             let project_json = project_json.clone();
+            // Extract batch metadata before the async move block so we can send
+            // BatchStarted without holding a borrow inside the async context.
+            let category_name = batch_adrs
+                .first()
+                .map(|a| a.category.name.clone())
+                .unwrap_or_default();
+            let adr_titles: Vec<String> = batch_adrs.iter().map(|a| a.title.clone()).collect();
+            let project_name_for_batch = project.name.clone();
+            let tx_for_batch = progress_tx.clone();
             async move {
                 // The semaphore is held in an Arc and never explicitly closed, so
                 // AcquireError is unreachable in practice. We convert it to
@@ -178,6 +187,22 @@ async fn tailor_single_project<R: TailoringRunner>(
                         "semaphore closed unexpectedly — this is a bug".to_string(),
                     )
                 })?;
+                // Emit BatchStarted now that work is actually beginning.
+                if let Some(ref t) = tx_for_batch {
+                    if t.send(TailoringEvent::BatchStarted {
+                        project_name: project_name_for_batch.clone(),
+                        batch_index: batch_idx + 1,
+                        batch_count,
+                        adr_count,
+                        category_name: category_name.clone(),
+                        adr_titles: adr_titles.clone(),
+                    })
+                    .is_err()
+                    {
+                        tracing::warn!("tailoring event dropped: receiver gone");
+                    }
+                }
+                let batch_started = std::time::Instant::now();
                 let output = invoke_tailoring(
                     runner,
                     batch_adrs,
@@ -188,9 +213,10 @@ async fn tailor_single_project<R: TailoringRunner>(
                     config.output_format,
                 )
                 .await?;
-                // Return (batch_idx, adr_count, output) so the consumer can emit
-                // a BatchCompleted event with correct indexing.
-                Ok::<_, ActualError>((batch_idx, adr_count, output))
+                let elapsed_secs = batch_started.elapsed().as_secs();
+                // Return (batch_idx, adr_count, output, elapsed_secs) so the consumer
+                // can emit a BatchCompleted event with correct indexing and timing.
+                Ok::<_, ActualError>((batch_idx, adr_count, output, elapsed_secs))
             }
         })
         .collect();
@@ -200,8 +226,16 @@ async fn tailor_single_project<R: TailoringRunner>(
 
     while let Some(batch_result) = stream.next().await {
         match batch_result {
-            Ok((batch_idx, adr_count, output)) => {
+            Ok((batch_idx, adr_count, output, elapsed_secs)) => {
                 if let Some(tx) = &progress_tx {
+                    let skipped_adrs: Vec<(String, String)> = output
+                        .skipped_adrs
+                        .iter()
+                        .take(3)
+                        .map(|s| (s.id.clone(), s.reason.clone()))
+                        .collect();
+                    let file_paths: Vec<String> =
+                        output.files.iter().map(|f| f.path.clone()).collect();
                     if tx
                         .send(TailoringEvent::BatchCompleted {
                             project_name: project.name.clone(),
@@ -209,6 +243,11 @@ async fn tailor_single_project<R: TailoringRunner>(
                             batch_index: batch_idx + 1,
                             batch_count,
                             adr_count,
+                            applied_count: output.summary.applicable,
+                            skipped_count: output.summary.not_applicable,
+                            skipped_adrs,
+                            file_paths,
+                            elapsed_secs,
                         })
                         .is_err()
                     {
@@ -234,11 +273,13 @@ async fn tailor_single_project<R: TailoringRunner>(
         Ok(outputs) => {
             let merged = merge_outputs(outputs);
             if let Some(tx) = &progress_tx {
+                let file_paths: Vec<String> = merged.files.iter().map(|f| f.path.clone()).collect();
                 if tx
                     .send(TailoringEvent::ProjectCompleted {
                         project_name: project.name.clone(),
                         files_generated: merged.summary.files_generated,
                         adrs_applied: merged.summary.applicable,
+                        file_paths,
                     })
                     .is_err()
                 {
@@ -296,6 +337,7 @@ mod tests {
                 batch_index,
                 batch_count,
                 adr_count,
+                ..
             } => (
                 project_name.as_str(),
                 *batch_index,
@@ -1212,6 +1254,7 @@ mod tests {
                 project_name,
                 files_generated,
                 adrs_applied,
+                ..
             } = event
             {
                 assert!(
@@ -1676,6 +1719,7 @@ mod tests {
             project_name: "x".to_string(),
             files_generated: 0,
             adrs_applied: 0,
+            file_paths: vec![],
         };
         project_started_fields(&wrong);
     }
@@ -1687,6 +1731,7 @@ mod tests {
             project_name: "x".to_string(),
             files_generated: 0,
             adrs_applied: 0,
+            file_paths: vec![],
         };
         batch_completed_fields(&wrong);
     }
