@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt as _;
 use tokio::sync::Semaphore;
 
 use crate::analysis::types::Project;
@@ -140,10 +141,15 @@ async fn tailor_single_project<R: TailoringRunner>(
     semaphore: &Semaphore,
     progress_tx: Option<tokio::sync::mpsc::UnboundedSender<TailoringEvent>>,
 ) -> Result<TailoringOutput, ActualError> {
+    let project_json = serialize_json(project, "project")?;
+    let batches = create_batches(adrs, config.batch_size);
+    let batch_count = batches.len();
+
     if let Some(tx) = &progress_tx {
         if tx
             .send(TailoringEvent::ProjectStarted {
                 project_name: project.name.clone(),
+                batch_count,
             })
             .is_err()
         {
@@ -151,35 +157,78 @@ async fn tailor_single_project<R: TailoringRunner>(
         }
     }
 
-    let project_json = serialize_json(project, "project")?;
-    let batches = create_batches(adrs, config.batch_size);
-
-    let futures: Vec<_> = batches
+    // Use FuturesUnordered so we can emit a BatchCompleted event as each
+    // batch finishes, rather than waiting for all batches to complete at once.
+    let mut stream: futures::stream::FuturesUnordered<_> = batches
         .iter()
-        .map(|batch_adrs| async {
-            // The semaphore is held in an Arc and never explicitly closed, so
-            // AcquireError is unreachable in practice. We convert it to
-            // InternalError rather than panicking, documenting the invariant.
-            // See actual-cli-bek.21.
-            let _permit = semaphore.acquire().await.map_err(|_| {
-                ActualError::InternalError(
-                    "semaphore closed unexpectedly — this is a bug".to_string(),
+        .enumerate()
+        .map(|(batch_idx, batch_adrs)| {
+            let adr_count = batch_adrs.len();
+            // Clone project_json so each async block owns its own copy — required
+            // because the FnMut closure cannot move the same String into multiple
+            // async blocks.
+            let project_json = project_json.clone();
+            async move {
+                // The semaphore is held in an Arc and never explicitly closed, so
+                // AcquireError is unreachable in practice. We convert it to
+                // InternalError rather than panicking, documenting the invariant.
+                // See actual-cli-bek.21.
+                let _permit = semaphore.acquire().await.map_err(|_| {
+                    ActualError::InternalError(
+                        "semaphore closed unexpectedly — this is a bug".to_string(),
+                    )
+                })?;
+                let output = invoke_tailoring(
+                    runner,
+                    batch_adrs,
+                    &project_json,
+                    config.existing_output_file_paths,
+                    config.model_override,
+                    config.max_budget_usd,
+                    config.output_format,
                 )
-            })?;
-            invoke_tailoring(
-                runner,
-                batch_adrs,
-                &project_json,
-                config.existing_output_file_paths,
-                config.model_override,
-                config.max_budget_usd,
-                config.output_format,
-            )
-            .await
+                .await?;
+                // Return (batch_idx, adr_count, output) so the consumer can emit
+                // a BatchCompleted event with correct indexing.
+                Ok::<_, ActualError>((batch_idx, adr_count, output))
+            }
         })
         .collect();
 
-    let result = futures::future::try_join_all(futures).await;
+    let mut batch_outputs = Vec::with_capacity(batch_count);
+    let mut stream_error: Option<ActualError> = None;
+
+    while let Some(batch_result) = stream.next().await {
+        match batch_result {
+            Ok((batch_idx, adr_count, output)) => {
+                if let Some(tx) = &progress_tx {
+                    if tx
+                        .send(TailoringEvent::BatchCompleted {
+                            project_name: project.name.clone(),
+                            // 1-based for display
+                            batch_index: batch_idx + 1,
+                            batch_count,
+                            adr_count,
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!("tailoring event dropped: receiver gone");
+                    }
+                }
+                batch_outputs.push(output);
+            }
+            Err(e) => {
+                stream_error = Some(e);
+                break;
+            }
+        }
+    }
+
+    let result = if let Some(e) = stream_error {
+        Err(e)
+    } else {
+        Ok(batch_outputs)
+    };
 
     match result {
         Ok(outputs) => {
@@ -1088,6 +1137,10 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, TailoringEvent::ProjectStarted { .. }))
             .collect();
+        let batch_completed: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TailoringEvent::BatchCompleted { .. }))
+            .collect();
         let completed: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, TailoringEvent::ProjectCompleted { .. }))
@@ -1098,8 +1151,29 @@ mod tests {
             .collect();
 
         assert_eq!(started.len(), 2, "expected 2 ProjectStarted events");
+        // 1 ADR → 1 batch per project → 2 BatchCompleted events total
+        assert_eq!(
+            batch_completed.len(),
+            2,
+            "expected 2 BatchCompleted events (one per project batch)"
+        );
         assert_eq!(completed.len(), 2, "expected 2 ProjectCompleted events");
         assert_eq!(failed.len(), 0, "expected no ProjectFailed events");
+
+        // ProjectStarted events should carry batch_count=1 (only one batch per project here)
+        for event in &started {
+            if let TailoringEvent::ProjectStarted {
+                project_name,
+                batch_count,
+            } = event
+            {
+                assert!(
+                    project_name == "alpha" || project_name == "beta",
+                    "unexpected project name: {project_name}"
+                );
+                assert_eq!(*batch_count, 1, "expected 1 batch for {project_name}");
+            }
+        }
 
         // ProjectCompleted events should carry correct file/adr counts
         for event in &completed {
@@ -1117,6 +1191,121 @@ mod tests {
                 assert_eq!(*adrs_applied, 1, "expected 1 adr for {project_name}");
             }
         }
+    }
+
+    // --- Test 11b: BatchCompleted events are emitted for multi-batch projects ---
+
+    #[tokio::test]
+    async fn test_batch_completed_events_emitted() {
+        // 1 project with 2 ADRs in different categories → 2 batches with batch_size=1
+        let projects = vec![make_project("mono")];
+        let adr1 = Adr {
+            id: "adr-001".to_string(),
+            title: "ADR 001".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-a".to_string(),
+                name: "Category A".to_string(),
+                path: "Category A".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adr2 = Adr {
+            id: "adr-002".to_string(),
+            title: "ADR 002".to_string(),
+            context: None,
+            policies: vec!["policy".to_string()],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-b".to_string(),
+                name: "Category B".to_string(),
+                path: "Category B".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+            },
+            matched_projects: vec![],
+        };
+        let adrs = vec![adr1, adr2];
+
+        let responses = vec![
+            make_output_json("CLAUDE.md", "Batch 1", &["adr-001"]),
+            make_output_json("apps/mono/CLAUDE.md", "Batch 2", &["adr-002"]),
+        ];
+
+        let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(10));
+
+        let config = ConcurrentTailoringConfig {
+            concurrency: 2,
+            batch_size: 1, // force 2 batches
+            existing_output_file_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(600),
+            output_format: &OutputFormat::ClaudeMd,
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, Some(tx)).await;
+        assert!(result.is_ok(), "expected success");
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        // Verify ProjectStarted carries batch_count=2
+        let started: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TailoringEvent::ProjectStarted { .. }))
+            .collect();
+        assert_eq!(started.len(), 1, "expected 1 ProjectStarted event");
+        if let TailoringEvent::ProjectStarted {
+            project_name,
+            batch_count,
+        } = &started[0]
+        {
+            assert_eq!(project_name, "mono");
+            assert_eq!(*batch_count, 2, "expected 2 batches for mono");
+        }
+
+        // Verify 2 BatchCompleted events, each with batch_count=2
+        let batch_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TailoringEvent::BatchCompleted { .. }))
+            .collect();
+        assert_eq!(batch_events.len(), 2, "expected 2 BatchCompleted events");
+        for event in &batch_events {
+            if let TailoringEvent::BatchCompleted {
+                project_name,
+                batch_index,
+                batch_count,
+                adr_count,
+            } = event
+            {
+                assert_eq!(project_name, "mono");
+                assert_eq!(*batch_count, 2);
+                assert!(
+                    *batch_index == 1 || *batch_index == 2,
+                    "unexpected batch_index: {batch_index}"
+                );
+                assert_eq!(*adr_count, 1, "each batch has 1 ADR");
+            }
+        }
+
+        // Verify exactly 1 ProjectCompleted event
+        let completed: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, TailoringEvent::ProjectCompleted { .. }))
+            .collect();
+        assert_eq!(completed.len(), 1, "expected 1 ProjectCompleted event");
     }
 
     // --- Test 12: progress events include ProjectFailed on error ---

@@ -3,13 +3,26 @@ use serde::{Deserialize, Serialize};
 /// Progress event emitted during concurrent tailoring.
 ///
 /// Sent through a channel to allow callers to display real-time progress
-/// as individual projects complete.
+/// as individual projects and batches complete.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TailoringEvent {
     /// A project started processing.
     ProjectStarted {
         /// Human-readable project name.
         project_name: String,
+        /// Total number of batches that will be processed for this project.
+        batch_count: usize,
+    },
+    /// A single batch within a project completed successfully.
+    BatchCompleted {
+        /// Human-readable project name.
+        project_name: String,
+        /// 1-based index of this batch within the project (1..=batch_count).
+        batch_index: usize,
+        /// Total number of batches for this project.
+        batch_count: usize,
+        /// Number of ADRs in this batch.
+        adr_count: usize,
     },
     /// A project finished successfully.
     ProjectCompleted {
@@ -90,6 +103,7 @@ mod tests {
     fn test_tailoring_event_project_started_debug_clone_eq() {
         let event = TailoringEvent::ProjectStarted {
             project_name: "my-app".to_string(),
+            batch_count: 3,
         };
         let cloned = event.clone();
         assert_eq!(event, cloned);
@@ -138,9 +152,36 @@ mod tests {
     }
 
     #[test]
+    fn test_tailoring_event_batch_completed_debug_clone_eq() {
+        let event = TailoringEvent::BatchCompleted {
+            project_name: "my-app".to_string(),
+            batch_index: 2,
+            batch_count: 4,
+            adr_count: 10,
+        };
+        let cloned = event.clone();
+        assert_eq!(event, cloned);
+        let debug = format!("{:?}", event);
+        assert!(
+            debug.contains("BatchCompleted"),
+            "expected variant in: {debug}"
+        );
+        assert!(debug.contains("my-app"), "expected name in: {debug}");
+        assert!(debug.contains('2'), "expected batch_index in: {debug}");
+        assert!(debug.contains('4'), "expected batch_count in: {debug}");
+    }
+
+    #[test]
     fn test_tailoring_event_variants_not_equal() {
         let started = TailoringEvent::ProjectStarted {
             project_name: "app".to_string(),
+            batch_count: 1,
+        };
+        let batch_completed = TailoringEvent::BatchCompleted {
+            project_name: "app".to_string(),
+            batch_index: 1,
+            batch_count: 1,
+            adr_count: 5,
         };
         let completed = TailoringEvent::ProjectCompleted {
             project_name: "app".to_string(),
@@ -151,8 +192,11 @@ mod tests {
             project_name: "app".to_string(),
             error: "err".to_string(),
         };
+        assert_ne!(started, batch_completed);
         assert_ne!(started, completed);
         assert_ne!(started, failed);
+        assert_ne!(batch_completed, completed);
+        assert_ne!(batch_completed, failed);
         assert_ne!(completed, failed);
     }
 
