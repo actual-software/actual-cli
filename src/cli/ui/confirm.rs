@@ -4,7 +4,6 @@ use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::error::ActualError;
 
-use super::panel::Panel;
 use super::theme;
 
 /// Abbreviate common language names for compact display.
@@ -56,21 +55,15 @@ fn format_metadata(project: &Project) -> String {
     parts.join(" · ")
 }
 
-/// Format the project summary for display inside a Panel.
+/// Format the project summary as clean inline text lines (no panel/box).
 ///
 /// This is separate from the prompt so it can be tested independently.
-/// The `width` parameter controls the panel's rendered width.
-pub fn format_project_summary(analysis: &RepoAnalysis, width: usize) -> String {
-    let title = if analysis.is_monorepo {
-        "Projects"
-    } else {
-        "Project"
-    };
-
-    let mut panel = Panel::titled(title);
+/// The `width` parameter is retained for API compatibility but is no longer
+/// used to render a panel — the output is plain text.
+pub fn format_project_summary(analysis: &RepoAnalysis, _width: usize) -> String {
+    let diamond = theme::hint(&theme::DIAMOND);
 
     // Header line
-    let diamond = theme::hint(&theme::DIAMOND);
     let header = if analysis.is_monorepo {
         format!(
             "{diamond} Monorepo detected \u{2014} {} projects",
@@ -79,29 +72,39 @@ pub fn format_project_summary(analysis: &RepoAnalysis, width: usize) -> String {
     } else {
         format!("{diamond} Single project detected")
     };
-    panel = panel.line("").line(&header).line("");
+
+    let mut lines = vec![header];
 
     // Project lines
     for project in &analysis.projects {
-        let bullet = theme::heading(&theme::BULLET);
         let safe_name = console::strip_ansi_codes(&project.name);
         let name = theme::heading(&safe_name);
         let metadata = format_metadata(project);
-        let meta_display = if metadata.is_empty() {
-            String::new()
+
+        let project_line = if analysis.is_monorepo {
+            // For monorepo: show path in parens
+            let safe_path = console::strip_ansi_codes(&project.path);
+            let path = theme::muted(&safe_path);
+            if metadata.is_empty() {
+                format!("  {name}  ({path})")
+            } else {
+                let meta = theme::muted(&metadata);
+                format!("  {name}  {meta}  ({path})")
+            }
         } else {
-            format!("  {}", theme::muted(&metadata))
+            // Single project: no path suffix needed
+            if metadata.is_empty() {
+                format!("  {name}")
+            } else {
+                let meta = theme::muted(&metadata);
+                format!("  {name}  {meta}")
+            }
         };
 
-        panel = panel.line(&format!("{bullet} {name}{meta_display}"));
-
-        let safe_path = console::strip_ansi_codes(&project.path);
-        let path = theme::muted(&safe_path);
-        panel = panel.line(&format!("  {path}"));
+        lines.push(project_line);
     }
 
-    panel = panel.line("");
-    panel.render(width)
+    lines.join("\n")
 }
 
 /// Display detected projects and prompt for confirmation using the given terminal.
@@ -252,15 +255,14 @@ mod tests {
             plain.contains("cargo"),
             "expected package manager in: {plain}"
         );
-        // Panel box characters
-        assert!(plain.contains('╭'), "expected panel top border in: {plain}");
+        // No panel box characters — output is plain text
         assert!(
-            plain.contains('╰'),
-            "expected panel bottom border in: {plain}"
+            !plain.contains('┌'),
+            "should not contain panel top border in: {plain}"
         );
         assert!(
-            plain.contains("Projects"),
-            "expected panel title in: {plain}"
+            !plain.contains('└'),
+            "should not contain panel bottom border in: {plain}"
         );
     }
 
@@ -283,9 +285,10 @@ mod tests {
             "expected project name in: {plain}"
         );
         assert!(plain.contains("clap"), "expected framework in: {plain}");
+        // No panel box characters — output is plain text
         assert!(
-            plain.contains("Project"),
-            "expected panel title 'Project' in: {plain}"
+            !plain.contains('┌'),
+            "should not contain panel borders in: {plain}"
         );
     }
 
@@ -459,19 +462,34 @@ mod tests {
     }
 
     #[test]
-    fn format_summary_panel_width_60() {
+    fn format_summary_width_ignored_no_panel() {
         let analysis = make_single_project_analysis();
+        // Width parameter is accepted but no longer affects output — no panel is rendered
         let output = format_project_summary(&analysis, 60);
         let plain = strip(&output);
 
-        // All lines should be 60 chars wide (panel lines)
-        for line in plain.lines() {
-            assert_eq!(
-                line.chars().count(),
-                60,
-                "line should be 60 chars: '{line}'"
-            );
-        }
+        // Content is still present
+        assert!(
+            plain.contains("Single project detected"),
+            "expected header in: {plain}"
+        );
+        assert!(
+            plain.contains("my-cli"),
+            "expected project name in: {plain}"
+        );
+        // No panel box-drawing characters
+        assert!(
+            !plain.contains('┌'),
+            "should not contain panel top border in: {plain}"
+        );
+        assert!(
+            !plain.contains('└'),
+            "should not contain panel bottom border in: {plain}"
+        );
+        assert!(
+            !plain.contains('│'),
+            "should not contain panel side border in: {plain}"
+        );
     }
 
     // ── prompt_project_confirmation tests ──
@@ -578,8 +596,9 @@ mod tests {
 
     #[test]
     fn format_summary_strips_ansi_from_project_path() {
+        // Use a monorepo so the path is shown in the output (single-project format omits the path)
         let analysis = RepoAnalysis {
-            is_monorepo: false,
+            is_monorepo: true,
             projects: vec![Project {
                 path: "\x1b[32mPATH_INJECT\x1b[0m".to_string(),
                 name: "safe-name".to_string(),
