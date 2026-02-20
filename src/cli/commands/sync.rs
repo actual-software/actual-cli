@@ -464,6 +464,18 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
 
+        // When --show-errors is active, create a side-channel for subprocess
+        // stderr.  The sender is registered with the runner so it can forward
+        // lines in real time; the receiver is passed to the select! loop.
+        let mut stderr_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>> =
+            if args.show_errors {
+                let (stderr_tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                runner.set_stderr_tx(stderr_tx);
+                Some(rx)
+            } else {
+                None
+            };
+
         // In TUI mode (raw mode active) the terminal consumes keyboard input,
         // so OS-level SIGINT from Ctrl+C may not reach the process reliably.
         // `sync_kb_poller::setup` optionally spawns a background poller thread
@@ -481,6 +493,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             run_tailoring_with_cancel(
                 tailor_fut,
                 &mut progress_rx,
+                &mut stderr_rx,
                 &mut pipeline,
                 project_count,
                 cancel,
@@ -655,6 +668,19 @@ fn apply_tailoring_event(event: TailoringEvent, pipeline: &mut TuiRenderer, comp
 /// Claude Code may be hanging (e.g. waiting for a permission prompt).
 const HANG_WARN_SECS: u64 = 30;
 
+/// Wait for the next line from an optional unbounded receiver.
+///
+/// When `rx` is `None`, the returned future is permanently pending,
+/// effectively disabling the caller's `select!` arm without any overhead.
+async fn recv_optional(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+) -> Option<String> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending::<Option<String>>().await,
+    }
+}
+
 /// Drive the tailoring future to completion while processing progress events,
 /// with support for cancellation via a caller-supplied future.
 ///
@@ -670,9 +696,15 @@ const HANG_WARN_SECS: u64 = 30;
 /// one-time warning is emitted to the TUI log pane.  This makes it visible
 /// when Claude Code is blocked on a permission prompt (stdin is /dev/null so
 /// the subprocess would hang silently until the 10-minute timeout fires).
+///
+/// When `stderr_rx` is `Some` (`--show-errors` is active), subprocess stderr
+/// lines are streamed live to the TUI log pane.  On hang, any buffered stderr
+/// lines are also dumped.  Without the flag, a tip to re-run with `--show-errors`
+/// is shown instead.
 async fn run_tailoring_with_cancel<F, C>(
     tailor_fut: F,
     progress_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TailoringEvent>,
+    stderr_rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     pipeline: &mut TuiRenderer,
     project_count: usize,
     cancel: C,
@@ -718,6 +750,12 @@ where
                 last_event_time = tokio::time::Instant::now();
                 apply_tailoring_event(event, pipeline, &mut completed);
             }
+            // Live-stream stderr lines from the subprocess when --show-errors is
+            // active.  recv_optional() returns a permanently-pending future when
+            // stderr_rx is None, so this arm is a no-op without the flag.
+            Some(line) = recv_optional(stderr_rx) => {
+                pipeline.println(&format!("  [stderr] {line}"));
+            }
             result = &mut cancel => {
                 if result.is_ok() {
                     break Err(ActualError::UserCancelled);
@@ -749,6 +787,25 @@ where
                         "no tailoring progress events for {HANG_WARN_SECS}s — \
         Claude Code may be waiting for a permission prompt"
                     );
+                    // Dump any stderr lines that arrived but haven't been shown
+                    // via the live-streaming arm yet (e.g. lines that raced with
+                    // the heartbeat tick).
+                    if let Some(ref mut rx) = stderr_rx {
+                        let mut dumped = 0usize;
+                        while let Ok(line) = rx.try_recv() {
+                            pipeline.println(&format!("  [stderr] {line}"));
+                            dumped += 1;
+                        }
+                        if dumped == 0 {
+                            pipeline.println(
+                                "  (no subprocess stderr captured yet)",
+                            );
+                        }
+                    } else {
+                        pipeline.println(
+                            "  Tip: re-run with --show-errors to see Claude Code output",
+                        );
+                    }
                 }
             }
         }
@@ -2115,6 +2172,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         }
     }
 
@@ -2133,6 +2191,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         }
     }
 
@@ -2553,6 +2612,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(
             &args,
@@ -3512,6 +3572,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(
             &args,
@@ -3556,6 +3617,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         // This should succeed and print verbose output to stderr
         let result = run_sync(
@@ -3601,6 +3663,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
@@ -3666,6 +3729,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None);
         // adr-001 is rejected, so no ADRs remain → "No files to write."
@@ -3694,6 +3758,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(
             &args,
@@ -3733,6 +3798,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(
             &args,
@@ -4205,6 +4271,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
 
@@ -4238,6 +4305,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
 
         // Provide "y" for project confirmation and select all files
@@ -4284,6 +4352,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
 
@@ -4310,6 +4379,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None).unwrap();
 
@@ -4384,6 +4454,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
 
@@ -4416,6 +4487,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None);
         assert!(
@@ -4472,6 +4544,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
 
@@ -4506,6 +4579,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None);
         assert!(
@@ -4767,7 +4841,16 @@ mod tests {
         // ctrl_c signal registration + user pressing Ctrl+C.
         let cancel = std::future::ready(Ok::<(), std::io::Error>(()));
 
-        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 0, cancel).await;
+        let mut stderr_rx = None;
+        let result = run_tailoring_with_cancel(
+            tailor_fut,
+            &mut rx,
+            &mut stderr_rx,
+            &mut pipeline,
+            0,
+            cancel,
+        )
+        .await;
 
         assert!(
             matches!(result, Err(ActualError::UserCancelled)),
@@ -4807,7 +4890,16 @@ mod tests {
         drop(ready_rx);
         drop(tx);
 
-        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 0, cancel).await;
+        let mut stderr_rx = None;
+        let result = run_tailoring_with_cancel(
+            tailor_fut,
+            &mut rx,
+            &mut stderr_rx,
+            &mut pipeline,
+            0,
+            cancel,
+        )
+        .await;
 
         // The cancel Err path must be ignored — tailoring should complete normally
         assert!(
@@ -4840,7 +4932,16 @@ mod tests {
         // cancel never fires
         let cancel = std::future::pending::<std::io::Result<()>>();
 
-        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 1, cancel).await;
+        let mut stderr_rx = None;
+        let result = run_tailoring_with_cancel(
+            tailor_fut,
+            &mut rx,
+            &mut stderr_rx,
+            &mut pipeline,
+            1,
+            cancel,
+        )
+        .await;
 
         assert!(result.is_ok(), "expected Ok result, got {result:?}");
         // Channel must be fully drained — no events left
@@ -4872,7 +4973,16 @@ mod tests {
 
         // Advance time so the interval fires before the sleep finishes.
         // tokio::time::pause() makes all timers advance in lockstep.
-        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 2, cancel).await;
+        let mut stderr_rx = None;
+        let result = run_tailoring_with_cancel(
+            tailor_fut,
+            &mut rx,
+            &mut stderr_rx,
+            &mut pipeline,
+            2,
+            cancel,
+        )
+        .await;
 
         assert!(result.is_ok(), "expected Ok result, got {result:?}");
         // The heartbeat must have updated the live elapsed (step row shows [Xs]).
@@ -5227,6 +5337,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(
             &args,
@@ -5271,6 +5382,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(
             &args,
@@ -5312,6 +5424,7 @@ mod tests {
             no_tui: false,
             output_format: None,
             runner: None,
+            show_errors: false,
         };
         let result = run_sync(
             &args,
@@ -5349,7 +5462,16 @@ mod tests {
         };
         let cancel = std::future::pending::<std::io::Result<()>>();
 
-        let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 0, cancel).await;
+        let mut stderr_rx = None;
+        let result = run_tailoring_with_cancel(
+            tailor_fut,
+            &mut rx,
+            &mut stderr_rx,
+            &mut pipeline,
+            0,
+            cancel,
+        )
+        .await;
 
         assert!(result.is_ok(), "expected Ok, got {result:?}");
 
