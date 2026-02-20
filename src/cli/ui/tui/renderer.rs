@@ -502,9 +502,10 @@ impl TuiRenderer {
     }
 
     /// Set the navigation command receiver.  Called from `sync.rs` after the
-    /// background keyboard poller is started.
-    pub fn set_nav_rx(&mut self, rx: std::sync::mpsc::Receiver<NavCmd>) {
-        self.nav_rx = Some(rx);
+    /// background keyboard poller is started.  If `rx` is `None` (non-TUI mode),
+    /// the existing `nav_rx` field is cleared so no stale receiver remains.
+    pub fn set_nav_rx_opt(&mut self, rx: Option<std::sync::mpsc::Receiver<NavCmd>>) {
+        self.nav_rx = rx;
     }
 
     /// Drain all pending [`NavCmd`]s from the channel and apply each one.
@@ -2494,7 +2495,7 @@ mod tests {
         r.start(SyncPhase::Analysis, "analysis");
 
         let (tx, rx) = std::sync::mpsc::channel::<NavCmd>();
-        r.set_nav_rx(rx);
+        r.set_nav_rx_opt(Some(rx));
 
         tx.send(NavCmd::StepUp).unwrap();
         tx.send(NavCmd::StepUp).unwrap(); // already at 0 after first — second is no-op
@@ -2505,6 +2506,19 @@ mod tests {
             Some(0),
             "apply_nav_cmds should drain all commands"
         );
+    }
+
+    #[test]
+    fn test_set_nav_rx_none_clears_channel() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // Set a channel, then clear it with None — apply_nav_cmds must be a no-op.
+        let (_tx, rx) = std::sync::mpsc::channel::<NavCmd>();
+        r.set_nav_rx_opt(Some(rx));
+        r.set_nav_rx_opt(None);
+        r.apply_nav_cmds(); // must not panic
+        assert_eq!(r.viewing_step, None);
     }
 
     #[test]
