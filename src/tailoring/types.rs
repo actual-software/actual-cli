@@ -286,24 +286,24 @@ mod tests {
             category_name: "Security".to_string(),
             adr_titles: vec!["Use HTTPS".to_string(), "Validate inputs".to_string()],
         };
-        // We constructed BatchStarted above, so this branch always matches.
-        if let TailoringEvent::BatchStarted {
-            category_name,
-            adr_titles,
+        let TailoringEvent::BatchStarted {
+            ref category_name,
+            ref adr_titles,
             batch_index,
             batch_count,
             adr_count,
             ..
-        } = &event
-        {
-            assert_eq!(category_name, "Security");
-            assert_eq!(adr_titles.len(), 2);
-            assert_eq!(adr_titles[0], "Use HTTPS");
-            assert_eq!(adr_titles[1], "Validate inputs");
-            assert_eq!(*batch_index, 2);
-            assert_eq!(*batch_count, 3);
-            assert_eq!(*adr_count, 2);
-        }
+        } = event
+        else {
+            unreachable!("event is always BatchStarted");
+        };
+        assert_eq!(category_name, "Security");
+        assert_eq!(adr_titles.len(), 2);
+        assert_eq!(adr_titles[0], "Use HTTPS");
+        assert_eq!(adr_titles[1], "Validate inputs");
+        assert_eq!(batch_index, 2);
+        assert_eq!(batch_count, 3);
+        assert_eq!(adr_count, 2);
     }
 
     #[test]
