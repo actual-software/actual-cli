@@ -9,12 +9,11 @@ use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
-use crate::branding::banner::render_banner;
 use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::format_project_summary;
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::file_confirm::confirm_files;
-use crate::cli::ui::header::{render_header_bar, AuthDisplay};
+use crate::cli::ui::header::AuthDisplay;
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::progress::SyncPhase;
 use crate::cli::ui::term_size;
@@ -77,23 +76,52 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 ) -> Result<(), ActualError> {
     // ── Phase 1: env check + analysis ──
 
-    // 1. Create pipeline; push banner + header bar into the log pane so all
-    //    branding chrome appears inside the TUI alternate screen.
-    let mut pipeline = TuiRenderer::new(false, args.no_tui);
-    let use_color = console::colors_enabled_stderr();
-    for line in render_banner(use_color) {
-        pipeline.println(&console::strip_ansi_codes(&line));
-    }
-    let width = term_size::terminal_width();
-    let header = render_header_bar(width, env!("CARGO_PKG_VERSION"), auth_display);
-    for line in header.lines() {
-        pipeline.println(line);
-    }
+    // 1. Create pipeline. The banner and version are shown in the left-column
+    //    banner box (rendered by the TUI directly), not in the log pane.
+    let mut pipeline = TuiRenderer::new_with_version(false, args.no_tui, env!("CARGO_PKG_VERSION"));
+
     pipeline.start(SyncPhase::Environment, "Checking environment...");
+
+    // Check authentication status and log it
+    match auth_display {
+        Some(a) if a.authenticated => {
+            let email_part = a
+                .email
+                .as_deref()
+                .map(|e| format!(" ({})", console::strip_ansi_codes(e)))
+                .unwrap_or_default();
+            pipeline.println(&format!("  {} Authenticated{email_part}", theme::SUCCESS));
+        }
+        Some(_) => {
+            pipeline.println(&format!(
+                "  {} Not authenticated — run `actual login`",
+                theme::ERROR
+            ));
+        }
+        None => {
+            pipeline.println("  - Auth status unknown");
+        }
+    }
+
+    // Log the config path being used
+    pipeline.println(&format!("  Config: {}", cfg_path.display()));
+
+    // Log the working directory
+    pipeline.println(&format!("  Working dir: {}", root_dir.display()));
+
+    // Check git repository
     let is_git = get_git_head(root_dir).is_some();
     if is_git {
+        pipeline.println(&format!(
+            "  {} Git repository detected — analysis caching enabled",
+            theme::SUCCESS
+        ));
         pipeline.success(SyncPhase::Environment, "Environment OK");
     } else {
+        pipeline.println(&format!(
+            "  {} Not a git repository — analysis caching disabled",
+            theme::WARN
+        ));
         pipeline.warn(
             SyncPhase::Environment,
             "Not a git repository (analysis caching disabled)",
