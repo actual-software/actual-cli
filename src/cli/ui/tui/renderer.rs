@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph},
     Terminal,
 };
 
@@ -152,6 +152,9 @@ const LEFT_COL_WIDTH: u16 = 44;
 /// BANNER has 11 lines + 1 blank above + 1 blank below + 2 border rows = 15.
 const BANNER_BOX_HEIGHT: u16 = 15;
 
+/// Horizontal padding (left + right) applied inside the Output panel border.
+const HORIZ_PAD: usize = 2;
+
 /// Render the steps and log panes into an arbitrary ratatui terminal backend.
 ///
 /// This is a free function (not a method) so it can be called from tests with
@@ -192,7 +195,10 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             } else {
                 // Post-sync review mode: scroll/quit hint
                 let approx_log_width = if cols >= 80 {
-                    content_area.width.saturating_sub(LEFT_COL_WIDTH + 2) as usize
+                    content_area
+                        .width
+                        .saturating_sub(LEFT_COL_WIDTH + 2 + 2 * HORIZ_PAD as u16)
+                        as usize
                 } else {
                     content_area.width.saturating_sub(2) as usize
                 };
@@ -307,7 +313,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             const OUTPUT_PADDING: usize = 2;
             let log_inner_height = h_chunks[1].height.saturating_sub(2) as usize;
             let log_height = log_inner_height.saturating_sub(OUTPUT_PADDING);
-            let log_width = h_chunks[1].width.saturating_sub(2) as usize;
+            let log_width = h_chunks[1].width.saturating_sub(2 + 2 * HORIZ_PAD as u16) as usize;
             let mut log_lines = ctx
                 .log
                 .render_to_string(log_height, log_width, ctx.scroll_offset);
@@ -327,7 +333,8 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title(" Output "),
+                    .title(" Output ")
+                    .padding(Padding::horizontal(HORIZ_PAD as u16)),
             );
             frame.render_widget(Clear, h_chunks[1]);
             frame.render_widget(log_widget, h_chunks[1]);
@@ -773,7 +780,8 @@ impl TuiRenderer {
                             rows.saturating_sub(2)
                         };
                         let width = if cols >= 80 {
-                            (cols as usize).saturating_sub(LEFT_COL_WIDTH as usize + 2)
+                            (cols as usize)
+                                .saturating_sub(LEFT_COL_WIDTH as usize + 2 + 2 * HORIZ_PAD)
                         } else {
                             (cols as usize).saturating_sub(2)
                         };
