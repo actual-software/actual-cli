@@ -735,4 +735,98 @@ mod tests {
         assert_eq!(parsed.name, "direct");
         assert_eq!(parsed.count, 99);
     }
+
+    // ── stderr streaming tests ──
+
+    /// Verify that `set_stderr_tx` stores the sender in the runner's mutex.
+    #[test]
+    fn test_set_stderr_tx_stores_sender() {
+        let runner = CliClaudeRunner::new(PathBuf::from("/fake/binary"), Duration::from_secs(10));
+        assert!(runner.stderr_tx.lock().unwrap().is_none(), "initially None");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        runner.set_stderr_tx(tx);
+        assert!(
+            runner.stderr_tx.lock().unwrap().is_some(),
+            "stored after set_stderr_tx"
+        );
+    }
+
+    /// Verify that stderr lines written by the subprocess are forwarded to the
+    /// channel registered via `set_stderr_tx`.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_streams_stderr_lines() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        let tailoring_json = serde_json::json!({
+            "files": [],
+            "skipped_adrs": [],
+            "summary": {
+                "total_input": 0,
+                "applicable": 0,
+                "not_applicable": 0,
+                "files_generated": 0
+            }
+        });
+        // Script writes two lines to stderr then emits valid tailoring output on stdout.
+        let script_content = format!(
+            "#!/bin/sh\necho 'line one' >&2\necho 'line two' >&2\necho '{}'\n",
+            tailoring_json
+        );
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        runner.set_stderr_tx(tx);
+
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+        assert!(result.is_ok(), "expected Ok: {result:?}");
+
+        // Both stderr lines must have been forwarded to the channel.
+        let line1 = rx.try_recv().expect("first stderr line must be in channel");
+        let line2 = rx
+            .try_recv()
+            .expect("second stderr line must be in channel");
+        assert_eq!(line1, "line one");
+        assert_eq!(line2, "line two");
+    }
+
+    /// Verify that when `set_stderr_tx` is active and the subprocess exits
+    /// non-zero, the collected stderr bytes are merged into the error so callers
+    /// can still read them from `ClaudeSubprocessFailed.stderr`.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_stderr_merged_into_error_when_streaming() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho 'fatal subprocess error' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        runner.set_stderr_tx(tx);
+
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+        let err = result.unwrap_err();
+        let ActualError::ClaudeSubprocessFailed { stderr, .. } = err else {
+            panic!("expected ClaudeSubprocessFailed, got {err:?}");
+        };
+        assert!(
+            stderr.contains("fatal subprocess error"),
+            "stderr bytes must be merged into error, got: {stderr:?}"
+        );
+    }
 }
