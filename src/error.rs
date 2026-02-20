@@ -18,6 +18,9 @@ pub enum ActualError {
     #[error("Claude Code subprocess failed: {message}")]
     ClaudeSubprocessFailed { message: String, stderr: String },
 
+    #[error("Insufficient credits: {message}")]
+    CreditBalanceTooLow { message: String },
+
     #[error("Failed to parse Claude Code output: {0}")]
     ClaudeOutputParse(#[from] serde_json::Error),
 
@@ -60,6 +63,7 @@ impl ActualError {
             | Self::ClaudeNotAuthenticated
             | Self::CodexNotFound
             | Self::ApiKeyMissing { .. } => 2,
+            Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
             Self::IoError(_) => 5,
             _ => 1,
@@ -77,6 +81,9 @@ impl ActualError {
                 // so provide a generic hint pointing users to the config.
                 let _ = env_var;
                 Some("Set the API key environment variable or add it to your config file")
+            }
+            Self::CreditBalanceTooLow { .. } => {
+                Some("Add credits at https://console.anthropic.com/settings/billing")
             }
             Self::ConfigError(_) => Some("Check ~/.actualai/actual/config.yaml"),
             Self::ClaudeTimeout { .. } => Some(
@@ -148,6 +155,13 @@ mod tests {
             }
             .exit_code(),
             2
+        );
+        assert_eq!(
+            ActualError::CreditBalanceTooLow {
+                message: "Credit balance is too low".to_string()
+            }
+            .exit_code(),
+            3
         );
     }
 
@@ -256,6 +270,19 @@ mod tests {
             msg.contains("OPENAI_API_KEY"),
             "expected env var name in: {msg}"
         );
+
+        let msg = ActualError::CreditBalanceTooLow {
+            message: "Credit balance is too low".to_string(),
+        }
+        .to_string();
+        assert!(
+            msg.contains("Insufficient credits"),
+            "expected 'Insufficient credits' in: {msg}"
+        );
+        assert!(
+            msg.contains("Credit balance is too low"),
+            "expected detail message in: {msg}"
+        );
     }
 
     #[test]
@@ -333,6 +360,20 @@ mod tests {
         assert!(
             hint.unwrap().contains("API key"),
             "expected 'API key' in hint: {:?}",
+            hint
+        );
+    }
+
+    #[test]
+    fn test_hint_credit_balance_too_low() {
+        let err = ActualError::CreditBalanceTooLow {
+            message: "Credit balance is too low".to_string(),
+        };
+        let hint = err.hint();
+        assert!(hint.is_some(), "expected Some hint for CreditBalanceTooLow");
+        assert!(
+            hint.unwrap().contains("console.anthropic.com"),
+            "expected billing URL in hint: {:?}",
             hint
         );
     }
