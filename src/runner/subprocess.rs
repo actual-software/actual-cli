@@ -103,10 +103,35 @@ pub(crate) fn format_stream_event(line: &str) -> Option<String> {
                 })
                 .collect();
 
-            if tool_uses.is_empty() {
-                None // text-only messages are too noisy
+            if !tool_uses.is_empty() {
+                return Some(format!("Claude: {}", tool_uses.join(", ")));
+            }
+
+            // Forward text-only assistant messages so users see Claude's
+            // planning and reasoning in the TUI instead of a silent spinner.
+            let text: String = content
+                .iter()
+                .filter_map(|item| {
+                    if item["type"].as_str() == Some("text") {
+                        item["text"].as_str()
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if text.is_empty() {
+                None
             } else {
-                Some(format!("Claude: {}", tool_uses.join(", ")))
+                const MAX_LEN: usize = 200;
+                let display = if text.chars().count() > MAX_LEN {
+                    format!("{}…", text.chars().take(MAX_LEN).collect::<String>())
+                } else {
+                    text
+                };
+                // Flatten newlines so the single log line stays readable.
+                Some(format!("Claude: {}", display.replace('\n', " ")))
             }
         }
         _ => None,
@@ -366,9 +391,15 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                 stderr,
             })
         }
-        Err(_) => Err(ActualError::ClaudeTimeout {
-            seconds: timeout.as_secs(),
-        }),
+        Err(_) => {
+            // kill_on_drop fires when `child` goes out of scope at function
+            // return; await the stderr drainer so any last-gasp diagnostic
+            // lines are flushed through event_tx before we return.
+            let _ = stderr_task.await;
+            Err(ActualError::ClaudeTimeout {
+                seconds: timeout.as_secs(),
+            })
+        }
     }
 }
 
@@ -990,8 +1021,8 @@ mod tests {
     }
 
     #[test]
-    fn test_format_stream_event_assistant_text_only_suppressed() {
-        // Text-only assistant messages are suppressed (too noisy)
+    fn test_format_stream_event_assistant_text_forwarded() {
+        // Text-only assistant messages are forwarded so users see Claude's reasoning.
         let line = serde_json::json!({
             "type": "assistant",
             "message": {
@@ -999,6 +1030,98 @@ mod tests {
                     "type": "text",
                     "text": "Thinking about the task..."
                 }]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: Thinking about the task...".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_text_truncated_at_200() {
+        // Text longer than 200 chars is truncated with an ellipsis.
+        let long_text = "A".repeat(300);
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": long_text}]
+            }
+        })
+        .to_string();
+        let result = format_stream_event(&line).unwrap();
+        assert!(result.starts_with("Claude: "), "expected 'Claude: ' prefix");
+        assert!(result.ends_with('…'), "expected ellipsis suffix");
+        // "Claude: " (8) + 200 chars + "…" (1 char, but multi-byte) = 209 chars + 2 bytes
+        assert_eq!(result.chars().count(), 8 + 200 + 1);
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_text_newlines_flattened() {
+        // Newlines in text are replaced with spaces so the TUI log line stays readable.
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "Line one\nLine two\nLine three"}]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: Line one Line two Line three".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_tool_takes_priority_over_text() {
+        // When a message has both tool_use and text content, tool_use is shown.
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "I will read the file."},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "src/main.rs"}}
+                ]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: Read src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_non_text_items_skipped_in_text_pass() {
+        // Non-text, non-tool_use items (e.g. "thinking" blocks) are skipped when
+        // collecting text; only real "text" blocks contribute to the output.
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "internal reasoning"},
+                    {"type": "text", "text": "Here is my answer."}
+                ]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: Here is my answer.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_format_stream_event_assistant_no_text_no_tool_suppressed() {
+        // Content with only non-text, non-tool_use items yields no displayable
+        // text and should be suppressed (returns None).
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "internal reasoning only"}
+                ]
             }
         })
         .to_string();
