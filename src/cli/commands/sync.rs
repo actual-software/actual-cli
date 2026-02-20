@@ -439,6 +439,12 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             SyncPhase::Tailor,
             &format!("Tailoring ADRs (0/{project_count} projects done)..."),
         );
+        let effective_model = args
+            .model
+            .as_deref()
+            .or(config.model.as_deref())
+            .unwrap_or("sonnet");
+        pipeline.println(&format!("  model: {effective_model}"));
         let tailoring_config = ConcurrentTailoringConfig::new(
             config.concurrency.unwrap_or(DEFAULT_CONCURRENCY),
             config.batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
@@ -563,31 +569,55 @@ fn apply_tailoring_event(event: TailoringEvent, pipeline: &mut TuiRenderer, comp
             };
             pipeline.println(&format!("  \u{25b6} {project_name} ({batch_label})"));
         }
-        TailoringEvent::BatchCompleted {
-            ref project_name,
+        TailoringEvent::BatchStarted {
             batch_index,
             batch_count,
             adr_count,
+            ref category_name,
+            ..
         } => {
             let adr_label = if adr_count == 1 { "ADR" } else { "ADRs" };
             pipeline.println(&format!(
-                "    \u{2714} {project_name}: batch {batch_index}/{batch_count} ({adr_count} {adr_label})"
+                "    \u{00b7} batch {batch_index}/{batch_count} \u{2014} {category_name} ({adr_count} {adr_label})"
             ));
+        }
+        TailoringEvent::BatchCompleted {
+            batch_index,
+            batch_count,
+            applied_count,
+            skipped_count,
+            ref skipped_adrs,
+            ref file_paths,
+            elapsed_secs,
+            ..
+        } => {
+            let paths_str = if file_paths.is_empty() {
+                String::new()
+            } else {
+                format!(" \u{2192} {}", file_paths.join(", "))
+            };
+            pipeline.println(&format!(
+                "    \u{2714} batch {batch_index}/{batch_count} done in {elapsed_secs}s \u{2014} {applied_count} applied, {skipped_count} skipped{paths_str}"
+            ));
+            // Show skipped reasons for small numbers to avoid flooding
+            if skipped_count > 0 && skipped_count <= 3 {
+                for (adr_id, reason) in skipped_adrs {
+                    pipeline.println(&format!("      skip {adr_id}: {reason}"));
+                }
+            }
         }
         TailoringEvent::ProjectCompleted {
             ref project_name,
-            files_generated,
+            ref file_paths,
             ..
         } => {
             *completed += 1;
-            let file_label = if files_generated == 1 {
-                "file"
+            let paths_str = if file_paths.is_empty() {
+                String::new()
             } else {
-                "files"
+                format!(" \u{2192} {}", file_paths.join(", "))
             };
-            pipeline.println(&format!(
-                "  \u{2714} {project_name} done \u{2192} {files_generated} {file_label}"
-            ));
+            pipeline.println(&format!("  \u{2714} {project_name} done{paths_str}"));
         }
         TailoringEvent::ProjectFailed {
             ref project_name,
@@ -4443,6 +4473,11 @@ mod tests {
                 batch_index: 1,
                 batch_count: 2,
                 adr_count: 5,
+                applied_count: 5,
+                skipped_count: 0,
+                skipped_adrs: vec![],
+                file_paths: vec!["CLAUDE.md".to_string()],
+                elapsed_secs: 30,
             },
             &mut pipeline,
             &mut completed,
@@ -4465,6 +4500,7 @@ mod tests {
                 project_name: "web-app".to_string(),
                 files_generated: 2,
                 adrs_applied: 5,
+                file_paths: vec!["CLAUDE.md".to_string(), "apps/web/CLAUDE.md".to_string()],
             },
             &mut pipeline,
             &mut completed,
@@ -4483,6 +4519,7 @@ mod tests {
                     project_name: format!("project-{i}"),
                     files_generated: 1,
                     adrs_applied: 2,
+                    file_paths: vec!["CLAUDE.md".to_string()],
                 },
                 &mut pipeline,
                 &mut completed,
@@ -4522,6 +4559,84 @@ mod tests {
             &mut completed,
         );
         assert_eq!(completed, 0);
+    }
+
+    #[test]
+    fn test_apply_batch_started_prints_category() {
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/1 projects done)...");
+        let mut completed = 0usize;
+        apply_tailoring_event(
+            TailoringEvent::BatchStarted {
+                project_name: "my-app".to_string(),
+                batch_index: 1,
+                batch_count: 2,
+                adr_count: 8,
+                category_name: "Error Handling".to_string(),
+                adr_titles: vec!["Use Result".to_string(), "Avoid panics".to_string()],
+            },
+            &mut pipeline,
+            &mut completed,
+        );
+        // BatchStarted should not increment the counter
+        assert_eq!(
+            completed, 0,
+            "BatchStarted must not increment project counter"
+        );
+    }
+
+    #[test]
+    fn test_apply_batch_completed_with_skipped() {
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/1 projects done)...");
+        let mut completed = 0usize;
+        apply_tailoring_event(
+            TailoringEvent::BatchCompleted {
+                project_name: "my-app".to_string(),
+                batch_index: 1,
+                batch_count: 2,
+                adr_count: 5,
+                applied_count: 3,
+                skipped_count: 2,
+                skipped_adrs: vec![
+                    ("adr-001".to_string(), "not applicable to Rust".to_string()),
+                    (
+                        "adr-002".to_string(),
+                        "no mobile project detected".to_string(),
+                    ),
+                ],
+                file_paths: vec!["CLAUDE.md".to_string()],
+                elapsed_secs: 47,
+            },
+            &mut pipeline,
+            &mut completed,
+        );
+        // BatchCompleted should not increment the counter
+        assert_eq!(
+            completed, 0,
+            "BatchCompleted must not increment project counter"
+        );
+    }
+
+    #[test]
+    fn test_apply_project_completed_shows_paths() {
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/1 projects done)...");
+        let mut completed = 0usize;
+        apply_tailoring_event(
+            TailoringEvent::ProjectCompleted {
+                project_name: "test-nextjs-project".to_string(),
+                files_generated: 2,
+                adrs_applied: 6,
+                file_paths: vec!["CLAUDE.md".to_string(), "apps/web/CLAUDE.md".to_string()],
+            },
+            &mut pipeline,
+            &mut completed,
+        );
+        assert_eq!(
+            completed, 1,
+            "ProjectCompleted must increment project counter"
+        );
     }
 
     // ── run_tailoring_with_cancel tests ──
@@ -4603,6 +4718,7 @@ mod tests {
             project_name: "app".to_string(),
             files_generated: 1,
             adrs_applied: 1,
+            file_paths: vec!["CLAUDE.md".to_string()],
         })
         .unwrap();
         drop(tx);
