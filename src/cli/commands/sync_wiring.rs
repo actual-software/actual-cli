@@ -7,9 +7,6 @@
 
 use std::time::Duration;
 
-/// Default per-subprocess timeout.  This is also the fallback when
-/// `invocation_timeout_secs` is not set in the config file.
-const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
 const DEFAULT_CODEX_MODEL: &str = "codex-mini-latest";
@@ -22,6 +19,7 @@ use crate::cli::commands::sync::{resolve_cwd, run_sync};
 use crate::cli::ui::header::AuthDisplay;
 use crate::cli::ui::real_terminal::RealTerminal;
 use crate::config::paths::{config_path, load_from};
+use crate::config::types::DEFAULT_TIMEOUT_SECS;
 use crate::error::ActualError;
 use crate::runner::anthropic_api::AnthropicApiRunner;
 use crate::runner::binary::find_claude_binary;

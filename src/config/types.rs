@@ -9,6 +9,9 @@ pub const DEFAULT_BATCH_SIZE: usize = 15;
 /// Default maximum concurrent projects during tailoring.
 pub const DEFAULT_CONCURRENCY: usize = 3;
 
+/// Default per-project tailoring timeout in seconds.
+pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
+
 /// Top-level configuration for the actual CLI.
 ///
 /// Stored as YAML at `~/.actualai/actual/config.yaml`.
