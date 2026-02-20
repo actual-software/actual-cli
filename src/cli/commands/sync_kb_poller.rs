@@ -16,6 +16,8 @@ use std::sync::{
 
 use tokio::sync::oneshot;
 
+use crate::cli::ui::tui::renderer::NavCmd;
+
 /// Guard returned by [`setup`].  Signals the poller thread to stop when
 /// dropped.  When no thread was started (non-TUI mode) this is a no-op.
 pub struct KbPoller {
@@ -41,6 +43,7 @@ impl Drop for KbPoller {
 ///
 /// When `is_tui` is `true`, spawns a background crossterm-poller thread and
 /// returns a cancel future that fires on `q`/`Esc`/`Ctrl+C` **or** OS SIGINT.
+/// Also returns a `Receiver<NavCmd>` for navigation commands.
 ///
 /// When `is_tui` is `false`, returns a no-op guard and a cancel future that
 /// only fires on OS SIGINT.
@@ -51,13 +54,14 @@ pub fn setup(
     is_tui: bool,
 ) -> (
     KbPoller,
+    Option<std::sync::mpsc::Receiver<NavCmd>>,
     impl std::future::Future<Output = std::io::Result<()>>,
 ) {
-    let (kb_poller, kb_cancel_rx) = if is_tui {
-        let (inner, rx) = spawn_thread();
-        (KbPoller { inner: Some(inner) }, Some(rx))
+    let (kb_poller, kb_cancel_rx, nav_rx) = if is_tui {
+        let (inner, rx, nav_rx) = spawn_thread();
+        (KbPoller { inner: Some(inner) }, Some(rx), Some(nav_rx))
     } else {
-        (KbPoller { inner: None }, None)
+        (KbPoller { inner: None }, None, None)
     };
 
     let cancel_fut = async move {
@@ -72,12 +76,17 @@ pub fn setup(
         }
     };
 
-    (kb_poller, cancel_fut)
+    (kb_poller, nav_rx, cancel_fut)
 }
 
 /// Spawn the background crossterm-poller thread.
-fn spawn_thread() -> (KbPollerInner, oneshot::Receiver<()>) {
+fn spawn_thread() -> (
+    KbPollerInner,
+    oneshot::Receiver<()>,
+    std::sync::mpsc::Receiver<NavCmd>,
+) {
     let (tx, rx) = oneshot::channel::<()>();
+    let (nav_tx, nav_rx) = std::sync::mpsc::channel::<NavCmd>();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = stop.clone();
 
@@ -102,6 +111,19 @@ fn spawn_thread() -> (KbPollerInner, oneshot::Receiver<()>) {
                         let _ = tx.send(());
                         break;
                     }
+                    // Navigation keys: send NavCmd events (non-blocking, ignore if receiver dropped)
+                    let nav_cmd = match key.code {
+                        KeyCode::Up => Some(NavCmd::StepUp),
+                        KeyCode::Down => Some(NavCmd::StepDown),
+                        KeyCode::PageUp | KeyCode::Char('u') => Some(NavCmd::ScrollUp),
+                        KeyCode::PageDown | KeyCode::Char('d') => Some(NavCmd::ScrollDown),
+                        KeyCode::Home | KeyCode::Char('g') => Some(NavCmd::ScrollTop),
+                        KeyCode::End | KeyCode::Char('G') => Some(NavCmd::ScrollBottom),
+                        _ => None,
+                    };
+                    if let Some(cmd) = nav_cmd {
+                        let _ = nav_tx.send(cmd);
+                    }
                 }
             }
         }
@@ -113,5 +135,6 @@ fn spawn_thread() -> (KbPollerInner, oneshot::Receiver<()>) {
             _handle: handle,
         },
         rx,
+        nav_rx,
     )
 }
