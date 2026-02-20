@@ -1267,14 +1267,15 @@ mod tests {
             .filter(|e| matches!(e, TailoringEvent::ProjectStarted { .. }))
             .collect();
         assert_eq!(started.len(), 1, "expected 1 ProjectStarted event");
-        if let TailoringEvent::ProjectStarted {
+        let TailoringEvent::ProjectStarted {
             project_name,
             batch_count,
         } = &started[0]
-        {
-            assert_eq!(project_name, "mono");
-            assert_eq!(*batch_count, 2, "expected 2 batches for mono");
-        }
+        else {
+            panic!("expected ProjectStarted event");
+        };
+        assert_eq!(project_name, "mono");
+        assert_eq!(*batch_count, 2, "expected 2 batches for mono");
 
         // Verify 2 BatchCompleted events, each with batch_count=2
         let batch_events: Vec<_> = events
@@ -1283,21 +1284,22 @@ mod tests {
             .collect();
         assert_eq!(batch_events.len(), 2, "expected 2 BatchCompleted events");
         for event in &batch_events {
-            if let TailoringEvent::BatchCompleted {
+            let TailoringEvent::BatchCompleted {
                 project_name,
                 batch_index,
                 batch_count,
                 adr_count,
             } = event
-            {
-                assert_eq!(project_name, "mono");
-                assert_eq!(*batch_count, 2);
-                assert!(
-                    *batch_index == 1 || *batch_index == 2,
-                    "unexpected batch_index: {batch_index}"
-                );
-                assert_eq!(*adr_count, 1, "each batch has 1 ADR");
-            }
+            else {
+                panic!("expected BatchCompleted event");
+            };
+            assert_eq!(project_name, "mono");
+            assert_eq!(*batch_count, 2);
+            assert!(
+                *batch_index == 1 || *batch_index == 2,
+                "unexpected batch_index: {batch_index}"
+            );
+            assert_eq!(*adr_count, 1, "each batch has 1 ADR");
         }
 
         // Verify exactly 1 ProjectCompleted event
