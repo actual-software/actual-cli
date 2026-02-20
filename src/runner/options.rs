@@ -36,11 +36,11 @@ const DEFAULT_MODEL: &str = "sonnet";
 impl InvocationOptions {
     /// Create options for ADR tailoring.
     ///
-    /// Tailoring is restricted to read-only tools (no Bash), 15 max turns.
+    /// Tailoring is restricted to read-only tools (no Bash), 5 max turns.
     pub fn for_tailoring(model_override: Option<&str>) -> Self {
         Self {
             model: model_override.unwrap_or(DEFAULT_MODEL).to_string(),
-            max_turns: 15,
+            max_turns: 5,
             tools: "Read,Glob,Grep".to_string(),
             allowed_tools: vec![
                 "Read".to_string(),
@@ -103,11 +103,17 @@ mod tests {
         let opts = InvocationOptions::for_tailoring(None);
         let args = opts.to_args();
 
-        // Max turns is 15
-        assert_arg_value(&args, "--max-turns", "15");
+        // Max turns is 5
+        assert_arg_value(&args, "--max-turns", "5");
 
         // No Bash anywhere in the args
         assert_eq!(args.iter().filter(|a| a.contains("Bash")).count(), 0);
+    }
+
+    #[test]
+    fn test_for_tailoring_default_max_turns_is_five() {
+        let opts = InvocationOptions::for_tailoring(None);
+        assert_eq!(opts.max_turns, 5);
     }
 
     #[test]
