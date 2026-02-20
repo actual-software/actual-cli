@@ -296,6 +296,8 @@ mod tests {
             .args(["sync", "--force", "--api-url", &env.api_url])
             .assert()
             .code(1)
-            .stderr(predicate::str::contains("Failed to parse"));
+            .stderr(predicate::str::contains(
+                "Claude Code exited without producing a result",
+            ));
     }
 }

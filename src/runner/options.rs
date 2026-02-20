@@ -69,8 +69,11 @@ impl InvocationOptions {
             self.model.clone(),
             "--max-turns".to_string(),
             self.max_turns.to_string(),
+            // stream-json emits events incrementally so the TUI can show real-time
+            // tool-call progress and reset the hang-detection timer on each event,
+            // rather than waiting for a single JSON blob at the end.
             "--output-format".to_string(),
-            "json".to_string(),
+            "stream-json".to_string(),
         ];
 
         if self.skip_permissions {
@@ -176,7 +179,7 @@ mod tests {
         let opts = InvocationOptions::for_tailoring(None);
         let args = opts.to_args();
 
-        assert_arg_value(&args, "--output-format", "json");
+        assert_arg_value(&args, "--output-format", "stream-json");
         assert!(args.contains(&"--no-session-persistence".to_string()));
     }
 
