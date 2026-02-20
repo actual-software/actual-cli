@@ -12,7 +12,6 @@ use crate::api::retry::{with_retry, RetryConfig};
 use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::format_project_summary;
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
-use crate::cli::ui::file_confirm::confirm_files;
 use crate::cli::ui::header::AuthDisplay;
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::progress::SyncPhase;
@@ -1211,13 +1210,10 @@ pub fn confirm_and_write(
     }
 
     // Step 4: Run confirmation (if not dry-run).
-    // When force=true, confirm_files returns all files immediately without
-    // any interactive prompt, so there is no need to suspend the TUI.
-    let confirmed = if force {
-        confirm_files(output, force, term)?
-    } else {
-        pipeline.suspend(|| confirm_files(output, force, term))?
-    };
+    // Use the native TUI multi-select so the user stays inside the TUI
+    // (no suspend/dialoguer teardown).  Plain/Quiet mode falls back to
+    // the existing dialoguer-based confirm_files path automatically.
+    let confirmed = pipeline.select_files_in_tui(output, force, term)?;
     let files_rejected = output.files.len() - confirmed.len();
 
     if confirmed.is_empty() {
