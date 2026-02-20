@@ -29,7 +29,6 @@ pub struct AnthropicApiRunner {
     base_url: String,
     /// Base duration for exponential back-off on 429 responses.
     /// Defaults to 1 second; tests override this to zero for speed.
-    #[cfg(test)]
     retry_base: Duration,
 }
 
@@ -68,7 +67,6 @@ impl AnthropicApiRunner {
             client,
             timeout,
             base_url,
-            #[cfg(test)]
             retry_base: Duration::from_secs(1),
         })
     }
@@ -133,10 +131,7 @@ impl AnthropicApiRunner {
                     attempt,
                     MAX_RATE_LIMIT_RETRIES
                 );
-                #[cfg(test)]
                 sleep(self.retry_base * wait_secs as u32).await;
-                #[cfg(not(test))]
-                sleep(Duration::from_secs(wait_secs)).await;
                 continue;
             }
 
