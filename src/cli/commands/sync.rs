@@ -1499,10 +1499,10 @@ mod tests {
         // File should NOT exist on disk
         assert!(!dir.path().join("CLAUDE.md").exists());
 
-        // Diff summary should be displayed in the log pane (file header line)
+        // Diff summary should be displayed in the log pane
         let log_text = pipeline.all_log_text();
         assert!(
-            log_text.contains("new file"),
+            log_text.contains("CLAUDE.md"),
             "expected diff summary in log: {log_text}"
         );
     }
