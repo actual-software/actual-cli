@@ -33,6 +33,12 @@ pub struct ConcurrentTailoringConfig<'a> {
     pub per_project_timeout: Duration,
     /// Output file format (CLAUDE.md vs AGENTS.md).
     pub output_format: &'a OutputFormat,
+    /// Repository root directory used to pre-bundle context for the prompt.
+    ///
+    /// When `Some`, [`bundle_context`] is called before each tailoring invocation
+    /// and the resulting file tree / key file contents are injected into the prompt.
+    /// On failure, bundling is skipped with a warning and tailoring continues normally.
+    pub root_dir: Option<&'a std::path::Path>,
 }
 
 impl<'a> ConcurrentTailoringConfig<'a> {
@@ -41,6 +47,7 @@ impl<'a> ConcurrentTailoringConfig<'a> {
     /// # Errors
     ///
     /// Returns [`ActualError::ConfigError`] if `batch_size` is `0`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         concurrency: usize,
         batch_size: usize,
@@ -49,6 +56,7 @@ impl<'a> ConcurrentTailoringConfig<'a> {
         max_budget_usd: Option<f64>,
         per_project_timeout: Duration,
         output_format: &'a OutputFormat,
+        root_dir: Option<&'a std::path::Path>,
     ) -> Result<Self, ActualError> {
         if batch_size == 0 {
             return Err(ActualError::ConfigError(
@@ -63,6 +71,7 @@ impl<'a> ConcurrentTailoringConfig<'a> {
             max_budget_usd,
             per_project_timeout,
             output_format,
+            root_dir,
         })
     }
 }
@@ -186,6 +195,7 @@ async fn tailor_single_project<R: TailoringRunner>(
                     config.model_override,
                     config.max_budget_usd,
                     config.output_format,
+                    config.root_dir,
                 )
                 .await?;
                 // Return (batch_idx, adr_count, output) so the consumer can emit
@@ -513,6 +523,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -558,6 +569,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -604,6 +616,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -650,6 +663,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -714,6 +728,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -763,6 +778,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
@@ -835,6 +851,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -932,6 +949,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -1010,6 +1028,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -1059,6 +1078,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(2),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
 
@@ -1093,6 +1113,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(2),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
@@ -1151,6 +1172,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1281,6 +1303,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1356,6 +1379,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1408,6 +1432,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
         // Should complete without panic
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
@@ -1437,6 +1462,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         // Call the private function directly — accessible inside the same
@@ -1481,6 +1507,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         // Drop the receiver immediately so all sends fail with is_err()=true,
@@ -1516,6 +1543,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         // Drop receiver immediately so ProjectStarted + ProjectFailed sends
@@ -1552,6 +1580,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(2),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         // Drop receiver so the timeout ProjectFailed send hits the warn branch.
@@ -1630,6 +1659,7 @@ mod tests {
             max_budget_usd: None,
             per_project_timeout: Duration::from_secs(600),
             output_format: &OutputFormat::ClaudeMd,
+            root_dir: None,
         };
 
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
@@ -1651,6 +1681,7 @@ mod tests {
             None,
             Duration::from_secs(600),
             &fmt,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::ConfigError(_))),
@@ -1661,12 +1692,64 @@ mod tests {
     #[test]
     fn test_config_new_nonzero_batch_size_succeeds() {
         let fmt = OutputFormat::ClaudeMd;
-        let result =
-            ConcurrentTailoringConfig::new(3, 15, "", None, None, Duration::from_secs(600), &fmt);
+        let result = ConcurrentTailoringConfig::new(
+            3,
+            15,
+            "",
+            None,
+            None,
+            Duration::from_secs(600),
+            &fmt,
+            None,
+        );
         assert!(result.is_ok());
         let cfg = result.unwrap();
         assert_eq!(cfg.batch_size, 15);
         assert_eq!(cfg.concurrency, 3);
+    }
+
+    #[test]
+    fn test_config_new_with_root_dir_stores_path() {
+        let fmt = OutputFormat::ClaudeMd;
+        let dir = tempfile::tempdir().unwrap();
+        let result = ConcurrentTailoringConfig::new(
+            1,
+            5,
+            "",
+            None,
+            None,
+            Duration::from_secs(60),
+            &fmt,
+            Some(dir.path()),
+        );
+        assert!(result.is_ok());
+        let cfg = result.unwrap();
+        assert_eq!(cfg.root_dir, Some(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn test_tailor_all_projects_with_root_dir() {
+        let projects = vec![make_project("proj")];
+        let adrs = vec![make_adr("adr-001")];
+        let response = make_output_json("apps/proj/CLAUDE.md", "content", &["adr-001"]);
+        let runner = ConcurrentMockRunner::new(vec![response], Duration::from_millis(10));
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = ConcurrentTailoringConfig {
+            concurrency: 1,
+            batch_size: 5,
+            existing_output_file_paths: "",
+            model_override: None,
+            max_budget_usd: None,
+            per_project_timeout: Duration::from_secs(60),
+            output_format: &OutputFormat::ClaudeMd,
+            root_dir: Some(dir.path()),
+        };
+        let result = tailor_all_projects(&runner, &projects, &adrs, &config, None).await;
+        assert!(
+            result.is_ok(),
+            "tailor_all_projects with root_dir should succeed: {result:?}"
+        );
     }
 
     #[test]

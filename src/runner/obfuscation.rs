@@ -57,15 +57,17 @@ pub fn tailoring_prompt_decoded(
     existing_output_paths: &str,
     adr_json_array: &str,
     filename: &str,
+    bundled_context: &str,
 ) -> Result<String, ActualError> {
     let template = decode(PROMPT_OBFUSCATED)?;
     // Positional placeholders: {0}=filename, {1}=projects_json,
-    // {2}=existing_output_paths, {3}=adr_json_array
+    // {2}=existing_output_paths, {3}=adr_json_array, {4}=bundled_context
     Ok(template
         .replace("{0}", filename)
         .replace("{1}", projects_json)
         .replace("{2}", existing_output_paths)
-        .replace("{3}", adr_json_array))
+        .replace("{3}", adr_json_array)
+        .replace("{4}", bundled_context))
 }
 
 /// Returns the CursorRules tailoring prompt template with runtime values interpolated.
@@ -77,15 +79,17 @@ pub fn cursor_rules_prompt_decoded(
     existing_output_paths: &str,
     adr_json_array: &str,
     cursor_rules_path: &str,
+    bundled_context: &str,
 ) -> Result<String, ActualError> {
     let template = decode(CURSOR_RULES_PROMPT_OBFUSCATED)?;
     // Positional placeholders: {0}=cursor_rules_path, {1}=projects_json,
-    // {2}=existing_output_paths, {3}=adr_json_array
+    // {2}=existing_output_paths, {3}=adr_json_array, {4}=bundled_context
     Ok(template
         .replace("{0}", cursor_rules_path)
         .replace("{1}", projects_json)
         .replace("{2}", existing_output_paths)
-        .replace("{3}", adr_json_array))
+        .replace("{3}", adr_json_array)
+        .replace("{4}", bundled_context))
 }
 
 /// Returns the tailoring output JSON schema string, decoded from its obfuscated
@@ -100,8 +104,9 @@ mod tests {
 
     #[test]
     fn decode_roundtrips_prompt() {
-        let prompt = tailoring_prompt_decoded(r#"{"projects":[]}"#, "CLAUDE.md", "[]", "CLAUDE.md")
-            .expect("decode must succeed for valid obfuscated constant");
+        let prompt =
+            tailoring_prompt_decoded(r#"{"projects":[]}"#, "CLAUDE.md", "[]", "CLAUDE.md", "")
+                .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("Tailor each ADR"),
             "decoded prompt must contain instruction text"
@@ -119,7 +124,7 @@ mod tests {
     #[test]
     fn decode_roundtrips_cursor_rules_prompt() {
         let path = ".cursor/rules/actual-policies.mdc";
-        let prompt = cursor_rules_prompt_decoded(r#"{"projects":[]}"#, "", "[]", path)
+        let prompt = cursor_rules_prompt_decoded(r#"{"projects":[]}"#, "", "[]", path, "")
             .expect("decode must succeed for valid obfuscated constant");
         assert!(
             prompt.contains("Tailor each ADR"),
@@ -171,7 +176,7 @@ mod tests {
 
     #[test]
     fn prompt_filename_substituted_for_agents_md() {
-        let prompt = tailoring_prompt_decoded("", "", "", "AGENTS.md")
+        let prompt = tailoring_prompt_decoded("", "", "", "AGENTS.md", "")
             .expect("decode must succeed for valid obfuscated constant");
         assert!(prompt.contains("AGENTS.md"));
         assert!(!prompt.contains("CLAUDE.md"));

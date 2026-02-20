@@ -30,17 +30,24 @@ fn main() {
     println!("cargo:rerun-if-changed=src/runner/schemas.rs");
 
     // --- Standard prompt template (ClaudeMd / AgentsMd) ---
-    // Uses {0} .. {3} positional placeholders so it survives format!() at runtime:
+    // Uses {0} .. {4} positional placeholders so it survives format!() at runtime:
     //   {0} = filename  (appears multiple times)
     //   {1} = projects_json
     //   {2} = existing_output_paths
     //   {3} = adr_json_array
+    //   {4} = bundled_context
     let prompt_template = "\
 You are tailoring Architecture Decision Records (ADRs) for a specific codebase \
 and generating {0} file content.
 
 ## Repository Context
 {1}
+
+## Pre-bundled Repository Context
+The following repository context has been pre-bundled for you. Use it as your \
+primary source of truth — only use Read/Glob/Grep tools when you need information \
+about a specific file NOT already included here.
+{4}
 
 ## Existing {0} Files
 The following {0} files already exist in the repo (read them if you need to \
@@ -79,13 +86,20 @@ Return your response as a JSON object matching the provided schema.";
     // Uses {0} = cursor_rules_path (e.g. ".cursor/rules/actual-policies.mdc"),
     //      {1} = projects_json,
     //      {2} = existing_output_paths,
-    //      {3} = adr_json_array.
+    //      {3} = adr_json_array,
+    //      {4} = bundled_context.
     let cursor_rules_template = "\
 You are tailoring Architecture Decision Records (ADRs) for a specific codebase \
 and generating Cursor IDE rule files ({0}).
 
 ## Repository Context
 {1}
+
+## Pre-bundled Repository Context
+The following repository context has been pre-bundled for you. Use it as your \
+primary source of truth — only use Read/Glob/Grep tools when you need information \
+about a specific file NOT already included here.
+{4}
 
 ## Existing Cursor Rule Files
 The following {0} files already exist in the repo (read them if you need to \
