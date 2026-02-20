@@ -74,6 +74,9 @@ impl InvocationOptions {
             // rather than waiting for a single JSON blob at the end.
             "--output-format".to_string(),
             "stream-json".to_string(),
+            // --verbose is required by the Claude CLI when --output-format=stream-json
+            // is combined with --print (enforced since Claude Code 1.0.x).
+            "--verbose".to_string(),
         ];
 
         if self.skip_permissions {
@@ -180,6 +183,7 @@ mod tests {
         let args = opts.to_args();
 
         assert_arg_value(&args, "--output-format", "stream-json");
+        assert!(args.contains(&"--verbose".to_string()));
         assert!(args.contains(&"--no-session-persistence".to_string()));
     }
 
