@@ -4650,15 +4650,19 @@ mod tests {
         let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 2, cancel).await;
 
         assert!(result.is_ok(), "expected Ok result, got {result:?}");
-        // The heartbeat must have pushed the progress message to the log pane
-        // (index 3 = Tailor) rather than the step row.
+        // The heartbeat must have set the step row message inline (Steps pane),
+        // not pushed to the log pane.
+        assert!(
+            pipeline.steps.steps[3].message.contains("projects done"),
+            "expected heartbeat message in step.message, got: {:?}",
+            pipeline.steps.steps[3].message
+        );
+        // The log pane must NOT have been populated by update_message.
         let logged = pipeline.logs[3].render_to_string(100, 500, 0);
         assert!(
-            logged.iter().any(|l| l.contains("projects done")),
-            "expected heartbeat message in logs, got: {logged:?}"
+            !logged.iter().any(|l| l.contains("projects done")),
+            "heartbeat message must not appear in log pane, got: {logged:?}"
         );
-        // step.message must not be set by update_message.
-        assert_eq!(pipeline.steps.steps[3].message, "");
     }
 
     // ── zero_adr_context_message tests ──
