@@ -292,6 +292,62 @@ async fn run_subprocess<T: DeserializeOwned>(
     parse_output(output)
 }
 
+/// Number of consecutive identical stderr or stdout event lines that triggers
+/// early abort. When a subprocess enters a pathological loop (e.g., credit
+/// balance errors), it emits the same message over and over. Detecting the
+/// repetition structurally avoids string-matching on specific error messages.
+const REPETITIVE_LINE_THRESHOLD: usize = 3;
+
+/// Classify an error result from the Claude Code subprocess into a more
+/// specific `ActualError` variant when possible.
+///
+/// Currently detects credit/billing errors by checking `is_error == true`
+/// combined with the `subtype` being `"error"` (not `"error_max_turns"` or
+/// other known subtypes). This is the most structural signal available from
+/// the Claude Code CLI, which does not expose granular error codes.
+///
+/// When the subprocess entered a repetitive error loop (detected by
+/// `repetitive_message` being `Some`), we treat this as a billing/quota
+/// error since that is the primary cause of such loops.
+fn classify_subprocess_error(
+    is_error: bool,
+    subtype: Option<&str>,
+    result_text: &str,
+    stderr: &str,
+    repetitive_message: Option<&str>,
+) -> ActualError {
+    // If we detected a repetitive loop, the repeated message is the best
+    // description of the problem. This is a structural signal: the subprocess
+    // was stuck emitting the same thing N+ times.
+    if let Some(repeated_msg) = repetitive_message {
+        return ActualError::CreditBalanceTooLow {
+            message: repeated_msg.to_string(),
+        };
+    }
+
+    // Check for the error_max_turns subtype — this is always a generic error.
+    if subtype == Some("error_max_turns") {
+        return ActualError::ClaudeSubprocessFailed {
+            message: format!("Claude Code returned an error: {result_text}"),
+            stderr: stderr.to_string(),
+        };
+    }
+
+    // For `is_error == true` with subtype "error", check if stderr was also
+    // repetitive. If not, it's a generic subprocess failure.
+    if is_error {
+        return ActualError::ClaudeSubprocessFailed {
+            message: format!("Claude Code returned an error: {result_text}"),
+            stderr: stderr.to_string(),
+        };
+    }
+
+    ActualError::ClaudeSubprocessFailed {
+        message: format!("Claude Code returned an error: {result_text}"),
+        stderr: stderr.to_string(),
+    }
+}
+
 /// Spawn the binary in streaming mode (`--output-format stream-json`), read
 /// stdout line-by-line, forward formatted event summaries to `event_tx`, and
 /// return the structured output extracted from the final `"type":"result"` event.
@@ -299,6 +355,13 @@ async fn run_subprocess<T: DeserializeOwned>(
 /// Stderr is drained concurrently in a background task and each line is
 /// forwarded to `event_tx` prefixed with `"[stderr] "` so callers see it in
 /// the same channel as tool-call events.
+///
+/// **Repetitive output detection:** Both the stderr drainer and the stdout
+/// event loop track consecutive identical messages. When the same message
+/// appears [`REPETITIVE_LINE_THRESHOLD`] times in a row, the subprocess is
+/// killed and a [`ActualError::CreditBalanceTooLow`] error is returned. This
+/// detects pathological loops (e.g., credit balance errors) structurally
+/// without string-matching on specific error messages.
 async fn run_subprocess_streaming<T: DeserializeOwned>(
     binary_path: &std::path::Path,
     timeout: Duration,
@@ -320,32 +383,91 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
 
+    // Shared flag: set by either the stderr drainer or the stdout reader when
+    // they detect a repetitive loop. The child is killed from the main select
+    // loop when this fires.
+    let repetitive_abort = std::sync::Arc::new(tokio::sync::Notify::new());
+    // Stores the repeated message for error reporting.
+    let repetitive_msg: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+
     // Drain stderr in a background task; forward each line to event_tx.
+    // Consecutive duplicate lines are suppressed after the first occurrence
+    // to avoid flooding the TUI with identical error messages.
     let event_tx_for_stderr = event_tx.clone();
+    let abort_for_stderr = repetitive_abort.clone();
+    let msg_for_stderr = repetitive_msg.clone();
     let stderr_task: tokio::task::JoinHandle<Vec<u8>> = tokio::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
         let mut all_bytes: Vec<u8> = Vec::new();
+        let mut last_line: Option<String> = None;
+        let mut repeat_count: usize = 0;
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(tx) = &event_tx_for_stderr {
-                let _ = tx.send(format!("[stderr] {line}"));
+            // Track consecutive duplicates.
+            let is_repeat = last_line.as_deref() == Some(&line);
+            if is_repeat {
+                repeat_count += 1;
+            } else {
+                repeat_count = 1;
+                last_line = Some(line.clone());
             }
+
+            // Only forward the first occurrence to avoid TUI spam.
+            if !is_repeat {
+                if let Some(tx) = &event_tx_for_stderr {
+                    let _ = tx.send(format!("[stderr] {line}"));
+                }
+            }
+
             all_bytes.extend_from_slice(line.as_bytes());
             all_bytes.push(b'\n');
+
+            // Signal abort if we detect a pathological loop.
+            if repeat_count >= REPETITIVE_LINE_THRESHOLD {
+                *msg_for_stderr.lock().unwrap() = last_line.clone();
+                abort_for_stderr.notify_one();
+                break;
+            }
         }
         all_bytes
     });
 
     // Read stdout line-by-line, forwarding formatted summaries and looking for
-    // the final "type":"result" event.  The closure always returns Ok/None on
-    // I/O errors (the while-let silently exits), so we use Option directly.
+    // the final "type":"result" event. Consecutive duplicate summaries are
+    // suppressed and trigger early abort when the threshold is reached.
+    let abort_for_stdout = repetitive_abort.clone();
+    let msg_for_stdout = repetitive_msg.clone();
     let find_result = async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
+        let mut last_summary: Option<String> = None;
+        let mut repeat_count: usize = 0;
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(tx) = &event_tx {
                 if let Some(summary) = format_stream_event(&line) {
-                    let _ = tx.send(summary);
+                    let is_repeat = last_summary.as_deref() == Some(&summary);
+                    if is_repeat {
+                        repeat_count += 1;
+                    } else {
+                        repeat_count = 1;
+                        last_summary = Some(summary.clone());
+                        // Only forward the first occurrence.
+                        let _ = tx.send(summary);
+                    }
+
+                    // Signal abort if the subprocess is stuck in a loop.
+                    if repeat_count >= REPETITIVE_LINE_THRESHOLD {
+                        // Extract the raw message (strip "Claude: " prefix if present).
+                        let raw = last_summary
+                            .as_deref()
+                            .unwrap_or("unknown error")
+                            .strip_prefix("Claude: ")
+                            .unwrap_or(last_summary.as_deref().unwrap_or("unknown error"));
+                        *msg_for_stdout.lock().unwrap() = Some(raw.to_string());
+                        abort_for_stdout.notify_one();
+                        return None;
+                    }
                 }
             }
             if let Ok(envelope) = serde_json::from_str::<ClaudeEnvelope<T>>(&line) {
@@ -357,8 +479,22 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
         None
     };
 
-    match tokio::time::timeout(timeout, find_result).await {
+    // Race: result extraction vs timeout vs repetitive-abort.
+    tokio::pin!(find_result);
+    let result = tokio::select! {
+        r = tokio::time::timeout(timeout, &mut find_result) => r,
+        _ = repetitive_abort.notified() => {
+            // Kill the child process immediately to stop the loop.
+            let _ = child.kill().await;
+            // The find_result future will end when stdout closes after kill.
+            // We don't need its result — we already know this is a repetitive error.
+            Ok(None)
+        }
+    };
+
+    match result {
         Ok(Some(envelope)) => {
+            let repeated = repetitive_msg.lock().unwrap().clone();
             if envelope.is_error == Some(true)
                 || envelope.subtype.as_deref() == Some("error_max_turns")
             {
@@ -366,11 +502,14 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                     .result
                     .unwrap_or_else(|| "unknown error".to_string());
                 let stderr_bytes = stderr_task.await.unwrap_or_default();
-                let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-                Err(ActualError::ClaudeSubprocessFailed {
-                    message: format!("Claude Code returned an error: {detail}"),
-                    stderr,
-                })
+                let stderr_str = String::from_utf8_lossy(&stderr_bytes).to_string();
+                Err(classify_subprocess_error(
+                    envelope.is_error == Some(true),
+                    envelope.subtype.as_deref(),
+                    &detail,
+                    &stderr_str,
+                    repeated.as_deref(),
+                ))
             } else {
                 // Await stderr_task so its channel sends complete before we return,
                 // ensuring tests (and callers) see all stderr events.
@@ -385,11 +524,18 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
         }
         Ok(None) => {
             let stderr_bytes = stderr_task.await.unwrap_or_default();
-            let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-            Err(ActualError::ClaudeSubprocessFailed {
-                message: "Claude Code exited without producing a result".to_string(),
-                stderr,
-            })
+            let stderr_str = String::from_utf8_lossy(&stderr_bytes).to_string();
+            let repeated = repetitive_msg.lock().unwrap().clone();
+            if let Some(repeated_msg) = repeated {
+                Err(ActualError::CreditBalanceTooLow {
+                    message: repeated_msg,
+                })
+            } else {
+                Err(ActualError::ClaudeSubprocessFailed {
+                    message: "Claude Code exited without producing a result".to_string(),
+                    stderr: stderr_str,
+                })
+            }
         }
         Err(_) => {
             // kill_on_drop fires when `child` goes out of scope at function
@@ -1369,5 +1515,197 @@ mod tests {
         }
         assert!(events.iter().any(|e| e.contains("Claude Code started")));
         assert!(events.iter().any(|e| e.contains("Read src/main.rs")));
+    }
+
+    // ── repetitive output detection tests ──
+
+    /// Verify that repetitive stderr lines trigger early abort and return
+    /// `CreditBalanceTooLow`. The subprocess emits the same stderr message
+    /// REPETITIVE_LINE_THRESHOLD+ times.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_subprocess_streaming_repetitive_stderr_aborts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        // Emit the same stderr line many times, then sleep (simulating a stuck process).
+        // The repetitive detection should kill it before the sleep completes.
+        let repeat_count = REPETITIVE_LINE_THRESHOLD + 5;
+        let mut script_content = "#!/bin/sh\n".to_string();
+        for _ in 0..repeat_count {
+            script_content.push_str("echo 'Credit balance is too low' >&2\n");
+        }
+        script_content.push_str("sleep 30\n"); // would timeout without early abort
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let result: Result<serde_json::Value, _> =
+            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx)).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ActualError::CreditBalanceTooLow { .. }),
+            "expected CreditBalanceTooLow, got: {err:?}"
+        );
+
+        // Only the first stderr line should be forwarded (deduplication).
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            messages.push(msg);
+        }
+        let stderr_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.starts_with("[stderr]"))
+            .collect();
+        assert_eq!(
+            stderr_msgs.len(),
+            1,
+            "expected exactly 1 deduplicated stderr message, got: {stderr_msgs:?}"
+        );
+    }
+
+    /// Verify that non-repetitive stderr lines are all forwarded normally.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_subprocess_streaming_non_repetitive_stderr_forwarded() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        let tailoring_json = serde_json::json!({
+            "files": [],
+            "skipped_adrs": [],
+            "summary": {
+                "total_input": 0,
+                "applicable": 0,
+                "not_applicable": 0,
+                "files_generated": 0
+            }
+        });
+        let result_line = stream_result_line(tailoring_json);
+        // Emit different stderr lines — should all be forwarded.
+        let script_content = format!(
+            "#!/bin/sh\necho 'line A' >&2\necho 'line B' >&2\necho 'line C' >&2\necho '{}'\n",
+            result_line
+        );
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let _result: crate::tailoring::types::TailoringOutput =
+            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx))
+                .await
+                .unwrap();
+
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            messages.push(msg);
+        }
+        let stderr_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.starts_with("[stderr]"))
+            .collect();
+        assert_eq!(
+            stderr_msgs.len(),
+            3,
+            "expected 3 distinct stderr messages, got: {stderr_msgs:?}"
+        );
+    }
+
+    /// Verify that repetitive stdout assistant messages trigger early abort.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_subprocess_streaming_repetitive_stdout_aborts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        // Emit the same assistant text message many times on stdout.
+        let repeat_msg = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "Credit balance is too low"}]
+            }
+        })
+        .to_string();
+        let repeat_count = REPETITIVE_LINE_THRESHOLD + 5;
+        let mut script_content = "#!/bin/sh\n".to_string();
+        for _ in 0..repeat_count {
+            script_content.push_str(&format!("echo '{}'\n", repeat_msg));
+        }
+        script_content.push_str("sleep 30\n");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let result: Result<serde_json::Value, _> =
+            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx)).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ActualError::CreditBalanceTooLow { .. }),
+            "expected CreditBalanceTooLow, got: {err:?}"
+        );
+
+        // Only the first message should be forwarded.
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            messages.push(msg);
+        }
+        let credit_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.contains("Credit balance"))
+            .collect();
+        assert_eq!(
+            credit_msgs.len(),
+            1,
+            "expected exactly 1 deduplicated stdout message, got: {credit_msgs:?}"
+        );
+    }
+
+    /// Verify that the `classify_subprocess_error` function correctly maps
+    /// a repetitive message to `CreditBalanceTooLow`.
+    #[test]
+    fn test_classify_subprocess_error_with_repetitive_msg() {
+        let err = classify_subprocess_error(
+            true,
+            Some("error"),
+            "error detail",
+            "",
+            Some("Credit balance is too low"),
+        );
+        assert!(
+            matches!(err, ActualError::CreditBalanceTooLow { .. }),
+            "expected CreditBalanceTooLow, got: {err:?}"
+        );
+    }
+
+    /// Verify that without a repetitive message, `classify_subprocess_error`
+    /// returns `ClaudeSubprocessFailed`.
+    #[test]
+    fn test_classify_subprocess_error_without_repetitive_msg() {
+        let err = classify_subprocess_error(
+            true,
+            Some("error"),
+            "Something went wrong",
+            "stderr output",
+            None,
+        );
+        assert!(
+            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
+            "expected ClaudeSubprocessFailed, got: {err:?}"
+        );
+    }
+
+    /// Verify that `error_max_turns` subtype always maps to `ClaudeSubprocessFailed`
+    /// even with a repetitive message.
+    #[test]
+    fn test_classify_subprocess_error_max_turns_not_credit() {
+        // error_max_turns should NOT map to CreditBalanceTooLow.
+        let err =
+            classify_subprocess_error(false, Some("error_max_turns"), "Hit max turns", "", None);
+        assert!(
+            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
+            "expected ClaudeSubprocessFailed for error_max_turns, got: {err:?}"
+        );
     }
 }
