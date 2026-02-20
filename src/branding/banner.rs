@@ -1,28 +1,18 @@
 /// ASCII art banner based on the actual logo.
 ///
 /// The logo is a stylized "a" shaped like a bird with speed lines,
-/// representing AI-powered code management. Sourced from `docs/logo.txt`.
-pub const BANNER: &str = "                 ..==++++++++=============
-              +*******************+++++++
-           .************************++**
-         =********:        :********+**
-        =******:              .+*******.........................
-      *******:                  -***********++++++++++++++++++=
-  -*********                     .*****+-+*****++++++++++++++=
-***********         ******.       .*** :*
- .*********       :********-       ***:.- :--===-----------
-   *******=       **********       +******************++++=
-    *******       *********-       =*******-=************=
-     :*****        +******.        +*****+ *+
-      ******          ::           +****** -. -===-====.
-       ******.                     +*******************
-        ******=                    +******************
-         +******+=-        .:      ****************=
-           +*********************- *****************-
-             +****************************************.
-               .+*************************************+:.
-                   :************************************-:
-                         ::-+++**************+*::";
+/// representing AI-powered code management. Sourced from `docs/logo_small.txt`.
+pub const BANNER: &str = "       ..===************
+     ..****************
+   .******      ********+************
+  =*****   ****   +*****************
+*******   ******   .*** :****
+  ****=   ******   **********+++=
+   *****    **.    **+ :**+
+    *****.         ************
+      ***********- *********-
+        **********************+
+           :-++**********";
 
 /// Gradient start color: #00FB7E (green).
 const GRADIENT_START: (u8, u8, u8) = (0x00, 0xFB, 0x7E);
@@ -122,19 +112,19 @@ mod tests {
 
     #[test]
     fn gradient_start_is_green() {
-        let (r, g, b) = gradient_rgb(0, 21);
+        let (r, g, b) = gradient_rgb(0, 11);
         assert_eq!((r, g, b), GRADIENT_START);
     }
 
     #[test]
     fn gradient_end_is_teal() {
-        let (r, g, b) = gradient_rgb(20, 21);
+        let (r, g, b) = gradient_rgb(10, 11);
         assert_eq!((r, g, b), GRADIENT_END);
     }
 
     #[test]
     fn gradient_midpoint_is_between_start_and_end() {
-        let (r, g, b) = gradient_rgb(10, 21);
+        let (r, g, b) = gradient_rgb(5, 11);
         // Midpoint should be roughly halfway between start and end
         assert!(r > GRADIENT_START.0 && r < GRADIENT_END.0);
         assert!(g < GRADIENT_START.1 && g > GRADIENT_END.1);
@@ -158,14 +148,14 @@ mod tests {
     #[test]
     fn banner_has_expected_line_count() {
         let count = BANNER.lines().count();
-        // The logo from docs/logo.txt has 21 non-empty lines
-        assert_eq!(count, 21, "BANNER should have 21 lines");
+        // The logo from docs/logo_small.txt has 11 non-empty lines
+        assert_eq!(count, 11, "BANNER should have 11 lines");
     }
 
     #[test]
     fn render_banner_with_color_has_ansi_escapes() {
         let lines = render_banner(true);
-        assert_eq!(lines.len(), 21);
+        assert_eq!(lines.len(), 11);
         // Each line should start with ANSI escape and end with reset
         for line in &lines {
             assert!(
@@ -182,7 +172,7 @@ mod tests {
     #[test]
     fn render_banner_without_color_has_no_escapes() {
         let lines = render_banner(false);
-        assert_eq!(lines.len(), 21);
+        assert_eq!(lines.len(), 11);
         // No line should contain ANSI escape sequences
         for line in &lines {
             assert!(
