@@ -451,47 +451,15 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         let (progress_tx, mut progress_rx) =
             tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
 
-        // In TUI mode (raw mode active) the terminal consumes keyboard input, so
-        // OS-level SIGINT from Ctrl+C may not reach the process reliably.  Spawn
-        // a background thread that polls crossterm for `q` or `Ctrl+C` key events
-        // and signals cancellation via a oneshot channel.
-        //
-        // A shared `stop` flag lets the main thread tell the poller to exit once
-        // tailoring completes (so the thread doesn't wait for a keypress forever).
-        let (kb_cancel_tx, kb_cancel_rx) = tokio::sync::oneshot::channel::<()>();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let kb_thread = if pipeline.is_tui() {
-            let stop_flag = stop.clone();
-            let handle = std::thread::spawn(move || {
-                use crossterm::event::{poll, read, Event, KeyCode, KeyModifiers};
-                loop {
-                    if stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    // Poll with a short timeout so the thread wakes frequently
-                    // to check the stop flag.
-                    if let Ok(true) = poll(std::time::Duration::from_millis(100)) {
-                        if let Ok(Event::Key(key)) = read() {
-                            let quit = matches!(
-                                key.code,
-                                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc
-                            ) || matches!(
-                                (key.code, key.modifiers),
-                                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL)
-                            );
-                            if quit {
-                                let _ = kb_cancel_tx.send(());
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-            Some(handle)
+        // In TUI mode (raw mode active) the terminal consumes keyboard input,
+        // so OS-level SIGINT from Ctrl+C may not reach the process reliably.
+        // `sync_kb_poller` spawns a background thread that polls crossterm for
+        // quit keys and signals cancellation via a oneshot channel.
+        let (kb_poller, kb_cancel_rx) = if pipeline.is_tui() {
+            let (poller, rx) = super::sync_kb_poller::spawn();
+            (Some(poller), Some(rx))
         } else {
-            // Not in TUI mode — drop the sender so the oneshot never fires.
-            drop(kb_cancel_tx);
-            None
+            (None, None)
         };
 
         let result = rt.block_on(async {
@@ -506,7 +474,12 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             let cancel = async {
                 tokio::select! {
                     r = tokio::signal::ctrl_c() => r,
-                    r = kb_cancel_rx => r.map_err(|_| std::io::Error::other("keyboard cancel channel closed")),
+                    r = async {
+                        match kb_cancel_rx {
+                            Some(rx) => rx.await.map_err(|_| std::io::Error::other("keyboard cancel channel closed")),
+                            None => std::future::pending().await,
+                        }
+                    } => r,
                 }
             };
             run_tailoring_with_cancel(
@@ -519,11 +492,9 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             .await
         });
 
-        // Signal the keyboard poller to stop, then join.  The thread wakes every
-        // 100 ms to check the flag, so this completes quickly.
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(handle) = kb_thread {
-            let _ = handle.join();
+        // Signal the keyboard poller to stop and wait for the thread to exit.
+        if let Some(poller) = kb_poller {
+            poller.stop_and_join();
         }
         match result {
             Ok(output) => {

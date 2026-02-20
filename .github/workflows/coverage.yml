@@ -64,14 +64,14 @@ jobs:
           # real_terminal.rs (console::Term I/O wrapper with untestable OS
           # error paths), sync_wiring.rs (CliClaudeRunner instantiation),
           # and test files from coverage measurement.
-          cargo llvm-cov --workspace --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_wiring\.rs|tui/renderer\.rs)' --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
+          cargo llvm-cov --workspace --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_wiring\.rs|sync_kb_poller\.rs|tui/renderer\.rs)' --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
           COV_EXIT=${PIPESTATUS[0]}
           echo "cov_exit=$COV_EXIT" >> $GITHUB_ENV
 
       - name: Generate text report
         if: always()
         run: |
-          cargo llvm-cov report --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_wiring\.rs|tui/renderer\.rs)' 2>&1 | tee coverage-summary.txt || true
+          cargo llvm-cov report --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_wiring\.rs|sync_kb_poller\.rs|tui/renderer\.rs)' 2>&1 | tee coverage-summary.txt || true
 
       - name: Enforce 100% coverage
         if: always()
@@ -164,7 +164,7 @@ jobs:
       - name: Generate HTML report
         if: always()
         run: |
-          cargo llvm-cov report --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_wiring\.rs|tui/renderer\.rs)' --html --output-dir coverage-html 2>/dev/null || true
+          cargo llvm-cov report --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_wiring\.rs|sync_kb_poller\.rs|tui/renderer\.rs)' --html --output-dir coverage-html 2>/dev/null || true
 
       - name: Upload coverage artifacts
         if: always()

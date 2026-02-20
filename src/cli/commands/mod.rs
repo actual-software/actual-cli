@@ -11,6 +11,7 @@ pub mod auth;
 pub mod config;
 pub mod status;
 pub mod sync;
+pub(crate) mod sync_kb_poller;
 pub(crate) mod sync_wiring;
 
 /// Non-hidden directory names to skip when walking the file tree for
