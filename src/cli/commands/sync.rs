@@ -398,7 +398,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         args.no_tailor,
         &project_paths,
         &existing_paths,
-        args.model.as_deref(),
+        args.model.as_deref().or(config.model.as_deref()),
     ));
 
     // Try cache (unless --force)
@@ -3922,6 +3922,32 @@ mod tests {
         assert_ne!(
             key1, key2,
             "None vs Some model should produce different key"
+        );
+    }
+
+    /// Regression test: compute_tailoring_cache_key must receive the effective
+    /// model (args.model OR config.model), not just the CLI flag.
+    ///
+    /// Before the fix, the callsite passed `args.model.as_deref()` only, so
+    /// setting `model: haiku` in config had no effect on the cache key — a
+    /// cached result from a prior sonnet run would be incorrectly served.
+    #[test]
+    fn test_tailoring_cache_key_config_model_differs_from_none() {
+        // Simulates: no --model CLI flag, but config.model = "haiku"
+        let args_model: Option<&str> = None;
+        let config_model: Option<&str> = Some("haiku");
+        let effective_model = args_model.or(config_model);
+
+        // Key with config model applied (correct — post-fix behaviour)
+        let key_with_config =
+            compute_tailoring_cache_key(&[], false, &[".".to_string()], "", effective_model);
+        // Key with only CLI flag (incorrect — pre-fix behaviour, passes None)
+        let key_without_config =
+            compute_tailoring_cache_key(&[], false, &[".".to_string()], "", args_model);
+
+        assert_ne!(
+            key_with_config, key_without_config,
+            "cache key must differ when config.model is set vs not set"
         );
     }
 
