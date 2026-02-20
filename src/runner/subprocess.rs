@@ -189,6 +189,39 @@ fn io_err(context: &str, e: std::io::Error) -> ActualError {
     }
 }
 
+/// Build a human-readable error detail from a Claude Code error envelope.
+///
+/// Prefers the envelope's `result` field (Claude Code's own error message).
+/// When that is absent, falls back to the first non-empty line of stderr
+/// (which often contains diagnostics like quota errors, rate limits, or auth
+/// failures).  If both are empty, synthesises a message from the `subtype`
+/// field so the user sees something more actionable than "unknown error".
+fn error_detail_from_envelope<T>(envelope: &ClaudeEnvelope<T>, stderr: &str) -> String {
+    // 1. Prefer the explicit result text from the envelope.
+    if let Some(ref result) = envelope.result {
+        if !result.is_empty() {
+            return result.clone();
+        }
+    }
+
+    // 2. Fall back to the first meaningful stderr line.
+    let stderr_first_line = stderr
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if !stderr_first_line.is_empty() {
+        return stderr_first_line.to_string();
+    }
+
+    // 3. Synthesise from subtype so the message is at least somewhat descriptive.
+    match envelope.subtype.as_deref() {
+        Some("error_max_turns") => "hit the maximum number of turns".to_string(),
+        Some(subtype) if !subtype.is_empty() => format!("{subtype} (no further details available)"),
+        _ => "unknown error (no details in result or stderr)".to_string(),
+    }
+}
+
 /// Parse the output of a completed subprocess, returning the deserialized result
 /// or an appropriate error.
 ///
@@ -218,12 +251,11 @@ pub(crate) fn parse_output<T: DeserializeOwned>(
         // Check for error states in the envelope.
         if envelope.is_error == Some(true) || envelope.subtype.as_deref() == Some("error_max_turns")
         {
-            let detail = envelope
-                .result
-                .unwrap_or_else(|| "unknown error".to_string());
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let detail = error_detail_from_envelope(&envelope, &stderr);
             return Err(ActualError::ClaudeSubprocessFailed {
                 message: format!("Claude Code returned an error: {detail}"),
-                stderr: String::new(),
+                stderr,
             });
         }
 
@@ -485,11 +517,9 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
             if envelope.is_error == Some(true)
                 || envelope.subtype.as_deref() == Some("error_max_turns")
             {
-                let detail = envelope
-                    .result
-                    .unwrap_or_else(|| "unknown error".to_string());
                 let stderr_bytes = stderr_task.await.unwrap_or_default();
                 let stderr_str = String::from_utf8_lossy(&stderr_bytes).to_string();
+                let detail = error_detail_from_envelope(&envelope, &stderr_str);
                 Err(classify_subprocess_error(
                     envelope.subtype.as_deref(),
                     &detail,
@@ -1035,6 +1065,157 @@ mod tests {
         let parsed: TestOutput = parse_output(output).unwrap();
         assert_eq!(parsed.name, "direct");
         assert_eq!(parsed.count, 99);
+    }
+
+    /// Build a fake successful `std::process::Output` with the given stdout
+    /// and stderr bytes.
+    fn success_output_with_stderr(stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+        let mut out = success_output(stdout);
+        out.stderr = stderr.to_vec();
+        out
+    }
+
+    // ── error_detail_from_envelope tests ──
+
+    #[test]
+    fn test_error_detail_prefers_result_field() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": "Rate limit exceeded",
+            "structured_output": null
+        });
+        let envelope: ClaudeEnvelope<TestOutput> = serde_json::from_value(json).unwrap();
+        let detail = error_detail_from_envelope(&envelope, "some stderr noise");
+        assert_eq!(detail, "Rate limit exceeded");
+    }
+
+    #[test]
+    fn test_error_detail_falls_back_to_stderr_when_result_null() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": null,
+            "structured_output": null
+        });
+        let envelope: ClaudeEnvelope<TestOutput> = serde_json::from_value(json).unwrap();
+        let detail = error_detail_from_envelope(&envelope, "Error: quota exceeded\n");
+        assert_eq!(detail, "Error: quota exceeded");
+    }
+
+    #[test]
+    fn test_error_detail_falls_back_to_stderr_when_result_absent() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "structured_output": null
+        });
+        let envelope: ClaudeEnvelope<TestOutput> = serde_json::from_value(json).unwrap();
+        let detail = error_detail_from_envelope(&envelope, "\n  Auth failure: invalid token\n");
+        assert_eq!(detail, "Auth failure: invalid token");
+    }
+
+    #[test]
+    fn test_error_detail_falls_back_to_subtype_when_no_result_or_stderr() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": null,
+            "structured_output": null
+        });
+        let envelope: ClaudeEnvelope<TestOutput> = serde_json::from_value(json).unwrap();
+        let detail = error_detail_from_envelope(&envelope, "");
+        assert_eq!(detail, "error (no further details available)");
+    }
+
+    #[test]
+    fn test_error_detail_max_turns_subtype_without_result() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error_max_turns",
+            "is_error": false,
+            "result": null,
+            "structured_output": null
+        });
+        let envelope: ClaudeEnvelope<TestOutput> = serde_json::from_value(json).unwrap();
+        let detail = error_detail_from_envelope(&envelope, "");
+        assert_eq!(detail, "hit the maximum number of turns");
+    }
+
+    #[test]
+    fn test_error_detail_completely_empty() {
+        let json = serde_json::json!({
+            "type": "result",
+            "is_error": true,
+            "structured_output": null
+        });
+        let envelope: ClaudeEnvelope<TestOutput> = serde_json::from_value(json).unwrap();
+        let detail = error_detail_from_envelope(&envelope, "");
+        assert_eq!(detail, "unknown error (no details in result or stderr)");
+    }
+
+    #[test]
+    fn test_error_detail_empty_result_string_falls_through() {
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": "",
+            "structured_output": null
+        });
+        let envelope: ClaudeEnvelope<TestOutput> = serde_json::from_value(json).unwrap();
+        let detail = error_detail_from_envelope(&envelope, "stderr: something");
+        assert_eq!(detail, "stderr: something");
+    }
+
+    #[test]
+    fn test_parse_envelope_is_error_null_result_with_stderr() {
+        // Integration test: parse_output should include stderr in the error
+        // detail when the envelope result field is null.
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": null,
+            "structured_output": null
+        });
+        let output = success_output_with_stderr(
+            json.to_string().as_bytes(),
+            b"Error: API rate limit exceeded\n",
+        );
+        let result: Result<TestOutput, _> = parse_output(output);
+        let (message, stderr) = subprocess_failed(result.unwrap_err());
+        assert!(
+            message.contains("API rate limit exceeded"),
+            "expected stderr content in message, got: {message}"
+        );
+        assert!(
+            stderr.contains("API rate limit exceeded"),
+            "expected stderr to be preserved, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn test_parse_envelope_is_error_null_result_no_stderr() {
+        // When both result and stderr are empty, the subtype should appear.
+        let json = serde_json::json!({
+            "type": "result",
+            "subtype": "error",
+            "is_error": true,
+            "result": null,
+            "structured_output": null
+        });
+        let output = success_output(json.to_string().as_bytes());
+        let result: Result<TestOutput, _> = parse_output(output);
+        let (message, _) = subprocess_failed(result.unwrap_err());
+        assert!(
+            message.contains("error (no further details available)"),
+            "expected subtype-based fallback in message, got: {message}"
+        );
     }
 
     // ── format_stream_event tests ──
