@@ -58,6 +58,37 @@ pub(crate) fn resolve_cwd() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or(fallback)
 }
 
+/// Format a cache age in seconds as a human-readable string.
+///
+/// - < 60 s   → `"Ns ago"`
+/// - < 3600 s → `"Nm ago"`
+/// - < 86400 s → `"Nh ago"`
+/// - ≥ 86400 s → `"Nd ago"`
+fn format_cache_age(age_secs: i64) -> String {
+    if age_secs < 60 {
+        format!("{age_secs}s ago")
+    } else if age_secs < 3600 {
+        format!("{}m ago", age_secs / 60)
+    } else if age_secs < 86400 {
+        format!("{}h ago", age_secs / 3600)
+    } else {
+        format!("{}d ago", age_secs / 86400)
+    }
+}
+
+/// Collapse the home directory prefix of a path to `~`.
+///
+/// If `home_dir` is `None` or the path does not start with the home directory,
+/// the full path is returned as-is.
+fn tilde_collapse(path: &Path, home_dir: Option<&std::path::PathBuf>) -> String {
+    if let Some(home) = home_dir {
+        if let Ok(rel) = path.strip_prefix(home) {
+            return format!("~/{}", rel.display());
+        }
+    }
+    path.display().to_string()
+}
+
 /// Core sync logic.
 ///
 /// Accepts injected `root_dir`, `term`, `runner`, and `auth_display` so unit
@@ -98,14 +129,6 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 
     // Helper: strip the home directory prefix and replace with "~".
     let home_dir = dirs::home_dir();
-    let tilde = |p: &Path| -> String {
-        if let Some(ref home) = home_dir {
-            if let Ok(rel) = p.strip_prefix(home) {
-                return format!("~/{}", rel.display());
-            }
-        }
-        p.display().to_string()
-    };
 
     // Blank line for visual breathing room.
     pipeline.println("");
@@ -140,10 +163,18 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     pipeline.println(&format!("  {:<9} {}", "Server", env_api_url));
 
     // Config path row (tilde-collapsed)
-    pipeline.println(&format!("  {:<9} {}", "Config", tilde(cfg_path)));
+    pipeline.println(&format!(
+        "  {:<9} {}",
+        "Config",
+        tilde_collapse(cfg_path, home_dir.as_ref())
+    ));
 
     // Working directory row (tilde-collapsed)
-    pipeline.println(&format!("  {:<9} {}", "Workdir", tilde(root_dir)));
+    pipeline.println(&format!(
+        "  {:<9} {}",
+        "Workdir",
+        tilde_collapse(root_dir, home_dir.as_ref())
+    ));
 
     // Git branch + caching status
     let git_head = get_git_head(root_dir);
@@ -164,15 +195,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
                 let age = chrono::Utc::now()
                     .signed_duration_since(ca.analyzed_at)
                     .num_seconds();
-                let age_str = if age < 60 {
-                    format!("{age}s ago")
-                } else if age < 3600 {
-                    format!("{}m ago", age / 60)
-                } else if age < 86400 {
-                    format!("{}h ago", age / 3600)
-                } else {
-                    format!("{}d ago", age / 86400)
-                };
+                let age_str = format_cache_age(age);
                 pipeline.println(&format!(
                     "  {:<9} {} Analysis cached ({})",
                     "Cache",
@@ -4757,5 +4780,56 @@ mod tests {
         let e = ActualError::UserCancelled;
         let msg = fetch_error_message(&e, "https://api.example.com");
         assert!(msg.contains("API request failed:"), "unexpected msg: {msg}");
+    }
+
+    // ── format_cache_age unit tests ──
+
+    #[test]
+    fn test_format_cache_age_seconds() {
+        assert_eq!(format_cache_age(0), "0s ago");
+        assert_eq!(format_cache_age(30), "30s ago");
+        assert_eq!(format_cache_age(59), "59s ago");
+    }
+
+    #[test]
+    fn test_format_cache_age_minutes() {
+        assert_eq!(format_cache_age(60), "1m ago");
+        assert_eq!(format_cache_age(90), "1m ago");
+        assert_eq!(format_cache_age(3599), "59m ago");
+    }
+
+    #[test]
+    fn test_format_cache_age_hours() {
+        assert_eq!(format_cache_age(3600), "1h ago");
+        assert_eq!(format_cache_age(7200), "2h ago");
+        assert_eq!(format_cache_age(86399), "23h ago");
+    }
+
+    #[test]
+    fn test_format_cache_age_days() {
+        assert_eq!(format_cache_age(86400), "1d ago");
+        assert_eq!(format_cache_age(172800), "2d ago");
+    }
+
+    // ── tilde_collapse unit tests ──
+
+    #[test]
+    fn test_tilde_collapse_with_home_prefix() {
+        let home = std::path::PathBuf::from("/home/user");
+        let path = std::path::Path::new("/home/user/projects/foo");
+        assert_eq!(tilde_collapse(path, Some(&home)), "~/projects/foo");
+    }
+
+    #[test]
+    fn test_tilde_collapse_without_home_prefix() {
+        let home = std::path::PathBuf::from("/home/user");
+        let path = std::path::Path::new("/tmp/other");
+        assert_eq!(tilde_collapse(path, Some(&home)), "/tmp/other");
+    }
+
+    #[test]
+    fn test_tilde_collapse_no_home_dir() {
+        let path = std::path::Path::new("/tmp/other");
+        assert_eq!(tilde_collapse(path, None), "/tmp/other");
     }
 }
