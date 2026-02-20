@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Terminal,
 };
 
@@ -173,6 +173,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 Paragraph::new(colored_lines).block(
                     Block::default()
                         .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
                         .title(version_title.as_str()),
                 )
             } else {
@@ -180,6 +181,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 Paragraph::new(banner_text).block(
                     Block::default()
                         .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
                         .title(version_title.as_str()),
                 )
             };
@@ -193,8 +195,12 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             let step_inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
             let step_lines = ctx.steps.render_lines(step_inner_width, ctx.selected);
             let step_text = step_lines.join("\n");
-            let step_widget = Paragraph::new(step_text)
-                .block(Block::default().borders(Borders::ALL).title("Steps"));
+            let step_widget = Paragraph::new(step_text).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title("Steps"),
+            );
             frame.render_widget(Clear, left_chunks[1]);
             frame.render_widget(step_widget, left_chunks[1]);
             if use_color {
@@ -230,8 +236,12 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 log_lines.push(scroll_hint);
             }
             let log_text = log_lines.join("\n");
-            let log_widget = Paragraph::new(log_text)
-                .block(Block::default().borders(Borders::ALL).title("Output"));
+            let log_widget = Paragraph::new(log_text).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title("Output"),
+            );
             frame.render_widget(Clear, h_chunks[1]);
             frame.render_widget(log_widget, h_chunks[1]);
             if use_color {
