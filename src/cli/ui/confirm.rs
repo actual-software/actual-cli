@@ -28,34 +28,42 @@ fn abbreviate_language(lang: &Language) -> &str {
     }
 }
 
-/// Format project metadata as compact inline string: `lang · framework · pm`.
-///
-/// Omits empty sections. Returns empty string if no metadata is present.
-fn format_metadata(project: &Project) -> String {
-    let mut parts = Vec::new();
+/// Returns indented multi-line metadata detail lines for a project.
+/// Returns empty vec if no metadata is present.
+fn format_metadata_lines(project: &Project) -> Vec<String> {
+    let mut lines = Vec::new();
 
     if !project.languages.is_empty() {
         let langs: Vec<&str> = project.languages.iter().map(abbreviate_language).collect();
-        parts.push(langs.join(", "));
+        lines.push(format!(
+            "    {}  {}",
+            theme::muted("Languages:"),
+            langs.join(", ")
+        ));
     }
 
     if !project.frameworks.is_empty() {
-        let fws: Vec<String> = project
+        let pkgs: Vec<String> = project
             .frameworks
             .iter()
             .map(|f| console::strip_ansi_codes(f.name.as_str()).into_owned())
             .collect();
-        parts.push(fws.join(", "));
+        lines.push(format!(
+            "    {}   {}",
+            theme::muted("Packages:"),
+            pkgs.join(", ")
+        ));
     }
 
     if let Some(pm) = &project.package_manager {
-        parts.push(console::strip_ansi_codes(pm).into_owned());
+        let value = console::strip_ansi_codes(pm).into_owned();
+        lines.push(format!("    {}    {}", theme::muted("Manager:"), value));
     }
 
-    parts.join(" · ")
+    lines
 }
 
-/// Format the project summary as clean inline text lines (no panel/box).
+/// Format the project summary as clean multi-line labeled text.
 ///
 /// This is separate from the prompt so it can be tested independently.
 /// The `width` parameter is retained for API compatibility but is no longer
@@ -63,7 +71,6 @@ fn format_metadata(project: &Project) -> String {
 pub fn format_project_summary(analysis: &RepoAnalysis, _width: usize) -> String {
     let diamond = theme::hint(&theme::DIAMOND);
 
-    // Header line
     let header = if analysis.is_monorepo {
         format!(
             "{diamond} Monorepo detected \u{2014} {} projects",
@@ -75,33 +82,20 @@ pub fn format_project_summary(analysis: &RepoAnalysis, _width: usize) -> String 
 
     let mut lines = vec![header];
 
-    // Project lines
     for project in &analysis.projects {
         let safe_name = console::strip_ansi_codes(&project.name);
         let name = theme::heading(&safe_name);
-        let metadata = format_metadata(project);
 
-        let project_line = if analysis.is_monorepo {
-            // For monorepo: show path in parens
+        let name_line = if analysis.is_monorepo {
             let safe_path = console::strip_ansi_codes(&project.path);
             let path = theme::muted(&safe_path);
-            if metadata.is_empty() {
-                format!("  {name}  ({path})")
-            } else {
-                let meta = theme::muted(&metadata);
-                format!("  {name}  {meta}  ({path})")
-            }
+            format!("  {name}  ({path})")
         } else {
-            // Single project: no path suffix needed
-            if metadata.is_empty() {
-                format!("  {name}")
-            } else {
-                let meta = theme::muted(&metadata);
-                format!("  {name}  {meta}")
-            }
+            format!("  {name}")
         };
+        lines.push(name_line);
 
-        lines.push(project_line);
+        lines.extend(format_metadata_lines(project));
     }
 
     lines.join("\n")
@@ -246,7 +240,7 @@ mod tests {
             "expected framework in: {plain}"
         );
         assert!(plain.contains("diesel"), "expected framework in: {plain}");
-        // Package managers now inline with · separator
+        // Package managers shown under Manager: label
         assert!(
             plain.contains("npm"),
             "expected package manager in: {plain}"
@@ -254,6 +248,20 @@ mod tests {
         assert!(
             plain.contains("cargo"),
             "expected package manager in: {plain}"
+        );
+        // New labeled layout uses Packages: and Manager: labels
+        assert!(
+            plain.contains("Packages:"),
+            "expected Packages: label in: {plain}"
+        );
+        assert!(
+            plain.contains("Manager:"),
+            "expected Manager: label in: {plain}"
+        );
+        // No old dot-separated inline format
+        assert!(
+            !plain.contains(" · "),
+            "should not contain · separator in: {plain}"
         );
         // No panel box characters — output is plain text
         assert!(
@@ -285,6 +293,20 @@ mod tests {
             "expected project name in: {plain}"
         );
         assert!(plain.contains("clap"), "expected framework in: {plain}");
+        // New labeled layout
+        assert!(
+            plain.contains("Packages:"),
+            "expected Packages: label in: {plain}"
+        );
+        assert!(
+            plain.contains("Manager:"),
+            "expected Manager: label in: {plain}"
+        );
+        // No old dot-separated inline format
+        assert!(
+            !plain.contains(" · "),
+            "should not contain · separator in: {plain}"
+        );
         // No panel box characters — output is plain text
         assert!(
             !plain.contains('┌'),
@@ -321,7 +343,7 @@ mod tests {
         let plain = strip(&output);
 
         assert!(plain.contains("bare"), "expected project name in: {plain}");
-        // New format doesn't use "Languages:" or "Frameworks:" labels
+        // Labels are omitted when the corresponding field is empty
         assert!(
             !plain.contains("Languages:"),
             "should not show languages label in: {plain}"
@@ -336,7 +358,7 @@ mod tests {
         );
     }
 
-    // ── format_metadata / abbreviate_language tests ──
+    // ── format_metadata_lines / abbreviate_language tests ──
 
     #[test]
     fn abbreviate_language_all_variants() {
@@ -378,8 +400,23 @@ mod tests {
             package_manager: Some("cargo".to_string()),
             description: None,
         };
-        let meta = format_metadata(&project);
-        assert_eq!(meta, "rust · actix-web · cargo");
+        let lines = format_metadata_lines(&project);
+        assert_eq!(lines.len(), 3, "expected 3 lines, got: {lines:?}");
+        let plain0 = strip(&lines[0]);
+        let plain1 = strip(&lines[1]);
+        let plain2 = strip(&lines[2]);
+        assert!(
+            plain0.contains("Languages:") && plain0.contains("rust"),
+            "line[0] should contain Languages: and rust, got: {plain0}"
+        );
+        assert!(
+            plain1.contains("Packages:") && plain1.contains("actix-web"),
+            "line[1] should contain Packages: and actix-web, got: {plain1}"
+        );
+        assert!(
+            plain2.contains("Manager:") && plain2.contains("cargo"),
+            "line[2] should contain Manager: and cargo, got: {plain2}"
+        );
     }
 
     #[test]
@@ -392,8 +429,13 @@ mod tests {
             package_manager: None,
             description: None,
         };
-        let meta = format_metadata(&project);
-        assert_eq!(meta, "ts");
+        let lines = format_metadata_lines(&project);
+        assert_eq!(lines.len(), 1, "expected 1 line, got: {lines:?}");
+        let plain = strip(&lines[0]);
+        assert!(
+            plain.contains("Languages:") && plain.contains("ts"),
+            "line should contain Languages: and ts, got: {plain}"
+        );
     }
 
     #[test]
@@ -406,8 +448,8 @@ mod tests {
             package_manager: None,
             description: None,
         };
-        let meta = format_metadata(&project);
-        assert!(meta.is_empty());
+        let lines = format_metadata_lines(&project);
+        assert!(lines.is_empty(), "expected empty vec, got: {lines:?}");
     }
 
     #[test]
@@ -420,8 +462,18 @@ mod tests {
             package_manager: Some("npm".to_string()),
             description: None,
         };
-        let meta = format_metadata(&project);
-        assert_eq!(meta, "ts, js · npm");
+        let lines = format_metadata_lines(&project);
+        assert_eq!(lines.len(), 2, "expected 2 lines, got: {lines:?}");
+        let plain0 = strip(&lines[0]);
+        let plain1 = strip(&lines[1]);
+        assert!(
+            plain0.contains("Languages:") && plain0.contains("ts") && plain0.contains("js"),
+            "line[0] should contain Languages: with ts and js, got: {plain0}"
+        );
+        assert!(
+            plain1.contains("Manager:") && plain1.contains("npm"),
+            "line[1] should contain Manager: and npm, got: {plain1}"
+        );
     }
 
     #[test]
@@ -434,8 +486,13 @@ mod tests {
             package_manager: Some("npm".to_string()),
             description: None,
         };
-        let meta = format_metadata(&project);
-        assert_eq!(meta, "npm");
+        let lines = format_metadata_lines(&project);
+        assert_eq!(lines.len(), 1, "expected 1 line, got: {lines:?}");
+        let plain = strip(&lines[0]);
+        assert!(
+            plain.contains("Manager:") && plain.contains("npm"),
+            "line should contain Manager: and npm, got: {plain}"
+        );
     }
 
     #[test]
@@ -457,8 +514,20 @@ mod tests {
             package_manager: None,
             description: None,
         };
-        let meta = format_metadata(&project);
-        assert_eq!(meta, "rust · actix-web, diesel");
+        let lines = format_metadata_lines(&project);
+        assert_eq!(lines.len(), 2, "expected 2 lines, got: {lines:?}");
+        let plain0 = strip(&lines[0]);
+        let plain1 = strip(&lines[1]);
+        assert!(
+            plain0.contains("Languages:") && plain0.contains("rust"),
+            "line[0] should contain Languages: and rust, got: {plain0}"
+        );
+        assert!(
+            plain1.contains("Packages:")
+                && plain1.contains("actix-web")
+                && plain1.contains("diesel"),
+            "line[1] should contain Packages: with actix-web and diesel, got: {plain1}"
+        );
     }
 
     #[test]
@@ -633,14 +702,15 @@ mod tests {
             package_manager: None,
             description: None,
         };
-        let meta = format_metadata(&project);
+        let lines = format_metadata_lines(&project);
+        let joined = lines.join("\n");
         assert!(
-            !meta.contains('\x1b'),
-            "metadata must not contain raw ANSI codes from injected framework name: {meta:?}"
+            !joined.contains('\x1b'),
+            "metadata must not contain raw ANSI codes from injected framework name: {joined:?}"
         );
         assert!(
-            meta.contains("MALICIOUS"),
-            "text content should still be present: {meta}"
+            joined.contains("MALICIOUS"),
+            "text content should still be present: {joined}"
         );
     }
 
@@ -654,14 +724,15 @@ mod tests {
             package_manager: Some("\x1b[33mINJECT_PM\x1b[0m".to_string()),
             description: None,
         };
-        let meta = format_metadata(&project);
+        let lines = format_metadata_lines(&project);
+        let joined = lines.join("\n");
         assert!(
-            !meta.contains('\x1b'),
-            "metadata must not contain raw ANSI codes from injected package manager: {meta:?}"
+            !joined.contains('\x1b'),
+            "metadata must not contain raw ANSI codes from injected package manager: {joined:?}"
         );
         assert!(
-            meta.contains("INJECT_PM"),
-            "text content should still be present: {meta}"
+            joined.contains("INJECT_PM"),
+            "text content should still be present: {joined}"
         );
     }
 
