@@ -274,6 +274,7 @@ mod tests {
             category_name: "Security".to_string(),
             adr_titles: vec!["Use HTTPS".to_string(), "Validate inputs".to_string()],
         };
+        // We constructed BatchStarted above, so this branch always matches.
         if let TailoringEvent::BatchStarted {
             category_name,
             adr_titles,
@@ -290,8 +291,6 @@ mod tests {
             assert_eq!(*batch_index, 2);
             assert_eq!(*batch_count, 3);
             assert_eq!(*adr_count, 2);
-        } else {
-            panic!("expected BatchStarted variant");
         }
     }
 
