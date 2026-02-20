@@ -69,6 +69,7 @@ trait TuiTerminal: Send {
         confirm: Option<&ConfirmState>,
         hint: bool,
         scroll_offset: usize,
+        selected: Option<usize>,
     ) -> io::Result<()>;
 }
 
@@ -83,8 +84,17 @@ impl<B: Backend + Send> TuiTerminal for TuiTerminalImpl<B> {
         confirm: Option<&ConfirmState>,
         hint: bool,
         scroll_offset: usize,
+        selected: Option<usize>,
     ) -> io::Result<()> {
-        render_to(&mut self.0, steps, log, confirm, hint, scroll_offset)
+        render_to(
+            &mut self.0,
+            steps,
+            log,
+            confirm,
+            hint,
+            scroll_offset,
+            selected,
+        )
     }
 }
 
@@ -110,6 +120,7 @@ pub fn render_to<B: Backend>(
     confirm: Option<&ConfirmState>,
     hint: bool,
     scroll_offset: usize,
+    selected: Option<usize>,
 ) -> io::Result<()> {
     let size = terminal.size()?;
     let cols = size.width;
@@ -121,7 +132,7 @@ pub fn render_to<B: Backend>(
                 .constraints([Constraint::Length(32), Constraint::Fill(1)])
                 .split(area);
 
-            let step_lines = steps.render_lines(30);
+            let step_lines = steps.render_lines(30, selected);
             let step_text = step_lines.join("\n");
             let step_widget = Paragraph::new(step_text)
                 .block(Block::default().borders(Borders::ALL).title("Steps"));
@@ -210,11 +221,16 @@ enum Mode {
 pub struct TuiRenderer {
     mode: Mode,
     pub steps: StepsPane,
-    pub log: LogPane,
+    /// Per-step log buffers (index matches phase_idx).
+    pub logs: [LogPane; 5],
+    /// Which step's log currently receives `println` output.
+    active_step: usize,
     starts: [Option<Instant>; 5],
     created_at: Instant,
     hint: bool,
     confirm_state: Option<ConfirmState>,
+    /// Which step is highlighted in review mode (None = show active_step's log).
+    selected_step: Option<usize>,
     /// Lines scrolled up from the bottom of the log pane (0 = pinned to bottom).
     scroll_offset: usize,
 }
@@ -228,7 +244,13 @@ impl TuiRenderer {
             "Tailoring",
             "Write Files",
         ]);
-        let log = LogPane::new();
+        let logs = [
+            LogPane::new(),
+            LogPane::new(),
+            LogPane::new(),
+            LogPane::new(),
+            LogPane::new(),
+        ];
         let created_at = Instant::now();
         let starts = [None; 5];
 
@@ -243,11 +265,13 @@ impl TuiRenderer {
         Self {
             mode,
             steps,
-            log,
+            logs,
+            active_step: 0,
             starts,
             created_at,
             hint: false,
             confirm_state: None,
+            selected_step: None,
             scroll_offset: 0,
         }
     }
@@ -284,13 +308,32 @@ impl TuiRenderer {
                 "Tailoring",
                 "Write Files",
             ]),
-            log: LogPane::new(),
+            logs: [
+                LogPane::new(),
+                LogPane::new(),
+                LogPane::new(),
+                LogPane::new(),
+                LogPane::new(),
+            ],
+            active_step: 0,
             starts: [None; 5],
             created_at: Instant::now(),
             hint: false,
             confirm_state: None,
+            selected_step: None,
             scroll_offset: 0,
         }
+    }
+
+    /// Return all log lines across all per-step buffers, concatenated.
+    /// Useful in tests to assert content without knowing which step it went to.
+    #[cfg(test)]
+    pub fn all_log_text(&self) -> String {
+        self.logs
+            .iter()
+            .flat_map(|l| l.render_to_string(10000, 1000, 0))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Map a `SyncPhase` to a step index.
@@ -307,6 +350,7 @@ impl TuiRenderer {
     /// Transition a phase to the active (spinning) state.
     pub fn start(&mut self, phase: SyncPhase, message: &str) {
         let idx = Self::phase_idx(phase);
+        self.active_step = idx;
         self.starts[idx] = Some(Instant::now());
         self.steps.steps[idx].status = StepStatus::Running { tick: 0 };
         self.steps.steps[idx].message = message.to_string();
@@ -391,12 +435,12 @@ impl TuiRenderer {
         self.draw();
     }
 
-    /// Push a line to the log pane.
+    /// Push a line to the active step's log pane.
     pub fn println(&mut self, line: &str) {
         if let Mode::Quiet = &self.mode {
             return;
         }
-        self.log.push(line.to_string());
+        self.logs[self.active_step].push(line.to_string());
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("{line}");
@@ -429,32 +473,30 @@ impl TuiRenderer {
     fn wait_for_keypress_impl(&mut self, source: &mut dyn EventSource) {
         use crossterm::event::{KeyCode, KeyModifiers};
         if let Mode::Tui(_) = &self.mode {
+            // Default to the most recently active step.
+            self.selected_step = Some(self.active_step);
             self.hint = true;
-            self.scroll_offset = 0; // start pinned to bottom
+            self.scroll_offset = 0;
             self.draw();
             loop {
                 let Ok(key) = source.next_key() else {
                     break;
                 };
-                // Mirror the log_height calculation from render_to exactly:
-                //   wide layout (>=80): log_inner = rows - 2 (Output box borders),
-                //                       then subtract 1 for the hint footer line.
-                //   narrow layout: rows - 1 (condensed steps row), no border subtraction.
-                // We use the wide formula here as a conservative lower bound; render_to
-                // also clamps internally, so over-estimating max is the only risk.
+                // Compute log_height matching render_to's formula exactly.
                 let log_height: usize = crossterm::terminal::size()
                     .map(|(cols, rows)| {
                         let rows = rows as usize;
                         if cols >= 80 {
-                            // log_inner_height = rows - 2 borders, then -1 for hint line
                             rows.saturating_sub(3)
                         } else {
-                            // narrow: rows - 1 condensed row (no border)
                             rows.saturating_sub(1)
                         }
                     })
                     .unwrap_or(20);
-                let max = self.log.max_scroll(log_height);
+                let n_steps = self.steps.steps.len();
+                let cur = self.selected_step.unwrap_or(self.active_step);
+                let log_idx = self.selected_step.unwrap_or(self.active_step);
+                let max = self.logs[log_idx].max_scroll(log_height);
                 match (key.code, key.modifiers) {
                     // Quit
                     (KeyCode::Char('q'), _)
@@ -462,41 +504,44 @@ impl TuiRenderer {
                     | (KeyCode::Esc, _)
                     | (KeyCode::Enter, _) => break,
                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break,
-                    // Scroll up (towards older output)
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                        self.scroll_offset = (self.scroll_offset + 1).min(max);
+                    // Navigate to previous step (↑)
+                    (KeyCode::Up, _) => {
+                        self.selected_step = Some(cur.saturating_sub(1));
+                        self.scroll_offset = 0;
                         self.draw();
                     }
-                    // Scroll down (towards newer output)
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                    // Navigate to next step (↓)
+                    (KeyCode::Down, _) => {
+                        self.selected_step = Some((cur + 1).min(n_steps - 1));
+                        self.scroll_offset = 0;
                         self.draw();
                     }
-                    // Half-page up
+                    // Scroll output up within selected step (PgUp)
                     (KeyCode::PageUp, _) | (KeyCode::Char('u'), _) => {
                         self.scroll_offset = (self.scroll_offset + log_height / 2).min(max);
                         self.draw();
                     }
-                    // Half-page down
+                    // Scroll output down within selected step (PgDn)
                     (KeyCode::PageDown, _) | (KeyCode::Char('d'), _) => {
                         self.scroll_offset = self.scroll_offset.saturating_sub(log_height / 2);
                         self.draw();
                     }
-                    // Jump to top
+                    // Jump to top of output
                     (KeyCode::Home, _) | (KeyCode::Char('g'), _) => {
                         self.scroll_offset = max;
                         self.draw();
                     }
-                    // Jump to bottom
+                    // Jump to bottom of output
                     (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
                         self.scroll_offset = 0;
                         self.draw();
                     }
-                    _ => {} // resize or unknown key — ignore
+                    _ => {}
                 }
             }
             self.hint = false;
             self.scroll_offset = 0;
+            self.selected_step = None;
         }
     }
 
@@ -523,7 +568,7 @@ impl TuiRenderer {
                 let width = term_size::terminal_width();
                 let summary = format_project_summary(analysis, width);
                 for line in summary.lines() {
-                    self.log.push(line.to_string());
+                    self.logs[self.active_step].push(line.to_string());
                 }
                 // Set up confirm state
                 self.confirm_state = Some(ConfirmState {
@@ -607,12 +652,15 @@ impl TuiRenderer {
     /// Redraw the TUI. No-op in Plain and Quiet modes.
     fn draw(&mut self) {
         if let Mode::Tui(ref mut terminal) = self.mode {
+            // In review mode, show the selected step's log; otherwise show active step's log.
+            let log_idx = self.selected_step.unwrap_or(self.active_step);
             let _ = terminal.draw_frame(
                 &self.steps,
-                &self.log,
+                &self.logs[log_idx],
                 self.confirm_state.as_ref(),
                 self.hint,
                 self.scroll_offset,
+                self.selected_step,
             );
         }
     }
@@ -670,7 +718,7 @@ mod tests {
             "Write Files",
         ]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
     }
 
     #[test]
@@ -685,7 +733,7 @@ mod tests {
             "Write Files",
         ]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
     }
 
     #[test]
@@ -701,7 +749,7 @@ mod tests {
         ]);
         let mut log = LogPane::new();
         log.push("a log line".to_string());
-        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
     }
 
     #[test]
@@ -722,7 +770,7 @@ mod tests {
         let mut log = LogPane::new();
         log.push("line one".to_string());
         log.push("line two".to_string());
-        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
     }
 
     // ── TuiRenderer::new tests ──
@@ -906,14 +954,14 @@ mod tests {
     fn test_println_plain_mode() {
         let mut r = TuiRenderer::new(false, true);
         r.println("hello world");
-        assert_eq!(r.log.len(), 1);
+        assert_eq!(r.logs[0].len(), 1);
     }
 
     #[test]
     fn test_println_quiet_mode() {
         let mut r = TuiRenderer::new(true, false);
         r.println("should be ignored");
-        assert_eq!(r.log.len(), 0);
+        assert_eq!(r.logs[0].len(), 0);
     }
 
     // ── suspend tests ──
@@ -1019,14 +1067,14 @@ mod tests {
         let log = LogPane::new();
 
         // First draw at wide size — must not panic.
-        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
         assert_eq!(terminal.size().unwrap().width, 100);
 
         // Simulate a SIGWINCH / terminal resize: shrink to narrow layout (60 cols).
         terminal.backend_mut().resize(60, 20);
 
         // Second draw at narrow size — must not panic and must use new dimensions.
-        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
         assert_eq!(terminal.size().unwrap().width, 60);
         assert_eq!(terminal.size().unwrap().height, 20);
     }
@@ -1045,11 +1093,11 @@ mod tests {
         ]);
         let log = LogPane::new();
 
-        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
 
         // Resize to just below the breakpoint — switches from wide to narrow layout.
         terminal.backend_mut().resize(79, 24);
-        render_to(&mut terminal, &steps, &log, None, false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
         assert_eq!(terminal.size().unwrap().width, 79);
     }
 
@@ -1270,7 +1318,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, true, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, true, 0, None).unwrap();
     }
 
     #[test]
@@ -1283,7 +1331,7 @@ mod tests {
             question: "Proceed?".to_string(),
             focus: ConfirmFocus::Accept,
         };
-        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0, None).unwrap();
     }
 
     #[test]
@@ -1296,7 +1344,7 @@ mod tests {
             question: "Proceed?".to_string(),
             focus: ConfirmFocus::Reject,
         };
-        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0, None).unwrap();
     }
 
     #[test]
@@ -1305,7 +1353,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, true, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, None, true, 0, None).unwrap();
     }
 
     #[test]
@@ -1318,6 +1366,6 @@ mod tests {
             question: "Proceed?".to_string(),
             focus: ConfirmFocus::Accept,
         };
-        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0).unwrap();
+        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0, None).unwrap();
     }
 }
