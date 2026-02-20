@@ -453,6 +453,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
                     .max(1),
             ),
             &output_format,
+            Some(root_dir),
         )?;
 
         let (progress_tx, mut progress_rx) =
