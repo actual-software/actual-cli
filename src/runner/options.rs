@@ -17,7 +17,11 @@ pub struct InvocationOptions {
     pub json_schema: Option<String>,
     /// Optional spending cap for --max-budget-usd.
     pub max_budget_usd: Option<f64>,
-    /// Whether to pass --allow-dangerously-skip-permissions.
+    /// Whether to pass `--dangerously-skip-permissions`.
+    ///
+    /// This is the flag that *actually* bypasses all permission checks (not to
+    /// be confused with `--allow-dangerously-skip-permissions`, which only makes
+    /// the bypass available as an opt-in without triggering it).
     ///
     /// Set to `true` for profiles that do not need Bash or network access
     /// (e.g., tailoring uses Read/Write/Edit/Glob/Grep). Profiles that include
@@ -70,10 +74,16 @@ impl InvocationOptions {
         ];
 
         if self.skip_permissions {
-            args.push("--allow-dangerously-skip-permissions".to_string());
+            // Use --dangerously-skip-permissions (not --allow-dangerously-skip-permissions).
+            // The "allow" variant only makes the bypass opt-in-able; this variant actually
+            // bypasses all permission checks so the subprocess never waits on stdin.
+            args.push("--dangerously-skip-permissions".to_string());
         }
 
         args.push("--no-session-persistence".to_string());
+        // Prevent the subprocess from initialising any MCP servers defined in
+        // project / user settings — those can hang on connection if not running.
+        args.push("--strict-mcp-config".to_string());
         args.push("--tools".to_string());
         args.push(self.tools.clone());
 
@@ -175,7 +185,7 @@ mod tests {
         let opts = InvocationOptions::for_tailoring(None);
         assert!(opts.skip_permissions);
         let args = opts.to_args();
-        assert!(args.contains(&"--allow-dangerously-skip-permissions".to_string()));
+        assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
     /// Guard: `skip_permissions = true` must never be combined with tools that
@@ -202,7 +212,7 @@ mod tests {
         let mut opts = InvocationOptions::for_tailoring(None);
         opts.skip_permissions = false;
         let args = opts.to_args();
-        assert!(!args.contains(&"--allow-dangerously-skip-permissions".to_string()));
+        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()));
     }
 
     #[test]
