@@ -193,7 +193,10 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
 
             // Steps box (bottom-left)
             let step_inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
-            let step_lines = ctx.steps.render_lines(step_inner_width, ctx.selected);
+            let mut step_lines = ctx.steps.render_lines(step_inner_width, ctx.selected);
+            // Add one line of padding at the top and bottom of the Steps section.
+            step_lines.insert(0, String::new());
+            step_lines.push(String::new());
             let step_text = step_lines.join("\n");
             let step_widget = Paragraph::new(step_text).block(
                 Block::default()
@@ -208,21 +211,30 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             }
 
             // ── Right column: output pane ──
-            // Reserve one line for the footer hint so it is always visible.
+            // Reserve one line for the footer hint so it is always visible,
+            // and two lines for top/bottom padding inside the Output section.
             let log_inner_height = h_chunks[1].height.saturating_sub(2) as usize;
             let footer_height: usize = if ctx.confirm.is_some() || ctx.hint {
                 1
             } else {
                 0
             };
-            let log_height = log_inner_height.saturating_sub(footer_height);
+            // Reserve 2 lines for padding (top + bottom) inside the Output box.
+            const OUTPUT_PADDING: usize = 2;
+            let log_height = log_inner_height
+                .saturating_sub(footer_height)
+                .saturating_sub(OUTPUT_PADDING);
             let log_width = h_chunks[1].width.saturating_sub(2) as usize;
             let mut log_lines = ctx
                 .log
                 .render_to_string(log_height, log_width, ctx.scroll_offset);
+            // Insert one blank line at the top and bottom for visual breathing room.
+            log_lines.insert(0, String::new());
             if let Some(cs) = ctx.confirm {
+                log_lines.push(String::new());
                 append_confirm_lines(&mut log_lines, cs);
             } else if ctx.hint {
+                log_lines.push(String::new());
                 let max = ctx.log.max_scroll(log_height);
                 let scroll_hint = if max > 0 {
                     format!(
@@ -234,6 +246,8 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                     "  q to quit".to_string()
                 };
                 log_lines.push(scroll_hint);
+            } else {
+                log_lines.push(String::new());
             }
             let log_text = log_lines.join("\n");
             let log_widget = Paragraph::new(log_text).block(
