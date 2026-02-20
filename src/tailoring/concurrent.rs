@@ -1315,17 +1315,17 @@ mod tests {
             events.push(event);
         }
 
-        // Verify ProjectStarted carries batch_count=2
+        // Verify ProjectStarted carries batch_count=2.
         let started: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, TailoringEvent::ProjectStarted { .. }))
             .collect();
         assert_eq!(started.len(), 1, "expected 1 ProjectStarted event");
-        let (ps_name, ps_batch_count) = project_started_fields(&started[0]);
+        let (ps_name, ps_batch_count) = project_started_fields(started[0]);
         assert_eq!(ps_name, "mono");
         assert_eq!(ps_batch_count, 2, "expected 2 batches for mono");
 
-        // Verify 2 BatchCompleted events, each with batch_count=2
+        // Verify 2 BatchCompleted events, each with batch_count=2.
         let batch_events: Vec<_> = events
             .iter()
             .filter(|e| matches!(e, TailoringEvent::BatchCompleted { .. }))
