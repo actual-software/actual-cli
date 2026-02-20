@@ -546,7 +546,9 @@ impl TuiRenderer {
     /// Update the message for an active phase and advance the spinner tick.
     pub fn update_message(&mut self, phase: SyncPhase, message: &str) {
         let idx = Self::phase_idx(phase);
-        self.steps.steps[idx].message = message.to_string();
+        // Push to the log pane so progress text appears in the scrollable log
+        // without polluting the step row in the Steps pane.
+        self.logs[idx].push(message.to_string());
         if let StepStatus::Running { ref mut tick } = self.steps.steps[idx].status {
             *tick = tick.wrapping_add(1);
         }
@@ -1079,7 +1081,12 @@ mod tests {
         let mut r = TuiRenderer::new(false, true);
         r.start(SyncPhase::Tailor, "initial");
         r.update_message(SyncPhase::Tailor, "updated message");
-        assert_eq!(r.steps.steps[3].message, "updated message");
+        // Message goes to the log pane (start also pushes one entry, so len == 2).
+        assert_eq!(r.logs[3].len(), 2);
+        let logged = r.logs[3].render_to_string(10, 200, 0);
+        assert!(logged.contains(&"updated message".to_string()));
+        // step.message should remain empty (not set by update_message).
+        assert_eq!(r.steps.steps[3].message, "");
         // tick should have advanced
         assert!(matches!(
             r.steps.steps[3].status,
@@ -1089,12 +1096,16 @@ mod tests {
 
     #[test]
     fn test_update_message_non_running_step() {
-        // update_message on a non-Running step should still update the message
-        // without panicking (the tick increment branch is skipped).
+        // update_message on a non-Running step should push to logs without
+        // panicking (the tick increment branch is skipped for non-Running steps).
         let mut r = TuiRenderer::new(false, true);
         // Step is Waiting — not Running
         r.update_message(SyncPhase::Environment, "some message");
-        assert_eq!(r.steps.steps[0].message, "some message");
+        // Message goes to the log pane, not the step row.
+        assert_eq!(r.logs[0].len(), 1);
+        let logged = r.logs[0].render_to_string(10, 200, 0);
+        assert!(logged.contains(&"some message".to_string()));
+        assert_eq!(r.steps.steps[0].message, "");
     }
 
     #[test]
