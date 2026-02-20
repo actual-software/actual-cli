@@ -78,9 +78,9 @@ impl ActualError {
                 let _ = env_var;
                 Some("Set the API key environment variable or add it to your config file")
             }
-            Self::ConfigError(_) => Some("Check ~/.config/actual/config.yaml"),
+            Self::ConfigError(_) => Some("Check ~/.actualai/actual/config.yaml"),
             Self::ClaudeTimeout { .. } => Some(
-                "Set `invocation_timeout_secs` in ~/.config/actual/config.yaml to increase the limit",
+                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit",
             ),
             _ => None,
         }
@@ -286,7 +286,7 @@ mod tests {
     fn test_hint_config_error() {
         assert_eq!(
             ActualError::ConfigError("test".to_string()).hint(),
-            Some("Check ~/.config/actual/config.yaml")
+            Some("Check ~/.actualai/actual/config.yaml")
         );
     }
 
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(
             ActualError::ClaudeTimeout { seconds: 30 }.hint(),
             Some(
-                "Set `invocation_timeout_secs` in ~/.config/actual/config.yaml to increase the limit",
+                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit",
             )
         );
     }
