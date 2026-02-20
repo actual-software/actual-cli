@@ -79,9 +79,9 @@ impl ActualError {
                 Some("Set the API key environment variable or add it to your config file")
             }
             Self::ConfigError(_) => Some("Check ~/.config/actual/config.yaml"),
-            Self::ClaudeTimeout { .. } => {
-                Some("Try increasing the timeout or check Claude Code status")
-            }
+            Self::ClaudeTimeout { .. } => Some(
+                "Set `invocation_timeout_secs` in ~/.config/actual/config.yaml to increase the limit",
+            ),
             _ => None,
         }
     }
@@ -294,7 +294,9 @@ mod tests {
     fn test_hint_claude_timeout() {
         assert_eq!(
             ActualError::ClaudeTimeout { seconds: 30 }.hint(),
-            Some("Try increasing the timeout or check Claude Code status")
+            Some(
+                "Set `invocation_timeout_secs` in ~/.config/actual/config.yaml to increase the limit",
+            )
         );
     }
 
