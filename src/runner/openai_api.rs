@@ -8,6 +8,9 @@ use crate::tailoring::types::TailoringOutput;
 
 use super::subprocess::TailoringRunner;
 
+/// Maximum number of retries on HTTP 429 rate-limit responses.
+const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+
 /// Map a `reqwest::Error` from `send()` into an [`ActualError`].
 ///
 /// The `is_timeout` predicate allows tests to inject the timeout classification
@@ -46,6 +49,10 @@ pub struct OpenAiApiRunner {
     timeout: Duration,
     /// Base URL for the OpenAI API (overridable for tests via mockito).
     base_url: String,
+    /// Base duration for exponential back-off on 429 responses.
+    /// Defaults to 1 second; tests override this to zero for speed.
+    #[cfg(test)]
+    retry_base: Duration,
 }
 
 // ── Request / response shapes ────────────────────────────────────────────────
@@ -122,6 +129,8 @@ impl OpenAiApiRunner {
             client,
             timeout,
             base_url: "https://api.openai.com".to_string(),
+            #[cfg(test)]
+            retry_base: Duration::from_secs(1),
         })
     }
 
@@ -186,49 +195,74 @@ impl TailoringRunner for OpenAiApiRunner {
 
         let url = format!("{}/v1/responses", self.base_url);
 
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| map_send_error(e, self.timeout))?;
-
-        let status = response.status();
-
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ActualError::ClaudeNotAuthenticated);
-        }
-
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(ActualError::ClaudeSubprocessFailed {
-                message: "OpenAI API rate limited".to_string(),
-                stderr: String::new(),
-            });
-        }
-
-        if status.is_server_error() {
-            let body_bytes = response
-                .bytes()
+        let mut attempt = 0u32;
+        let api_response: ApiResponse = loop {
+            let response = self
+                .client
+                .post(&url)
+                .bearer_auth(&self.api_key)
+                .json(&body)
+                .send()
                 .await
-                .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
-            let truncated = &body_bytes[..body_bytes.len().min(4096)];
-            let body_text = String::from_utf8_lossy(truncated).into_owned();
-            return Err(ActualError::ClaudeSubprocessFailed {
-                message: format!("OpenAI API error: {status}"),
-                stderr: body_text,
-            });
-        }
+                .map_err(|e| map_send_error(e, self.timeout))?;
 
-        let api_response: ApiResponse = response.json().await.map_err(|e| {
-            // reqwest JSON parse failure wraps serde_json; surface as ClaudeSubprocessFailed
-            // with the original message since we can't recover the raw bytes at this point.
-            ActualError::ClaudeSubprocessFailed {
-                message: format!("Failed to parse OpenAI API response: {e}"),
-                stderr: String::new(),
+            let status = response.status();
+
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(ActualError::ClaudeNotAuthenticated);
             }
-        })?;
+
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                attempt += 1;
+                if attempt > MAX_RATE_LIMIT_RETRIES {
+                    return Err(ActualError::ClaudeSubprocessFailed {
+                        message: format!(
+                            "OpenAI API rate limited after {MAX_RATE_LIMIT_RETRIES} retries"
+                        ),
+                        stderr: String::new(),
+                    });
+                }
+                // Respect Retry-After header if present, else use exponential backoff.
+                let wait_secs =
+                    parse_retry_after(response.headers()).unwrap_or_else(|| 1u64 << (attempt - 1)); // 1s, 2s, 4s
+                let wait_secs = wait_secs.min(60);
+                tracing::warn!(
+                    "OpenAI API rate limited, waiting {}s before retry {}/{}",
+                    wait_secs,
+                    attempt,
+                    MAX_RATE_LIMIT_RETRIES
+                );
+                #[cfg(test)]
+                tokio::time::sleep(self.retry_base * wait_secs as u32).await;
+                #[cfg(not(test))]
+                tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                continue;
+            }
+
+            if status.is_server_error() {
+                let body_bytes = response
+                    .bytes()
+                    .await
+                    .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
+                let truncated = &body_bytes[..body_bytes.len().min(4096)];
+                let body_text = String::from_utf8_lossy(truncated).into_owned();
+                return Err(ActualError::ClaudeSubprocessFailed {
+                    message: format!("OpenAI API error: {status}"),
+                    stderr: body_text,
+                });
+            }
+
+            break response.json().await.map_err(|e| {
+                // reqwest JSON parse failure wraps serde_json; surface as ClaudeSubprocessFailed
+                // with the original message since we can't recover the raw bytes at this point.
+                ActualError::ClaudeSubprocessFailed {
+                    message: format!("Failed to parse OpenAI API response: {e}"),
+                    stderr: String::new(),
+                }
+            })?;
+        };
 
         // Find the message output item.
         let message_item = api_response
@@ -280,6 +314,16 @@ impl TailoringRunner for OpenAiApiRunner {
     }
 }
 
+/// Parse the `Retry-After` header value into a number of seconds.
+///
+/// Returns `Some(seconds)` if the header is present and contains a valid
+/// non-negative integer.  Returns `None` if the header is absent, non-UTF-8,
+/// or not an integer (e.g., an HTTP-date string).
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers.get("retry-after")?.to_str().ok()?;
+    value.trim().parse::<u64>().ok()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -326,13 +370,16 @@ mod tests {
     }
 
     fn make_runner(server: &Server) -> OpenAiApiRunner {
-        OpenAiApiRunner::new(
+        let mut runner = OpenAiApiRunner::new(
             "test-key".to_string(),
             "gpt-4o".to_string(),
             Duration::from_secs(10),
         )
         .expect("failed to build test runner")
-        .with_base_url(server.url())
+        .with_base_url(server.url());
+        // Use zero-duration back-off so 429 retry tests run without real sleeps.
+        runner.retry_base = Duration::ZERO;
+        runner
     }
 
     // Test 1: valid response is parsed correctly into TailoringOutput
@@ -390,15 +437,17 @@ mod tests {
         mock.assert_async().await;
     }
 
-    // Test 3: HTTP 429 maps to ClaudeSubprocessFailed with rate limit message
+    // Test 3: HTTP 429 exhausts all retries and returns ClaudeSubprocessFailed
     #[tokio::test]
-    async fn test_429_maps_to_rate_limited() {
+    async fn test_429_exhausts_retries() {
         let mut server = Server::new_async().await;
 
+        // Return 429 on every attempt: 1 initial + MAX_RATE_LIMIT_RETRIES retries = 4 total.
         let mock = server
             .mock("POST", "/v1/responses")
             .with_status(429)
             .with_body(r#"{"error": "Too Many Requests"}"#)
+            .expect(4)
             .create_async()
             .await;
 
@@ -407,6 +456,7 @@ mod tests {
             .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
             .await;
 
+        mock.assert_async().await;
         match result {
             Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
                 assert!(
@@ -416,8 +466,82 @@ mod tests {
             }
             other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
         }
+    }
 
-        mock.assert_async().await;
+    // Test 3b: 429 retries then succeeds on a subsequent 200
+    #[tokio::test]
+    async fn test_429_retries_and_succeeds() {
+        let mut server = Server::new_async().await;
+
+        // Return 429 three times, then a valid 200.
+        let mock_429 = server
+            .mock("POST", "/v1/responses")
+            .with_status(429)
+            .with_body(r#"{"error": "Too Many Requests"}"#)
+            .expect(3)
+            .create_async()
+            .await;
+
+        let inner = minimal_tailoring_output_json();
+        let body = responses_body(&inner);
+        let mock_200 = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock_429.assert_async().await;
+        mock_200.assert_async().await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after retrying, got: {:?}",
+            result
+        );
+    }
+
+    // Test 3c: 429 with Retry-After header is respected, then succeeds
+    #[tokio::test]
+    async fn test_429_respects_retry_after_header() {
+        let mut server = Server::new_async().await;
+
+        let mock_429 = server
+            .mock("POST", "/v1/responses")
+            .with_status(429)
+            .with_header("retry-after", "5")
+            .with_body(r#"{"error": "Too Many Requests"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let inner = minimal_tailoring_output_json();
+        let body = responses_body(&inner);
+        let mock_200 = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock_429.assert_async().await;
+        mock_200.assert_async().await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after Retry-After wait, got: {:?}",
+            result
+        );
     }
 
     // Test 4: refusal response maps to TailoringValidationError
@@ -1080,5 +1204,32 @@ mod tests {
         }
 
         mock.assert_async().await;
+    }
+
+    // Tests for parse_retry_after helper
+    #[test]
+    fn test_parse_retry_after_integer() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            reqwest::header::HeaderValue::from_static("30"),
+        );
+        assert_eq!(parse_retry_after(&headers), Some(30));
+    }
+
+    #[test]
+    fn test_parse_retry_after_missing() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn test_parse_retry_after_invalid() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            reqwest::header::HeaderValue::from_static("not-a-number"),
+        );
+        assert_eq!(parse_retry_after(&headers), None);
     }
 }

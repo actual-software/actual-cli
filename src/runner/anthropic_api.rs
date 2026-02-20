@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::time::sleep;
 
 use crate::error::ActualError;
 use crate::tailoring::types::TailoringOutput;
@@ -10,6 +11,9 @@ use super::subprocess::TailoringRunner;
 
 /// The production Anthropic Messages API endpoint.
 const ANTHROPIC_API_BASE: &str = "https://api.anthropic.com";
+
+/// Maximum number of retries on HTTP 429 rate-limit responses.
+const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 
 /// Direct HTTP runner that calls the Anthropic Messages API without spawning a subprocess.
 ///
@@ -23,6 +27,10 @@ pub struct AnthropicApiRunner {
     timeout: Duration,
     /// Base URL for the API, configurable for testing.
     base_url: String,
+    /// Base duration for exponential back-off on 429 responses.
+    /// Defaults to 1 second; tests override this to zero for speed.
+    #[cfg(test)]
+    retry_base: Duration,
 }
 
 /// Map a reqwest client build error into an [`ActualError`].
@@ -60,71 +68,113 @@ impl AnthropicApiRunner {
             client,
             timeout,
             base_url,
+            #[cfg(test)]
+            retry_base: Duration::from_secs(1),
         })
     }
 
     /// POST to the Anthropic Messages API and return the parsed JSON response body.
+    ///
+    /// On HTTP 429 rate-limit responses, retries up to [`MAX_RATE_LIMIT_RETRIES`] times
+    /// with exponential backoff (1 s, 2 s, 4 s), respecting the `Retry-After` header
+    /// when present.
     async fn post_messages(&self, body: Value) -> Result<Value, ActualError> {
         let url = format!("{}/v1/messages", self.base_url);
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    ActualError::ClaudeTimeout {
-                        seconds: self.timeout.as_secs(),
-                    }
-                } else {
-                    ActualError::ClaudeSubprocessFailed {
-                        message: format!("HTTP request failed: {e}"),
-                        stderr: String::new(),
-                    }
-                }
-            })?;
 
-        let status = response.status();
-
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(ActualError::ClaudeNotAuthenticated);
-        }
-
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(ActualError::ClaudeSubprocessFailed {
-                message: "Anthropic API rate limited".to_string(),
-                stderr: String::new(),
-            });
-        }
-
-        if status.is_server_error() {
-            let body_bytes = response
-                .bytes()
+        let mut attempt = 0u32;
+        loop {
+            let response = self
+                .client
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
                 .await
-                .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
-            let truncated = &body_bytes[..body_bytes.len().min(4096)];
-            let body = String::from_utf8_lossy(truncated).into_owned();
-            return Err(ActualError::ClaudeSubprocessFailed {
-                message: format!("Anthropic API error: {status}"),
-                stderr: body,
-            });
-        }
-
-        let json: Value =
-            response
-                .json()
-                .await
-                .map_err(|e| ActualError::ClaudeSubprocessFailed {
-                    message: format!("Failed to parse Anthropic API response: {e}"),
-                    stderr: String::new(),
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        ActualError::ClaudeTimeout {
+                            seconds: self.timeout.as_secs(),
+                        }
+                    } else {
+                        ActualError::ClaudeSubprocessFailed {
+                            message: format!("HTTP request failed: {e}"),
+                            stderr: String::new(),
+                        }
+                    }
                 })?;
 
-        Ok(json)
+            let status = response.status();
+
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(ActualError::ClaudeNotAuthenticated);
+            }
+
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                attempt += 1;
+                if attempt > MAX_RATE_LIMIT_RETRIES {
+                    return Err(ActualError::ClaudeSubprocessFailed {
+                        message: format!(
+                            "Anthropic API rate limited after {MAX_RATE_LIMIT_RETRIES} retries"
+                        ),
+                        stderr: String::new(),
+                    });
+                }
+                // Respect Retry-After header if present, else use exponential backoff.
+                let wait_secs =
+                    parse_retry_after(response.headers()).unwrap_or_else(|| 1u64 << (attempt - 1)); // 1s, 2s, 4s
+                let wait_secs = wait_secs.min(60);
+                tracing::warn!(
+                    "Anthropic API rate limited, waiting {}s before retry {}/{}",
+                    wait_secs,
+                    attempt,
+                    MAX_RATE_LIMIT_RETRIES
+                );
+                #[cfg(test)]
+                sleep(self.retry_base * wait_secs as u32).await;
+                #[cfg(not(test))]
+                sleep(Duration::from_secs(wait_secs)).await;
+                continue;
+            }
+
+            if status.is_server_error() {
+                let body_bytes = response
+                    .bytes()
+                    .await
+                    .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
+                let truncated = &body_bytes[..body_bytes.len().min(4096)];
+                let body = String::from_utf8_lossy(truncated).into_owned();
+                return Err(ActualError::ClaudeSubprocessFailed {
+                    message: format!("Anthropic API error: {status}"),
+                    stderr: body,
+                });
+            }
+
+            let json: Value =
+                response
+                    .json()
+                    .await
+                    .map_err(|e| ActualError::ClaudeSubprocessFailed {
+                        message: format!("Failed to parse Anthropic API response: {e}"),
+                        stderr: String::new(),
+                    })?;
+
+            return Ok(json);
+        }
     }
+}
+
+/// Parse the `Retry-After` header value into a number of seconds.
+///
+/// Returns `Some(seconds)` if the header is present and contains a valid
+/// non-negative integer.  Returns `None` if the header is absent, non-UTF-8,
+/// or not an integer (e.g., an HTTP-date string).
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers.get("retry-after")?.to_str().ok()?;
+    value.trim().parse::<u64>().ok()
 }
 
 /// Intermediate representation for a content block in the Anthropic response.
@@ -212,14 +262,17 @@ mod tests {
     use mockito::Server;
 
     /// Create a runner pointed at `server_url` instead of the production API.
+    /// Sets `retry_base` to zero so 429 retry tests run without real sleeps.
     fn make_runner(server_url: &str) -> AnthropicApiRunner {
-        AnthropicApiRunner::with_base_url(
+        let mut runner = AnthropicApiRunner::with_base_url(
             "test-key".to_string(),
             "claude-sonnet-4-5".to_string(),
             Duration::from_secs(10),
             server_url.to_string(),
         )
-        .expect("failed to build test runner")
+        .expect("failed to build test runner");
+        runner.retry_base = Duration::ZERO;
+        runner
     }
 
     /// Build a minimal valid TailoringOutput JSON value.
@@ -314,15 +367,17 @@ mod tests {
         );
     }
 
-    // Test 3: 429 maps to ClaudeSubprocessFailed with rate limit message
+    // Test 3: 429 exhausts all retries and returns ClaudeSubprocessFailed
     #[tokio::test]
-    async fn test_429_maps_to_rate_limited() {
+    async fn test_429_exhausts_retries() {
         let mut server = Server::new_async().await;
 
+        // Return 429 on every attempt: 1 initial + MAX_RATE_LIMIT_RETRIES retries = 4 total.
         let mock = server
             .mock("POST", "/v1/messages")
             .with_status(429)
             .with_body(r#"{"error": {"type": "rate_limit_error"}}"#)
+            .expect(4)
             .create_async()
             .await;
 
@@ -340,6 +395,78 @@ mod tests {
             }
             other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
         }
+    }
+
+    // Test 3b: 429 retries then succeeds on a subsequent 200
+    #[tokio::test]
+    async fn test_429_retries_and_succeeds() {
+        let mut server = Server::new_async().await;
+
+        // Return 429 three times, then a valid 200.
+        let mock_429 = server
+            .mock("POST", "/v1/messages")
+            .with_status(429)
+            .with_body(r#"{"error": {"type": "rate_limit_error"}}"#)
+            .expect(3)
+            .create_async()
+            .await;
+
+        let response_body = anthropic_tool_use_response(tailoring_output_json());
+        let mock_200 = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock_429.assert_async().await;
+        mock_200.assert_async().await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after retrying, got: {:?}",
+            result
+        );
+    }
+
+    // Test 3c: 429 with Retry-After header is respected, then succeeds
+    #[tokio::test]
+    async fn test_429_respects_retry_after_header() {
+        let mut server = Server::new_async().await;
+
+        let mock_429 = server
+            .mock("POST", "/v1/messages")
+            .with_status(429)
+            .with_header("retry-after", "5")
+            .with_body(r#"{"error": {"type": "rate_limit_error"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let response_body = anthropic_tool_use_response(tailoring_output_json());
+        let mock_200 = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock_429.assert_async().await;
+        mock_200.assert_async().await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after Retry-After wait, got: {:?}",
+            result
+        );
     }
 
     // Test 4: 500 maps to ClaudeSubprocessFailed
@@ -629,6 +756,33 @@ mod tests {
             }
             other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
         }
+    }
+
+    // Tests for parse_retry_after helper
+    #[test]
+    fn test_parse_retry_after_integer() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            reqwest::header::HeaderValue::from_static("30"),
+        );
+        assert_eq!(parse_retry_after(&headers), Some(30));
+    }
+
+    #[test]
+    fn test_parse_retry_after_missing() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn test_parse_retry_after_invalid() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "retry-after",
+            reqwest::header::HeaderValue::from_static("not-a-number"),
+        );
+        assert_eq!(parse_retry_after(&headers), None);
     }
 
     // Test 7: map_client_build_error formats the error message correctly
