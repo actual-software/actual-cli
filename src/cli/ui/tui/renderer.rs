@@ -61,11 +61,22 @@ pub struct ConfirmState {
     pub focus: ConfirmFocus,
 }
 
+/// State for the inline file multi-select rendered at the bottom of the log pane.
+pub struct FileSelectState {
+    /// Display label for each file (e.g. "CLAUDE.md  (3 ADRs)").
+    pub items: Vec<String>,
+    /// Toggle state for each item (true = selected).
+    pub checked: Vec<bool>,
+    /// Index of the currently highlighted row.
+    pub cursor: usize,
+}
+
 /// Rendering context passed to `render_to` and `draw_frame`.
 pub struct RenderContext<'a> {
     pub steps: &'a StepsPane,
     pub log: &'a LogPane,
     pub confirm: Option<&'a ConfirmState>,
+    pub file_select: Option<&'a FileSelectState>,
     pub hint: bool,
     pub scroll_offset: usize,
     pub selected: Option<usize>,
@@ -99,6 +110,18 @@ fn append_confirm_lines(lines: &mut Vec<String>, cs: &ConfirmState) {
     lines.push(format!("  {accept_label}   {reject_label}"));
 }
 
+fn append_file_select_lines(lines: &mut Vec<String>, fs: &FileSelectState) {
+    lines.push("  Select files to write:".to_string());
+    lines.push("  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string());
+    for (i, item) in fs.items.iter().enumerate() {
+        let checkbox = if fs.checked[i] { "[x]" } else { "[ ]" };
+        let cursor = if i == fs.cursor { ">" } else { " " };
+        lines.push(format!("  {cursor} {checkbox} {item}"));
+    }
+    lines.push(String::new());
+    lines.push("  Space toggle  Enter confirm  Esc cancel".to_string());
+}
+
 /// Width of the left panel (banner box + steps box).
 ///
 /// The banner art is 37 chars wide; +2 for borders = 39. We add a few chars
@@ -123,7 +146,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
         let frame_area = area;
 
         // ── Outer vertical split: content area on top, footer hint row on bottom ──
-        let has_hint = ctx.hint || ctx.confirm.is_some();
+        let has_hint = ctx.hint || ctx.confirm.is_some() || ctx.file_select.is_some();
         let outer_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(if has_hint {
@@ -143,6 +166,9 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             let hint_text = if ctx.confirm.is_some() {
                 // Confirm mode: show key hints
                 "  ← → select  Enter confirm".to_string()
+            } else if ctx.file_select.is_some() {
+                // File select mode: show key hints
+                "  ↑/↓ move  Space toggle  Enter confirm  Esc cancel".to_string()
             } else {
                 // Post-sync review mode: scroll/quit hint
                 let max = ctx.log.max_scroll(approx_log_height);
@@ -263,6 +289,9 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             if let Some(cs) = ctx.confirm {
                 log_lines.push(String::new());
                 append_confirm_lines(&mut log_lines, cs);
+            } else if let Some(fs) = ctx.file_select {
+                log_lines.push(String::new());
+                append_file_select_lines(&mut log_lines, fs);
             } else {
                 log_lines.push(String::new());
             }
@@ -295,6 +324,8 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                     .render_to_string(log_inner_height, log_width, ctx.scroll_offset);
             if let Some(cs) = ctx.confirm {
                 append_confirm_lines(&mut log_lines, cs);
+            } else if let Some(fs) = ctx.file_select {
+                append_file_select_lines(&mut log_lines, fs);
             }
             let log_text = log_lines.join("\n");
             frame.render_widget(Clear, chunks[1]);
@@ -334,6 +365,8 @@ pub struct TuiRenderer {
     created_at: Instant,
     hint: bool,
     confirm_state: Option<ConfirmState>,
+    /// State for the inline file multi-select (None when not active).
+    file_select_state: Option<FileSelectState>,
     /// Which step is highlighted in review mode (None = show active_step's log).
     selected_step: Option<usize>,
     /// Lines scrolled up from the bottom of the log pane (0 = pinned to bottom).
@@ -382,6 +415,7 @@ impl TuiRenderer {
             created_at,
             hint: false,
             confirm_state: None,
+            file_select_state: None,
             selected_step: None,
             scroll_offset: 0,
             version: version.to_string(),
@@ -432,6 +466,7 @@ impl TuiRenderer {
             created_at: Instant::now(),
             hint: false,
             confirm_state: None,
+            file_select_state: None,
             selected_step: None,
             scroll_offset: 0,
             version: "0.0.0-test".to_string(),
@@ -765,6 +800,165 @@ impl TuiRenderer {
         }
     }
 
+    /// Show the file multi-select prompt.
+    ///
+    /// In TUI mode: renders an inline checklist at the bottom of the log pane.
+    /// In Plain/Quiet mode: delegates to `confirm_files` (the existing dialoguer-based flow).
+    pub fn select_files_in_tui(
+        &mut self,
+        output: &crate::tailoring::types::TailoringOutput,
+        force: bool,
+        term: &dyn TerminalIO,
+    ) -> Result<Vec<crate::tailoring::types::FileOutput>, crate::error::ActualError> {
+        self.select_files_in_tui_impl(output, force, term, &mut CrosstermEventSource)
+    }
+
+    fn select_files_in_tui_impl(
+        &mut self,
+        output: &crate::tailoring::types::TailoringOutput,
+        force: bool,
+        term: &dyn TerminalIO,
+        source: &mut dyn EventSource,
+    ) -> Result<Vec<crate::tailoring::types::FileOutput>, crate::error::ActualError> {
+        use crate::cli::ui::file_confirm::confirm_files;
+
+        match &self.mode {
+            Mode::Tui(_) => {
+                if force {
+                    return Ok(output.files.clone());
+                }
+
+                // Show skipped ADRs in the log pane before the file list.
+                if !output.skipped_adrs.is_empty() {
+                    self.logs[self.active_step].push(format!(
+                        "{} ADR(s) skipped (not applicable)",
+                        output.skipped_adrs.len()
+                    ));
+                }
+
+                if output.files.is_empty() {
+                    return Ok(vec![]);
+                }
+
+                // Build display items.
+                let items: Vec<String> = output
+                    .files
+                    .iter()
+                    .map(|file| {
+                        let count = file.adr_ids.len();
+                        let plural = if count == 1 { "" } else { "s" };
+                        let safe_path = console::strip_ansi_codes(&file.path);
+                        format!("{safe_path}  ({count} ADR{plural})")
+                    })
+                    .collect();
+
+                let n = items.len();
+                self.file_select_state = Some(FileSelectState {
+                    items,
+                    checked: vec![true; n],
+                    cursor: 0,
+                });
+                self.draw();
+
+                let result = self.run_file_select_loop(source);
+
+                self.file_select_state = None;
+                self.draw();
+
+                match result? {
+                    Some(indices) => {
+                        let selected: Result<Vec<_>, _> = indices
+                            .into_iter()
+                            .map(|i| {
+                                output.files.get(i).cloned().ok_or_else(|| {
+                                    crate::error::ActualError::InternalError(format!(
+                                        "file selection index {i} out of bounds (max {})",
+                                        output.files.len()
+                                    ))
+                                })
+                            })
+                            .collect();
+                        Ok(selected?)
+                    }
+                    None => Err(crate::error::ActualError::UserCancelled),
+                }
+            }
+            Mode::Plain | Mode::Quiet => confirm_files(output, force, term),
+        }
+    }
+
+    /// Inner event loop for the file multi-select.
+    ///
+    /// Returns `Ok(Some(indices))` for a confirmed selection, `Ok(None)` for cancel,
+    /// or `Err` on I/O failure.
+    fn run_file_select_loop(
+        &mut self,
+        source: &mut dyn EventSource,
+    ) -> Result<Option<Vec<usize>>, crate::error::ActualError> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        loop {
+            let key = source.next_key().map_err(|e| {
+                crate::error::ActualError::InternalError(format!("event read failed: {e}"))
+            })?;
+            let n = self
+                .file_select_state
+                .as_ref()
+                .map(|fs| fs.items.len())
+                .unwrap_or(0);
+            match (key.code, key.modifiers) {
+                // Confirm selection
+                (KeyCode::Enter, _) => {
+                    if let Some(ref fs) = self.file_select_state {
+                        let indices: Vec<usize> = fs
+                            .checked
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, &checked)| if checked { Some(i) } else { None })
+                            .collect();
+                        return Ok(Some(indices));
+                    }
+                    return Ok(Some(vec![]));
+                }
+                // Cancel
+                (KeyCode::Esc, _) | (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) => {
+                    return Ok(None);
+                }
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    return Err(crate::error::ActualError::UserCancelled);
+                }
+                // Move cursor up
+                (KeyCode::Up, _) => {
+                    if let Some(ref mut fs) = self.file_select_state {
+                        if fs.cursor > 0 {
+                            fs.cursor -= 1;
+                        }
+                    }
+                    self.draw();
+                }
+                // Move cursor down
+                (KeyCode::Down, _) => {
+                    if let Some(ref mut fs) = self.file_select_state {
+                        if n > 0 && fs.cursor < n - 1 {
+                            fs.cursor += 1;
+                        }
+                    }
+                    self.draw();
+                }
+                // Toggle current item
+                (KeyCode::Char(' '), _) => {
+                    if let Some(ref mut fs) = self.file_select_state {
+                        let cur = fs.cursor;
+                        if cur < fs.checked.len() {
+                            fs.checked[cur] = !fs.checked[cur];
+                        }
+                    }
+                    self.draw();
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Returns `true` when running in full TUI mode (crossterm raw mode).
     pub fn is_tui(&self) -> bool {
         matches!(self.mode, Mode::Tui(_))
@@ -789,6 +983,7 @@ impl TuiRenderer {
                 steps: &self.steps,
                 log: &self.logs[log_idx],
                 confirm: self.confirm_state.as_ref(),
+                file_select: self.file_select_state.as_ref(),
                 hint: self.hint,
                 scroll_offset: self.scroll_offset,
                 selected: self.selected_step,
@@ -857,6 +1052,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -884,6 +1080,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -912,6 +1109,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -945,6 +1143,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1272,6 +1471,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1291,6 +1491,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1322,6 +1523,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1338,6 +1540,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1571,6 +1774,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: true,
                 scroll_offset: 0,
                 selected: None,
@@ -1596,6 +1800,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: Some(&cs),
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1621,6 +1826,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: Some(&cs),
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1642,6 +1848,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: None,
+                file_select: None,
                 hint: true,
                 scroll_offset: 0,
                 selected: None,
@@ -1667,6 +1874,7 @@ mod tests {
                 steps: &steps,
                 log: &log,
                 confirm: Some(&cs),
+                file_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1674,5 +1882,332 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    // ── FileSelectState rendering tests ──
+
+    #[test]
+    fn test_render_to_with_file_select() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        let fs = FileSelectState {
+            items: vec![
+                "file1.md  (1 ADR)".to_string(),
+                "file2.md  (2 ADRs)".to_string(),
+            ],
+            checked: vec![true, false],
+            cursor: 0,
+        };
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                file_select: Some(&fs),
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_render_to_narrow_with_file_select() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        let fs = FileSelectState {
+            items: vec!["file1.md  (1 ADR)".to_string()],
+            checked: vec![true],
+            cursor: 0,
+        };
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                file_select: Some(&fs),
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
+    }
+
+    // ── select_files_in_tui tests ──
+
+    fn make_tailoring_output(file_count: usize) -> crate::tailoring::types::TailoringOutput {
+        use crate::tailoring::types::{FileOutput, TailoringSummary};
+        let files: Vec<FileOutput> = (1..=file_count)
+            .map(|i| FileOutput {
+                path: format!("file{i}.md"),
+                content: format!("content {i}"),
+                reasoning: format!("reason {i}"),
+                adr_ids: vec![format!("adr-{i:03}")],
+            })
+            .collect();
+        crate::tailoring::types::TailoringOutput {
+            summary: TailoringSummary {
+                total_input: file_count,
+                applicable: file_count,
+                not_applicable: 0,
+                files_generated: file_count,
+            },
+            skipped_adrs: vec![],
+            files,
+        }
+    }
+
+    #[test]
+    fn test_select_files_in_tui_plain_mode_delegates() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        let mut r = TuiRenderer::new(false, true); // Plain mode
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(Some(vec![0, 1]));
+        let result = r.select_files_in_tui(&output, false, &term).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_select_files_in_tui_quiet_mode_delegates() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        let mut r = TuiRenderer::new(true, false); // Quiet mode
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(Some(vec![0, 1]));
+        let result = r.select_files_in_tui(&output, false, &term).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_select_files_in_tui_force_returns_all() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(3);
+        let term = MockTerminal::with_selection_only(None);
+        let result = r.select_files_in_tui(&output, true, &term).unwrap();
+        assert_eq!(result.len(), 3);
+        // force=true must not activate file_select_state
+        assert!(r.file_select_state.is_none());
+    }
+
+    #[test]
+    fn test_select_files_in_tui_empty_files() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(0);
+        let term = MockTerminal::with_selection_only(None);
+        let result = r.select_files_in_tui(&output, false, &term).unwrap();
+        assert!(result.is_empty());
+        assert!(r.file_select_state.is_none());
+    }
+
+    #[test]
+    fn test_select_files_in_tui_enter_selects_all_checked() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(None);
+        // Press Enter immediately — both files are checked by default.
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![enter]);
+        let result = r
+            .select_files_in_tui_impl(&output, false, &term, &mut source)
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(r.file_select_state.is_none(), "state must be cleared");
+    }
+
+    #[test]
+    fn test_select_files_in_tui_space_toggles_and_enter_confirms() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(None);
+        // Space on item 0 unchecks it, then Enter confirms item 1 only.
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![space, enter]);
+        let result = r
+            .select_files_in_tui_impl(&output, false, &term, &mut source)
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, "file2.md");
+    }
+
+    #[test]
+    fn test_select_files_in_tui_down_up_navigation() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(3);
+        let term = MockTerminal::with_selection_only(None);
+        // Down → cursor=1; Down → cursor=2; Space (uncheck item 2); Up → cursor=1;
+        // Space (uncheck item 1); Enter → only item 0 selected.
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![down, down, space, up, space, enter]);
+        let result = r
+            .select_files_in_tui_impl(&output, false, &term, &mut source)
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, "file1.md");
+    }
+
+    #[test]
+    fn test_select_files_in_tui_esc_cancels() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(None);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![esc]);
+        let result = r.select_files_in_tui_impl(&output, false, &term, &mut source);
+        assert!(
+            matches!(result, Err(crate::error::ActualError::UserCancelled)),
+            "Esc should return UserCancelled"
+        );
+        assert!(r.file_select_state.is_none());
+    }
+
+    #[test]
+    fn test_select_files_in_tui_q_cancels() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(None);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![q]);
+        let result = r.select_files_in_tui_impl(&output, false, &term, &mut source);
+        assert!(
+            matches!(result, Err(crate::error::ActualError::UserCancelled)),
+            "q should return UserCancelled"
+        );
+    }
+
+    #[test]
+    fn test_select_files_in_tui_ctrl_c_cancels() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(None);
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let mut source = MockEventSource::new(vec![ctrl_c]);
+        let result = r.select_files_in_tui_impl(&output, false, &term, &mut source);
+        assert!(
+            matches!(result, Err(crate::error::ActualError::UserCancelled)),
+            "Ctrl-C should return UserCancelled"
+        );
+    }
+
+    #[test]
+    fn test_select_files_in_tui_skipped_adrs_appear_in_log() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crate::tailoring::types::SkippedAdr;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let mut output = make_tailoring_output(1);
+        output.skipped_adrs = vec![SkippedAdr {
+            id: "adr-skip-1".to_string(),
+            reason: "not applicable".to_string(),
+        }];
+        let term = MockTerminal::with_selection_only(None);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![enter]);
+        let _ = r.select_files_in_tui_impl(&output, false, &term, &mut source);
+        let log_text = r.all_log_text();
+        assert!(
+            log_text.contains("1 ADR(s) skipped (not applicable)"),
+            "skipped ADRs must appear in the TUI log; got: {log_text}"
+        );
+    }
+
+    #[test]
+    fn test_select_files_in_tui_cursor_clamps_at_bottom() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(None);
+        // Press Down 5 times on 2 items — cursor must not go beyond 1.
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![down, down, down, down, down, enter]);
+        let result = r
+            .select_files_in_tui_impl(&output, false, &term, &mut source)
+            .unwrap();
+        // Both files should still be selected (cursor clamped, no toggle).
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_select_files_in_tui_cursor_clamps_at_top() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(None);
+        // Press Up 5 times from cursor=0 — cursor must stay at 0.
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![up, up, up, up, up, enter]);
+        let result = r
+            .select_files_in_tui_impl(&output, false, &term, &mut source)
+            .unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_select_files_in_tui_source_exhausted_returns_error() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let output = make_tailoring_output(2);
+        let term = MockTerminal::with_selection_only(None);
+        let mut source = MockEventSource::new(vec![]); // EOF immediately
+        let result = r.select_files_in_tui_impl(&output, false, &term, &mut source);
+        assert!(result.is_err());
+        assert!(
+            r.file_select_state.is_none(),
+            "state must be cleared on error"
+        );
     }
 }
