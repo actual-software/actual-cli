@@ -2422,11 +2422,11 @@ mod tests {
             "expected panel title 'Results' in log: {stripped}"
         );
         assert!(
-            stripped.contains('\u{250c}'), // ┌
+            stripped.contains('\u{256d}'), // ╭
             "expected top-left border in log: {stripped}"
         );
         assert!(
-            stripped.contains('\u{2514}'), // └
+            stripped.contains('\u{2570}'), // ╰
             "expected bottom-left border in log: {stripped}"
         );
         assert!(

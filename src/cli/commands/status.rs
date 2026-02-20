@@ -491,11 +491,11 @@ mod tests {
         let output = format_config_section(&cfg, &path, true, false, 80);
         let p = plain(&output);
         assert!(
-            p.contains('┌'),
+            p.contains('╭'),
             "should contain top-left corner box character"
         );
         assert!(
-            p.contains('└'),
+            p.contains('╰'),
             "should contain bottom-left corner box character"
         );
         assert!(p.contains('│'), "should contain vertical border character");
@@ -818,8 +818,8 @@ mod tests {
         let cfg = Config::default();
         let output = format_verbose_section(&cfg, 80);
         let p = plain(&output);
-        assert!(p.contains('┌'), "should contain top-left corner");
-        assert!(p.contains('└'), "should contain bottom-left corner");
+        assert!(p.contains('╭'), "should contain top-left corner");
+        assert!(p.contains('╰'), "should contain bottom-left corner");
         assert!(p.contains('│'), "should contain vertical border");
     }
 

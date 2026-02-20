@@ -191,9 +191,9 @@ impl Panel {
         let _ = write!(
             out,
             "{}{}{}",
-            theme::border("└"),
+            theme::border("╰"),
             theme::border(bottom_fill),
-            theme::border("┘")
+            theme::border("╯")
         );
 
         out
@@ -219,24 +219,24 @@ impl Panel {
                     let dash_str: String = "─".repeat(dashes);
                     format!(
                         "{}{}{}{}{}{}",
-                        theme::border("┌"),
+                        theme::border("╭"),
                         theme::border("─ "),
                         theme::heading(&*truncated),
                         theme::border(" "),
                         theme::border(dash_str),
-                        theme::border("┐"),
+                        theme::border("╮"),
                     )
                 } else {
                     let dashes = width.saturating_sub(overhead + title_visual);
                     let dash_str: String = "─".repeat(dashes);
                     format!(
                         "{}{}{}{}{}{}",
-                        theme::border("┌"),
+                        theme::border("╭"),
                         theme::border("─ "),
                         theme::heading(title),
                         theme::border(" "),
                         theme::border(dash_str),
-                        theme::border("┐"),
+                        theme::border("╮"),
                     )
                 }
             }
@@ -244,9 +244,9 @@ impl Panel {
                 let fill: String = "─".repeat(width.saturating_sub(2));
                 format!(
                     "{}{}{}",
-                    theme::border("┌"),
+                    theme::border("╭"),
                     theme::border(fill),
-                    theme::border("┐")
+                    theme::border("╮")
                 )
             }
         }
@@ -392,13 +392,13 @@ mod tests {
             2,
             "empty panel should have 2 lines (top + bottom)"
         );
-        assert!(lines[0].starts_with('┌'), "top border should start with ┌");
-        assert!(lines[0].ends_with('┐'), "top border should end with ┐");
+        assert!(lines[0].starts_with('╭'), "top border should start with ╭");
+        assert!(lines[0].ends_with('╮'), "top border should end with ╮");
         assert!(
-            lines[1].starts_with('└'),
-            "bottom border should start with └"
+            lines[1].starts_with('╰'),
+            "bottom border should start with ╰"
         );
-        assert!(lines[1].ends_with('┘'), "bottom border should end with ┘");
+        assert!(lines[1].ends_with('╯'), "bottom border should end with ╯");
         assert_eq!(
             lines[0].chars().count(),
             80,
@@ -419,10 +419,10 @@ mod tests {
         let p = plain(&rendered);
         let lines: Vec<&str> = p.lines().collect();
         assert!(
-            lines[0].starts_with("┌─ Config "),
-            "top border should start with '┌─ Config '"
+            lines[0].starts_with("╭─ Config "),
+            "top border should start with '╭─ Config '"
         );
-        assert!(lines[0].ends_with('┐'), "top border should end with ┐");
+        assert!(lines[0].ends_with('╮'), "top border should end with ╮");
         assert_eq!(lines[0].chars().count(), 80);
     }
 
@@ -672,8 +672,8 @@ mod tests {
             40,
             "top border should be exactly 40 chars: '{top}'"
         );
-        assert!(top.starts_with("┌─ "), "should start with ┌─ : '{top}'");
-        assert!(top.ends_with('┐'), "should end with ┐: '{top}'");
+        assert!(top.starts_with("╭─ "), "should start with ╭─ : '{top}'");
+        assert!(top.ends_with('╮'), "should end with ╮: '{top}'");
         assert!(
             top.contains('…'),
             "truncated title should contain …: '{top}'"
