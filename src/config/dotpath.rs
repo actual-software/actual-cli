@@ -75,6 +75,7 @@ define_config_keys! {
     (Runner,                "runner"),
     (AnthropicApiKey,       "anthropic_api_key"),
     (OpenaiApiKey,          "openai_api_key"),
+    (MaxTurns,              "max_turns"),
 }
 
 /// Get a config value by dotpath, returning its string representation.
@@ -151,6 +152,10 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
         ConfigKey::OpenaiApiKey => config
             .openai_api_key
             .clone()
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::MaxTurns => config
+            .max_turns
+            .map(|v| v.to_string())
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
     }
 }
@@ -298,6 +303,19 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
         }
         ConfigKey::OpenaiApiKey => {
             config.openai_api_key = Some(value.to_string());
+        }
+        ConfigKey::MaxTurns => {
+            let v = value.parse::<u32>().map_err(|_| {
+                ActualError::ConfigError(format!(
+                    "invalid value for {path}: expected u32, got \"{value}\""
+                ))
+            })?;
+            if v < 1 {
+                return Err(ActualError::ConfigError(format!(
+                    "{path} must be at least 1, got {v}"
+                )));
+            }
+            config.max_turns = Some(v);
         }
     }
     Ok(())
@@ -800,6 +818,7 @@ mod tests {
             ("runner", "anthropic-api"),
             ("anthropic_api_key", "sk-ant-test"),
             ("openai_api_key", "sk-openai-test"),
+            ("max_turns", "10"),
         ];
 
         // Sanity-check: valid_values must cover every variant in ConfigKey::ALL.
@@ -926,5 +945,45 @@ mod tests {
         let err = get(&config, "openai_api_key").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    // --- max_turns tests ---
+
+    #[test]
+    fn test_set_and_get_max_turns() {
+        let mut config = Config::default();
+        set(&mut config, "max_turns", "10").unwrap();
+        assert_eq!(get(&config, "max_turns").unwrap(), "10");
+    }
+
+    #[test]
+    fn test_get_unset_max_turns() {
+        let config = Config::default();
+        let err = get(&config, "max_turns").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_invalid_max_turns() {
+        let mut config = Config::default();
+        let err = set(&mut config, "max_turns", "abc").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("invalid value"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_max_turns_zero_rejected() {
+        let mut config = Config::default();
+        let err = set(&mut config, "max_turns", "0").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must be at least 1"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_set_max_turns_one_accepted() {
+        let mut config = Config::default();
+        set(&mut config, "max_turns", "1").unwrap();
+        assert_eq!(config.max_turns, Some(1));
     }
 }
