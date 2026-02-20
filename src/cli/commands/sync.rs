@@ -535,16 +535,15 @@ fn tailoring_cache_skip_msg(applicable: usize) -> &'static str {
 
 /// Apply a single [`TailoringEvent`] to the progress pipeline.
 ///
-/// Updates the spinner message and prints per-project and per-batch status
-/// lines as work progresses. This is extracted from the select loop so that
-/// both the real-time event path and the drain-on-completion path share the
-/// same logic and the function can be tested independently.
-fn apply_tailoring_event(
-    event: TailoringEvent,
-    pipeline: &mut TuiRenderer,
-    completed: &mut usize,
-    project_count: usize,
-) {
+/// Logs per-project and per-batch status lines to the pipeline as work
+/// progresses.  The spinner message/tick is managed by the heartbeat timer in
+/// `run_tailoring_with_cancel` instead, so the display stays live even when
+/// Claude is thinking and no progress events are flowing.
+///
+/// Extracted from the select loop so both the real-time event path and the
+/// drain-on-completion path share the same logic and the function can be
+/// tested independently.
+fn apply_tailoring_event(event: TailoringEvent, pipeline: &mut TuiRenderer, completed: &mut usize) {
     match event {
         TailoringEvent::ProjectStarted {
             ref project_name,
@@ -564,11 +563,6 @@ fn apply_tailoring_event(
             adr_count,
         } => {
             let adr_label = if adr_count == 1 { "ADR" } else { "ADRs" };
-            // Tick the spinner so it keeps moving during long-running batch work.
-            pipeline.update_message(
-                SyncPhase::Tailor,
-                &format!("Tailoring ADRs ({completed}/{project_count} projects done)..."),
-            );
             pipeline.println(&format!(
                 "    \u{2714} {project_name}: batch {batch_index}/{batch_count} ({adr_count} {adr_label})"
             ));
@@ -579,10 +573,6 @@ fn apply_tailoring_event(
             ..
         } => {
             *completed += 1;
-            pipeline.update_message(
-                SyncPhase::Tailor,
-                &format!("Tailoring ADRs ({completed}/{project_count} projects done)..."),
-            );
             let file_label = if files_generated == 1 {
                 "file"
             } else {
@@ -607,6 +597,10 @@ fn apply_tailoring_event(
 /// This is extracted from `run_sync` so the ctrl_c cancellation branch can be
 /// reached by tests (which pass `std::future::ready(())` as `cancel`) without
 /// requiring an actual OS signal.
+///
+/// A 100 ms heartbeat timer keeps the TUI spinner animating and the elapsed
+/// time display updating even when Claude is thinking and no progress events
+/// are flowing.
 async fn run_tailoring_with_cancel<F, C>(
     tailor_fut: F,
     progress_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TailoringEvent>,
@@ -626,24 +620,39 @@ where
     // continues for any reason after cancel fires.
     let mut cancel = std::pin::pin!(cancel.fuse());
     let mut completed = 0usize;
+    let started_at = std::time::Instant::now();
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_millis(100));
+    // Consume the first immediate tick so the interval doesn't fire right away.
+    heartbeat.tick().await;
 
     loop {
         tokio::select! {
             result = &mut tailor_fut => {
                 // Drain any remaining events before breaking
                 while let Ok(event) = progress_rx.try_recv() {
-                    apply_tailoring_event(event, pipeline, &mut completed, project_count);
+                    apply_tailoring_event(event, pipeline, &mut completed);
                 }
                 break result;
             }
             Some(event) = progress_rx.recv() => {
-                apply_tailoring_event(event, pipeline, &mut completed, project_count);
+                apply_tailoring_event(event, pipeline, &mut completed);
             }
             result = &mut cancel => {
                 if result.is_ok() {
                     break Err(ActualError::UserCancelled);
                 }
                 // ctrl_c registration failed — ignore and let tailoring continue
+            }
+            _ = heartbeat.tick() => {
+                // Keep the spinner animating and elapsed time current while
+                // Claude is thinking and no progress events are arriving.
+                let elapsed = started_at.elapsed().as_secs();
+                pipeline.update_message(
+                    SyncPhase::Tailor,
+                    &format!(
+                        "Tailoring ADRs ({completed}/{project_count} projects done, {elapsed}s)..."
+                    ),
+                );
             }
         }
     }
@@ -1168,12 +1177,7 @@ pub fn confirm_and_write(
     // Step 2: Display diff summary in a panel
     let summary = format_diff_summary(&diffs);
     if !summary.is_empty() {
-        let width = term_size::terminal_width();
-        let mut panel = Panel::titled("Changes");
         for line in summary.lines() {
-            panel = panel.line(line);
-        }
-        for line in panel.render(width).lines() {
             pipeline.println(line);
         }
     }
@@ -1495,11 +1499,11 @@ mod tests {
         // File should NOT exist on disk
         assert!(!dir.path().join("CLAUDE.md").exists());
 
-        // Diff summary should be displayed in the log pane
+        // Diff summary should be displayed in the log pane (file header line)
         let log_text = pipeline.all_log_text();
         assert!(
-            log_text.contains("Changes"),
-            "expected changes panel in log: {log_text}"
+            log_text.contains("new file"),
+            "expected diff summary in log: {log_text}"
         );
     }
 
@@ -4419,7 +4423,6 @@ mod tests {
             },
             &mut pipeline,
             &mut completed,
-            3,
         );
         // ProjectStarted prints a log line but does not increment the completed counter
         assert_eq!(completed, 0);
@@ -4439,10 +4442,9 @@ mod tests {
             },
             &mut pipeline,
             &mut completed,
-            2,
         );
-        // BatchCompleted ticks the spinner and logs a line but does NOT increment
-        // the project-level completed counter
+        // BatchCompleted logs a line but does NOT increment the project-level counter
+        // (spinner tick is handled by the heartbeat timer in run_tailoring_with_cancel)
         assert_eq!(
             completed, 0,
             "BatchCompleted must not increment project counter"
@@ -4462,7 +4464,6 @@ mod tests {
             },
             &mut pipeline,
             &mut completed,
-            3,
         );
         assert_eq!(completed, 1, "expected completed to increment to 1");
     }
@@ -4481,7 +4482,6 @@ mod tests {
                 },
                 &mut pipeline,
                 &mut completed,
-                3,
             );
             assert_eq!(completed, i, "expected completed={i} after {i} events");
         }
@@ -4499,7 +4499,6 @@ mod tests {
             },
             &mut pipeline,
             &mut completed,
-            2,
         );
         // ProjectFailed should not increment the counter
         assert_eq!(completed, 0, "expected completed to remain 0 on failure");
@@ -4517,7 +4516,6 @@ mod tests {
             },
             &mut pipeline,
             &mut completed,
-            1,
         );
         assert_eq!(completed, 0);
     }
@@ -4618,6 +4616,42 @@ mod tests {
             rx.try_recv().is_err(),
             "expected channel to be empty after drain"
         );
+    }
+
+    /// Verify that the heartbeat timer updates the spinner message with elapsed
+    /// seconds even when no progress events arrive.  Use tokio::time::pause()
+    /// so the test advances time without actually sleeping.
+    #[tokio::test]
+    async fn test_run_tailoring_with_cancel_heartbeat_updates_message() {
+        tokio::time::pause();
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/0 projects done, 0s)...");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
+
+        // Tailor future that completes after we advance time.
+        let (fire_tx, fire_rx) = tokio::sync::oneshot::channel::<()>();
+        let output = make_output(vec![]);
+        let tailor_fut = async move {
+            let _ = fire_rx.await;
+            Ok::<TailoringOutput, ActualError>(output)
+        };
+        let cancel = std::future::pending::<std::io::Result<()>>();
+
+        // Spawn the loop so it runs concurrently with time-advance.
+        let handle = tokio::spawn(async move {
+            run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 0, cancel).await
+        });
+
+        // Advance time by 5 seconds — multiple heartbeat ticks should fire.
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+
+        // Now let the tailor future complete and drain the channel.
+        let _ = fire_tx.send(());
+        drop(tx);
+
+        // The loop must complete successfully.
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "expected Ok result, got {result:?}");
     }
 
     // ── zero_adr_context_message tests ──
