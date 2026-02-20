@@ -340,6 +340,48 @@ mod tests {
         assert_eq!(lines[prompt_pos + 1], prompt);
     }
 
+    /// Verify that `with_max_turns` overrides the `--max-turns` arg passed to the subprocess.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_run_tailoring_respects_max_turns_override() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let args_file = dir.path().join("captured-args.txt");
+        let tailoring_json = serde_json::json!({
+            "files": [],
+            "skipped_adrs": [],
+            "summary": {
+                "total_input": 0,
+                "applicable": 0,
+                "not_applicable": 0,
+                "files_generated": 0
+            }
+        });
+        let script_content = format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{}'\n",
+            args_file.display(),
+            tailoring_json
+        );
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = CliClaudeRunner::new(script, Duration::from_secs(10)).with_max_turns(3);
+        runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await
+            .unwrap();
+
+        let captured = std::fs::read_to_string(&args_file).unwrap();
+        let lines: Vec<&str> = captured.lines().collect();
+        let max_turns_pos = lines
+            .iter()
+            .position(|&l| l == "--max-turns")
+            .expect("--max-turns flag should be present");
+        assert_eq!(lines[max_turns_pos + 1], "3");
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn test_cli_runner_subprocess_failure() {
