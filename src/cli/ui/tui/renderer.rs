@@ -103,8 +103,8 @@ fn append_confirm_lines(lines: &mut Vec<String>, cs: &ConfirmState) {
 const LEFT_COL_WIDTH: u16 = 44;
 
 /// Number of banner lines + border rows for the banner box height.
-/// BANNER has 11 lines + 2 border rows (top + bottom) = 13.
-const BANNER_BOX_HEIGHT: u16 = 13;
+/// BANNER has 11 lines + 1 blank above + 1 blank below + 2 border rows = 15.
+const BANNER_BOX_HEIGHT: u16 = 15;
 
 /// Render the steps and log panes into an arbitrary ratatui terminal backend.
 ///
@@ -132,19 +132,21 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             // Banner box (top-left)
             let inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
             let banner_lines: Vec<&str> = BANNER.lines().collect();
-            let banner_text = banner_lines
-                .iter()
-                .map(|l| {
-                    // Truncate each line to inner_width if needed
-                    let chars: Vec<char> = l.chars().collect();
-                    if chars.len() > inner_width {
-                        chars[..inner_width].iter().collect::<String>()
-                    } else {
-                        l.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let mut padded_banner: Vec<String> = Vec::with_capacity(banner_lines.len() + 2);
+            padded_banner.push(String::new()); // blank line above art
+            for l in &banner_lines {
+                let chars: Vec<char> = l.chars().collect();
+                let line = if chars.len() > inner_width {
+                    chars[..inner_width].iter().collect::<String>()
+                } else {
+                    l.to_string()
+                };
+                // Center the line within inner_width
+                let pad = inner_width.saturating_sub(line.chars().count()) / 2;
+                padded_banner.push(format!("{}{}", " ".repeat(pad), line));
+            }
+            padded_banner.push(String::new()); // blank line below art
+            let banner_text = padded_banner.join("\n");
             let version_title = format!(" actual v{} ", ctx.version);
             let banner_widget = Paragraph::new(banner_text).block(
                 Block::default()
