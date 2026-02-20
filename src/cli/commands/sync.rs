@@ -4653,16 +4653,17 @@ mod tests {
         assert!(result.is_ok(), "expected Ok result, got {result:?}");
         // The heartbeat must have set the step row message inline (Steps pane),
         // not pushed to the log pane.
+        let step_msg = pipeline.steps.steps[3].message.clone();
         assert!(
-            pipeline.steps.steps[3].message.contains("projects done"),
-            "expected heartbeat message in step.message, got: {:?}",
-            pipeline.steps.steps[3].message
+            step_msg.contains("projects done"),
+            "expected heartbeat message in step.message, got: {step_msg:?}"
         );
         // The log pane must NOT have been populated by update_message.
         let logged = pipeline.logs[3].render_to_string(100, 500, 0);
+        let has_progress_in_log = logged.iter().any(|l| l.contains("projects done"));
         assert!(
-            !logged.iter().any(|l| l.contains("projects done")),
-            "heartbeat message must not appear in log pane, got: {logged:?}"
+            !has_progress_in_log,
+            "heartbeat message must not appear in log pane"
         );
     }
 
