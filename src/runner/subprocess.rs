@@ -312,7 +312,8 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
     });
 
     // Read stdout line-by-line, forwarding formatted summaries and looking for
-    // the final "type":"result" event.
+    // the final "type":"result" event.  The closure always returns Ok/None on
+    // I/O errors (the while-let silently exits), so we use Option directly.
     let find_result = async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
@@ -324,15 +325,15 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
             }
             if let Ok(envelope) = serde_json::from_str::<ClaudeEnvelope<T>>(&line) {
                 if envelope.result_type.as_deref() == Some("result") {
-                    return Ok(Some(envelope));
+                    return Some(envelope);
                 }
             }
         }
-        Ok::<_, std::io::Error>(None)
+        None
     };
 
     match tokio::time::timeout(timeout, find_result).await {
-        Ok(Ok(Some(envelope))) => {
+        Ok(Some(envelope)) => {
             if envelope.is_error == Some(true)
                 || envelope.subtype.as_deref() == Some("error_max_turns")
             {
@@ -357,7 +358,7 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                     })
             }
         }
-        Ok(Ok(None)) => {
+        Ok(None) => {
             let stderr_bytes = stderr_task.await.unwrap_or_default();
             let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
             Err(ActualError::ClaudeSubprocessFailed {
@@ -365,7 +366,6 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                 stderr,
             })
         }
-        Ok(Err(e)) => Err(io_err("Failed to read Claude Code output", e)),
         Err(_) => Err(ActualError::ClaudeTimeout {
             seconds: timeout.as_secs(),
         }),
@@ -1006,6 +1006,25 @@ mod tests {
     }
 
     #[test]
+    fn test_format_stream_event_assistant_multiedit_tool() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "MultiEdit",
+                    "input": {"file_path": "src/lib.rs"}
+                }]
+            }
+        })
+        .to_string();
+        assert_eq!(
+            format_stream_event(&line),
+            Some("Claude: MultiEdit src/lib.rs".to_string())
+        );
+    }
+
+    #[test]
     fn test_format_stream_event_result_suppressed() {
         // Result events are not forwarded (handled separately)
         let line =
@@ -1107,10 +1126,7 @@ mod tests {
         while let Ok(msg) = rx.try_recv() {
             messages.push(msg);
         }
-        assert!(
-            messages.iter().any(|m| m == "[stderr] err line"),
-            "expected '[stderr] err line' in messages, got: {messages:?}"
-        );
+        assert!(messages.iter().any(|m| m == "[stderr] err line"));
     }
 
     /// Verify that run_subprocess_streaming returns an error for error result events.
@@ -1134,14 +1150,34 @@ mod tests {
         let result: Result<serde_json::Value, _> =
             run_subprocess_streaming(&script, Duration::from_secs(5), &[], None).await;
         let (message, _) = subprocess_failed(result.unwrap_err());
-        assert!(
-            message.contains("returned an error"),
-            "unexpected message: {message}"
-        );
-        assert!(
-            message.contains("Something went wrong"),
-            "unexpected message: {message}"
-        );
+        assert!(message.contains("returned an error"));
+        assert!(message.contains("Something went wrong"));
+    }
+
+    /// Verify that run_subprocess_streaming returns an error when the result event
+    /// has no structured_output field.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_subprocess_streaming_missing_structured_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        // Emit a success result envelope but with null structured_output
+        let result_line = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "",
+            "structured_output": null
+        })
+        .to_string();
+        std::fs::write(&script, format!("#!/bin/sh\necho '{}'\n", result_line)).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result: Result<serde_json::Value, _> =
+            run_subprocess_streaming(&script, Duration::from_secs(5), &[], None).await;
+        let (message, _) = subprocess_failed(result.unwrap_err());
+        assert!(message.contains("missing structured_output"));
     }
 
     // ── set_event_tx tests ──
@@ -1153,10 +1189,7 @@ mod tests {
         assert!(runner.event_tx.lock().unwrap().is_none(), "initially None");
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         runner.set_event_tx(tx);
-        assert!(
-            runner.event_tx.lock().unwrap().is_some(),
-            "stored after set_event_tx"
-        );
+        assert!(runner.event_tx.lock().unwrap().is_some());
     }
 
     /// Verify that tool-call events from the subprocess are forwarded via event_tx.
@@ -1211,13 +1244,7 @@ mod tests {
         while let Ok(msg) = rx.try_recv() {
             events.push(msg);
         }
-        assert!(
-            events.iter().any(|e| e.contains("Claude Code started")),
-            "missing system event: {events:?}"
-        );
-        assert!(
-            events.iter().any(|e| e.contains("Read src/main.rs")),
-            "missing tool-call event: {events:?}"
-        );
+        assert!(events.iter().any(|e| e.contains("Claude Code started")));
+        assert!(events.iter().any(|e| e.contains("Read src/main.rs")));
     }
 }
