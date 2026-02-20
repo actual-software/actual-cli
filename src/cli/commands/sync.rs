@@ -4622,6 +4622,34 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_batch_completed_no_files_no_skips() {
+        // Exercises the empty file_paths branch (paths_str = String::new())
+        // and the skipped_count == 0 branch.
+        let mut pipeline = TuiRenderer::new(false, true); // plain mode
+        pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/1 projects done)...");
+        let mut completed = 0usize;
+        apply_tailoring_event(
+            TailoringEvent::BatchCompleted {
+                project_name: "my-app".to_string(),
+                batch_index: 1,
+                batch_count: 1,
+                adr_count: 3,
+                applied_count: 3,
+                skipped_count: 0,
+                skipped_adrs: vec![],
+                file_paths: vec![], // empty — exercises the String::new() branch
+                elapsed_secs: 10,
+            },
+            &mut pipeline,
+            &mut completed,
+        );
+        assert_eq!(
+            completed, 0,
+            "BatchCompleted must not increment project counter"
+        );
+    }
+
+    #[test]
     fn test_apply_project_completed_shows_paths() {
         let mut pipeline = TuiRenderer::new(false, true); // plain mode
         pipeline.start(SyncPhase::Tailor, "Tailoring ADRs (0/1 projects done)...");
