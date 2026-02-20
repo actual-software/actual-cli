@@ -211,6 +211,14 @@ mod tests {
             project_name: "app".to_string(),
             batch_count: 1,
         };
+        let batch_started = TailoringEvent::BatchStarted {
+            project_name: "app".to_string(),
+            batch_index: 1,
+            batch_count: 1,
+            adr_count: 3,
+            category_name: "Security".to_string(),
+            adr_titles: vec![],
+        };
         let batch_completed = TailoringEvent::BatchCompleted {
             project_name: "app".to_string(),
             batch_index: 1,
@@ -232,9 +240,13 @@ mod tests {
             project_name: "app".to_string(),
             error: "err".to_string(),
         };
+        assert_ne!(started, batch_started);
         assert_ne!(started, batch_completed);
         assert_ne!(started, completed);
         assert_ne!(started, failed);
+        assert_ne!(batch_started, batch_completed);
+        assert_ne!(batch_started, completed);
+        assert_ne!(batch_started, failed);
         assert_ne!(batch_completed, completed);
         assert_ne!(batch_completed, failed);
         assert_ne!(completed, failed);
