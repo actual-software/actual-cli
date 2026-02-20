@@ -346,6 +346,9 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                     stderr,
                 })
             } else {
+                // Await stderr_task so its channel sends complete before we return,
+                // ensuring tests (and callers) see all stderr events.
+                let _ = stderr_task.await;
                 envelope
                     .structured_output
                     .ok_or_else(|| ActualError::ClaudeSubprocessFailed {
