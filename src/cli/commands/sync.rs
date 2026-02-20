@@ -244,14 +244,16 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 
     let response = match response {
         Ok(r) => {
-            pipeline.success(
-                SyncPhase::Fetch,
-                &format!("Fetched {} ADRs", r.matched_adrs.len()),
-            );
+            let count = r.matched_adrs.len();
+            pipeline.success(SyncPhase::Fetch, &format!("Fetched {count} ADRs"));
+            if count == 0 {
+                pipeline.println(&zero_adr_context_message(&request));
+            }
             r
         }
         Err(e) => {
-            pipeline.error(SyncPhase::Fetch, &format!("API request failed: {e}"));
+            let msg = fetch_error_message(&e, api_url);
+            pipeline.error(SyncPhase::Fetch, &msg);
             pipeline.finish_remaining();
             return Err(e);
         }
@@ -739,6 +741,77 @@ fn compute_tailoring_cache_key(
         hasher.update(m.as_bytes());
     }
     format!("{:x}", hasher.finalize())
+}
+
+/// Produce a contextual follow-up message for a zero-ADR fetch result.
+///
+/// Examines the languages and frameworks in the match request and returns a
+/// human-readable explanation of *why* no ADRs were matched:
+///
+/// - No languages detected → indicates the repo language is not recognized.
+/// - Languages but no frameworks → only general ADRs were eligible.
+/// - Languages + frameworks → the combination has no ADR coverage yet.
+fn zero_adr_context_message(request: &crate::api::types::MatchRequest) -> String {
+    let mut langs: Vec<&str> = request
+        .projects
+        .iter()
+        .flat_map(|p| p.languages.iter().map(|l| l.as_str()))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    langs.sort_unstable();
+
+    let mut fws: Vec<&str> = request
+        .projects
+        .iter()
+        .flat_map(|p| p.frameworks.iter().map(|f| f.name.as_str()))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    fws.sort_unstable();
+
+    if langs.is_empty() {
+        "No supported programming languages detected \u{2014} unable to match ADRs".to_string()
+    } else if fws.is_empty() {
+        format!(
+            "Detected: {} \u{2014} no frameworks found; only general ADRs were eligible",
+            langs.join(", ")
+        )
+    } else {
+        format!(
+            "Detected: {} with {} \u{2014} no ADRs available for this combination yet",
+            langs.join(", "),
+            fws.join(", ")
+        )
+    }
+}
+
+/// Produce a user-friendly error message for an ADR fetch failure.
+///
+/// Distinguishes connection failures, timeouts, structured API errors (4xx/5xx),
+/// and falls back to a raw message for unrecognized errors.
+fn fetch_error_message(e: &ActualError, api_url: &str) -> String {
+    match e {
+        ActualError::ApiError(s)
+            if s.contains("error trying to connect")
+                || s.contains("Connection refused")
+                || s.contains("connection refused")
+                || s.contains("dns error") =>
+        {
+            format!(
+                "Unable to connect to Actual AI ({api_url}) \u{2014} check your network connection"
+            )
+        }
+        ActualError::ApiError(s)
+            if s.contains("timed out") || s.contains("operation timed out") =>
+        {
+            "Connection to Actual AI timed out \u{2014} try again later".to_string()
+        }
+        ActualError::ApiResponseError { code, message } => {
+            format!("Actual AI returned an error ({code}): {message}")
+        }
+        _ => format!("API request failed: {e}"),
+    }
 }
 
 /// Strip non-printable ASCII control characters from server-controlled ADR content.
@@ -4369,5 +4442,227 @@ mod tests {
             rx.try_recv().is_err(),
             "expected channel to be empty after drain"
         );
+    }
+
+    // ── zero_adr_context_message tests ──
+
+    use crate::api::types::{MatchFramework, MatchProject, MatchRequest};
+
+    fn make_match_request(projects: Vec<MatchProject>) -> MatchRequest {
+        MatchRequest {
+            projects,
+            options: None,
+        }
+    }
+
+    fn make_match_project(languages: Vec<&str>, frameworks: Vec<(&str, &str)>) -> MatchProject {
+        MatchProject {
+            path: ".".to_string(),
+            name: "test-project".to_string(),
+            languages: languages.into_iter().map(str::to_string).collect(),
+            frameworks: frameworks
+                .into_iter()
+                .map(|(name, category)| MatchFramework {
+                    name: name.to_string(),
+                    category: category.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_zero_adr_context_message_no_languages() {
+        let req = make_match_request(vec![make_match_project(vec![], vec![])]);
+        let msg = zero_adr_context_message(&req);
+        assert!(
+            msg.contains("No supported programming languages detected"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            msg.contains("unable to match ADRs"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_zero_adr_context_message_languages_no_frameworks() {
+        let req = make_match_request(vec![make_match_project(vec!["typescript"], vec![])]);
+        let msg = zero_adr_context_message(&req);
+        assert!(
+            msg.contains("Detected: typescript"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            msg.contains("no frameworks found"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            msg.contains("only general ADRs were eligible"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_zero_adr_context_message_languages_and_frameworks() {
+        let req = make_match_request(vec![make_match_project(
+            vec!["typescript"],
+            vec![("nextjs", "web-frontend")],
+        )]);
+        let msg = zero_adr_context_message(&req);
+        assert!(
+            msg.contains("Detected: typescript with nextjs"),
+            "unexpected message: {msg}"
+        );
+        assert!(
+            msg.contains("no ADRs available for this combination yet"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_zero_adr_context_message_deduplicates_across_projects() {
+        // Two projects with the same language → appears only once in message
+        let req = make_match_request(vec![
+            make_match_project(vec!["typescript"], vec![]),
+            make_match_project(vec!["typescript"], vec![]),
+        ]);
+        let msg = zero_adr_context_message(&req);
+        // "typescript" should appear exactly once
+        assert_eq!(
+            msg.matches("typescript").count(),
+            1,
+            "language should be deduplicated: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_zero_adr_context_message_multiple_languages_sorted() {
+        let req = make_match_request(vec![make_match_project(vec!["rust", "typescript"], vec![])]);
+        let msg = zero_adr_context_message(&req);
+        // Languages should be sorted alphabetically
+        let rust_pos = msg.find("rust").unwrap();
+        let ts_pos = msg.find("typescript").unwrap();
+        assert!(
+            rust_pos < ts_pos,
+            "languages should be sorted: rust before typescript in '{msg}'"
+        );
+    }
+
+    #[test]
+    fn test_zero_adr_context_message_empty_request() {
+        // No projects at all
+        let req = make_match_request(vec![]);
+        let msg = zero_adr_context_message(&req);
+        assert!(
+            msg.contains("No supported programming languages detected"),
+            "empty request should produce no-languages message: {msg}"
+        );
+    }
+
+    // ── fetch_error_message tests ──
+
+    #[test]
+    fn test_fetch_error_message_connection_refused() {
+        let e = ActualError::ApiError("error sending request: Connection refused".to_string());
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(
+            msg.contains("Unable to connect to Actual AI"),
+            "unexpected msg: {msg}"
+        );
+        assert!(
+            msg.contains("https://api.example.com"),
+            "should include api_url: {msg}"
+        );
+        assert!(
+            msg.contains("check your network connection"),
+            "unexpected msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_fetch_error_message_error_trying_to_connect() {
+        let e = ActualError::ApiError(
+            "error trying to connect: tcp connect error: Connection refused".to_string(),
+        );
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(
+            msg.contains("Unable to connect to Actual AI"),
+            "unexpected msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_fetch_error_message_dns_error() {
+        let e = ActualError::ApiError("dns error: failed to lookup".to_string());
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(
+            msg.contains("Unable to connect to Actual AI"),
+            "unexpected msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_fetch_error_message_timed_out() {
+        let e = ActualError::ApiError("request timed out after 30s".to_string());
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(
+            msg.contains("Connection to Actual AI timed out"),
+            "unexpected msg: {msg}"
+        );
+        assert!(msg.contains("try again later"), "unexpected msg: {msg}");
+    }
+
+    #[test]
+    fn test_fetch_error_message_operation_timed_out() {
+        let e = ActualError::ApiError("operation timed out".to_string());
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(
+            msg.contains("Connection to Actual AI timed out"),
+            "unexpected msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_fetch_error_message_api_response_error() {
+        let e = ActualError::ApiResponseError {
+            code: "401".to_string(),
+            message: "unauthorized".to_string(),
+        };
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(
+            msg.contains("Actual AI returned an error (401): unauthorized"),
+            "unexpected msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_fetch_error_message_api_response_error_500() {
+        let e = ActualError::ApiResponseError {
+            code: "500".to_string(),
+            message: "internal server error".to_string(),
+        };
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(
+            msg.contains("Actual AI returned an error (500): internal server error"),
+            "unexpected msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_fetch_error_message_generic_api_error_catch_all() {
+        let e = ActualError::ApiError("some unexpected error".to_string());
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(msg.contains("API request failed:"), "unexpected msg: {msg}");
+        assert!(
+            msg.contains("some unexpected error"),
+            "unexpected msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_fetch_error_message_user_cancelled_catch_all() {
+        let e = ActualError::UserCancelled;
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(msg.contains("API request failed:"), "unexpected msg: {msg}");
     }
 }
