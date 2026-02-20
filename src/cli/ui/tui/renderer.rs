@@ -17,6 +17,7 @@ use super::log::LogPane;
 use super::steps::{StepStatus, StepsPane};
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
+use crate::branding::banner::BANNER;
 use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
 use crate::cli::ui::progress::SyncPhase;
 use crate::cli::ui::term_size;
@@ -57,44 +58,31 @@ pub struct ConfirmState {
     pub focus: ConfirmFocus,
 }
 
+/// Rendering context passed to `render_to` and `draw_frame`.
+pub struct RenderContext<'a> {
+    pub steps: &'a StepsPane,
+    pub log: &'a LogPane,
+    pub confirm: Option<&'a ConfirmState>,
+    pub hint: bool,
+    pub scroll_offset: usize,
+    pub selected: Option<usize>,
+    pub version: &'a str,
+}
+
 /// Trait-erased interface to a live ratatui terminal.
 ///
 /// Abstracting over the backend type allows tests to inject a [`TestBackend`]
 /// without changing the public API.
 trait TuiTerminal: Send {
-    fn draw_frame(
-        &mut self,
-        steps: &StepsPane,
-        log: &LogPane,
-        confirm: Option<&ConfirmState>,
-        hint: bool,
-        scroll_offset: usize,
-        selected: Option<usize>,
-    ) -> io::Result<()>;
+    fn draw_frame(&mut self, ctx: RenderContext<'_>) -> io::Result<()>;
 }
 
 /// Concrete [`TuiTerminal`] backed by any [`Backend`].
 struct TuiTerminalImpl<B: Backend + Send>(Terminal<B>);
 
 impl<B: Backend + Send> TuiTerminal for TuiTerminalImpl<B> {
-    fn draw_frame(
-        &mut self,
-        steps: &StepsPane,
-        log: &LogPane,
-        confirm: Option<&ConfirmState>,
-        hint: bool,
-        scroll_offset: usize,
-        selected: Option<usize>,
-    ) -> io::Result<()> {
-        render_to(
-            &mut self.0,
-            steps,
-            log,
-            confirm,
-            hint,
-            scroll_offset,
-            selected,
-        )
+    fn draw_frame(&mut self, ctx: RenderContext<'_>) -> io::Result<()> {
+        render_to(&mut self.0, ctx)
     }
 }
 
@@ -108,51 +96,94 @@ fn append_confirm_lines(lines: &mut Vec<String>, cs: &ConfirmState) {
     lines.push(format!("  {accept_label}   {reject_label}"));
 }
 
+/// Width of the left panel (banner box + steps box).
+///
+/// The banner art is 37 chars wide; +2 for borders = 39. We add a few chars
+/// of breathing room and round up to 44 so step messages are readable too.
+const LEFT_COL_WIDTH: u16 = 44;
+
+/// Number of banner lines + border rows for the banner box height.
+/// BANNER has 11 lines + 2 border rows (top + bottom) = 13.
+const BANNER_BOX_HEIGHT: u16 = 13;
+
 /// Render the steps and log panes into an arbitrary ratatui terminal backend.
 ///
 /// This is a free function (not a method) so it can be called from tests with
 /// [`ratatui::backend::TestBackend`] without requiring a real TTY or
 /// `CrosstermBackend`.
-pub fn render_to<B: Backend>(
-    terminal: &mut Terminal<B>,
-    steps: &StepsPane,
-    log: &LogPane,
-    confirm: Option<&ConfirmState>,
-    hint: bool,
-    scroll_offset: usize,
-    selected: Option<usize>,
-) -> io::Result<()> {
+pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>) -> io::Result<()> {
     let size = terminal.size()?;
     let cols = size.width;
     terminal.draw(|frame| {
         let area = frame.area();
         if cols >= 80 {
-            let chunks = Layout::default()
+            // ── Horizontal split: left (banner + steps) | right (output) ──
+            let h_chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(32), Constraint::Fill(1)])
+                .constraints([Constraint::Length(LEFT_COL_WIDTH), Constraint::Fill(1)])
                 .split(area);
 
-            let step_lines = steps.render_lines(30, selected);
+            // ── Left column: vertical split — banner box on top, steps below ──
+            let left_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(BANNER_BOX_HEIGHT), Constraint::Fill(1)])
+                .split(h_chunks[0]);
+
+            // Banner box (top-left)
+            let inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
+            let banner_lines: Vec<&str> = BANNER.lines().collect();
+            let banner_text = banner_lines
+                .iter()
+                .map(|l| {
+                    // Truncate each line to inner_width if needed
+                    let chars: Vec<char> = l.chars().collect();
+                    if chars.len() > inner_width {
+                        chars[..inner_width].iter().collect::<String>()
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let version_title = format!(" actual v{} ", ctx.version);
+            let banner_widget = Paragraph::new(banner_text).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(version_title.as_str()),
+            );
+            frame.render_widget(Clear, left_chunks[0]);
+            frame.render_widget(banner_widget, left_chunks[0]);
+
+            // Steps box (bottom-left)
+            let step_inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
+            let step_lines = ctx.steps.render_lines(step_inner_width, ctx.selected);
             let step_text = step_lines.join("\n");
             let step_widget = Paragraph::new(step_text)
                 .block(Block::default().borders(Borders::ALL).title("Steps"));
-            frame.render_widget(Clear, chunks[0]);
-            frame.render_widget(step_widget, chunks[0]);
+            frame.render_widget(Clear, left_chunks[1]);
+            frame.render_widget(step_widget, left_chunks[1]);
 
+            // ── Right column: output pane ──
             // Reserve one line for the footer hint so it is always visible.
-            let log_inner_height = chunks[1].height.saturating_sub(2) as usize;
-            let footer_height: usize = if confirm.is_some() || hint { 1 } else { 0 };
+            let log_inner_height = h_chunks[1].height.saturating_sub(2) as usize;
+            let footer_height: usize = if ctx.confirm.is_some() || ctx.hint {
+                1
+            } else {
+                0
+            };
             let log_height = log_inner_height.saturating_sub(footer_height);
-            let log_width = chunks[1].width.saturating_sub(2) as usize;
-            let mut log_lines = log.render_to_string(log_height, log_width, scroll_offset);
-            if let Some(cs) = confirm {
+            let log_width = h_chunks[1].width.saturating_sub(2) as usize;
+            let mut log_lines = ctx
+                .log
+                .render_to_string(log_height, log_width, ctx.scroll_offset);
+            if let Some(cs) = ctx.confirm {
                 append_confirm_lines(&mut log_lines, cs);
-            } else if hint {
-                let max = log.max_scroll(log_height);
+            } else if ctx.hint {
+                let max = ctx.log.max_scroll(log_height);
                 let scroll_hint = if max > 0 {
                     format!(
                         "  ↑/↓ scroll  Home/End top/bottom  q quit  [{}/{}]",
-                        scroll_offset.min(max),
+                        ctx.scroll_offset.min(max),
                         max
                     )
                 } else {
@@ -163,31 +194,37 @@ pub fn render_to<B: Backend>(
             let log_text = log_lines.join("\n");
             let log_widget = Paragraph::new(log_text)
                 .block(Block::default().borders(Borders::ALL).title("Output"));
-            frame.render_widget(Clear, chunks[1]);
-            frame.render_widget(log_widget, chunks[1]);
+            frame.render_widget(Clear, h_chunks[1]);
+            frame.render_widget(log_widget, h_chunks[1]);
         } else {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(1), Constraint::Fill(1)])
                 .split(area);
 
-            let condensed = steps.render_condensed(area.width as usize);
+            let condensed = ctx.steps.render_condensed(area.width as usize);
             frame.render_widget(Clear, chunks[0]);
             frame.render_widget(Paragraph::new(condensed), chunks[0]);
 
             let log_inner_height = chunks[1].height as usize;
-            let footer_height: usize = if confirm.is_some() || hint { 1 } else { 0 };
+            let footer_height: usize = if ctx.confirm.is_some() || ctx.hint {
+                1
+            } else {
+                0
+            };
             let log_height = log_inner_height.saturating_sub(footer_height);
             let log_width = area.width as usize;
-            let mut log_lines = log.render_to_string(log_height, log_width, scroll_offset);
-            if let Some(cs) = confirm {
+            let mut log_lines = ctx
+                .log
+                .render_to_string(log_height, log_width, ctx.scroll_offset);
+            if let Some(cs) = ctx.confirm {
                 append_confirm_lines(&mut log_lines, cs);
-            } else if hint {
-                let max = log.max_scroll(log_height);
+            } else if ctx.hint {
+                let max = ctx.log.max_scroll(log_height);
                 let scroll_hint = if max > 0 {
                     format!(
                         "  ↑/↓ scroll  Home/End top/bottom  q quit  [{}/{}]",
-                        scroll_offset.min(max),
+                        ctx.scroll_offset.min(max),
                         max
                     )
                 } else {
@@ -237,10 +274,16 @@ pub struct TuiRenderer {
     selected_step: Option<usize>,
     /// Lines scrolled up from the bottom of the log pane (0 = pinned to bottom).
     scroll_offset: usize,
+    /// Version string shown in the banner box title.
+    version: String,
 }
 
 impl TuiRenderer {
     pub fn new(quiet: bool, no_tui: bool) -> Self {
+        Self::new_with_version(quiet, no_tui, env!("CARGO_PKG_VERSION"))
+    }
+
+    pub fn new_with_version(quiet: bool, no_tui: bool, version: &str) -> Self {
         let steps = StepsPane::new(&[
             "Environment",
             "Analysis",
@@ -277,6 +320,7 @@ impl TuiRenderer {
             confirm_state: None,
             selected_step: None,
             scroll_offset: 0,
+            version: version.to_string(),
         }
     }
 
@@ -326,6 +370,7 @@ impl TuiRenderer {
             confirm_state: None,
             selected_step: None,
             scroll_offset: 0,
+            version: "0.0.0-test".to_string(),
         }
     }
 
@@ -661,14 +706,16 @@ impl TuiRenderer {
         if let Mode::Tui(ref mut terminal) = self.mode {
             // In review mode, show the selected step's log; otherwise show active step's log.
             let log_idx = self.selected_step.unwrap_or(self.active_step);
-            let _ = terminal.draw_frame(
-                &self.steps,
-                &self.logs[log_idx],
-                self.confirm_state.as_ref(),
-                self.hint,
-                self.scroll_offset,
-                self.selected_step,
-            );
+            let ctx = RenderContext {
+                steps: &self.steps,
+                log: &self.logs[log_idx],
+                confirm: self.confirm_state.as_ref(),
+                hint: self.hint,
+                scroll_offset: self.scroll_offset,
+                selected: self.selected_step,
+                version: &self.version,
+            };
+            let _ = terminal.draw_frame(ctx);
         }
     }
 }
@@ -725,7 +772,19 @@ mod tests {
             "Write Files",
         ]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -740,7 +799,19 @@ mod tests {
             "Write Files",
         ]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -756,7 +827,19 @@ mod tests {
         ]);
         let mut log = LogPane::new();
         log.push("a log line".to_string());
-        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -777,7 +860,19 @@ mod tests {
         let mut log = LogPane::new();
         log.push("line one".to_string());
         log.push("line two".to_string());
-        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 
     // ── TuiRenderer::new tests ──
@@ -1086,14 +1181,38 @@ mod tests {
         let log = LogPane::new();
 
         // First draw at wide size — must not panic.
-        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
         assert_eq!(terminal.size().unwrap().width, 100);
 
         // Simulate a SIGWINCH / terminal resize: shrink to narrow layout (60 cols).
         terminal.backend_mut().resize(60, 20);
 
         // Second draw at narrow size — must not panic and must use new dimensions.
-        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
         assert_eq!(terminal.size().unwrap().width, 60);
         assert_eq!(terminal.size().unwrap().height, 20);
     }
@@ -1112,11 +1231,35 @@ mod tests {
         ]);
         let log = LogPane::new();
 
-        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
 
         // Resize to just below the breakpoint — switches from wide to narrow layout.
         terminal.backend_mut().resize(79, 24);
-        render_to(&mut terminal, &steps, &log, None, false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
         assert_eq!(terminal.size().unwrap().width, 79);
     }
 
@@ -1337,7 +1480,19 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, true, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: true,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1350,7 +1505,19 @@ mod tests {
             question: "Proceed?".to_string(),
             focus: ConfirmFocus::Accept,
         };
-        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: Some(&cs),
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1363,7 +1530,19 @@ mod tests {
             question: "Proceed?".to_string(),
             focus: ConfirmFocus::Reject,
         };
-        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: Some(&cs),
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1372,7 +1551,19 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
         let log = LogPane::new();
-        render_to(&mut terminal, &steps, &log, None, true, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                hint: true,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1385,6 +1576,18 @@ mod tests {
             question: "Proceed?".to_string(),
             focus: ConfirmFocus::Accept,
         };
-        render_to(&mut terminal, &steps, &log, Some(&cs), false, 0, None).unwrap();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: Some(&cs),
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 }
