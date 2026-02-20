@@ -241,7 +241,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title("Steps"),
+                    .title(" Steps "),
             );
             frame.render_widget(Clear, left_chunks[1]);
             frame.render_widget(step_widget, left_chunks[1]);
@@ -271,7 +271,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title("Output"),
+                    .title(" Output "),
             );
             frame.render_widget(Clear, h_chunks[1]);
             frame.render_widget(log_widget, h_chunks[1]);
