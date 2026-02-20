@@ -118,6 +118,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
     let use_color = console::colors_enabled_stderr();
     terminal.draw(|frame| {
         let area = frame.area();
+        let frame_area = area;
         if cols >= 80 {
             // ── Horizontal split: left (banner + steps) | right (output) ──
             let h_chunks = Layout::default()
@@ -159,7 +160,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             frame.render_widget(Clear, left_chunks[0]);
             frame.render_widget(banner_widget, left_chunks[0]);
             if use_color {
-                paint_gradient_border(frame.buffer_mut(), left_chunks[0]);
+                paint_gradient_border(frame.buffer_mut(), left_chunks[0], frame_area);
             }
 
             // Steps box (bottom-left)
@@ -171,7 +172,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             frame.render_widget(Clear, left_chunks[1]);
             frame.render_widget(step_widget, left_chunks[1]);
             if use_color {
-                paint_gradient_border(frame.buffer_mut(), left_chunks[1]);
+                paint_gradient_border(frame.buffer_mut(), left_chunks[1], frame_area);
             }
 
             // ── Right column: output pane ──
@@ -208,7 +209,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             frame.render_widget(Clear, h_chunks[1]);
             frame.render_widget(log_widget, h_chunks[1]);
             if use_color {
-                paint_gradient_border(frame.buffer_mut(), h_chunks[1]);
+                paint_gradient_border(frame.buffer_mut(), h_chunks[1], frame_area);
             }
         } else {
             let chunks = Layout::default()

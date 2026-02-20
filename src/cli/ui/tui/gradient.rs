@@ -22,15 +22,18 @@ fn gradient_rgb(y_offset: u16, height: u16) -> (u8, u8, u8) {
     )
 }
 
-/// Paint the border cells of a `Borders::ALL` box in the given `area` with the
-/// green→teal vertical gradient.
+/// Paint the border cells of a `Borders::ALL` box with a green→teal gradient
+/// that is continuous across the full terminal frame.
+///
+/// `area`       — the Rect of this specific box
+/// `frame_area` — the full terminal frame Rect (used to normalize vertical position)
 ///
 /// Call this **after** `frame.render_widget()` so the border glyphs are already
 /// written to the buffer. Only border-row/column cells are touched; interior
 /// content cells are unmodified.
 ///
 /// If the area is too small to have a border, this is a no-op.
-pub fn paint_gradient_border(buf: &mut Buffer, area: Rect) {
+pub fn paint_gradient_border(buf: &mut Buffer, area: Rect, frame_area: Rect) {
     if area.width < 2 || area.height < 2 {
         return;
     }
@@ -38,10 +41,10 @@ pub fn paint_gradient_border(buf: &mut Buffer, area: Rect) {
     let x1 = area.x + area.width - 1;
     let y0 = area.y;
     let y1 = area.y + area.height - 1;
-    let h = area.height;
 
     for y in y0..=y1 {
-        let (r, g, b) = gradient_rgb(y - y0, h);
+        // t is relative to the full frame, not this box
+        let (r, g, b) = gradient_rgb(y - frame_area.y, frame_area.height);
         let color = ratatui::style::Color::Rgb(r, g, b);
         let style = Style::default().fg(color);
 
@@ -108,18 +111,21 @@ mod tests {
     fn test_paint_gradient_border_too_small() {
         // Areas smaller than 2×2 should be a no-op (no panic)
         let mut buf = make_buf(10, 10);
-        paint_gradient_border(&mut buf, Rect::new(0, 0, 1, 5));
-        paint_gradient_border(&mut buf, Rect::new(0, 0, 5, 1));
-        paint_gradient_border(&mut buf, Rect::new(0, 0, 0, 0));
+        let frame_area = Rect::new(0, 0, 10, 10);
+        paint_gradient_border(&mut buf, Rect::new(0, 0, 1, 5), frame_area);
+        paint_gradient_border(&mut buf, Rect::new(0, 0, 5, 1), frame_area);
+        paint_gradient_border(&mut buf, Rect::new(0, 0, 0, 0), frame_area);
     }
 
     #[test]
     fn test_paint_gradient_border_colors_top_row() {
+        // When the box starts at the top of the frame, the top row gets GRADIENT_START
         let mut buf = make_buf(10, 5);
         let area = Rect::new(0, 0, 10, 5);
-        paint_gradient_border(&mut buf, area);
+        let frame_area = Rect::new(0, 0, 10, 5);
+        paint_gradient_border(&mut buf, area, frame_area);
 
-        // Top row should have GRADIENT_START color on all cells
+        // Top row (y=0) is at frame offset 0 → GRADIENT_START
         let expected_color =
             ratatui::style::Color::Rgb(GRADIENT_START.0, GRADIENT_START.1, GRADIENT_START.2);
         for x in 0..10u16 {
@@ -133,11 +139,13 @@ mod tests {
 
     #[test]
     fn test_paint_gradient_border_colors_bottom_row() {
+        // When the box fills the entire frame, the bottom row gets GRADIENT_END
         let mut buf = make_buf(10, 5);
         let area = Rect::new(0, 0, 10, 5);
-        paint_gradient_border(&mut buf, area);
+        let frame_area = Rect::new(0, 0, 10, 5);
+        paint_gradient_border(&mut buf, area, frame_area);
 
-        // Bottom row should have GRADIENT_END color on all cells
+        // Bottom row (y=4) is at frame offset 4 = height-1 → GRADIENT_END
         let expected_color =
             ratatui::style::Color::Rgb(GRADIENT_END.0, GRADIENT_END.1, GRADIENT_END.2);
         for x in 0..10u16 {
@@ -153,7 +161,8 @@ mod tests {
     fn test_paint_gradient_border_middle_rows_only_sides() {
         let mut buf = make_buf(10, 5);
         let area = Rect::new(0, 0, 10, 5);
-        paint_gradient_border(&mut buf, area);
+        let frame_area = Rect::new(0, 0, 10, 5);
+        paint_gradient_border(&mut buf, area, frame_area);
 
         // Middle rows (y=1,2,3): only x=0 and x=9 should have an RGB gradient color;
         // interior cells (x=1..8) should NOT have an RGB color set by gradient.
@@ -178,12 +187,15 @@ mod tests {
 
     #[test]
     fn test_paint_gradient_border_offset_area() {
-        // Test that an area not starting at (0,0) is handled correctly
+        // A box offset within a larger frame should use the frame's coordinates for t.
+        // With frame_area matching the box, the top row gets GRADIENT_START and bottom gets GRADIENT_END.
         let mut buf = make_buf(20, 10);
         let area = Rect::new(5, 3, 10, 4);
-        paint_gradient_border(&mut buf, area);
+        // frame_area matches the box exactly so t is still box-relative
+        let frame_area = Rect::new(5, 3, 10, 4);
+        paint_gradient_border(&mut buf, area, frame_area);
 
-        // Top row of area (y=3) — all cells x=5..14 should have gradient start
+        // Top row of area (y=3) — offset 0 within frame → GRADIENT_START
         let expected_top =
             ratatui::style::Color::Rgb(GRADIENT_START.0, GRADIENT_START.1, GRADIENT_START.2);
         for x in 5..15u16 {
@@ -194,7 +206,7 @@ mod tests {
             );
         }
 
-        // Bottom row of area (y=6) — all cells should have gradient end
+        // Bottom row of area (y=6) — offset 3 = height-1 within frame → GRADIENT_END
         let expected_bottom =
             ratatui::style::Color::Rgb(GRADIENT_END.0, GRADIENT_END.1, GRADIENT_END.2);
         for x in 5..15u16 {
@@ -202,6 +214,83 @@ mod tests {
                 buf[(x, 6u16)].style().fg,
                 Some(expected_bottom),
                 "bottom border cell ({x}, 6) should have gradient end"
+            );
+        }
+    }
+
+    #[test]
+    fn test_paint_gradient_border_continuous_across_boxes() {
+        // Two boxes stacked vertically in a frame — they should share a continuous gradient.
+        // Frame: 10 wide × 10 tall, y=0..9
+        // Box A: rows 0..4 (top half)
+        // Box B: rows 5..9 (bottom half)
+        let mut buf = make_buf(10, 10);
+        let frame_area = Rect::new(0, 0, 10, 10);
+        let box_a = Rect::new(0, 0, 10, 5);
+        let box_b = Rect::new(0, 5, 10, 5);
+
+        paint_gradient_border(&mut buf, box_a, frame_area);
+        paint_gradient_border(&mut buf, box_b, frame_area);
+
+        // The bottom row of box A (y=4) and the top row of box B (y=5)
+        // should have different colors (gradient is progressing), not both GRADIENT_START.
+        let color_at_y4 = buf[(0u16, 4u16)].style().fg;
+        let color_at_y5 = buf[(0u16, 5u16)].style().fg;
+        assert!(
+            is_rgb(color_at_y4),
+            "bottom row of box A should have a gradient color"
+        );
+        assert!(
+            is_rgb(color_at_y5),
+            "top row of box B should have a gradient color"
+        );
+        // They should be different (gradient continues across boxes)
+        assert_ne!(
+            color_at_y4, color_at_y5,
+            "adjacent rows in different boxes should have different gradient colors"
+        );
+
+        // The top row of box A (y=0) at frame offset 0 should be GRADIENT_START
+        let expected_start =
+            ratatui::style::Color::Rgb(GRADIENT_START.0, GRADIENT_START.1, GRADIENT_START.2);
+        for x in 0..10u16 {
+            assert_eq!(
+                buf[(x, 0u16)].style().fg,
+                Some(expected_start),
+                "top of frame should have gradient start color"
+            );
+        }
+
+        // The bottom row of box B (y=9) at frame offset 9 = height-1 should be GRADIENT_END
+        let expected_end =
+            ratatui::style::Color::Rgb(GRADIENT_END.0, GRADIENT_END.1, GRADIENT_END.2);
+        for x in 0..10u16 {
+            assert_eq!(
+                buf[(x, 9u16)].style().fg,
+                Some(expected_end),
+                "bottom of frame should have gradient end color"
+            );
+        }
+    }
+
+    #[test]
+    fn test_paint_gradient_border_color_from_frame_not_box() {
+        // A box placed in the middle of a frame should NOT start with GRADIENT_START —
+        // it should use a mid-gradient color based on its frame position.
+        let mut buf = make_buf(10, 10);
+        let frame_area = Rect::new(0, 0, 10, 10);
+        // Box covers only the bottom half (y=5..9)
+        let area = Rect::new(0, 5, 10, 5);
+        paint_gradient_border(&mut buf, area, frame_area);
+
+        // Top row of this box is y=5, which is mid-frame. It should NOT be GRADIENT_START.
+        let start_color =
+            ratatui::style::Color::Rgb(GRADIENT_START.0, GRADIENT_START.1, GRADIENT_START.2);
+        for x in 0..10u16 {
+            assert_ne!(
+                buf[(x, 5u16)].style().fg,
+                Some(start_color),
+                "top of mid-frame box should NOT have gradient start color"
             );
         }
     }
