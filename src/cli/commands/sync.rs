@@ -4875,14 +4875,18 @@ mod tests {
         let result = run_tailoring_with_cancel(tailor_fut, &mut rx, &mut pipeline, 2, cancel).await;
 
         assert!(result.is_ok(), "expected Ok result, got {result:?}");
-        // The heartbeat must have set the step row message inline (Steps pane),
-        // not pushed to the log pane.
+        // The heartbeat must have updated the live elapsed (step row shows [Xs]).
+        assert!(
+            pipeline.steps.steps[3].elapsed.is_some(),
+            "expected live elapsed to be set by heartbeat"
+        );
+        // step.message must remain empty — progress text is discarded by update_message.
         let step_msg = pipeline.steps.steps[3].message.clone();
         assert!(
-            step_msg.contains("projects done"),
-            "expected heartbeat message in step.message, got: {step_msg:?}"
+            step_msg.is_empty(),
+            "step.message must not contain progress text, got: {step_msg:?}"
         );
-        // The log pane must NOT have been populated by update_message.
+        // The log pane must NOT have been flooded by update_message heartbeat entries.
         let logged = pipeline.logs[3].render_to_string(100, 500, 0);
         let has_progress_in_log = logged.iter().any(|l| l.contains("projects done"));
         assert!(
