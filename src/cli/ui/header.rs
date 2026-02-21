@@ -23,6 +23,16 @@ pub struct AuthDisplay {
     pub email: Option<String>,
 }
 
+/// Runner + model display info for the Environment section.
+pub struct RunnerDisplay {
+    /// Human-readable runner name (e.g. "claude-cli", "anthropic-api").
+    pub runner_name: String,
+    /// Effective model name resolved from CLI flag / config / default.
+    pub model: String,
+    /// Optional compatibility warning (e.g. model/runner mismatch).
+    pub warning: Option<String>,
+}
+
 /// Render a header bar with version and optional auth status.
 ///
 /// - Left side: `actual v{version}` in accent colour

@@ -18,6 +18,107 @@ pub enum RunnerChoice {
     CodexCli,
 }
 
+impl RunnerChoice {
+    /// Human-readable name for display in the Environment section.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            RunnerChoice::ClaudeCli => "claude-cli",
+            RunnerChoice::AnthropicApi => "anthropic-api",
+            RunnerChoice::OpenAiApi => "openai-api",
+            RunnerChoice::CodexCli => "codex-cli",
+        }
+    }
+
+    /// Check if the given model name is likely incompatible with this runner
+    /// and return an actionable warning message if so.
+    ///
+    /// Returns `None` when the model appears compatible or is unrecognized
+    /// (custom/fine-tuned models pass without warning).
+    pub fn model_compatibility_warning(&self, model: &str) -> Option<String> {
+        let m = model.to_ascii_lowercase();
+
+        // Short aliases only valid for claude-cli
+        let is_short_alias = matches!(m.as_str(), "sonnet" | "opus" | "haiku");
+
+        // Anthropic model heuristic: contains "claude" OR is a short alias
+        let is_anthropic = m.contains("claude") || is_short_alias;
+
+        // OpenAI model heuristic
+        let is_openai = m.starts_with("gpt-")
+            || m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4")
+            || m.starts_with("chatgpt-");
+
+        // Codex model heuristic
+        let is_codex = m.starts_with("codex-");
+
+        match self {
+            RunnerChoice::ClaudeCli => {
+                if is_openai {
+                    Some(format!(
+                        "Model \"{model}\" looks like an OpenAI model; \
+                         consider --runner openai-api"
+                    ))
+                } else if is_codex {
+                    Some(format!(
+                        "Model \"{model}\" looks like a Codex model; \
+                         consider --runner codex-cli"
+                    ))
+                } else {
+                    None
+                }
+            }
+            RunnerChoice::AnthropicApi => {
+                if is_short_alias {
+                    Some(format!(
+                        "Model \"{model}\" is a short alias; anthropic-api \
+                         requires a full model name (e.g. claude-sonnet-4-5)"
+                    ))
+                } else if is_openai {
+                    Some(format!(
+                        "Model \"{model}\" looks like an OpenAI model; \
+                         consider --runner openai-api"
+                    ))
+                } else if is_codex {
+                    Some(format!(
+                        "Model \"{model}\" looks like a Codex model; \
+                         consider --runner codex-cli"
+                    ))
+                } else {
+                    None
+                }
+            }
+            RunnerChoice::OpenAiApi => {
+                if is_anthropic {
+                    Some(format!(
+                        "Model \"{model}\" looks like an Anthropic model; \
+                         consider --runner claude-cli or --runner anthropic-api"
+                    ))
+                } else if is_codex {
+                    Some(format!(
+                        "Model \"{model}\" looks like a Codex model; \
+                         consider --runner codex-cli"
+                    ))
+                } else {
+                    None
+                }
+            }
+            RunnerChoice::CodexCli => {
+                if is_anthropic {
+                    Some(format!(
+                        "Model \"{model}\" looks like an Anthropic model; \
+                         consider --runner claude-cli or --runner anthropic-api"
+                    ))
+                } else {
+                    // OpenAI models on codex-cli are fine (codex uses OpenAI API)
+                    None
+                }
+            }
+        }
+    }
+}
+
 impl clap::ValueEnum for RunnerChoice {
     fn value_variants<'a>() -> &'a [Self] {
         &[
@@ -552,5 +653,200 @@ mod parse_tests {
         // Exercises the `_ => false` arm of no_tui_from_command.
         let cli = Cli::try_parse_from(["actual", "status"]).unwrap();
         assert!(!no_tui_from_command(cli.command));
+    }
+
+    // ---- RunnerChoice::display_name tests ----
+
+    #[test]
+    fn test_display_name_claude_cli() {
+        assert_eq!(RunnerChoice::ClaudeCli.display_name(), "claude-cli");
+    }
+
+    #[test]
+    fn test_display_name_anthropic_api() {
+        assert_eq!(RunnerChoice::AnthropicApi.display_name(), "anthropic-api");
+    }
+
+    #[test]
+    fn test_display_name_openai_api() {
+        assert_eq!(RunnerChoice::OpenAiApi.display_name(), "openai-api");
+    }
+
+    #[test]
+    fn test_display_name_codex_cli() {
+        assert_eq!(RunnerChoice::CodexCli.display_name(), "codex-cli");
+    }
+
+    // ---- model_compatibility_warning tests ----
+
+    #[test]
+    fn test_compat_claude_cli_with_anthropic_model_ok() {
+        assert!(RunnerChoice::ClaudeCli
+            .model_compatibility_warning("claude-sonnet-4-5")
+            .is_none());
+    }
+
+    #[test]
+    fn test_compat_claude_cli_with_short_alias_ok() {
+        assert!(RunnerChoice::ClaudeCli
+            .model_compatibility_warning("sonnet")
+            .is_none());
+        assert!(RunnerChoice::ClaudeCli
+            .model_compatibility_warning("opus")
+            .is_none());
+        assert!(RunnerChoice::ClaudeCli
+            .model_compatibility_warning("haiku")
+            .is_none());
+    }
+
+    #[test]
+    fn test_compat_claude_cli_with_openai_model_warns() {
+        let warn = RunnerChoice::ClaudeCli
+            .model_compatibility_warning("gpt-4o")
+            .unwrap();
+        assert!(warn.contains("OpenAI"), "msg: {warn}");
+        assert!(warn.contains("openai-api"), "msg: {warn}");
+    }
+
+    #[test]
+    fn test_compat_claude_cli_with_codex_model_warns() {
+        let warn = RunnerChoice::ClaudeCli
+            .model_compatibility_warning("codex-mini-latest")
+            .unwrap();
+        assert!(warn.contains("Codex"), "msg: {warn}");
+        assert!(warn.contains("codex-cli"), "msg: {warn}");
+    }
+
+    #[test]
+    fn test_compat_anthropic_api_with_short_alias_warns() {
+        let warn = RunnerChoice::AnthropicApi
+            .model_compatibility_warning("sonnet")
+            .unwrap();
+        assert!(warn.contains("short alias"), "msg: {warn}");
+        assert!(warn.contains("full model name"), "msg: {warn}");
+    }
+
+    #[test]
+    fn test_compat_anthropic_api_with_full_name_ok() {
+        assert!(RunnerChoice::AnthropicApi
+            .model_compatibility_warning("claude-sonnet-4-5")
+            .is_none());
+    }
+
+    #[test]
+    fn test_compat_anthropic_api_with_openai_model_warns() {
+        let warn = RunnerChoice::AnthropicApi
+            .model_compatibility_warning("gpt-4o")
+            .unwrap();
+        assert!(warn.contains("OpenAI"), "msg: {warn}");
+    }
+
+    #[test]
+    fn test_compat_anthropic_api_with_codex_model_warns() {
+        let warn = RunnerChoice::AnthropicApi
+            .model_compatibility_warning("codex-mini-latest")
+            .unwrap();
+        assert!(warn.contains("Codex"), "msg: {warn}");
+    }
+
+    #[test]
+    fn test_compat_openai_api_with_openai_model_ok() {
+        assert!(RunnerChoice::OpenAiApi
+            .model_compatibility_warning("gpt-4o")
+            .is_none());
+    }
+
+    #[test]
+    fn test_compat_openai_api_with_anthropic_model_warns() {
+        let warn = RunnerChoice::OpenAiApi
+            .model_compatibility_warning("claude-3.5-sonnet")
+            .unwrap();
+        assert!(warn.contains("Anthropic"), "msg: {warn}");
+    }
+
+    #[test]
+    fn test_compat_openai_api_with_short_alias_warns() {
+        let warn = RunnerChoice::OpenAiApi
+            .model_compatibility_warning("haiku")
+            .unwrap();
+        assert!(warn.contains("Anthropic"), "msg: {warn}");
+    }
+
+    #[test]
+    fn test_compat_openai_api_with_codex_model_warns() {
+        let warn = RunnerChoice::OpenAiApi
+            .model_compatibility_warning("codex-mini-latest")
+            .unwrap();
+        assert!(warn.contains("Codex"), "msg: {warn}");
+    }
+
+    #[test]
+    fn test_compat_codex_cli_with_codex_model_ok() {
+        assert!(RunnerChoice::CodexCli
+            .model_compatibility_warning("codex-mini-latest")
+            .is_none());
+    }
+
+    #[test]
+    fn test_compat_codex_cli_with_openai_model_ok() {
+        // OpenAI models on codex-cli are fine (codex uses OpenAI API)
+        assert!(RunnerChoice::CodexCli
+            .model_compatibility_warning("gpt-4o")
+            .is_none());
+    }
+
+    #[test]
+    fn test_compat_codex_cli_with_anthropic_model_warns() {
+        let warn = RunnerChoice::CodexCli
+            .model_compatibility_warning("claude-sonnet-4-5")
+            .unwrap();
+        assert!(warn.contains("Anthropic"), "msg: {warn}");
+    }
+
+    #[test]
+    fn test_compat_unknown_model_no_warning() {
+        // Unknown/custom models should not trigger warnings on any runner
+        assert!(RunnerChoice::ClaudeCli
+            .model_compatibility_warning("my-custom-model")
+            .is_none());
+        assert!(RunnerChoice::AnthropicApi
+            .model_compatibility_warning("my-custom-model")
+            .is_none());
+        assert!(RunnerChoice::OpenAiApi
+            .model_compatibility_warning("my-custom-model")
+            .is_none());
+        assert!(RunnerChoice::CodexCli
+            .model_compatibility_warning("my-custom-model")
+            .is_none());
+    }
+
+    #[test]
+    fn test_compat_case_insensitive() {
+        // Model matching should be case-insensitive
+        let warn = RunnerChoice::ClaudeCli
+            .model_compatibility_warning("GPT-4o")
+            .unwrap();
+        assert!(warn.contains("OpenAI"), "case-insensitive match: {warn}");
+    }
+
+    #[test]
+    fn test_compat_o1_o3_o4_prefixes() {
+        // OpenAI o-series models
+        assert!(RunnerChoice::ClaudeCli
+            .model_compatibility_warning("o1-preview")
+            .is_some());
+        assert!(RunnerChoice::ClaudeCli
+            .model_compatibility_warning("o3-mini")
+            .is_some());
+        assert!(RunnerChoice::ClaudeCli
+            .model_compatibility_warning("o4-mini")
+            .is_some());
+    }
+
+    #[test]
+    fn test_compat_chatgpt_prefix() {
+        assert!(RunnerChoice::ClaudeCli
+            .model_compatibility_warning("chatgpt-4o-latest")
+            .is_some());
     }
 }
