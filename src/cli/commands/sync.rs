@@ -2545,13 +2545,15 @@ mod tests {
 
     #[test]
     fn test_exec_claude_not_found() {
-        // exec() now calls find_claude_binary() which will fail if Claude is not found
-        // Set an invalid binary path to ensure it fails predictably
+        // exec() delegates to sync_wiring::sync_run which auto-detects the runner
+        // from the user's config. Explicitly set runner to ClaudeCli so the test
+        // exercises the find_claude_binary() path regardless of config state.
         let _lock = crate::testutil::ENV_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let _guard = crate::testutil::EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
-        let args = make_sync_args(true, false, false, false, "http://unused");
+        let mut args = make_sync_args(true, false, false, false, "http://unused");
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let code = handle_result(exec(&args));
         assert_eq!(code, 2, "expected exit code 2 (ClaudeNotFound)");
     }
