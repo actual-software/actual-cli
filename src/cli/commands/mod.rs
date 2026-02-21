@@ -126,7 +126,7 @@ fn walk_for_cursor_rules(dir: &Path, results: &mut Vec<PathBuf>) {
 /// place where error output is formatted, so callers never need to print
 /// errors themselves.
 ///
-/// When the error is a [`ActualError::ClaudeSubprocessFailed`] with non-empty
+/// When the error is a [`ActualError::RunnerFailed`] with non-empty
 /// `stderr`, the subprocess output is appended to the panel so the user sees
 /// the actual Claude Code diagnostic (quota errors, auth failures, etc.).
 pub fn handle_result(result: Result<(), ActualError>) -> i32 {
@@ -141,7 +141,7 @@ pub fn handle_result(result: Result<(), ActualError>) -> i32 {
             // Gap 1: show subprocess stderr so the user sees Claude Code diagnostics
             // (quota errors, rate limits, auth failures, etc.) rather than just the
             // exit-code summary.
-            if let ActualError::ClaudeSubprocessFailed { stderr, .. } = &e {
+            if let ActualError::RunnerFailed { stderr, .. } = &e {
                 if !stderr.is_empty() {
                     let clean = console::strip_ansi_codes(stderr);
                     panel = panel.line("").line("Subprocess output:");
@@ -187,10 +187,10 @@ mod tests {
 
     #[test]
     fn test_handle_result_subprocess_failed_with_stderr_returns_exit_code_1() {
-        // Verify that ClaudeSubprocessFailed still returns exit code 1 even
+        // Verify that RunnerFailed still returns exit code 1 even
         // when stderr is non-empty (the stderr display path must not panic or
         // alter the exit code).
-        let code = handle_result(Err(ActualError::ClaudeSubprocessFailed {
+        let code = handle_result(Err(ActualError::RunnerFailed {
             message: "Claude Code exited with code 1".to_string(),
             stderr: "You have exceeded your API quota.\nPlease check your billing.".to_string(),
         }));
@@ -201,7 +201,7 @@ mod tests {
     fn test_handle_result_subprocess_failed_empty_stderr_returns_exit_code_1() {
         // Empty stderr should not add a "Subprocess output:" section but must
         // still propagate correctly.
-        let code = handle_result(Err(ActualError::ClaudeSubprocessFailed {
+        let code = handle_result(Err(ActualError::RunnerFailed {
             message: "Claude Code exited with code 1".to_string(),
             stderr: String::new(),
         }));

@@ -309,10 +309,10 @@ pub enum ActualError {
     // telemetry (directory path hash fallback).
 
     #[error("Claude Code subprocess failed: {message}")]
-    ClaudeSubprocessFailed { message: String, stderr: String },
+    RunnerFailed { message: String, stderr: String },
 
     #[error("Failed to parse Claude Code output: {0}")]
-    ClaudeOutputParse(#[from] serde_json::Error),
+    RunnerOutputParse(#[from] serde_json::Error),
 
     #[error("API request failed: {0}")]
     ApiError(String),

@@ -24,14 +24,14 @@ pub(crate) fn check_auth(binary_path: &Path) -> Result<ClaudeAuthStatus, ActualE
         .args(["auth", "status", "--json"])
         .stdin(std::process::Stdio::null())
         .output()
-        .map_err(|e| ActualError::ClaudeSubprocessFailed {
+        .map_err(|e| ActualError::RunnerFailed {
             message: format!("failed to execute claude: {e}"),
             stderr: String::new(),
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(ActualError::ClaudeSubprocessFailed {
+        return Err(ActualError::RunnerFailed {
             message: format!(
                 "claude auth status exited with code {}",
                 output.status.code().unwrap_or(-1)
@@ -60,7 +60,7 @@ pub fn check_auth_with_timeout(
 
 /// Convert a tokio runtime build error into an [`ActualError`].
 fn runtime_build_error(e: std::io::Error) -> ActualError {
-    ActualError::ClaudeSubprocessFailed {
+    ActualError::RunnerFailed {
         message: format!("failed to build tokio runtime: {e}"),
         stderr: String::new(),
     }
@@ -68,7 +68,7 @@ fn runtime_build_error(e: std::io::Error) -> ActualError {
 
 /// Convert a `wait_with_output` I/O error into an [`ActualError`].
 fn wait_io_error(e: std::io::Error) -> ActualError {
-    ActualError::ClaudeSubprocessFailed {
+    ActualError::RunnerFailed {
         message: format!("failed to wait for claude: {e}"),
         stderr: String::new(),
     }
@@ -100,14 +100,14 @@ async fn check_auth_async(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| ActualError::ClaudeSubprocessFailed {
+        .map_err(|e| ActualError::RunnerFailed {
             message: format!("failed to spawn claude: {e}"),
             stderr: String::new(),
         })?;
 
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
-        .map_err(|_| ActualError::ClaudeTimeout {
+        .map_err(|_| ActualError::RunnerTimeout {
             // Round up so sub-second timeouts display as "1s" rather than "0s".
             seconds: timeout.as_secs_f64().ceil() as u64,
         })?
@@ -115,7 +115,7 @@ async fn check_auth_async(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(ActualError::ClaudeSubprocessFailed {
+        return Err(ActualError::RunnerFailed {
             message: format!(
                 "claude auth status exited with code {}",
                 output.status.code().unwrap_or(-1)
@@ -293,7 +293,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ActualError::ClaudeSubprocessFailed { .. }
+            ActualError::RunnerFailed { .. }
         ));
     }
 
@@ -306,7 +306,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ActualError::ClaudeOutputParse(_)
+            ActualError::RunnerOutputParse(_)
         ));
     }
 
@@ -368,7 +368,7 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let result = check_auth_with_timeout(&script, std::time::Duration::from_millis(100));
-        assert!(matches!(result, Err(ActualError::ClaudeTimeout { .. })));
+        assert!(matches!(result, Err(ActualError::RunnerTimeout { .. })));
     }
 
     #[cfg(unix)]
@@ -382,7 +382,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ActualError::ClaudeSubprocessFailed { .. }
+            ActualError::RunnerFailed { .. }
         ));
     }
 
@@ -410,7 +410,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ActualError::ClaudeSubprocessFailed { .. }
+            ActualError::RunnerFailed { .. }
         ));
     }
 
@@ -425,7 +425,7 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            ActualError::ClaudeOutputParse(_)
+            ActualError::RunnerOutputParse(_)
         ));
     }
 
@@ -451,10 +451,7 @@ mod tests {
             Path::new("/nonexistent/binary/that/does/not/exist"),
             std::time::Duration::from_secs(5),
         );
-        assert!(matches!(
-            result,
-            Err(ActualError::ClaudeSubprocessFailed { .. })
-        ));
+        assert!(matches!(result, Err(ActualError::RunnerFailed { .. })));
     }
 
     #[cfg(unix)]
@@ -479,10 +476,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = create_fake_binary(dir.path(), "error output", 1);
         let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
-        assert!(matches!(
-            result,
-            Err(ActualError::ClaudeSubprocessFailed { .. })
-        ));
+        assert!(matches!(result, Err(ActualError::RunnerFailed { .. })));
     }
 
     #[cfg(unix)]
@@ -491,7 +485,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = create_fake_binary(dir.path(), "not json", 0);
         let result = check_auth_with_timeout(&script, std::time::Duration::from_secs(5));
-        assert!(matches!(result, Err(ActualError::ClaudeOutputParse(_))));
+        assert!(matches!(result, Err(ActualError::RunnerOutputParse(_))));
     }
 
     // ── Direct tests of check_auth_async for coverage of all reachable paths ──
@@ -504,8 +498,8 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
-            "expected ClaudeSubprocessFailed from spawn failure, got: {result:?}"
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed from spawn failure, got: {result:?}"
         );
     }
 
@@ -519,8 +513,8 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let result = check_auth_async(&script, std::time::Duration::from_millis(100)).await;
         assert!(
-            matches!(result, Err(ActualError::ClaudeTimeout { .. })),
-            "expected ClaudeTimeout, got: {result:?}"
+            matches!(result, Err(ActualError::RunnerTimeout { .. })),
+            "expected RunnerTimeout, got: {result:?}"
         );
     }
 
@@ -531,8 +525,8 @@ mod tests {
         let script = create_fake_binary(dir.path(), "error output", 1);
         let result = check_auth_async(&script, std::time::Duration::from_secs(5)).await;
         assert!(
-            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
-            "expected ClaudeSubprocessFailed, got: {result:?}"
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed, got: {result:?}"
         );
     }
 
@@ -543,8 +537,8 @@ mod tests {
         let script = create_fake_binary(dir.path(), "not json", 0);
         let result = check_auth_async(&script, std::time::Duration::from_secs(5)).await;
         assert!(
-            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
-            "expected ClaudeOutputParse, got: {result:?}"
+            matches!(result, Err(ActualError::RunnerOutputParse(_))),
+            "expected RunnerOutputParse, got: {result:?}"
         );
     }
 
@@ -580,7 +574,7 @@ mod tests {
         let err = runtime_build_error(io_err);
         assert!(matches!(
             err,
-            ActualError::ClaudeSubprocessFailed { ref message, .. } if message.contains("failed to build tokio runtime")
+            ActualError::RunnerFailed { ref message, .. } if message.contains("failed to build tokio runtime")
         ));
     }
 
@@ -592,7 +586,7 @@ mod tests {
         let err = wait_io_error(io_err);
         assert!(matches!(
             err,
-            ActualError::ClaudeSubprocessFailed { ref message, .. } if message.contains("failed to wait for claude")
+            ActualError::RunnerFailed { ref message, .. } if message.contains("failed to wait for claude")
         ));
     }
 }

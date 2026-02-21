@@ -122,7 +122,7 @@ pub async fn tailor_all_projects<R: TailoringRunner>(
                             tracing::warn!("tailoring event dropped: receiver gone");
                         }
                     }
-                    ActualError::ClaudeTimeout {
+                    ActualError::RunnerTimeout {
                         seconds: timeout_dur.as_secs(),
                     }
                 })?
@@ -754,7 +754,7 @@ mod tests {
                 "Rules for A",
                 &["adr-001"],
             )),
-            MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+            MockResponse::Error(ActualError::RunnerFailed {
                 message: "process crashed".to_string(),
                 stderr: "segfault".to_string(),
             }),
@@ -778,7 +778,7 @@ mod tests {
         let err_display = err.to_string();
         assert!(
             err_display.contains("process crashed"),
-            "expected ClaudeSubprocessFailed, got: {err_display}"
+            "expected RunnerFailed, got: {err_display}"
         );
     }
 
@@ -794,7 +794,7 @@ mod tests {
 
         // First response is an error; the rest are valid but should never be reached.
         let responses = vec![
-            MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+            MockResponse::Error(ActualError::RunnerFailed {
                 message: "boom".to_string(),
                 stderr: String::new(),
             }),
@@ -1126,8 +1126,8 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            matches!(err, ActualError::ClaudeTimeout { seconds: 2 }),
-            "expected ClaudeTimeout, got: {err}"
+            matches!(err, ActualError::RunnerTimeout { seconds: 2 }),
+            "expected RunnerTimeout, got: {err}"
         );
     }
 
@@ -1163,8 +1163,8 @@ mod tests {
 
         // Confirm timeout error
         assert!(
-            matches!(result, Err(ActualError::ClaudeTimeout { seconds: 2 })),
-            "expected ClaudeTimeout"
+            matches!(result, Err(ActualError::RunnerTimeout { seconds: 2 })),
+            "expected RunnerTimeout"
         );
 
         // Collect all events
@@ -1406,7 +1406,7 @@ mod tests {
                 "Good rules",
                 &["adr-001"],
             )),
-            MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+            MockResponse::Error(ActualError::RunnerFailed {
                 message: "crashed".to_string(),
                 stderr: String::new(),
             }),
@@ -1573,7 +1573,7 @@ mod tests {
         let projects = vec![make_project("bad")];
         let adrs = vec![make_adr("adr-001")];
 
-        let responses = vec![MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+        let responses = vec![MockResponse::Error(ActualError::RunnerFailed {
             message: "crashed".to_string(),
             stderr: String::new(),
         })];
@@ -1632,8 +1632,8 @@ mod tests {
 
         let result = tailor_all_projects(&runner, &projects, &adrs, &config, Some(tx)).await;
         assert!(
-            matches!(result, Err(ActualError::ClaudeTimeout { seconds: 2 })),
-            "expected ClaudeTimeout even with dropped receiver: {result:?}"
+            matches!(result, Err(ActualError::RunnerTimeout { seconds: 2 })),
+            "expected RunnerTimeout even with dropped receiver: {result:?}"
         );
     }
 
@@ -1686,7 +1686,7 @@ mod tests {
         // First batch succeeds; second batch fails.
         let responses = vec![
             MockResponse::Json(make_output_json("CLAUDE.md", "Batch 1 rules", &["adr-001"])),
-            MockResponse::Error(ActualError::ClaudeSubprocessFailed {
+            MockResponse::Error(ActualError::RunnerFailed {
                 message: "batch 2 crashed".to_string(),
                 stderr: String::new(),
             }),

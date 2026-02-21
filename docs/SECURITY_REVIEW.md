@@ -381,7 +381,7 @@ eprintln!("Warning: failed to parse {}: {e}", relative.display());
 
 ```rust
 // error.rs:12
-ClaudeSubprocessFailed { message: String, stderr: String },
+RunnerFailed { message: String, stderr: String },
 ```
 
 When the `claude` subprocess fails, its full stderr is captured and stored in the error variant. This stderr is printed to the terminal by the error handler in `src/cli/commands/mod.rs`. If Claude Code emits sensitive information to stderr — partial tokens, session identifiers, internal API responses — those are surfaced to the user's terminal and potentially to log aggregation systems.

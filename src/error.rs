@@ -22,14 +22,14 @@ pub enum ActualError {
     #[error("API key not set. Set {env_var} or configure the api key in your config")]
     ApiKeyMissing { env_var: String },
 
-    #[error("Claude Code subprocess failed: {message}")]
-    ClaudeSubprocessFailed { message: String, stderr: String },
+    #[error("Runner failed: {message}")]
+    RunnerFailed { message: String, stderr: String },
 
     #[error("Insufficient credits: {message}")]
     CreditBalanceTooLow { message: String },
 
-    #[error("Failed to parse Claude Code output: {0}")]
-    ClaudeOutputParse(#[from] serde_json::Error),
+    #[error("Failed to parse runner output: {0}")]
+    RunnerOutputParse(#[from] serde_json::Error),
 
     #[error("Analysis returned no projects")]
     AnalysisEmpty,
@@ -46,8 +46,8 @@ pub enum ActualError {
     #[error("Config error: {0}")]
     ConfigError(String),
 
-    #[error("Claude Code subprocess timed out after {seconds}s")]
-    ClaudeTimeout { seconds: u64 },
+    #[error("Runner timed out after {seconds}s")]
+    RunnerTimeout { seconds: u64 },
 
     #[error("User cancelled")]
     UserCancelled,
@@ -99,7 +99,7 @@ impl ActualError {
                 Some("Add credits at https://console.anthropic.com/settings/billing")
             }
             Self::ConfigError(_) => Some("Check ~/.actualai/actual/config.yaml"),
-            Self::ClaudeTimeout { .. } => Some(
+            Self::RunnerTimeout { .. } => Some(
                 "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit",
             ),
             _ => None,
@@ -119,7 +119,7 @@ mod tests {
         assert_eq!(ActualError::CodexNotFound.exit_code(), 2);
         assert_eq!(ActualError::CursorNotFound.exit_code(), 2);
         assert_eq!(
-            ActualError::ClaudeSubprocessFailed {
+            ActualError::RunnerFailed {
                 message: "fail".to_string(),
                 stderr: "err".to_string(),
             }
@@ -127,7 +127,7 @@ mod tests {
             1
         );
         assert_eq!(
-            ActualError::ClaudeOutputParse(serde_json::from_str::<()>("invalid").unwrap_err())
+            ActualError::RunnerOutputParse(serde_json::from_str::<()>("invalid").unwrap_err())
                 .exit_code(),
             1
         );
@@ -149,7 +149,7 @@ mod tests {
             ActualError::ConfigError("bad key".to_string()).exit_code(),
             1
         );
-        assert_eq!(ActualError::ClaudeTimeout { seconds: 30 }.exit_code(), 1);
+        assert_eq!(ActualError::RunnerTimeout { seconds: 30 }.exit_code(), 1);
         assert_eq!(ActualError::AnalysisEmpty.exit_code(), 1);
         assert_eq!(ActualError::UserCancelled.exit_code(), 4);
         assert_eq!(
@@ -218,7 +218,7 @@ mod tests {
             "expected 'OPENAI_API_KEY' in: {msg}"
         );
 
-        let msg = ActualError::ClaudeSubprocessFailed {
+        let msg = ActualError::RunnerFailed {
             message: "oops".to_string(),
             stderr: "...".to_string(),
         }
@@ -242,7 +242,7 @@ mod tests {
         let msg = ActualError::ConfigError("bad key".to_string()).to_string();
         assert!(msg.contains("bad key"), "expected 'bad key' in: {msg}");
 
-        let msg = ActualError::ClaudeTimeout { seconds: 30 }.to_string();
+        let msg = ActualError::RunnerTimeout { seconds: 30 }.to_string();
         assert!(msg.contains("30"), "expected '30' in: {msg}");
         assert!(msg.contains("timed out"), "expected 'timed out' in: {msg}");
 
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn test_hint_claude_timeout() {
         assert_eq!(
-            ActualError::ClaudeTimeout { seconds: 30 }.hint(),
+            ActualError::RunnerTimeout { seconds: 30 }.hint(),
             Some(
                 "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit",
             )
