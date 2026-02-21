@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::keys::Key;
 use crate::pty::PtyProcess;
+use crate::screen::{ScreenBuffer, ScreenSnapshot};
 use crate::TuiTestError;
 
 /// Default terminal width in columns.
@@ -84,7 +85,7 @@ impl TuiSessionBuilder {
 
     /// Spawn the process and return a [`TuiSession`].
     pub fn spawn(self) -> Result<TuiSession, TuiTestError> {
-        let pty = PtyProcess::spawn(
+        let mut pty = PtyProcess::spawn(
             &self.command,
             &self.args,
             self.cols,
@@ -93,9 +94,15 @@ impl TuiSessionBuilder {
             self.workdir.as_ref(),
         )?;
 
+        let reader = pty
+            .take_reader()
+            .ok_or_else(|| TuiTestError::Pty("Failed to take PTY reader".to_string()))?;
+        let screen = ScreenBuffer::new(reader, self.rows, self.cols);
+
         Ok(TuiSession {
             pty,
             timeout: self.timeout,
+            screen,
         })
     }
 
@@ -121,6 +128,7 @@ impl TuiSessionBuilder {
 pub struct TuiSession {
     pty: PtyProcess,
     timeout: Duration,
+    screen: ScreenBuffer,
 }
 
 impl TuiSession {
@@ -179,7 +187,52 @@ impl TuiSession {
 
     /// Resize the PTY terminal.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), TuiTestError> {
-        self.pty.resize(cols, rows)
+        self.pty.resize(cols, rows)?;
+        self.screen.resize(rows, cols);
+        Ok(())
+    }
+
+    /// Wait for a predicate to become true on the terminal screen.
+    pub fn wait_for<F>(&self, predicate: F) -> Result<(), TuiTestError>
+    where
+        F: Fn(&ScreenSnapshot) -> bool,
+    {
+        self.screen.wait_for(predicate, self.timeout)
+    }
+
+    /// Wait for a predicate with a custom timeout.
+    pub fn wait_for_timeout<F>(&self, predicate: F, timeout: Duration) -> Result<(), TuiTestError>
+    where
+        F: Fn(&ScreenSnapshot) -> bool,
+    {
+        self.screen.wait_for(predicate, timeout)
+    }
+
+    /// Wait until the screen contains the given text.
+    pub fn wait_for_text(&self, text: &str) -> Result<(), TuiTestError> {
+        let text = text.to_string();
+        self.wait_for(move |snap| snap.contains(&text))
+    }
+
+    /// Wait until the screen contains the given text, with a custom timeout.
+    pub fn wait_for_text_timeout(&self, text: &str, timeout: Duration) -> Result<(), TuiTestError> {
+        let text = text.to_string();
+        self.wait_for_timeout(move |snap| snap.contains(&text), timeout)
+    }
+
+    /// Check if the screen currently contains the given text.
+    pub fn screen_contains(&self, text: &str) -> bool {
+        self.screen.contains(text)
+    }
+
+    /// Get the plain text contents of the current terminal screen.
+    pub fn get_screen_text(&self) -> String {
+        self.screen.contents()
+    }
+
+    /// Get a snapshot of the current screen state.
+    pub fn get_screen(&self) -> ScreenSnapshot {
+        self.screen.snapshot()
     }
 }
 
@@ -432,5 +485,114 @@ mod tests {
             .env("KEY2", "val2");
         assert_eq!(builder.env.get("KEY1").unwrap(), "val1");
         assert_eq!(builder.env.get("KEY2").unwrap(), "val2");
+    }
+
+    #[test]
+    fn test_echo_output_captured_on_screen() {
+        let session = TuiSession::new("/bin/echo hello_world")
+            .timeout(Duration::from_secs(5))
+            .spawn()
+            .expect("Failed to spawn echo");
+        session
+            .wait_for_text("hello_world")
+            .expect("Should see echo output");
+    }
+
+    #[test]
+    fn test_cat_echo_captured() {
+        let mut session = TuiSession::new("/bin/cat")
+            .timeout(Duration::from_secs(5))
+            .spawn()
+            .expect("Failed to spawn cat");
+        session.type_text("testing 123\n").unwrap();
+        session
+            .wait_for_text("testing 123")
+            .expect("Should see typed text");
+        session.send_key(Key::Ctrl('d')).unwrap();
+        session.send_key(Key::Ctrl('d')).unwrap();
+    }
+
+    #[test]
+    fn test_get_screen_text() {
+        let session = TuiSession::new("/bin/echo screen_text_test")
+            .timeout(Duration::from_secs(5))
+            .spawn()
+            .expect("Failed to spawn");
+        session.wait_for_text("screen_text_test").unwrap();
+        let text = session.get_screen_text();
+        assert!(text.contains("screen_text_test"));
+    }
+
+    #[test]
+    fn test_screen_contains() {
+        let session = TuiSession::new("/bin/echo contains_check")
+            .timeout(Duration::from_secs(5))
+            .spawn()
+            .expect("Failed to spawn");
+        session.wait_for_text("contains_check").unwrap();
+        assert!(session.screen_contains("contains_check"));
+        assert!(!session.screen_contains("not_there_xyz"));
+    }
+
+    #[test]
+    fn test_get_screen_snapshot() {
+        let session = TuiSession::new("/bin/echo snapshot_test")
+            .timeout(Duration::from_secs(5))
+            .spawn()
+            .expect("Failed to spawn");
+        session.wait_for_text("snapshot_test").unwrap();
+        let snap = session.get_screen();
+        assert!(snap.contains("snapshot_test"));
+        assert_eq!(snap.size(), (24, 80));
+    }
+
+    #[test]
+    fn test_wait_for_with_predicate() {
+        let session = TuiSession::new("/bin/echo predicate_test")
+            .timeout(Duration::from_secs(5))
+            .spawn()
+            .expect("Failed to spawn");
+        session
+            .wait_for(|snap| snap.contains("predicate_test"))
+            .expect("Predicate should match");
+    }
+
+    #[test]
+    fn test_wait_for_text_timeout_expires() {
+        let mut session = TuiSession::new("/bin/cat")
+            .timeout(Duration::from_secs(30))
+            .spawn()
+            .expect("Failed to spawn");
+        let result = session.wait_for_text_timeout("never_appears_xyz", Duration::from_millis(200));
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TuiTestError::Timeout(_)));
+        let _ = session.kill();
+    }
+
+    #[test]
+    fn test_resize_updates_screen_buffer() {
+        let mut session = TuiSession::new("/bin/cat")
+            .timeout(Duration::from_secs(5))
+            .spawn()
+            .expect("Failed to spawn");
+        session.resize(120, 40).unwrap();
+        let snap = session.get_screen();
+        assert_eq!(snap.size(), (40, 120));
+        session.send_key(Key::Ctrl('d')).unwrap();
+        session.send_key(Key::Ctrl('d')).unwrap();
+    }
+
+    #[test]
+    fn test_wait_for_timeout_custom() {
+        let session = TuiSession::new("/bin/echo custom_timeout_test")
+            .timeout(Duration::from_secs(30))
+            .spawn()
+            .expect("Failed to spawn");
+        session
+            .wait_for_timeout(
+                |snap| snap.contains("custom_timeout_test"),
+                Duration::from_secs(5),
+            )
+            .expect("Should find with custom timeout");
     }
 }
