@@ -1475,6 +1475,28 @@ mod tests {
         );
     }
 
+    // Test 30b: top-level JSON array containing objects gets the injection
+    #[test]
+    fn test_inject_additional_properties_top_level_array() {
+        let mut schema = serde_json::json!([
+            {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }
+                }
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            }
+        ]);
+        inject_additional_properties_false(&mut schema);
+        assert_eq!(schema[0]["additionalProperties"], serde_json::json!(false));
+        assert_eq!(schema[1]["additionalProperties"], serde_json::json!(false));
+    }
+
     // Test 31: real tailoring schema — all object nodes get additionalProperties: false
     #[test]
     fn test_inject_additional_properties_real_schema() {
