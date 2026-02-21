@@ -1161,8 +1161,8 @@ fn raw_adrs_to_output(adrs: &[crate::api::types::Adr], format: &OutputFormat) ->
         } else {
             for project_path in &adr.matched_projects {
                 if validate_project_path(project_path).is_err() {
-                    eprintln!(
-                        "  warning: skipping invalid project path '{}' for ADR '{}'",
+                    tracing::warn!(
+                        "skipping invalid project path '{}' for ADR '{}'",
                         console::strip_ansi_codes(project_path),
                         adr.id
                     );
@@ -4176,7 +4176,7 @@ mod tests {
     #[test]
     fn test_serialize_tailoring_output_warns_on_error() {
         // AlwaysFailsSerialize always returns Err from serde, exercising the
-        // eprintln! warning branch inside serialize_tailoring_output.
+        // tracing::warn! branch inside serialize_tailoring_output.
         let result = serialize_tailoring_output(&AlwaysFailsSerialize);
         assert!(
             result.is_none(),

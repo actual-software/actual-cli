@@ -195,8 +195,8 @@ pub(crate) fn validate_and_filter_output(
             .cloned()
             .collect();
         if !invalid_ids.is_empty() {
-            eprintln!(
-                "  warning: filtered {} hallucinated ADR ID(s) from '{}': {}",
+            tracing::warn!(
+                "filtered {} hallucinated ADR ID(s) from '{}': {}",
                 invalid_ids.len(),
                 console::strip_ansi_codes(&file.path),
                 invalid_ids
