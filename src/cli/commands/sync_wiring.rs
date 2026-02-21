@@ -189,13 +189,14 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 authenticated: true,
                 email: Some("OpenAI API".to_string()),
             };
-            // Model resolution: --model flag > openai_model config > default.
-            // Uses `openai_model` (not `model`) so that `model: haiku` in config
-            // doesn't leak Claude aliases into the OpenAI API runner.
+            // Model resolution: --model flag > openai_model config > model config > default.
+            // `openai_model` takes priority so runner-specific config wins, but
+            // `model` is included because it may have triggered runner auto-selection.
             let model = args
                 .model
                 .as_deref()
                 .or(cfg.openai_model.as_deref())
+                .or(cfg.model.as_deref())
                 .unwrap_or(DEFAULT_OPENAI_MODEL)
                 .to_string();
             let runner_display = RunnerDisplay {
@@ -233,18 +234,15 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 authenticated: true,
                 email: api_key.as_ref().map(|_| "OpenAI API".to_string()),
             };
-            // Model resolution: --model flag > openai_model config > None (let
-            // Codex CLI use its own default, currently gpt-5 for ChatGPT OAuth).
-            // Uses `openai_model` (not `model`) so that `model: haiku` in config
-            // doesn't leak Claude aliases into the Codex CLI runner.
-            // Model resolution: --model flag > openai_model config > None (let
-            // Codex CLI use its own default, currently gpt-5 for ChatGPT OAuth).
-            // Uses `openai_model` (not `model`) so that `model: haiku` in config
-            // doesn't leak Claude aliases into the Codex CLI runner.
+            // Model resolution: --model flag > openai_model config > model config > None
+            // (let Codex CLI use its own default, currently gpt-5 for ChatGPT OAuth).
+            // `openai_model` takes priority so runner-specific config wins, but
+            // `model` is included because it may have triggered runner auto-selection.
             let model = args
                 .model
                 .as_deref()
                 .or(cfg.openai_model.as_deref())
+                .or(cfg.model.as_deref())
                 .map(|s| s.to_string());
             let display_model = model
                 .clone()
@@ -281,6 +279,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .model
                 .as_deref()
                 .or(cfg.cursor_model.as_deref())
+                .or(cfg.model.as_deref())
                 .map(|s| s.to_string());
             let display_model = model
                 .clone()
@@ -541,6 +540,26 @@ mod tests {
         assert_eq!(
             infer_runner_from_config(None, None, Some("gemini-pro"), None).unwrap(),
             RunnerChoice::CursorCli,
+        );
+    }
+
+    #[test]
+    fn infer_runner_cfg_model_gpt5_mini_selects_openai() {
+        // When `model: gpt-5-mini` is set (not openai_model), runner should be OpenAiApi.
+        // The OpenAiApi branch should then use cfg.model as fallback after cfg.openai_model.
+        assert_eq!(
+            infer_runner_from_config(None, None, None, Some("gpt-5-mini")).unwrap(),
+            RunnerChoice::OpenAiApi,
+            "model: gpt-5-mini should auto-select OpenAiApi runner"
+        );
+    }
+
+    #[test]
+    fn infer_runner_cfg_model_codex_selects_codex() {
+        assert_eq!(
+            infer_runner_from_config(None, None, None, Some("codex-mini-latest")).unwrap(),
+            RunnerChoice::CodexCli,
+            "model: codex-mini-latest should auto-select CodexCli runner"
         );
     }
 }
