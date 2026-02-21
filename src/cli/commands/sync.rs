@@ -2360,6 +2360,62 @@ mod tests {
     }
 
     #[test]
+    fn test_run_sync_runner_display_shown() {
+        // Exercises the `if let Some(rd) = runner_display` branch (no warning).
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let rd = RunnerDisplay {
+            runner_name: "claude-cli".to_string(),
+            model: "sonnet".to_string(),
+            warning: None,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            Some(&rd),
+        );
+        assert!(
+            result.is_ok(),
+            "runner_display without warning should succeed"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_runner_display_with_warning() {
+        // Exercises the `if let Some(ref warn) = rd.warning` branch.
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let rd = RunnerDisplay {
+            runner_name: "codex-cli".to_string(),
+            model: "haiku".to_string(),
+            warning: Some("model 'haiku' may not be supported by codex-cli".to_string()),
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            Some(&rd),
+        );
+        assert!(
+            result.is_ok(),
+            "runner_display with warning should still succeed"
+        );
+    }
+
+    #[test]
     fn test_run_sync_dry_run_writes_no_files() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
