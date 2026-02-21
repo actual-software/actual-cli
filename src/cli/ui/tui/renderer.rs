@@ -21,9 +21,8 @@ use super::steps::{StepStatus, StepsPane};
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
 use crate::branding::banner::BANNER;
-use crate::cli::ui::confirm::{format_project_summary, prompt_project_confirmation};
+use crate::cli::ui::confirm::{format_project_summary_plain, prompt_project_confirmation};
 use crate::cli::ui::progress::SyncPhase;
-use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 
 /// Navigation command produced by the background keyboard poller during execution.
@@ -907,8 +906,7 @@ impl TuiRenderer {
         match &self.mode {
             Mode::Tui(_) => {
                 // Push the project summary to the log pane
-                let width = term_size::terminal_width();
-                let summary = format_project_summary(analysis, width);
+                let summary = format_project_summary_plain(analysis);
                 for line in summary.lines() {
                     self.logs[self.active_step].push(line.to_string());
                 }
