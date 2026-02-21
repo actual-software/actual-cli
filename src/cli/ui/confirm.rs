@@ -825,13 +825,7 @@ mod tests {
         assert!(output.contains("Packages:"));
         assert!(output.contains("Manager:"));
         // ASCII-only: no chars > 0x7F
-        for ch in output.chars() {
-            assert!(
-                ch.is_ascii(),
-                "non-ASCII character found: U+{:04X}",
-                ch as u32
-            );
-        }
+        assert!(output.is_ascii(), "output must be ASCII-only: {output:?}");
         // No ANSI codes
         assert!(!output.contains('\x1b'));
     }
@@ -846,13 +840,7 @@ mod tests {
         assert!(output.contains("apps/web"));
         assert!(output.contains("services/api"));
         // ASCII-only
-        for ch in output.chars() {
-            assert!(
-                ch.is_ascii(),
-                "non-ASCII character found: U+{:04X}",
-                ch as u32
-            );
-        }
+        assert!(output.is_ascii(), "output must be ASCII-only: {output:?}");
         assert!(!output.contains('\x1b'));
     }
 
