@@ -1328,7 +1328,12 @@ pub fn confirm_and_write(
     // Use the native TUI multi-select so the user stays inside the TUI
     // (no suspend/dialoguer teardown).  Plain/Quiet mode falls back to
     // the existing dialoguer-based confirm_files path automatically.
+    //
+    // Record prompt duration so we can exclude user wait time from the
+    // Write phase elapsed timer.
+    let prompt_start = std::time::Instant::now();
     let confirmed = pipeline.select_files_in_tui(output, force, term)?;
+    pipeline.adjust_start_for_pause(SyncPhase::Write, prompt_start.elapsed());
     let files_rejected = output.files.len() - confirmed.len();
 
     if confirmed.is_empty() {
