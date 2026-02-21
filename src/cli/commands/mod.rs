@@ -9,6 +9,7 @@ use crate::generation::OutputFormat;
 
 pub mod auth;
 pub mod config;
+pub mod models;
 pub mod runners;
 pub mod status;
 pub mod sync;
