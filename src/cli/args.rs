@@ -292,6 +292,8 @@ pub enum Command {
     Config(ConfigArgs),
     /// List all available AI backend runners
     Runners,
+    /// List known model names grouped by runner
+    Models,
 }
 
 /// Arguments for the `sync` command

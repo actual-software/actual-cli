@@ -1,0 +1,257 @@
+//! Implementation of the `actual models` command.
+//!
+//! Prints known model names grouped by runner family so users can discover
+//! valid values for `--model` / `actual config set model`.
+
+use crate::error::ActualError;
+
+/// A single model entry: its ID and whether it is the default for its family.
+struct ModelEntry {
+    id: &'static str,
+    is_default: bool,
+    note: Option<&'static str>,
+}
+
+impl ModelEntry {
+    const fn new(id: &'static str) -> Self {
+        Self {
+            id,
+            is_default: false,
+            note: None,
+        }
+    }
+
+    const fn default_model(id: &'static str) -> Self {
+        Self {
+            id,
+            is_default: true,
+            note: None,
+        }
+    }
+
+    const fn with_note(id: &'static str, note: &'static str) -> Self {
+        Self {
+            id,
+            is_default: false,
+            note: Some(note),
+        }
+    }
+}
+
+/// A runner family with its associated models.
+struct RunnerFamily {
+    name: &'static str,
+    runners: &'static [&'static str],
+    models: &'static [ModelEntry],
+}
+
+/// Static list of runner families and their known models.
+static RUNNER_FAMILIES: &[RunnerFamily] = &[
+    RunnerFamily {
+        name: "Claude / Anthropic",
+        runners: &["claude-cli", "anthropic-api"],
+        models: &[
+            ModelEntry::new("claude-opus-4-5"),
+            ModelEntry::default_model("claude-sonnet-4-6"),
+            ModelEntry::new("claude-haiku-3-5"),
+            ModelEntry::with_note("sonnet", "short alias, claude-cli only"),
+            ModelEntry::with_note("opus", "short alias, claude-cli only"),
+            ModelEntry::with_note("haiku", "short alias, claude-cli only"),
+        ],
+    },
+    RunnerFamily {
+        name: "OpenAI / Codex",
+        runners: &["openai-api", "codex-cli"],
+        models: &[
+            ModelEntry::default_model("gpt-5.2"),
+            ModelEntry::new("codex-mini-latest"),
+        ],
+    },
+    RunnerFamily {
+        name: "Cursor",
+        runners: &["cursor-cli"],
+        models: &[ModelEntry::with_note(
+            "(any model)",
+            "Cursor proxies all providers — no fixed model list",
+        )],
+    },
+];
+
+pub fn exec() -> Result<(), ActualError> {
+    run_models();
+    Ok(())
+}
+
+fn run_models() {
+    println!("Known models by runner\n");
+    println!("  (default) marks the model used when none is configured");
+    println!("  Set with: actual config set model <name>\n");
+
+    for family in RUNNER_FAMILIES {
+        let runners_str = family.runners.join(", ");
+        println!("  {} ({})", family.name, runners_str);
+
+        for model in family.models {
+            let default_tag = if model.is_default { " (default)" } else { "" };
+            match model.note {
+                Some(note) => {
+                    println!("    {}{}  — {}", model.id, default_tag, note);
+                }
+                None => {
+                    println!("    {}{}", model.id, default_tag);
+                }
+            }
+        }
+
+        println!();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exec_returns_ok() {
+        assert!(exec().is_ok());
+    }
+
+    #[test]
+    fn test_runner_families_nonempty() {
+        assert!(
+            !RUNNER_FAMILIES.is_empty(),
+            "should have at least one family"
+        );
+    }
+
+    #[test]
+    fn test_each_family_has_runners_and_models() {
+        for family in RUNNER_FAMILIES {
+            assert!(
+                !family.runners.is_empty(),
+                "family '{}' should have runners",
+                family.name
+            );
+            assert!(
+                !family.models.is_empty(),
+                "family '{}' should have models",
+                family.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_exactly_one_default_per_claude_family() {
+        let claude_family = RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "Claude / Anthropic")
+            .expect("should have Claude family");
+        let defaults: Vec<_> = claude_family
+            .models
+            .iter()
+            .filter(|m| m.is_default)
+            .collect();
+        assert_eq!(
+            defaults.len(),
+            1,
+            "Claude family should have exactly one default"
+        );
+        assert_eq!(
+            defaults[0].id, "claude-sonnet-4-6",
+            "default Claude model should be claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn test_exactly_one_default_per_openai_family() {
+        let openai_family = RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "OpenAI / Codex")
+            .expect("should have OpenAI family");
+        let defaults: Vec<_> = openai_family
+            .models
+            .iter()
+            .filter(|m| m.is_default)
+            .collect();
+        assert_eq!(
+            defaults.len(),
+            1,
+            "OpenAI family should have exactly one default"
+        );
+        assert_eq!(
+            defaults[0].id, "gpt-5.2",
+            "default OpenAI model should be gpt-5.2"
+        );
+    }
+
+    #[test]
+    fn test_model_entry_new_not_default() {
+        let entry = ModelEntry::new("some-model");
+        assert!(!entry.is_default);
+        assert!(entry.note.is_none());
+    }
+
+    #[test]
+    fn test_model_entry_default_model() {
+        let entry = ModelEntry::default_model("my-model");
+        assert!(entry.is_default);
+        assert!(entry.note.is_none());
+    }
+
+    #[test]
+    fn test_model_entry_with_note() {
+        let entry = ModelEntry::with_note("alias", "short alias only");
+        assert!(!entry.is_default);
+        assert_eq!(entry.note, Some("short alias only"));
+    }
+
+    #[test]
+    fn test_short_aliases_present_in_claude_family() {
+        let claude_family = RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "Claude / Anthropic")
+            .expect("should have Claude family");
+        let ids: Vec<&str> = claude_family.models.iter().map(|m| m.id).collect();
+        assert!(
+            ids.contains(&"sonnet"),
+            "should include 'sonnet' short alias"
+        );
+        assert!(ids.contains(&"opus"), "should include 'opus' short alias");
+        assert!(ids.contains(&"haiku"), "should include 'haiku' short alias");
+    }
+
+    #[test]
+    fn test_claude_full_ids_present() {
+        let claude_family = RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "Claude / Anthropic")
+            .expect("should have Claude family");
+        let ids: Vec<&str> = claude_family.models.iter().map(|m| m.id).collect();
+        assert!(
+            ids.contains(&"claude-sonnet-4-6"),
+            "should include claude-sonnet-4-6"
+        );
+        assert!(
+            ids.contains(&"claude-opus-4-5"),
+            "should include claude-opus-4-5"
+        );
+        assert!(
+            ids.contains(&"claude-haiku-3-5"),
+            "should include claude-haiku-3-5"
+        );
+    }
+
+    #[test]
+    fn test_openai_codex_models_present() {
+        let openai_family = RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "OpenAI / Codex")
+            .expect("should have OpenAI family");
+        let ids: Vec<&str> = openai_family.models.iter().map(|m| m.id).collect();
+        assert!(ids.contains(&"gpt-5.2"), "should include gpt-5.2");
+        assert!(
+            ids.contains(&"codex-mini-latest"),
+            "should include codex-mini-latest"
+        );
+    }
+}

@@ -28,6 +28,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Auth => cli::commands::auth::exec(),
         Command::Config(args) => cli::commands::config::exec(args),
         Command::Runners => cli::commands::runners::exec(),
+        Command::Models => cli::commands::models::exec(),
     }
 }
 
