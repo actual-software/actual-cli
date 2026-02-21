@@ -1861,6 +1861,7 @@ mod tests {
                                                    // Just test it doesn't panic; result depends on MockTerminal default
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         // This calls prompt_project_confirmation which uses MockTerminal
@@ -1874,6 +1875,7 @@ mod tests {
         let mut r = TuiRenderer::new(true, false); // Quiet mode
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         let _ = r.confirm_project(&analysis, &term);
@@ -1889,6 +1891,7 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -1908,6 +1911,7 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
@@ -1926,6 +1930,7 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
@@ -1944,6 +1949,7 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
@@ -1962,6 +1968,7 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
@@ -1982,6 +1989,7 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         let right = KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
@@ -2003,6 +2011,7 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -2023,6 +2032,7 @@ mod tests {
         let term = MockTerminal::new(vec![]);
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         };
         let mut source = MockEventSource::new(vec![]); // no events → EOF error
@@ -2045,6 +2055,7 @@ mod tests {
         // ANSI-styled output (via theme::heading, theme::hint, etc.).
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![Project {
                 path: ".".to_string(),
                 name: "TestProject".to_string(),

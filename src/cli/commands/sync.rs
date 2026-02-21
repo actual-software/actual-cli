@@ -1561,6 +1561,7 @@ mod tests {
     fn make_monorepo_analysis() -> RepoAnalysis {
         RepoAnalysis {
             is_monorepo: true,
+            workspace_type: Some(crate::analysis::types::WorkspaceType::Pnpm),
             projects: vec![
                 Project {
                     path: "apps/web".to_string(),
