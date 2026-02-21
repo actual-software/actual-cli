@@ -23,6 +23,7 @@ use crate::error::ActualError;
 use crate::runner::anthropic_api::AnthropicApiRunner;
 use crate::runner::binary::find_claude_binary;
 use crate::runner::codex_cli::{check_codex_auth, find_codex_binary, CodexCliRunner};
+use crate::runner::cursor_cli::{find_cursor_binary, CursorCliRunner};
 use crate::runner::openai_api::OpenAiApiRunner;
 use crate::runner::subprocess::CliClaudeRunner;
 
@@ -62,7 +63,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
     } else if let Some(cfg_runner_str) = cfg.runner.as_deref() {
         RunnerChoice::from_str(cfg_runner_str, true).map_err(|_| {
             ActualError::ConfigError(format!(
-                "Unknown runner '{}' in config. Valid values: claude-cli, anthropic-api, openai-api, codex-cli",
+                "Unknown runner '{}' in config. Valid values: claude-cli, anthropic-api, openai-api, codex-cli, cursor-cli",
                 cfg_runner_str.chars().take(64).collect::<String>()
             ))
         })?
@@ -226,6 +227,42 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 &cfg_path,
                 &term,
                 &codex_runner,
+                Some(&auth_display),
+                Some(&runner_display),
+            )
+        }
+        RunnerChoice::CursorCli => {
+            let binary_path = find_cursor_binary()?;
+            let api_key = std::env::var("CURSOR_API_KEY")
+                .ok()
+                .or_else(|| cfg.cursor_api_key.clone());
+            let auth_display = AuthDisplay {
+                authenticated: true,
+                email: api_key.as_ref().map(|_| "Cursor API".to_string()),
+            };
+            let model = args
+                .model
+                .as_deref()
+                .or(cfg.cursor_model.as_deref())
+                .map(|s| s.to_string());
+            let display_model = model
+                .clone()
+                .unwrap_or_else(|| "(cursor default)".to_string());
+            let runner_display = RunnerDisplay {
+                runner_name: RunnerChoice::CursorCli.display_name().to_string(),
+                model: display_model.clone(),
+                warning: RunnerChoice::CursorCli.model_compatibility_warning(&display_model),
+            };
+            let mut cursor_runner = CursorCliRunner::new(binary_path, model, subprocess_timeout);
+            if let Some(key) = api_key {
+                cursor_runner = cursor_runner.with_api_key(key);
+            }
+            run_sync(
+                args,
+                &root_dir,
+                &cfg_path,
+                &term,
+                &cursor_runner,
                 Some(&auth_display),
                 Some(&runner_display),
             )

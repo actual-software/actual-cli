@@ -16,6 +16,8 @@ pub enum RunnerChoice {
     OpenAiApi,
     /// Codex CLI subprocess (requires `codex` binary).
     CodexCli,
+    /// Cursor CLI subprocess (requires `agent` binary).
+    CursorCli,
 }
 
 impl RunnerChoice {
@@ -26,6 +28,7 @@ impl RunnerChoice {
             RunnerChoice::AnthropicApi => "anthropic-api",
             RunnerChoice::OpenAiApi => "openai-api",
             RunnerChoice::CodexCli => "codex-cli",
+            RunnerChoice::CursorCli => "cursor-cli",
         }
     }
 
@@ -115,6 +118,11 @@ impl RunnerChoice {
                     None
                 }
             }
+            RunnerChoice::CursorCli => {
+                // Cursor supports all models via its proxy (OpenAI, Anthropic, etc.)
+                // so no compatibility warnings are needed.
+                None
+            }
         }
     }
 }
@@ -126,6 +134,7 @@ impl clap::ValueEnum for RunnerChoice {
             RunnerChoice::AnthropicApi,
             RunnerChoice::OpenAiApi,
             RunnerChoice::CodexCli,
+            RunnerChoice::CursorCli,
         ]
     }
 
@@ -135,6 +144,7 @@ impl clap::ValueEnum for RunnerChoice {
             RunnerChoice::AnthropicApi => clap::builder::PossibleValue::new("anthropic-api"),
             RunnerChoice::OpenAiApi => clap::builder::PossibleValue::new("openai-api"),
             RunnerChoice::CodexCli => clap::builder::PossibleValue::new("codex-cli"),
+            RunnerChoice::CursorCli => clap::builder::PossibleValue::new("cursor-cli"),
         })
     }
 }
@@ -269,6 +279,7 @@ pub struct SyncArgs {
     ///   anthropic-api  — Anthropic Messages API (requires ANTHROPIC_API_KEY)
     ///   openai-api     — OpenAI Responses API (requires OPENAI_API_KEY)
     ///   codex-cli      — Codex CLI subprocess (requires codex binary)
+    ///   cursor-cli     — Cursor CLI subprocess (requires agent binary)
     ///
     /// Can also be set permanently via: actual config set runner anthropic-api
     #[arg(long, value_enum, value_name = "RUNNER")]
@@ -381,6 +392,13 @@ mod parse_tests {
         let result = parse_runner("codex-cli");
         assert!(result.is_ok(), "codex-cli should be accepted");
         assert_eq!(result.unwrap(), Some(RunnerChoice::CodexCli));
+    }
+
+    #[test]
+    fn test_runner_cursor_cli_accepted() {
+        let result = parse_runner("cursor-cli");
+        assert!(result.is_ok(), "cursor-cli should be accepted");
+        assert_eq!(result.unwrap(), Some(RunnerChoice::CursorCli));
     }
 
     #[test]
@@ -677,6 +695,11 @@ mod parse_tests {
         assert_eq!(RunnerChoice::CodexCli.display_name(), "codex-cli");
     }
 
+    #[test]
+    fn test_display_name_cursor_cli() {
+        assert_eq!(RunnerChoice::CursorCli.display_name(), "cursor-cli");
+    }
+
     // ---- model_compatibility_warning tests ----
 
     #[test]
@@ -804,6 +827,26 @@ mod parse_tests {
     }
 
     #[test]
+    fn test_compat_cursor_cli_no_warnings() {
+        // Cursor supports all models via its proxy — no warnings for any model type
+        assert!(RunnerChoice::CursorCli
+            .model_compatibility_warning("claude-sonnet-4-5")
+            .is_none());
+        assert!(RunnerChoice::CursorCli
+            .model_compatibility_warning("gpt-4o")
+            .is_none());
+        assert!(RunnerChoice::CursorCli
+            .model_compatibility_warning("codex-mini-latest")
+            .is_none());
+        assert!(RunnerChoice::CursorCli
+            .model_compatibility_warning("haiku")
+            .is_none());
+        assert!(RunnerChoice::CursorCli
+            .model_compatibility_warning("auto")
+            .is_none());
+    }
+
+    #[test]
     fn test_compat_unknown_model_no_warning() {
         // Unknown/custom models should not trigger warnings on any runner
         assert!(RunnerChoice::ClaudeCli
@@ -816,6 +859,9 @@ mod parse_tests {
             .model_compatibility_warning("my-custom-model")
             .is_none());
         assert!(RunnerChoice::CodexCli
+            .model_compatibility_warning("my-custom-model")
+            .is_none());
+        assert!(RunnerChoice::CursorCli
             .model_compatibility_warning("my-custom-model")
             .is_none());
     }
