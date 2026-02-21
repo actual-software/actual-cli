@@ -9,9 +9,8 @@ use crate::TuiTestError;
 /// for spawning commands and interacting with them.
 pub(crate) struct PtyProcess {
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    /// Reader for the PTY output — used by the VT100 parser in later tasks.
-    #[allow(dead_code)]
-    pub(crate) reader: Box<dyn Read + Send>,
+    /// Reader for the PTY output — can be taken by ScreenBuffer for VT100 parsing.
+    reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
 }
@@ -64,7 +63,7 @@ impl PtyProcess {
 
         Ok(Self {
             child,
-            reader,
+            reader: Some(reader),
             writer,
             master: pair.master,
         })
@@ -80,10 +79,23 @@ impl PtyProcess {
     /// Try to read from the PTY's stdout without blocking indefinitely.
     /// Returns the number of bytes read.
     ///
-    /// Used by the VT100 parser in later tasks.
-    #[allow(dead_code)]
+    /// Returns an error if the reader has been taken by `take_reader()`.
+    #[cfg(test)]
     pub fn try_read(&mut self, buf: &mut [u8]) -> Result<usize, TuiTestError> {
-        self.reader.read(buf).map_err(TuiTestError::Io)
+        match &mut self.reader {
+            Some(reader) => reader.read(buf).map_err(TuiTestError::Io),
+            None => Err(TuiTestError::ScreenBufferUnavailable(
+                "reader has been taken".to_string(),
+            )),
+        }
+    }
+
+    /// Take the reader from this PTY process, transferring ownership to the caller.
+    ///
+    /// Returns `Some(reader)` on the first call, `None` on subsequent calls.
+    /// After taking the reader, `try_read()` will return an error.
+    pub fn take_reader(&mut self) -> Option<Box<dyn Read + Send>> {
+        self.reader.take()
     }
 
     /// Check if the process has exited without blocking.
@@ -93,9 +105,7 @@ impl PtyProcess {
     }
 
     /// Wait for the process to exit and return its exit status.
-    ///
-    /// Used by the VT100 parser in later tasks.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn wait(&mut self) -> Result<portable_pty::ExitStatus, TuiTestError> {
         self.child
             .wait()
@@ -293,5 +303,45 @@ mod tests {
         let status = pty.try_wait();
         assert!(status.is_some(), "Expected process to have exited");
         assert_eq!(status.unwrap().exit_code(), 0);
+    }
+
+    #[test]
+    fn test_take_reader_returns_some_then_none() {
+        let mut pty = PtyProcess::spawn("/bin/cat", &[], 80, 24, &default_env(), None)
+            .expect("Failed to spawn cat");
+
+        // First call returns Some
+        let reader = pty.take_reader();
+        assert!(reader.is_some(), "First take_reader should return Some");
+
+        // Second call returns None
+        let reader2 = pty.take_reader();
+        assert!(reader2.is_none(), "Second take_reader should return None");
+
+        // Clean up
+        pty.kill().expect("Failed to kill");
+    }
+
+    #[test]
+    fn test_try_read_after_take_reader_returns_error() {
+        let mut pty = PtyProcess::spawn("/bin/cat", &[], 80, 24, &default_env(), None)
+            .expect("Failed to spawn cat");
+
+        // Take the reader
+        let _reader = pty.take_reader();
+
+        // try_read should now return an error
+        let mut buf = [0u8; 1024];
+        let result = pty.try_read(&mut buf);
+        assert!(result.is_err(), "try_read after take_reader should error");
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, TuiTestError::ScreenBufferUnavailable(_)),
+            "Expected ScreenBufferUnavailable error, got: {err:?}"
+        );
+
+        // Clean up
+        pty.kill().expect("Failed to kill");
     }
 }

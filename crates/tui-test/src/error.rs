@@ -12,4 +12,6 @@ pub enum TuiTestError {
     ProcessExited(Option<u32>),
     #[error("Session not started")]
     NotStarted,
+    #[error("Screen buffer unavailable: {0}")]
+    ScreenBufferUnavailable(String),
 }
