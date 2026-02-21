@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use crate::analysis::cache::{get_git_branch, get_git_head, run_analysis_cached, CacheStatus};
+use crate::analysis::cache::{get_git_branch, get_git_head, run_analysis_cached};
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
@@ -248,12 +248,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     pipeline.start(SyncPhase::Analysis, "Analyzing repository...");
     let analysis = match run_analysis_cached(root_dir, cfg_path, args.force) {
         Ok(outcome) => {
-            let cache_label = match outcome.cache_status {
-                CacheStatus::Hit => "(cached)",
-                CacheStatus::Miss => "(fresh)",
-                CacheStatus::ForcedMiss => "(forced refresh)",
-                CacheStatus::Uncacheable => "(no cache)",
-            };
+            let cache_label = outcome.cache_status.label();
             pipeline.success(
                 SyncPhase::Analysis,
                 &format!("Analysis complete {cache_label}"),

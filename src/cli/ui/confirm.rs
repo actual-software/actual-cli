@@ -1051,10 +1051,12 @@ mod tests {
         };
         let lines = format_metadata_lines_plain(&project);
         assert_eq!(lines.len(), 2, "expected Languages + Deps, got: {lines:?}");
+        let deps_line = &lines[1];
         assert!(
-            lines[1].contains("Deps:") && lines[1].contains("5 prod") && lines[1].contains("3 dev"),
-            "expected Deps: line with counts, got: {}",
-            lines[1]
+            deps_line.contains("Deps:")
+                && deps_line.contains("5 prod")
+                && deps_line.contains("3 dev"),
+            "expected Deps: line with counts, got: {deps_line}"
         );
     }
 
