@@ -252,11 +252,12 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 model: display_model.clone(),
                 warning: RunnerChoice::CodexCli.model_compatibility_warning(&display_model),
             };
-            let mut codex_runner = CodexCliRunner::new(binary_path, model, subprocess_timeout);
-            if let Some(key) = api_key {
-                codex_runner = codex_runner.with_api_key(key);
+            let mut codex_runner =
+                CodexCliRunner::new(binary_path, model.clone(), subprocess_timeout);
+            if let Some(ref key) = api_key {
+                codex_runner = codex_runner.with_api_key(key.clone());
             }
-            run_sync(
+            let result = run_sync(
                 args,
                 &root_dir,
                 &cfg_path,
@@ -264,7 +265,55 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 &codex_runner,
                 Some(&auth_display),
                 Some(&runner_display),
-            )
+            );
+
+            // Fall back to the OpenAI Responses API when Codex CLI reports a
+            // model-level error (e.g. "model is not supported").  This lets
+            // users who have a valid OPENAI_API_KEY transparently retry via
+            // the direct API without manual --runner overrides.
+            match result {
+                Err(ref e) if e.is_model_error() => {
+                    // Only attempt fallback if an API key is available.
+                    let fallback_key =
+                        resolve_api_key("OPENAI_API_KEY", cfg.openai_api_key.as_deref());
+                    match fallback_key {
+                        Ok(key) => {
+                            tracing::warn!(
+                                "Codex CLI failed with a model error, falling back to OpenAI API runner"
+                            );
+                            let fallback_model =
+                                model.unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
+                            let fallback_auth = AuthDisplay {
+                                authenticated: true,
+                                email: Some("OpenAI API (fallback)".to_string()),
+                            };
+                            let fallback_display = RunnerDisplay {
+                                runner_name: "openai-api (fallback)".to_string(),
+                                model: fallback_model.clone(),
+                                warning: RunnerChoice::OpenAiApi
+                                    .model_compatibility_warning(&fallback_model),
+                            };
+                            let api_runner =
+                                OpenAiApiRunner::new(key, fallback_model, subprocess_timeout)?;
+                            run_sync(
+                                args,
+                                &root_dir,
+                                &cfg_path,
+                                &term,
+                                &api_runner,
+                                Some(&fallback_auth),
+                                Some(&fallback_display),
+                            )
+                        }
+                        Err(_) => {
+                            // No API key available for fallback — return the
+                            // original Codex CLI error.
+                            result
+                        }
+                    }
+                }
+                other => other,
+            }
         }
         RunnerChoice::CursorCli => {
             let binary_path = find_cursor_binary()?;
