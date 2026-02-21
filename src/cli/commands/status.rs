@@ -116,11 +116,25 @@ fn format_config_section(
     };
 
     if verbose {
+        let runner = match cfg.runner.as_deref() {
+            Some(r) => r.to_string(),
+            None => "(inferred from model)".to_string(),
+        };
+        panel = panel.kv("Runner", &runner);
+
         let model = cfg
             .model
             .as_deref()
             .unwrap_or("not set (will use server default)");
         panel = panel.kv("Model", model);
+
+        if let Some(ref openai_model) = cfg.openai_model {
+            panel = panel.kv("OpenAI model", openai_model);
+        }
+
+        if let Some(ref cursor_model) = cfg.cursor_model {
+            panel = panel.kv("Cursor model", cursor_model);
+        }
     }
 
     panel.render(width)
@@ -481,6 +495,144 @@ mod tests {
         assert!(
             p.contains("not set"),
             "should show 'not set' for default model"
+        );
+    }
+
+    #[test]
+    fn test_format_config_section_verbose_shows_runner_inferred() {
+        let cfg = Config::default();
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, true, 80);
+        let p = plain(&output);
+        assert!(p.contains("Runner"), "should show Runner in verbose mode");
+        assert!(
+            p.contains("(inferred from model)"),
+            "should show inferred runner when not set: {p}"
+        );
+    }
+
+    #[test]
+    fn test_format_config_section_verbose_shows_explicit_runner() {
+        let cfg = Config {
+            runner: Some("anthropic-api".to_string()),
+            ..Config::default()
+        };
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, true, 80);
+        let p = plain(&output);
+        assert!(p.contains("Runner"), "should show Runner in verbose mode");
+        assert!(
+            p.contains("anthropic-api"),
+            "should show explicit runner value: {p}"
+        );
+    }
+
+    #[test]
+    fn test_format_config_section_verbose_shows_openai_model() {
+        let cfg = Config {
+            openai_model: Some("gpt-5".to_string()),
+            ..Config::default()
+        };
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, true, 80);
+        let p = plain(&output);
+        assert!(
+            p.contains("OpenAI model"),
+            "should show OpenAI model in verbose mode: {p}"
+        );
+        assert!(p.contains("gpt-5"), "should show openai model value: {p}");
+    }
+
+    #[test]
+    fn test_format_config_section_verbose_hides_openai_model_when_not_set() {
+        let cfg = Config::default();
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, true, 80);
+        let p = plain(&output);
+        assert!(
+            !p.contains("OpenAI model"),
+            "should not show OpenAI model when not set: {p}"
+        );
+    }
+
+    #[test]
+    fn test_format_config_section_verbose_shows_cursor_model() {
+        let cfg = Config {
+            cursor_model: Some("cursor-fast".to_string()),
+            ..Config::default()
+        };
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, true, 80);
+        let p = plain(&output);
+        assert!(
+            p.contains("Cursor model"),
+            "should show Cursor model in verbose mode: {p}"
+        );
+        assert!(
+            p.contains("cursor-fast"),
+            "should show cursor model value: {p}"
+        );
+    }
+
+    #[test]
+    fn test_format_config_section_verbose_hides_cursor_model_when_not_set() {
+        let cfg = Config::default();
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, true, 80);
+        let p = plain(&output);
+        assert!(
+            !p.contains("Cursor model"),
+            "should not show Cursor model when not set: {p}"
+        );
+    }
+
+    #[test]
+    fn test_format_config_section_verbose_all_fields() {
+        let cfg = Config {
+            runner: Some("openai-api".to_string()),
+            model: Some("sonnet".to_string()),
+            openai_model: Some("gpt-5.2".to_string()),
+            cursor_model: Some("cursor-small".to_string()),
+            ..Config::default()
+        };
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, true, 80);
+        let p = plain(&output);
+        assert!(p.contains("Runner"), "should show Runner: {p}");
+        assert!(p.contains("openai-api"), "should show runner value: {p}");
+        assert!(p.contains("Model"), "should show Model: {p}");
+        assert!(p.contains("sonnet"), "should show model value: {p}");
+        assert!(p.contains("OpenAI model"), "should show OpenAI model: {p}");
+        assert!(p.contains("gpt-5.2"), "should show openai model value: {p}");
+        assert!(p.contains("Cursor model"), "should show Cursor model: {p}");
+        assert!(
+            p.contains("cursor-small"),
+            "should show cursor model value: {p}"
+        );
+    }
+
+    #[test]
+    fn test_format_config_section_verbose_not_shown_when_not_verbose() {
+        let cfg = Config {
+            runner: Some("anthropic-api".to_string()),
+            openai_model: Some("gpt-5".to_string()),
+            cursor_model: Some("cursor-fast".to_string()),
+            ..Config::default()
+        };
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, false, 80);
+        let p = plain(&output);
+        assert!(
+            !p.contains("Runner"),
+            "should not show Runner when not verbose: {p}"
+        );
+        assert!(
+            !p.contains("OpenAI model"),
+            "should not show OpenAI model when not verbose: {p}"
+        );
+        assert!(
+            !p.contains("Cursor model"),
+            "should not show Cursor model when not verbose: {p}"
         );
     }
 
