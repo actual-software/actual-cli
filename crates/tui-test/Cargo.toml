@@ -1,0 +1,9 @@
+[package]
+name = "tui-test"
+version = "0.1.0"
+edition = "2021"
+description = "E2E testing library for TUI applications"
+
+[dependencies]
+portable-pty = "0.8"
+thiserror = "2"
