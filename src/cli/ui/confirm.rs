@@ -66,15 +66,15 @@ fn format_metadata_lines(project: &Project) -> Vec<String> {
     }
 
     if !project.frameworks.is_empty() {
-        let pkgs: Vec<String> = project
+        let frameworks: Vec<String> = project
             .frameworks
             .iter()
             .map(|f| console::strip_ansi_codes(f.name.as_str()).into_owned())
             .collect();
         lines.push(format!(
-            "    {}   {}",
-            theme::muted("Packages:"),
-            pkgs.join(", ")
+            "    {} {}",
+            theme::muted("Frameworks:"),
+            frameworks.join(", ")
         ));
     }
 
@@ -96,8 +96,8 @@ fn format_metadata_lines(project: &Project) -> Vec<String> {
     lines
 }
 
-/// Label column width — "Languages:" is the longest at 10 chars.
-const LABEL_WIDTH: usize = 10;
+/// Label column width — "Frameworks:" is the longest at 11 chars.
+const LABEL_WIDTH: usize = 11;
 
 /// Format the project summary as clean ASCII text (no ANSI codes, no Unicode).
 ///
@@ -154,15 +154,15 @@ fn format_metadata_lines_plain(project: &Project) -> Vec<String> {
     }
 
     if !project.frameworks.is_empty() {
-        let pkgs: Vec<String> = project
+        let frameworks: Vec<String> = project
             .frameworks
             .iter()
             .map(|f| console::strip_ansi_codes(f.name.as_str()).into_owned())
             .collect();
         lines.push(format!(
             "    {:>width$}  {}",
-            "Packages:",
-            pkgs.join(", "),
+            "Frameworks:",
+            frameworks.join(", "),
             width = LABEL_WIDTH,
         ));
     }
@@ -407,10 +407,10 @@ mod tests {
             plain.contains("cargo"),
             "expected package manager in: {plain}"
         );
-        // New labeled layout uses Packages: and Manager: labels
+        // New labeled layout uses Frameworks: and Manager: labels
         assert!(
-            plain.contains("Packages:"),
-            "expected Packages: label in: {plain}"
+            plain.contains("Frameworks:"),
+            "expected Frameworks: label in: {plain}"
         );
         assert!(
             plain.contains("Manager:"),
@@ -453,8 +453,8 @@ mod tests {
         assert!(plain.contains("clap"), "expected framework in: {plain}");
         // New labeled layout
         assert!(
-            plain.contains("Packages:"),
-            "expected Packages: label in: {plain}"
+            plain.contains("Frameworks:"),
+            "expected Frameworks: label in: {plain}"
         );
         assert!(
             plain.contains("Manager:"),
@@ -613,8 +613,8 @@ mod tests {
             "line[0] should contain Languages: and rust, got: {plain0}"
         );
         assert!(
-            plain1.contains("Packages:") && plain1.contains("actix-web"),
-            "line[1] should contain Packages: and actix-web, got: {plain1}"
+            plain1.contains("Frameworks:") && plain1.contains("actix-web"),
+            "line[1] should contain Frameworks: and actix-web, got: {plain1}"
         );
         assert!(
             plain2.contains("Manager:") && plain2.contains("cargo"),
@@ -751,10 +751,10 @@ mod tests {
             "line[0] should contain Languages: and rust, got: {plain0}"
         );
         assert!(
-            plain1.contains("Packages:")
+            plain1.contains("Frameworks:")
                 && plain1.contains("actix-web")
                 && plain1.contains("diesel"),
-            "line[1] should contain Packages: with actix-web and diesel, got: {plain1}"
+            "line[1] should contain Frameworks: with actix-web and diesel, got: {plain1}"
         );
     }
 
@@ -982,7 +982,7 @@ mod tests {
         let output = format_project_summary_plain(&analysis);
         assert!(output.contains("* Single project detected"));
         assert!(output.contains("my-cli"));
-        assert!(output.contains("Packages:"));
+        assert!(output.contains("Frameworks:"));
         assert!(output.contains("Manager:"));
         // ASCII-only: no chars > 0x7F
         assert!(output.is_ascii(), "output must be ASCII-only: {output:?}");
@@ -1021,7 +1021,7 @@ mod tests {
             .filter(|l| {
                 let trimmed = l.trim_start();
                 trimmed.starts_with("Languages:")
-                    || trimmed.starts_with("Packages:")
+                    || trimmed.starts_with("Frameworks:")
                     || trimmed.starts_with("Manager:")
             })
             .map(|l| l.find(':').unwrap())
@@ -1055,7 +1055,7 @@ mod tests {
         let output = format_project_summary_plain(&analysis);
         assert!(output.contains("bare"));
         assert!(!output.contains("Languages:"));
-        assert!(!output.contains("Packages:"));
+        assert!(!output.contains("Frameworks:"));
         assert!(!output.contains("Manager:"));
     }
 
@@ -1101,7 +1101,7 @@ mod tests {
         let lines = format_metadata_lines_plain(&project);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("Languages:") && lines[0].contains("rust"));
-        assert!(lines[1].contains("Packages:") && lines[1].contains("actix-web"));
+        assert!(lines[1].contains("Frameworks:") && lines[1].contains("actix-web"));
         assert!(lines[2].contains("Manager:") && lines[2].contains("cargo"));
     }
 
