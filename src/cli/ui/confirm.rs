@@ -459,6 +459,8 @@ mod tests {
                 frameworks: vec![],
                 package_manager: None,
                 description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
             }],
         };
         let themed = strip(&format_project_summary(&analysis, 80));
