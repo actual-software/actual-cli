@@ -630,7 +630,7 @@ User footer";
             .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
             .assert()
             .success()
-            .stderr(predicate::str::contains("No files to write."));
+            .stderr(predicate::str::contains("No files to write"));
 
         assert!(
             !env.file_exists("CLAUDE.md"),
