@@ -109,22 +109,20 @@ mod tests {
         let mut atlas = FontAtlas::new(TEST_FONT_SIZE);
         let regular = atlas.rasterize('A', false);
         let regular_coverage = regular.coverage.clone();
+        let regular_width = regular.metrics.width;
+        let regular_height = regular.metrics.height;
 
         let bold = atlas.rasterize('A', true);
         let bold_coverage = bold.coverage.clone();
+        let bold_width = bold.metrics.width;
+        let bold_height = bold.metrics.height;
 
         // Bold and regular glyphs for 'A' should differ in some way
         // (either metrics or coverage values)
-        let metrics_differ = regular_coverage.len() != bold_coverage.len();
-        let coverage_differs = if !metrics_differ {
-            regular_coverage != bold_coverage
-        } else {
-            true
-        };
-        assert!(
-            metrics_differ || coverage_differs,
-            "Bold and regular glyphs should differ"
-        );
+        let differs = regular_coverage != bold_coverage
+            || regular_width != bold_width
+            || regular_height != bold_height;
+        assert!(differs, "Bold and regular glyphs should differ");
     }
 
     #[test]
