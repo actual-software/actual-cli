@@ -36,6 +36,30 @@ fn map_send_error(e: reqwest::Error, timeout: Duration) -> ActualError {
     map_send_error_with(e, timeout, |err| err.is_timeout())
 }
 
+/// Map a body-read error from `response.text().await` into an [`ActualError`].
+fn map_body_read_error(e: reqwest::Error) -> ActualError {
+    ActualError::RunnerFailed {
+        message: format!("Failed to read OpenAI API response body: {e}"),
+        stderr: String::new(),
+    }
+}
+
+/// Extract a truncated body string from an HTTP response byte result,
+/// returning a fallback message if the body could not be read.
+fn extract_error_body(
+    body_result: Result<impl AsRef<[u8]>, impl std::fmt::Display>,
+    max: usize,
+) -> String {
+    match body_result {
+        Ok(bytes) => {
+            let bytes = bytes.as_ref();
+            let truncated = &bytes[..bytes.len().min(max)];
+            String::from_utf8_lossy(truncated).into_owned()
+        }
+        Err(e) => format!("<body read error: {e}>"),
+    }
+}
+
 /// Runner that uses the OpenAI Responses API with structured JSON output.
 ///
 /// Implements [`TailoringRunner`] by calling `POST /v1/responses` with a
@@ -241,24 +265,26 @@ impl TailoringRunner for OpenAiApiRunner {
             }
 
             if status.is_server_error() {
-                let body_bytes = response
-                    .bytes()
-                    .await
-                    .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
-                let truncated = &body_bytes[..body_bytes.len().min(4096)];
-                let body_text = String::from_utf8_lossy(truncated).into_owned();
+                let body_text = extract_error_body(response.bytes().await, 4096);
                 return Err(ActualError::RunnerFailed {
                     message: format!("OpenAI API error: {status}"),
                     stderr: body_text,
                 });
             }
 
-            break response.json().await.map_err(|e| {
-                // reqwest JSON parse failure wraps serde_json; surface as RunnerFailed
-                // with the original message since we can't recover the raw bytes at this point.
+            // Read body as text first so we can include it in errors if
+            // JSON parsing fails.
+            let body_text = response.text().await.map_err(map_body_read_error)?;
+
+            break serde_json::from_str::<ApiResponse>(&body_text).map_err(|e| {
+                let truncated = if body_text.len() > 2048 {
+                    format!("{}...(truncated)", &body_text[..2048])
+                } else {
+                    body_text.clone()
+                };
                 ActualError::RunnerFailed {
                     message: format!("Failed to parse OpenAI API response: {e}"),
-                    stderr: String::new(),
+                    stderr: truncated,
                 }
             })?;
         };
@@ -922,10 +948,59 @@ mod tests {
             .await;
 
         match result {
-            Err(ActualError::RunnerFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, stderr }) => {
                 assert!(
                     message.contains("Failed to parse OpenAI API response"),
                     "expected parse error message, got: {message}"
+                );
+                assert!(
+                    stderr.contains("this is not valid json at all"),
+                    "expected raw response body in stderr, got: {stderr}"
+                );
+            }
+            other => panic!("expected RunnerFailed, got: {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    // Test 14b: Large response body is truncated in error stderr
+    #[tokio::test]
+    async fn test_malformed_json_response_truncated() {
+        let mut server = Server::new_async().await;
+
+        // Create a body larger than 2048 chars
+        let large_body = "x".repeat(3000);
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&large_body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::RunnerFailed { message, stderr }) => {
+                assert!(
+                    message.contains("Failed to parse OpenAI API response"),
+                    "expected parse error message, got: {message}"
+                );
+                assert!(
+                    stderr.contains("...(truncated)"),
+                    "expected truncation marker in stderr, got len: {}",
+                    stderr.len()
+                );
+                // Truncated to 2048 + the suffix
+                assert!(
+                    stderr.len() < 2100,
+                    "stderr should be truncated, got len: {}",
+                    stderr.len()
                 );
             }
             other => panic!("expected RunnerFailed, got: {:?}", other),
@@ -1228,5 +1303,51 @@ mod tests {
             reqwest::header::HeaderValue::from_static("not-a-number"),
         );
         assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    // Test 22: map_body_read_error formats the error correctly
+    #[tokio::test]
+    async fn test_map_body_read_error_formats_message() {
+        // Obtain a reqwest::Error by sending a request to a dead port.
+        let client = reqwest::Client::builder().build().unwrap();
+        let err = client.get("http://127.0.0.1:1/").send().await.unwrap_err();
+
+        let mapped = map_body_read_error(err);
+        match mapped {
+            ActualError::RunnerFailed { message, stderr } => {
+                assert!(
+                    message.contains("Failed to read OpenAI API response body"),
+                    "expected body-read prefix in: {message}"
+                );
+                assert!(stderr.is_empty(), "expected empty stderr, got: {stderr}");
+            }
+            other => panic!("expected RunnerFailed, got: {:?}", other),
+        }
+    }
+
+    // Test 23: extract_error_body with Ok result truncates to max
+    #[test]
+    fn test_extract_error_body_ok_truncates() {
+        let data = vec![b'X'; 8192];
+        let result: Result<Vec<u8>, String> = Ok(data);
+        let body = extract_error_body(result, 4096);
+        assert_eq!(body.len(), 4096);
+        assert!(body.chars().all(|c| c == 'X'));
+    }
+
+    // Test 24: extract_error_body with Ok result shorter than max returns full body
+    #[test]
+    fn test_extract_error_body_ok_short() {
+        let result: Result<Vec<u8>, String> = Ok(b"hello".to_vec());
+        let body = extract_error_body(result, 4096);
+        assert_eq!(body, "hello");
+    }
+
+    // Test 25: extract_error_body with Err returns fallback message
+    #[test]
+    fn test_extract_error_body_err_fallback() {
+        let result: Result<Vec<u8>, String> = Err("connection reset".to_string());
+        let body = extract_error_body(result, 4096);
+        assert_eq!(body, "<body read error: connection reset>");
     }
 }
