@@ -458,10 +458,10 @@ mod parse_tests {
         let valid = [
             "sonnet",
             "opus",
-            "o4-mini",
-            "gpt-4o",
-            "claude-3.5-sonnet",
-            "openai/o4-mini",
+            "gpt-5",
+            "gpt-5.2",
+            "claude-sonnet-4-6",
+            "openai/gpt-5",
             "provider/model-name_v2",
             "codex-mini-latest",
         ];
@@ -538,11 +538,11 @@ mod parse_tests {
 
     #[test]
     fn test_cli_accepts_valid_model() {
-        let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-3.5-sonnet"])
+        let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-sonnet-4-6"])
             .expect("expected Ok");
         assert_eq!(
             model_from_command(cli.command),
-            Some("claude-3.5-sonnet".to_string())
+            Some("claude-sonnet-4-6".to_string())
         );
     }
 

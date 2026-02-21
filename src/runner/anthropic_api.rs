@@ -261,7 +261,7 @@ mod tests {
     fn make_runner(server_url: &str) -> AnthropicApiRunner {
         let mut runner = AnthropicApiRunner::with_base_url(
             "test-key".to_string(),
-            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-6".to_string(),
             Duration::from_secs(10),
             server_url.to_string(),
         )
@@ -305,7 +305,7 @@ mod tests {
                     "input": input
                 }
             ],
-            "model": "claude-sonnet-4-5",
+            "model": "claude-sonnet-4-6",
             "stop_reason": "tool_use",
             "usage": {"input_tokens": 100, "output_tokens": 200}
         })
@@ -504,7 +504,7 @@ mod tests {
                     "text": "Here is the result..."
                 }
             ],
-            "model": "claude-sonnet-4-5",
+            "model": "claude-sonnet-4-6",
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 100, "output_tokens": 50}
         });
@@ -538,7 +538,7 @@ mod tests {
     fn test_new_constructs_successfully() {
         let result = AnthropicApiRunner::new(
             "sk-test-key".to_string(),
-            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-6".to_string(),
             Duration::from_secs(30),
         );
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
@@ -561,7 +561,7 @@ mod tests {
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
         let result = runner
-            .run_tailoring("prompt", schema, Some("claude-opus-4-5"), None)
+            .run_tailoring("prompt", schema, Some("claude-opus-4-6"), None)
             .await;
 
         mock.assert_async().await;
@@ -701,7 +701,7 @@ mod tests {
         // Use a 1 ms timeout — the request will time out before headers arrive.
         let runner = AnthropicApiRunner::with_base_url(
             "test-key".to_string(),
-            "claude-sonnet-4-5".to_string(),
+            "claude-sonnet-4-6".to_string(),
             Duration::from_millis(1),
             format!("http://127.0.0.1:{port}"),
         )
@@ -727,7 +727,7 @@ mod tests {
             "id": "msg_test",
             "type": "message",
             "role": "assistant",
-            "model": "claude-sonnet-4-5",
+            "model": "claude-sonnet-4-6",
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 10, "output_tokens": 5}
         });
@@ -817,7 +817,7 @@ mod tests {
             "type": "message",
             "role": "assistant",
             "content": "this is a string, not an array",
-            "model": "claude-sonnet-4-5",
+            "model": "claude-sonnet-4-6",
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 10, "output_tokens": 5}
         });
