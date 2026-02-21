@@ -108,7 +108,7 @@ pub struct Config {
 
     /// AI backend runner for tailoring (default: "claude-cli").
     ///
-    /// Supported values: "claude-cli", "anthropic-api", "openai-api", "codex-cli"
+    /// Supported values: "claude-cli", "anthropic-api", "openai-api", "codex-cli", "cursor-cli"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<String>,
 
@@ -119,6 +119,14 @@ pub struct Config {
     /// Fallback OpenAI API key (used when runner = "openai-api" and OPENAI_API_KEY not set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_api_key: Option<String>,
+
+    /// Default model for the Cursor CLI runner (`cursor-cli`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_model: Option<String>,
+
+    /// Fallback Cursor API key (used when runner = "cursor-cli" and CURSOR_API_KEY not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_api_key: Option<String>,
 
     /// Maximum number of agentic turns per tailoring invocation (default: 10).
     /// Only applies to the claude-cli runner.
@@ -206,6 +214,8 @@ mod tests {
             runner: None,
             anthropic_api_key: None,
             openai_api_key: None,
+            cursor_model: None,
+            cursor_api_key: None,
             max_turns: Some(10),
         };
 
