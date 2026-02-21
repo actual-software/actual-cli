@@ -19,6 +19,29 @@ pub enum Key {
     Space,
 }
 
+impl std::fmt::Display for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Key::Enter => write!(f, "Enter"),
+            Key::Escape => write!(f, "Escape"),
+            Key::Tab => write!(f, "Tab"),
+            Key::Backspace => write!(f, "Backspace"),
+            Key::Up => write!(f, "Up"),
+            Key::Down => write!(f, "Down"),
+            Key::Left => write!(f, "Left"),
+            Key::Right => write!(f, "Right"),
+            Key::Home => write!(f, "Home"),
+            Key::End => write!(f, "End"),
+            Key::PageUp => write!(f, "PageUp"),
+            Key::PageDown => write!(f, "PageDown"),
+            Key::Ctrl(c) => write!(f, "Ctrl+{}", c.to_uppercase()),
+            Key::Alt(c) => write!(f, "Alt+{}", c.to_uppercase()),
+            Key::Char(c) => write!(f, "{c}"),
+            Key::Space => write!(f, "Space"),
+        }
+    }
+}
+
 impl Key {
     /// Convert this key to the byte sequence that a terminal would send.
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -127,5 +150,71 @@ mod tests {
     #[test]
     fn test_space_key() {
         assert_eq!(Key::Space.to_bytes(), vec![32]);
+    }
+
+    // Display tests
+    #[test]
+    fn test_display_enter() {
+        assert_eq!(Key::Enter.to_string(), "Enter");
+    }
+
+    #[test]
+    fn test_display_escape() {
+        assert_eq!(Key::Escape.to_string(), "Escape");
+    }
+
+    #[test]
+    fn test_display_tab() {
+        assert_eq!(Key::Tab.to_string(), "Tab");
+    }
+
+    #[test]
+    fn test_display_backspace() {
+        assert_eq!(Key::Backspace.to_string(), "Backspace");
+    }
+
+    #[test]
+    fn test_display_arrows() {
+        assert_eq!(Key::Up.to_string(), "Up");
+        assert_eq!(Key::Down.to_string(), "Down");
+        assert_eq!(Key::Left.to_string(), "Left");
+        assert_eq!(Key::Right.to_string(), "Right");
+    }
+
+    #[test]
+    fn test_display_home_end() {
+        assert_eq!(Key::Home.to_string(), "Home");
+        assert_eq!(Key::End.to_string(), "End");
+    }
+
+    #[test]
+    fn test_display_page_keys() {
+        assert_eq!(Key::PageUp.to_string(), "PageUp");
+        assert_eq!(Key::PageDown.to_string(), "PageDown");
+    }
+
+    #[test]
+    fn test_display_ctrl() {
+        assert_eq!(Key::Ctrl('c').to_string(), "Ctrl+C");
+        assert_eq!(Key::Ctrl('a').to_string(), "Ctrl+A");
+        assert_eq!(Key::Ctrl('z').to_string(), "Ctrl+Z");
+    }
+
+    #[test]
+    fn test_display_alt() {
+        assert_eq!(Key::Alt('x').to_string(), "Alt+X");
+        assert_eq!(Key::Alt('a').to_string(), "Alt+A");
+    }
+
+    #[test]
+    fn test_display_char() {
+        assert_eq!(Key::Char('a').to_string(), "a");
+        assert_eq!(Key::Char('Z').to_string(), "Z");
+        assert_eq!(Key::Char('1').to_string(), "1");
+    }
+
+    #[test]
+    fn test_display_space() {
+        assert_eq!(Key::Space.to_string(), "Space");
     }
 }

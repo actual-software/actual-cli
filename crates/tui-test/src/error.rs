@@ -16,4 +16,6 @@ pub enum TuiTestError {
     ScreenBufferUnavailable(String),
     #[error("Render error: {0}")]
     Render(String),
+    #[error("Capture error: {0}")]
+    Capture(String),
 }

@@ -8,9 +8,12 @@ description = "E2E testing library for TUI applications"
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
 portable-pty = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 vt100 = "0.15"
 
 [dev-dependencies]
 os_pipe = "1"
 sha2 = "0.10"
+tempfile = "3"
