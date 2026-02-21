@@ -328,6 +328,15 @@ fn test_cli_parse_sync_runner_codex_cli_accepted() {
 }
 
 #[test]
+fn test_cli_parse_sync_runner_cursor_cli_accepted() {
+    let cli = Cli::parse_from(["actual", "sync", "--runner", "cursor-cli"]);
+    let Command::Sync(args) = cli.command else {
+        unreachable!()
+    };
+    assert_eq!(args.runner, Some(RunnerChoice::CursorCli));
+}
+
+#[test]
 fn test_cli_parse_sync_runner_invalid_value_rejected() {
     let result = Cli::try_parse_from(["actual", "sync", "--runner", "unknown-runner"]);
     assert!(result.is_err(), "invalid runner value should be rejected");

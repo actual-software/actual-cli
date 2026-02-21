@@ -9,6 +9,10 @@ pub enum ActualError {
     #[error("Codex CLI (codex) not found. Install with: npm install -g @openai/codex")]
     CodexNotFound,
 
+    /// The Cursor agent CLI binary was not found.
+    #[error("Cursor agent CLI not found. Install from: https://cursor.com/install")]
+    CursorNotFound,
+
     #[error("Claude Code is not authenticated")]
     ClaudeNotAuthenticated,
 
@@ -66,6 +70,7 @@ impl ActualError {
             | Self::ClaudeNotAuthenticated
             | Self::CodexNotFound
             | Self::CodexNotAuthenticated
+            | Self::CursorNotFound
             | Self::ApiKeyMissing { .. } => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
@@ -79,6 +84,7 @@ impl ActualError {
         match self {
             Self::ClaudeNotFound => Some("npm install -g @anthropic-ai/claude-code"),
             Self::CodexNotFound => Some("npm install -g @openai/codex"),
+            Self::CursorNotFound => Some("curl https://cursor.com/install -fsS | bash"),
             Self::ClaudeNotAuthenticated => Some("claude auth login"),
             Self::CodexNotAuthenticated => {
                 Some("Set OPENAI_API_KEY or run: codex login")
@@ -111,6 +117,7 @@ mod tests {
         assert_eq!(ActualError::ClaudeNotAuthenticated.exit_code(), 2);
         assert_eq!(ActualError::CodexNotAuthenticated.exit_code(), 2);
         assert_eq!(ActualError::CodexNotFound.exit_code(), 2);
+        assert_eq!(ActualError::CursorNotFound.exit_code(), 2);
         assert_eq!(
             ActualError::ClaudeSubprocessFailed {
                 message: "fail".to_string(),
@@ -186,6 +193,13 @@ mod tests {
         assert!(
             msg.contains("@openai/codex"),
             "expected '@openai/codex' in: {msg}"
+        );
+
+        let msg = ActualError::CursorNotFound.to_string();
+        assert!(msg.contains("not found"), "expected 'not found' in: {msg}");
+        assert!(
+            msg.contains("cursor.com"),
+            "expected 'cursor.com' in: {msg}"
         );
 
         let msg = ActualError::ClaudeNotAuthenticated.to_string();
@@ -316,6 +330,14 @@ mod tests {
         assert_eq!(
             ActualError::CodexNotFound.hint(),
             Some("npm install -g @openai/codex")
+        );
+    }
+
+    #[test]
+    fn test_hint_cursor_not_found() {
+        assert_eq!(
+            ActualError::CursorNotFound.hint(),
+            Some("curl https://cursor.com/install -fsS | bash")
         );
     }
 
