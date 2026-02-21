@@ -57,24 +57,38 @@ impl StepsPane {
 
     /// Render a single step as a string, truncated to `width` visible chars.
     /// If `selected` is true, a `▶` prefix is prepended (consuming 2 chars of width).
-    /// Format: `[▶ ]{icon} {label:<12} {message}  {elapsed}`
+    /// When elapsed is present, the timestamp is right-aligned flush with the right edge.
+    /// Format: `[▶ ]{icon} {label}{padding}{elapsed}`
     pub fn render_step(step: &Step, width: usize, selected: bool) -> String {
         let icon = Self::status_icon(step.status);
-        let elapsed_str = match step.elapsed {
-            Some(d) => format!(" [{:.1}s]", d.as_secs_f64()),
-            None => String::new(),
-        };
         let prefix = if selected { "▶ " } else { "  " };
-        let base = format!(
-            "{}{} {:<12} {}{}",
-            prefix, icon, step.label, step.message, elapsed_str
-        );
-        // Truncate to width (simple char-level truncation; no ANSI codes here)
-        if base.chars().count() <= width {
-            base
-        } else {
-            let truncated: String = base.chars().take(width.saturating_sub(1)).collect();
-            format!("{truncated}…")
+        let left = format!("{prefix}{icon} {}", step.label);
+        let left_len = left.chars().count();
+
+        match step.elapsed {
+            Some(d) => {
+                let right = format!("[{:.1}s]", d.as_secs_f64());
+                let right_len = right.chars().count();
+                // Need at least 1 space gap between left and right
+                let min_total = left_len + 1 + right_len;
+                if min_total <= width {
+                    let pad_width = width - left_len;
+                    format!("{left}{right:>pad_width$}")
+                } else {
+                    // Truncate left to make room: width - 1(gap) - right_len - 1(ellipsis)
+                    let available = width.saturating_sub(1 + right_len + 1);
+                    let truncated_left: String = left.chars().take(available).collect();
+                    format!("{truncated_left}… {right}")
+                }
+            }
+            None => {
+                if left_len <= width {
+                    left
+                } else {
+                    let truncated: String = left.chars().take(width.saturating_sub(1)).collect();
+                    format!("{truncated}…")
+                }
+            }
         }
     }
 
@@ -197,32 +211,35 @@ mod tests {
         let rendered = StepsPane::render_step(&step, 200, false);
         assert!(rendered.contains('○'));
         assert!(rendered.contains("Env"));
-        assert!(rendered.contains("ok"));
         // no elapsed bracket
         assert!(!rendered.contains('['));
     }
 
-    // --- render_step: elapsed Some branch ---
+    // --- render_step: elapsed Some branch (right-aligned) ---
 
     #[test]
-    fn test_render_step_with_elapsed_no_truncation() {
+    fn test_render_step_with_elapsed_right_aligned() {
         let step = Step {
             label: "Analysis".to_string(),
             status: StepStatus::Success,
             message: "done".to_string(),
             elapsed: Some(Duration::from_secs_f64(1.5)),
         };
-        let rendered = StepsPane::render_step(&step, 200, false);
+        let width = 42;
+        let rendered = StepsPane::render_step(&step, width, false);
         assert!(rendered.contains('✔'));
         assert!(rendered.contains("Analysis"));
-        assert!(rendered.contains("done"));
         assert!(rendered.contains("[1.5s]"));
+        // Total line is exactly `width` chars
+        assert_eq!(rendered.chars().count(), width);
+        // Elapsed is flush with right edge
+        assert!(rendered.ends_with("[1.5s]"));
     }
 
-    // --- render_step: truncation branch ---
+    // --- render_step: truncation branch (no elapsed) ---
 
     #[test]
-    fn test_render_step_truncation() {
+    fn test_render_step_truncation_no_elapsed() {
         let step = Step {
             label: "Environment".to_string(),
             status: StepStatus::Running { tick: 0 },
@@ -236,10 +253,27 @@ mod tests {
         assert!(rendered.chars().count() <= 10);
     }
 
+    // --- render_step: truncation branch (with elapsed) ---
+
+    #[test]
+    fn test_render_step_truncation_with_elapsed() {
+        let step = Step {
+            label: "Environment".to_string(),
+            status: StepStatus::Running { tick: 0 },
+            message: String::new(),
+            elapsed: Some(Duration::from_secs_f64(0.3)),
+        };
+        // Width too small to fit left + gap + right without truncation
+        let rendered = StepsPane::render_step(&step, 18, false);
+        // Should contain elapsed and ellipsis in left part
+        assert!(rendered.contains("[0.3s]"));
+        assert!(rendered.contains('…'));
+    }
+
     // --- render_step: width exactly matches (no truncation) ---
 
     #[test]
-    fn test_render_step_exact_width() {
+    fn test_render_step_exact_width_no_elapsed() {
         let step = Step {
             label: "A".to_string(),
             status: StepStatus::Skipped,
@@ -251,6 +285,101 @@ mod tests {
         // Render again at exact width — should not truncate
         let rendered2 = StepsPane::render_step(&step, char_count, false);
         assert!(!rendered2.ends_with('…'));
+    }
+
+    // --- render_step: elapsed fills exact width ---
+
+    #[test]
+    fn test_render_step_elapsed_exact_width() {
+        let step = Step {
+            label: "Env".to_string(),
+            status: StepStatus::Success,
+            message: String::new(),
+            elapsed: Some(Duration::from_secs_f64(0.0)),
+        };
+        let width = 42;
+        let rendered = StepsPane::render_step(&step, width, false);
+        assert_eq!(rendered.chars().count(), width);
+        assert!(rendered.ends_with("[0.0s]"));
+    }
+
+    // --- render_step: various elapsed widths ---
+
+    #[test]
+    fn test_render_step_short_elapsed() {
+        // [0.0s] = 5 chars
+        let step = Step {
+            label: "Environment".to_string(),
+            status: StepStatus::Success,
+            message: String::new(),
+            elapsed: Some(Duration::from_secs_f64(0.0)),
+        };
+        let width = 42;
+        let rendered = StepsPane::render_step(&step, width, false);
+        assert_eq!(rendered.chars().count(), width);
+        assert!(rendered.ends_with("[0.0s]"));
+    }
+
+    #[test]
+    fn test_render_step_medium_elapsed() {
+        // [10.5s] = 6 chars
+        let step = Step {
+            label: "Environment".to_string(),
+            status: StepStatus::Success,
+            message: String::new(),
+            elapsed: Some(Duration::from_secs_f64(10.5)),
+        };
+        let width = 42;
+        let rendered = StepsPane::render_step(&step, width, false);
+        assert_eq!(rendered.chars().count(), width);
+        assert!(rendered.ends_with("[10.5s]"));
+    }
+
+    #[test]
+    fn test_render_step_long_elapsed() {
+        // [115.0s] = 7 chars
+        let step = Step {
+            label: "Tailoring".to_string(),
+            status: StepStatus::Running { tick: 6 },
+            message: String::new(),
+            elapsed: Some(Duration::from_secs_f64(115.0)),
+        };
+        let width = 42;
+        let rendered = StepsPane::render_step(&step, width, false);
+        assert_eq!(rendered.chars().count(), width);
+        assert!(rendered.ends_with("[115.0s]"));
+    }
+
+    // --- render_step: no elapsed means no padding ---
+
+    #[test]
+    fn test_render_step_no_elapsed_no_padding() {
+        let step = Step {
+            label: "Env".to_string(),
+            status: StepStatus::Waiting,
+            message: String::new(),
+            elapsed: None,
+        };
+        let rendered = StepsPane::render_step(&step, 42, false);
+        // "  ○ Env" = 7 chars, NOT padded to 42
+        assert_eq!(rendered.chars().count(), 7);
+    }
+
+    // --- render_step: selected prefix ---
+
+    #[test]
+    fn test_render_step_selected_with_elapsed() {
+        let step = Step {
+            label: "Analysis".to_string(),
+            status: StepStatus::Success,
+            message: String::new(),
+            elapsed: Some(Duration::from_secs_f64(2.0)),
+        };
+        let width = 42;
+        let rendered = StepsPane::render_step(&step, width, true);
+        assert!(rendered.starts_with("▶ "));
+        assert_eq!(rendered.chars().count(), width);
+        assert!(rendered.ends_with("[2.0s]"));
     }
 
     // --- render_lines ---
