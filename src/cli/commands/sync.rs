@@ -10,7 +10,7 @@ use crate::analysis::types::RepoAnalysis;
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
 use crate::cli::args::SyncArgs;
-use crate::cli::ui::confirm::format_project_summary;
+use crate::cli::ui::confirm::format_project_summary_plain;
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::header::{AuthDisplay, RunnerDisplay};
 use crate::cli::ui::progress::SyncPhase;
@@ -268,8 +268,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         // Show project summary even in --force mode for visibility.
         // Use pipeline.println() so the output stays inside the TUI log pane
         // rather than triggering a LeaveAlternateScreen/re-enter flash.
-        let summary_width = term_size::terminal_width();
-        let summary = format_project_summary(&analysis, summary_width);
+        let summary = format_project_summary_plain(&analysis);
         for line in summary.lines() {
             pipeline.println(line);
         }
