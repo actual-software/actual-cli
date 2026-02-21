@@ -201,7 +201,11 @@ pub fn build_match_request(analysis: &RepoAnalysis, config: &Config) -> MatchReq
         .map(|project| MatchProject {
             path: project.path.clone(),
             name: project.name.clone(),
-            languages: project.languages.iter().map(serialize_language).collect(),
+            languages: project
+                .languages
+                .iter()
+                .map(|ls| serialize_language(&ls.language))
+                .collect(),
             frameworks: project
                 .frameworks
                 .iter()
@@ -235,7 +239,7 @@ pub fn build_match_request(analysis: &RepoAnalysis, config: &Config) -> MatchReq
 mod tests {
     use super::*;
     use crate::analysis::types::{
-        Framework, FrameworkCategory, Language, Project, RepoAnalysis, WorkspaceType,
+        Framework, FrameworkCategory, Language, LanguageStat, Project, RepoAnalysis, WorkspaceType,
     };
 
     /// Helper: create a minimal project with the given languages and frameworks.
@@ -248,7 +252,10 @@ mod tests {
         Project {
             path: path.to_string(),
             name: name.to_string(),
-            languages,
+            languages: languages
+                .into_iter()
+                .map(|language| LanguageStat { language, loc: 0 })
+                .collect(),
             frameworks,
             package_manager: None,
             description: None,
