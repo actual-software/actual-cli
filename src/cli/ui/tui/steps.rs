@@ -3,6 +3,9 @@ use std::time::Duration;
 /// The spinner frames to cycle through for a running step.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
+/// Horizontal padding reserved on the right side of step lines (matches the left prefix width).
+const RIGHT_PAD: usize = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepStatus {
     Waiting,
@@ -69,14 +72,15 @@ impl StepsPane {
             Some(d) => {
                 let right = format!("[{:.1}s]", d.as_secs_f64());
                 let right_len = right.chars().count();
-                // Need at least 1 space gap between left and right
+                // Reserve RIGHT_PAD spaces on the right edge to match left prefix padding
+                let usable = width.saturating_sub(RIGHT_PAD);
                 let min_total = left_len + 1 + right_len;
-                if min_total <= width {
-                    let pad_width = width - left_len;
+                if min_total <= usable {
+                    let pad_width = usable - left_len;
                     format!("{left}{right:>pad_width$}")
                 } else {
-                    // Truncate left to make room: width - 1(gap) - right_len - 1(ellipsis)
-                    let available = width.saturating_sub(1 + right_len + 1);
+                    // Truncation case — still respect right padding
+                    let available = usable.saturating_sub(1 + right_len + 1);
                     let truncated_left: String = left.chars().take(available).collect();
                     format!("{truncated_left}… {right}")
                 }
@@ -230,9 +234,9 @@ mod tests {
         assert!(rendered.contains('✔'));
         assert!(rendered.contains("Analysis"));
         assert!(rendered.contains("[1.5s]"));
-        // Total line is exactly `width` chars
-        assert_eq!(rendered.chars().count(), width);
-        // Elapsed is flush with right edge
+        // Total line is width - RIGHT_PAD chars (right padding is implicit)
+        assert_eq!(rendered.chars().count(), width - 2);
+        // Elapsed is at the end of the rendered string
         assert!(rendered.ends_with("[1.5s]"));
     }
 
@@ -299,7 +303,7 @@ mod tests {
         };
         let width = 42;
         let rendered = StepsPane::render_step(&step, width, false);
-        assert_eq!(rendered.chars().count(), width);
+        assert_eq!(rendered.chars().count(), width - 2);
         assert!(rendered.ends_with("[0.0s]"));
     }
 
@@ -316,7 +320,7 @@ mod tests {
         };
         let width = 42;
         let rendered = StepsPane::render_step(&step, width, false);
-        assert_eq!(rendered.chars().count(), width);
+        assert_eq!(rendered.chars().count(), width - 2);
         assert!(rendered.ends_with("[0.0s]"));
     }
 
@@ -331,7 +335,7 @@ mod tests {
         };
         let width = 42;
         let rendered = StepsPane::render_step(&step, width, false);
-        assert_eq!(rendered.chars().count(), width);
+        assert_eq!(rendered.chars().count(), width - 2);
         assert!(rendered.ends_with("[10.5s]"));
     }
 
@@ -346,7 +350,7 @@ mod tests {
         };
         let width = 42;
         let rendered = StepsPane::render_step(&step, width, false);
-        assert_eq!(rendered.chars().count(), width);
+        assert_eq!(rendered.chars().count(), width - 2);
         assert!(rendered.ends_with("[115.0s]"));
     }
 
@@ -378,7 +382,7 @@ mod tests {
         let width = 42;
         let rendered = StepsPane::render_step(&step, width, true);
         assert!(rendered.starts_with("▶ "));
-        assert_eq!(rendered.chars().count(), width);
+        assert_eq!(rendered.chars().count(), width - 2);
         assert!(rendered.ends_with("[2.0s]"));
     }
 
@@ -433,5 +437,24 @@ mod tests {
         let pane = StepsPane::new(&["AB"]);
         let line = pane.render_condensed(200);
         assert!(line.contains("AB"));
+    }
+
+    // --- render_step: right padding ---
+
+    #[test]
+    fn test_render_step_right_padding() {
+        let step = Step {
+            label: "Env".to_string(),
+            status: StepStatus::Success,
+            message: String::new(),
+            elapsed: Some(Duration::from_secs_f64(1.0)),
+        };
+        let width = 42;
+        let rendered = StepsPane::render_step(&step, width, false);
+        // Line should be width - RIGHT_PAD chars, leaving 2 chars of implicit right padding
+        assert_eq!(rendered.chars().count(), width - 2);
+        assert!(rendered.ends_with("[1.0s]"));
+        // Left side starts with 2-space prefix
+        assert!(rendered.starts_with("  "));
     }
 }
