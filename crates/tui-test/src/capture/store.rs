@@ -705,4 +705,121 @@ mod tests {
         let timeline: Timeline = serde_json::from_str(&content).unwrap();
         assert_eq!(timeline.entries.len(), 2);
     }
+
+    #[test]
+    fn test_save_to_invalid_path() {
+        // Use a path that can't be created (nested under a file, not a dir)
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("not_a_dir");
+        std::fs::write(&file_path, b"i am a file").unwrap();
+        // Try to use a path nested under this file (which isn't a directory)
+        let config = CaptureConfig {
+            output_dir: file_path.join("subdir"),
+            ..CaptureConfig::default()
+        };
+        let mut store = CaptureStore::new(config, "test", 80, 24);
+        store.record_session_start("start");
+
+        let result = store.save();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, TuiTestError::Capture(ref msg) if msg.contains("Failed to create output directory")),
+            "Expected Capture error about directory creation, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_write_png_to_invalid_path() {
+        // Create an output dir that's actually a file so write fails
+        let tmp = TempDir::new().unwrap();
+        let file_path = tmp.path().join("not_a_dir");
+        std::fs::write(&file_path, b"i am a file").unwrap();
+
+        let config = CaptureConfig {
+            output_dir: file_path.join("subdir"),
+            ..CaptureConfig::default()
+        };
+        let mut store = CaptureStore::new(config, "test", 80, 24);
+        let snap = make_snapshot("hello", 1);
+
+        let result = store.capture_screenshot(&snap, || Ok(fake_png()));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, TuiTestError::Capture(ref msg) if msg.contains("Failed to create output directory")),
+            "Expected Capture error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_save_write_failure() {
+        // Create the output dir, then make timeline.json a directory so write fails
+        let tmp = TempDir::new().unwrap();
+        let output_dir = tmp.path().join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        // Create timeline.json as a directory so fs::write fails
+        std::fs::create_dir_all(output_dir.join("timeline.json")).unwrap();
+
+        let config = CaptureConfig {
+            output_dir,
+            ..CaptureConfig::default()
+        };
+        let mut store = CaptureStore::new(config, "test", 80, 24);
+        store.record_session_start("start");
+
+        let result = store.save();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, TuiTestError::Capture(ref msg) if msg.contains("Failed to write timeline")),
+            "Expected Capture error about write failure, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_write_png_file_write_failure() {
+        // Create the output dir, then make the PNG filename a directory so write fails
+        let tmp = TempDir::new().unwrap();
+        let output_dir = tmp.path().join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        // Create 000.png as a directory so fs::write fails
+        std::fs::create_dir_all(output_dir.join("000.png")).unwrap();
+
+        let config = CaptureConfig {
+            output_dir,
+            generation_debounce: 1,
+            min_interval_ms: 0,
+            ..CaptureConfig::default()
+        };
+        let mut store = CaptureStore::new(config, "test", 80, 24);
+        let snap = make_snapshot("hello", 1);
+
+        let result = store.capture_screenshot(&snap, || Ok(fake_png()));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, TuiTestError::Capture(ref msg) if msg.contains("Failed to write PNG")),
+            "Expected Capture error about PNG write failure, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_ensure_dir_already_exists() {
+        // ensure_dir should succeed when dir already exists
+        let tmp = TempDir::new().unwrap();
+        let config = CaptureConfig {
+            output_dir: tmp.path().to_path_buf(),
+            generation_debounce: 1,
+            min_interval_ms: 0,
+            ..CaptureConfig::default()
+        };
+        let mut store = CaptureStore::new(config, "test", 80, 24);
+
+        // Directory already exists (created by TempDir), should not fail
+        let snap = make_snapshot("hello", 1);
+        let result = store.capture_screenshot(&snap, || Ok(fake_png()));
+        assert!(result.is_ok());
+        assert!(tmp.path().join("000.png").exists());
+    }
 }
