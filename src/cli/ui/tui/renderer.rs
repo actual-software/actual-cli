@@ -142,6 +142,37 @@ fn append_file_select_lines(lines: &mut Vec<String>, fs: &FileSelectState) {
     lines.push("  Space toggle  Enter confirm  Esc cancel".to_string());
 }
 
+/// Build the keybinding hint text as a ratatui `Line` for embedding in the bottom border.
+fn build_hint_line(
+    ctx: &RenderContext<'_>,
+    log_height: usize,
+    log_width: usize,
+) -> Option<Line<'static>> {
+    let has_hint = ctx.hint || ctx.confirm.is_some() || ctx.file_select.is_some();
+    if !has_hint {
+        return None;
+    }
+
+    let hint_text = if ctx.confirm.is_some() {
+        " ← → select  Enter confirm ".to_string()
+    } else if ctx.file_select.is_some() {
+        " ↑/↓ move  Space toggle  Enter confirm  Esc cancel ".to_string()
+    } else {
+        let max = ctx.log.max_scroll_wrapped(log_height, log_width);
+        if max > 0 {
+            format!(
+                " ↑/↓ steps  u/d scroll  g/G top/bottom  q quit  [{}/{}] ",
+                ctx.scroll_offset.min(max),
+                max
+            )
+        } else {
+            " ↑/↓ steps  q quit ".to_string()
+        }
+    };
+
+    Some(Line::from(hint_text).right_aligned())
+}
+
 /// Width of the left panel (banner box + steps box).
 ///
 /// The banner art is 37 chars wide; +2 for borders = 39. We add a few chars
@@ -170,9 +201,12 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
 
         // ── Outer vertical split: content area on top, footer hint row on bottom ──
         let has_hint = ctx.hint || ctx.confirm.is_some() || ctx.file_select.is_some();
+        // In wide mode, hints go into the Output pane's bottom border — no separate footer row.
+        // In narrow mode, keep the footer row since there's no bordered panel.
+        let needs_footer_row = has_hint && cols < 80;
         let outer_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(if has_hint {
+            .constraints(if needs_footer_row {
                 vec![Constraint::Fill(1), Constraint::Length(1)]
             } else {
                 vec![Constraint::Fill(1), Constraint::Length(0)]
@@ -181,27 +215,15 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
         let content_area = outer_chunks[0];
         let footer_area = outer_chunks[1];
 
-        // ── Footer hint row ──
-        if has_hint {
-            // Compute log_height for scroll position display (approximate).
-            // For the wide layout: content minus 2 borders.
+        // ── Footer hint row (narrow mode only) ──
+        if needs_footer_row {
             let approx_log_height = content_area.height.saturating_sub(2) as usize;
             let hint_text = if ctx.confirm.is_some() {
-                // Confirm mode: show key hints
                 "  ← → select  Enter confirm".to_string()
             } else if ctx.file_select.is_some() {
-                // File select mode: show key hints
                 "  ↑/↓ move  Space toggle  Enter confirm  Esc cancel".to_string()
             } else {
-                // Post-sync review mode: scroll/quit hint
-                let approx_log_width = if cols >= 80 {
-                    content_area
-                        .width
-                        .saturating_sub(LEFT_COL_WIDTH + 2 + 2 * HORIZ_PAD as u16)
-                        as usize
-                } else {
-                    content_area.width.saturating_sub(2) as usize
-                };
+                let approx_log_width = content_area.width.saturating_sub(2) as usize;
                 let max = ctx
                     .log
                     .max_scroll_wrapped(approx_log_height, approx_log_width);
@@ -329,13 +351,16 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 log_lines.push(String::new());
             }
             let log_text = log_lines.join("\n");
-            let log_widget = Paragraph::new(log_text).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(" Output ")
-                    .padding(Padding::horizontal(HORIZ_PAD as u16)),
-            );
+            let hint_line = build_hint_line(&ctx, log_height, log_width);
+            let mut output_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Output ")
+                .padding(Padding::horizontal(HORIZ_PAD as u16));
+            if let Some(hint) = hint_line {
+                output_block = output_block.title_bottom(hint);
+            }
+            let log_widget = Paragraph::new(log_text).block(output_block);
             frame.render_widget(Clear, h_chunks[1]);
             frame.render_widget(log_widget, h_chunks[1]);
             if use_color {
@@ -768,14 +793,14 @@ impl TuiRenderer {
                     break;
                 };
                 // Compute log_height matching render_to's formula exactly.
-                // render_to uses: outer layout gives 1 row to footer hint.
-                //   Wide (>=80): content = rows-1, box borders = -2, OUTPUT_PADDING = -2 → log = rows-5
-                //   Narrow (<80): content = rows-1, condensed row = -1 → log = rows-2
+                // render_to uses:
+                //   Wide (>=80): no footer row, box borders = -2, OUTPUT_PADDING = -2 → log = rows-4
+                //   Narrow (<80): footer row = -1, condensed row = -1 → log = rows-2
                 let (log_height, log_width): (usize, usize) = crossterm::terminal::size()
                     .map(|(cols, rows)| {
                         let rows = rows as usize;
                         let height = if cols >= 80 {
-                            rows.saturating_sub(5)
+                            rows.saturating_sub(4)
                         } else {
                             rows.saturating_sub(2)
                         };
