@@ -447,6 +447,41 @@ mod tests {
     }
 
     #[test]
+    fn format_summary_monorepo_without_workspace_type() {
+        // Covers the None branch: "Monorepo detected" without workspace prefix
+        let analysis = RepoAnalysis {
+            is_monorepo: true,
+            workspace_type: None,
+            projects: vec![Project {
+                path: "pkg/a".to_string(),
+                name: "a".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+            }],
+        };
+        let themed = strip(&format_project_summary(&analysis, 80));
+        assert!(
+            themed.contains("Monorepo detected"),
+            "expected 'Monorepo detected' in themed output: {themed}"
+        );
+        assert!(
+            !themed.contains("pnpm"),
+            "should not contain workspace type: {themed}"
+        );
+        let plain = format_project_summary_plain(&analysis);
+        assert!(
+            plain.contains("* Monorepo detected"),
+            "expected '* Monorepo detected' in plain output: {plain}"
+        );
+        assert!(
+            !plain.contains("pnpm"),
+            "should not contain workspace type: {plain}"
+        );
+    }
+
+    #[test]
     fn format_summary_project_without_optional_fields() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
