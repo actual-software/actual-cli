@@ -23,6 +23,12 @@ pub struct ScreenSnapshot {
 }
 
 impl ScreenSnapshot {
+    /// Create a new snapshot for testing purposes.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(screen: vt100::Screen, generation: u64) -> Self {
+        Self { screen, generation }
+    }
+
     /// Return the full text contents of the screen.
     pub fn contents(&self) -> String {
         self.screen.contents()
