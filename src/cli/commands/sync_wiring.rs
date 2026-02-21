@@ -27,30 +27,30 @@ use crate::runner::cursor_cli::{find_cursor_binary, CursorCliRunner};
 use crate::runner::openai_api::OpenAiApiRunner;
 use crate::runner::subprocess::CliClaudeRunner;
 
-/// Generate a compatibility warning when using Codex CLI with a ChatGPT OAuth
-/// account and an explicit model override.
+/// Enforce that an explicit Codex CLI model override is only used with an API key.
 ///
-/// ChatGPT accounts (`codex login`) only support a restricted set of OpenAI
-/// models.  When a specific model is requested without an API key, surface an
-/// early warning at the Environment step so the user can choose a supported
-/// model or add `OPENAI_API_KEY` before the run starts — rather than
-/// discovering the failure after the full tailoring run completes.
+/// ChatGPT OAuth accounts (`codex login`) only support the Codex CLI's own
+/// default model.  When the user specifies a model explicitly it signals intent
+/// to use API-key access — so we require `OPENAI_API_KEY` and fail early at
+/// the Environment step rather than after the full tailoring run.
 ///
-/// Returns `None` when:
-/// - An API key is present (API key users have full model access).
+/// Returns `Ok(())` when:
+/// - An API key is present (explicit model + API key → full access).
 /// - No explicit model was requested (Codex CLI picks its own safe default,
-///   currently `gpt-5` for ChatGPT OAuth accounts).
-fn codex_chatgpt_oauth_model_warning(api_key: Option<&str>, model: Option<&str>) -> Option<String> {
-    // API key users have full model access — no warning needed.
-    if api_key.is_some_and(|k| !k.is_empty()) {
-        return None;
+///   which works with ChatGPT OAuth accounts).
+///
+/// Returns `Err(ActualError::ApiKeyMissing)` when an explicit model is
+/// requested but no API key is available.
+fn require_api_key_for_model(
+    api_key: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), ActualError> {
+    if model.is_some() && api_key.is_none_or(|k| k.is_empty()) {
+        return Err(ActualError::ApiKeyMissing {
+            env_var: "OPENAI_API_KEY".to_string(),
+        });
     }
-    // No explicit model → Codex CLI picks its own safe default.
-    let m = model?;
-    Some(format!(
-        "Model \"{m}\" may not be supported with ChatGPT accounts (codex login); \
-         if this fails, set OPENAI_API_KEY or omit --model to use the Codex default"
-    ))
+    Ok(())
 }
 
 /// Infer the runner from available model configuration when neither `--runner`
@@ -247,19 +247,11 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
             // 1. OPENAI_API_KEY env var (API key from platform.openai.com)
             // 2. `codex login` (OAuth / ChatGPT account)
             //
-            // We check the env var and config fallback. If an API key is found,
-            // we inject it into the subprocess environment. If not, we let the
-            // subprocess inherit whatever auth the user has configured (env var
-            // or `codex login`). This mirrors the Claude Code runner pattern
-            // where auth is inherited from the parent process.
+            // We check the env var and config fallback first. If an API key is
+            // found, it is injected into the subprocess environment.
             let api_key = std::env::var("OPENAI_API_KEY")
                 .ok()
                 .or_else(|| cfg.openai_api_key.clone());
-            check_codex_auth(api_key.as_deref())?;
-            let auth_display = AuthDisplay {
-                authenticated: true,
-                email: api_key.as_ref().map(|_| "OpenAI API".to_string()),
-            };
             // Model resolution: --model flag > openai_model config > model config > None
             // (let Codex CLI use its own default, currently gpt-5 for ChatGPT OAuth).
             // `openai_model` takes priority so runner-specific config wins, but
@@ -270,17 +262,22 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .or(cfg.openai_model.as_deref())
                 .or(cfg.model.as_deref())
                 .map(|s| s.to_string());
+            // An explicit model override signals intent to use API-key access.
+            // ChatGPT OAuth accounts only support the Codex CLI default model,
+            // so require OPENAI_API_KEY and fail early rather than after the run.
+            require_api_key_for_model(api_key.as_deref(), model.as_deref())?;
+            check_codex_auth(api_key.as_deref())?;
+            let auth_display = AuthDisplay {
+                authenticated: true,
+                email: api_key.as_ref().map(|_| "OpenAI API".to_string()),
+            };
             let display_model = model
                 .clone()
                 .unwrap_or_else(|| "(codex default)".to_string());
             let runner_display = RunnerDisplay {
                 runner_name: RunnerChoice::CodexCli.display_name().to_string(),
                 model: display_model.clone(),
-                warning: RunnerChoice::CodexCli
-                    .model_compatibility_warning(&display_model)
-                    .or_else(|| {
-                        codex_chatgpt_oauth_model_warning(api_key.as_deref(), model.as_deref())
-                    }),
+                warning: RunnerChoice::CodexCli.model_compatibility_warning(&display_model),
             };
             let mut codex_runner =
                 CodexCliRunner::new(binary_path, model.clone(), subprocess_timeout);
@@ -406,7 +403,7 @@ pub(crate) fn resolve_api_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_chatgpt_oauth_model_warning, infer_runner_from_config, resolve_api_key};
+    use super::{infer_runner_from_config, require_api_key_for_model, resolve_api_key};
     use crate::cli::args::RunnerChoice;
     use crate::error::ActualError;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
@@ -646,44 +643,40 @@ mod tests {
         );
     }
 
-    // ---- codex_chatgpt_oauth_model_warning tests ----
+    // ---- require_api_key_for_model tests ----
 
     #[test]
-    fn chatgpt_oauth_warning_no_api_key_with_model_warns() {
-        // No API key + explicit model → ChatGPT OAuth path, warning expected.
-        let warn = codex_chatgpt_oauth_model_warning(None, Some("gpt-5-mini"));
-        assert!(warn.is_some(), "expected warning, got None");
-        let msg = warn.unwrap();
-        assert!(msg.contains("gpt-5-mini"), "msg: {msg}");
-        assert!(msg.contains("ChatGPT"), "msg: {msg}");
-        assert!(msg.contains("OPENAI_API_KEY"), "msg: {msg}");
+    fn require_api_key_no_key_with_model_errors() {
+        // No API key + explicit model → error (ChatGPT OAuth can't run arbitrary models).
+        let err = require_api_key_for_model(None, Some("gpt-5-mini")).unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiKeyMissing { ref env_var } if env_var == "OPENAI_API_KEY"),
+            "expected ApiKeyMissing, got: {err:?}"
+        );
     }
 
     #[test]
-    fn chatgpt_oauth_warning_no_api_key_no_model_no_warning() {
-        // No API key + no model → Codex CLI will use its safe default, no warning.
-        let warn = codex_chatgpt_oauth_model_warning(None, None);
-        assert!(warn.is_none(), "expected None, got: {warn:?}");
+    fn require_api_key_no_key_no_model_ok() {
+        // No API key + no model → OK (Codex CLI default works with ChatGPT OAuth).
+        assert!(require_api_key_for_model(None, None).is_ok());
     }
 
     #[test]
-    fn chatgpt_oauth_warning_with_api_key_no_warning() {
-        // API key present → full model access, no warning even with explicit model.
-        let warn = codex_chatgpt_oauth_model_warning(Some("sk-test"), Some("gpt-5-mini"));
-        assert!(warn.is_none(), "expected None, got: {warn:?}");
+    fn require_api_key_with_key_and_model_ok() {
+        // API key present + explicit model → OK (full model access).
+        assert!(require_api_key_for_model(Some("sk-test"), Some("gpt-5-mini")).is_ok());
     }
 
     #[test]
-    fn chatgpt_oauth_warning_empty_api_key_with_model_warns() {
-        // Empty API key is treated as absent → still on ChatGPT OAuth path.
-        let warn = codex_chatgpt_oauth_model_warning(Some(""), Some("gpt-5.2"));
-        assert!(warn.is_some(), "expected warning for empty key, got None");
+    fn require_api_key_empty_key_with_model_errors() {
+        // Empty API key is treated as absent → error.
+        let err = require_api_key_for_model(Some(""), Some("gpt-5.2")).unwrap_err();
+        assert!(matches!(err, ActualError::ApiKeyMissing { .. }));
     }
 
     #[test]
-    fn chatgpt_oauth_warning_includes_model_name_in_message() {
-        // The warning message should include the exact model name for clarity.
-        let warn = codex_chatgpt_oauth_model_warning(None, Some("gpt-5.2")).unwrap();
-        assert!(warn.contains("gpt-5.2"), "msg: {warn}");
+    fn require_api_key_with_key_no_model_ok() {
+        // API key present + no model → OK (API key + Codex default is fine too).
+        assert!(require_api_key_for_model(Some("sk-test"), None).is_ok());
     }
 }
