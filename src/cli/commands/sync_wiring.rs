@@ -22,7 +22,7 @@ use crate::config::types::DEFAULT_TIMEOUT_SECS;
 use crate::error::ActualError;
 use crate::runner::anthropic_api::AnthropicApiRunner;
 use crate::runner::binary::find_claude_binary;
-use crate::runner::codex_cli::{find_codex_binary, CodexCliRunner};
+use crate::runner::codex_cli::{check_codex_auth, find_codex_binary, CodexCliRunner};
 use crate::runner::openai_api::OpenAiApiRunner;
 use crate::runner::subprocess::CliClaudeRunner;
 
@@ -190,6 +190,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
             let api_key = std::env::var("OPENAI_API_KEY")
                 .ok()
                 .or_else(|| cfg.openai_api_key.clone());
+            check_codex_auth(api_key.as_deref())?;
             let auth_display = AuthDisplay {
                 authenticated: true,
                 email: api_key.as_ref().map(|_| "OpenAI API".to_string()),
