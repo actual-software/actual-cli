@@ -26,6 +26,7 @@ mod pty;
 pub mod render;
 mod screen;
 mod session;
+pub mod snapshot;
 
 pub use capture::{CaptureConfig, CaptureStore, EventType, Timeline, TimelineEntry};
 pub use error::TuiTestError;
@@ -34,3 +35,7 @@ pub use render::{ColorScheme, ScreenRenderer};
 pub use screen::ScreenSnapshot;
 pub use session::{TuiSession, TuiSessionBuilder};
 pub use vt100;
+
+// Re-export insta when snapshot feature is enabled
+#[cfg(feature = "snapshot")]
+pub use insta;
