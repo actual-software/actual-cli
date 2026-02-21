@@ -7,9 +7,14 @@
 //! for real-world project structures.
 
 use actual_cli::analysis::orchestrate::run_static_analysis;
-use actual_cli::analysis::types::{Language, RepoAnalysis};
+use actual_cli::analysis::types::{Language, LanguageStat, RepoAnalysis};
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/// Check if a list of LanguageStat contains a specific language.
+fn has_language(stats: &[LanguageStat], lang: &Language) -> bool {
+    stats.iter().any(|ls| ls.language == *lang)
+}
 
 /// Create a directory and write a file inside a temp dir.
 fn write_file(root: &std::path::Path, relative: &str, content: &str) {
@@ -87,7 +92,7 @@ fn main() {
     let project = &result.projects[0];
     assert_eq!(project.path, ".");
     assert_eq!(project.name, "my-cli");
-    assert!(project.languages.contains(&Language::Rust));
+    assert!(has_language(&project.languages, &Language::Rust));
     assert_eq!(project.package_manager.as_deref(), Some("cargo"));
     assert!(has_framework(&result, ".", "clap"));
     assert!(has_framework(&result, ".", "serde"));
@@ -147,7 +152,7 @@ fn nextjs_web_app() {
     assert_eq!(project.package_manager.as_deref(), Some("pnpm"));
     // TypeScript files present
     assert!(
-        project.languages.contains(&Language::TypeScript),
+        has_language(&project.languages, &Language::TypeScript),
         "Expected TypeScript, got: {:?}",
         project.languages
     );
@@ -204,7 +209,7 @@ def train_model(data):
 
     let project = &result.projects[0];
     assert_eq!(project.path, ".");
-    assert!(project.languages.contains(&Language::Python));
+    assert!(has_language(&project.languages, &Language::Python));
     // pytorch is the framework name in the registry for the "torch" package
     assert!(
         has_framework(&result, ".", "pytorch"),
@@ -262,7 +267,7 @@ func main() {
 
     let project = &result.projects[0];
     assert_eq!(project.path, ".");
-    assert!(project.languages.contains(&Language::Go));
+    assert!(has_language(&project.languages, &Language::Go));
     assert_eq!(project.package_manager.as_deref(), Some("go"));
     assert!(
         has_framework(&result, ".", "gin"),
@@ -347,7 +352,7 @@ version = "0.1.0"
     let cli = find_project(&result, "crates/cli");
     assert!(cli.is_some(), "Expected crates/cli project");
     let cli = cli.unwrap();
-    assert!(cli.languages.contains(&Language::Rust));
+    assert!(has_language(&cli.languages, &Language::Rust));
     assert!(has_framework(&result, "crates/cli", "clap"));
 
     // Check core crate
@@ -488,12 +493,12 @@ actix-web = "4"
     let project = &result.projects[0];
     // Both languages should be detected
     assert!(
-        project.languages.contains(&Language::Rust),
+        has_language(&project.languages, &Language::Rust),
         "Expected Rust, got: {:?}",
         project.languages
     );
     assert!(
-        project.languages.contains(&Language::TypeScript),
+        has_language(&project.languages, &Language::TypeScript),
         "Expected TypeScript, got: {:?}",
         project.languages
     );
@@ -525,7 +530,7 @@ fn minimal_repo_no_manifests() {
     let project = &result.projects[0];
     assert_eq!(project.path, ".");
     assert!(
-        project.languages.contains(&Language::Python),
+        has_language(&project.languages, &Language::Python),
         "Expected Python, got: {:?}",
         project.languages
     );
@@ -654,7 +659,7 @@ reqwest = "0.12"
     let project = &result.projects[0];
     assert_eq!(project.path, ".");
     assert!(
-        project.languages.contains(&Language::Rust),
+        has_language(&project.languages, &Language::Rust),
         "Expected Rust, got: {:?}",
         project.languages
     );
