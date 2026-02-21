@@ -62,6 +62,8 @@ macro_rules! define_config_keys {
 define_config_keys! {
     (ApiUrl,                "api_url"),
     (Model,                 "model"),
+    (OpenaiModel,           "openai_model"),
+    (CursorModel,           "cursor_model"),
     (BatchSize,             "batch_size"),
     (Concurrency,           "concurrency"),
     (InvocationTimeoutSecs, "invocation_timeout_secs"),
@@ -90,6 +92,14 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::Model => config
             .model
+            .clone()
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::OpenaiModel => config
+            .openai_model
+            .clone()
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::CursorModel => config
+            .cursor_model
             .clone()
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::BatchSize => config
@@ -171,6 +181,12 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
         }
         ConfigKey::Model => {
             config.model = Some(value.to_string());
+        }
+        ConfigKey::OpenaiModel => {
+            config.openai_model = Some(value.to_string());
+        }
+        ConfigKey::CursorModel => {
+            config.cursor_model = Some(value.to_string());
         }
         ConfigKey::BatchSize => {
             let v = value.parse::<usize>().map_err(|_| {
@@ -805,6 +821,8 @@ mod tests {
         let valid_values: &[(&str, &str)] = &[
             ("api_url", "https://example.com"),
             ("model", "claude-3"),
+            ("openai_model", "gpt-5"),
+            ("cursor_model", "cursor-small"),
             ("batch_size", "5"),
             ("concurrency", "4"),
             ("invocation_timeout_secs", "120"),
@@ -985,5 +1003,41 @@ mod tests {
         let mut config = Config::default();
         set(&mut config, "max_turns", "1").unwrap();
         assert_eq!(config.max_turns, Some(1));
+    }
+
+    // --- openai_model tests ---
+
+    #[test]
+    fn test_set_and_get_openai_model() {
+        let mut config = Config::default();
+        set(&mut config, "openai_model", "gpt-5.2").unwrap();
+        assert_eq!(get(&config, "openai_model").unwrap(), "gpt-5.2");
+        assert_eq!(config.openai_model, Some("gpt-5.2".to_string()));
+    }
+
+    #[test]
+    fn test_get_unset_openai_model() {
+        let config = Config::default();
+        let err = get(&config, "openai_model").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    // --- cursor_model tests ---
+
+    #[test]
+    fn test_set_and_get_cursor_model() {
+        let mut config = Config::default();
+        set(&mut config, "cursor_model", "cursor-small").unwrap();
+        assert_eq!(get(&config, "cursor_model").unwrap(), "cursor-small");
+        assert_eq!(config.cursor_model, Some("cursor-small".to_string()));
+    }
+
+    #[test]
+    fn test_get_unset_cursor_model() {
+        let config = Config::default();
+        let err = get(&config, "cursor_model").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
     }
 }
