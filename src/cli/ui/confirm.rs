@@ -63,6 +63,84 @@ fn format_metadata_lines(project: &Project) -> Vec<String> {
     lines
 }
 
+/// Label column width — "Languages:" is the longest at 10 chars.
+const LABEL_WIDTH: usize = 10;
+
+/// Format the project summary as clean ASCII text (no ANSI codes, no Unicode).
+///
+/// Used by the TUI renderer where ratatui handles all styling. Output uses
+/// ASCII-only characters and right-aligns labels so values start at the same column.
+pub fn format_project_summary_plain(analysis: &RepoAnalysis) -> String {
+    let header = if analysis.is_monorepo {
+        format!(
+            "* Monorepo detected -- {} projects",
+            analysis.projects.len()
+        )
+    } else {
+        "* Single project detected".to_string()
+    };
+
+    let mut lines = vec![header];
+
+    for project in &analysis.projects {
+        let safe_name = console::strip_ansi_codes(&project.name);
+
+        let name_line = if analysis.is_monorepo {
+            let safe_path = console::strip_ansi_codes(&project.path);
+            format!("  {safe_name}  ({safe_path})")
+        } else {
+            format!("  {safe_name}")
+        };
+        lines.push(name_line);
+
+        lines.extend(format_metadata_lines_plain(project));
+    }
+
+    lines.join("\n")
+}
+
+/// Returns indented multi-line metadata detail lines for a project (ASCII-only).
+/// Right-aligns labels so all colons and values align vertically.
+fn format_metadata_lines_plain(project: &Project) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    if !project.languages.is_empty() {
+        let langs: Vec<&str> = project.languages.iter().map(abbreviate_language).collect();
+        lines.push(format!(
+            "    {:>width$}  {}",
+            "Languages:",
+            langs.join(", "),
+            width = LABEL_WIDTH,
+        ));
+    }
+
+    if !project.frameworks.is_empty() {
+        let pkgs: Vec<String> = project
+            .frameworks
+            .iter()
+            .map(|f| console::strip_ansi_codes(f.name.as_str()).into_owned())
+            .collect();
+        lines.push(format!(
+            "    {:>width$}  {}",
+            "Packages:",
+            pkgs.join(", "),
+            width = LABEL_WIDTH,
+        ));
+    }
+
+    if let Some(pm) = &project.package_manager {
+        let value = console::strip_ansi_codes(pm).into_owned();
+        lines.push(format!(
+            "    {:>width$}  {}",
+            "Manager:",
+            value,
+            width = LABEL_WIDTH,
+        ));
+    }
+
+    lines
+}
+
 /// Format the project summary as clean multi-line labeled text.
 ///
 /// This is separate from the prompt so it can be tested independently.
@@ -734,6 +812,138 @@ mod tests {
             joined.contains("INJECT_PM"),
             "text content should still be present: {joined}"
         );
+    }
+
+    // ── format_project_summary_plain tests ──
+
+    #[test]
+    fn format_summary_plain_single_project() {
+        let analysis = make_single_project_analysis();
+        let output = format_project_summary_plain(&analysis);
+        assert!(output.contains("* Single project detected"));
+        assert!(output.contains("my-cli"));
+        assert!(output.contains("Packages:"));
+        assert!(output.contains("Manager:"));
+        // ASCII-only: no chars > 0x7F
+        for ch in output.chars() {
+            assert!(
+                ch.is_ascii(),
+                "non-ASCII character found: U+{:04X}",
+                ch as u32
+            );
+        }
+        // No ANSI codes
+        assert!(!output.contains('\x1b'));
+    }
+
+    #[test]
+    fn format_summary_plain_monorepo() {
+        let analysis = make_monorepo_analysis();
+        let output = format_project_summary_plain(&analysis);
+        assert!(output.contains("* Monorepo detected -- 2 projects"));
+        assert!(output.contains("Web App"));
+        assert!(output.contains("API Service"));
+        assert!(output.contains("apps/web"));
+        assert!(output.contains("services/api"));
+        // ASCII-only
+        for ch in output.chars() {
+            assert!(
+                ch.is_ascii(),
+                "non-ASCII character found: U+{:04X}",
+                ch as u32
+            );
+        }
+        assert!(!output.contains('\x1b'));
+    }
+
+    #[test]
+    fn format_summary_plain_empty_projects() {
+        let analysis = make_empty_analysis();
+        let output = format_project_summary_plain(&analysis);
+        assert!(output.contains("* Single project detected"));
+    }
+
+    #[test]
+    fn format_summary_plain_right_aligned_labels() {
+        let analysis = make_single_project_analysis();
+        let output = format_project_summary_plain(&analysis);
+        // Find colon positions in metadata lines
+        let colon_positions: Vec<usize> = output
+            .lines()
+            .filter(|l| {
+                let trimmed = l.trim_start();
+                trimmed.starts_with("Languages:")
+                    || trimmed.starts_with("Packages:")
+                    || trimmed.starts_with("Manager:")
+            })
+            .map(|l| l.find(':').unwrap())
+            .collect();
+        assert!(!colon_positions.is_empty(), "expected metadata lines");
+        let first = colon_positions[0];
+        for (i, pos) in colon_positions.iter().enumerate() {
+            assert_eq!(
+                *pos, first,
+                "colon on line {i} at column {pos}, expected {first}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_summary_plain_no_optional_fields() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "bare".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+            }],
+        };
+        let output = format_project_summary_plain(&analysis);
+        assert!(output.contains("bare"));
+        assert!(!output.contains("Languages:"));
+        assert!(!output.contains("Packages:"));
+        assert!(!output.contains("Manager:"));
+    }
+
+    #[test]
+    fn format_summary_plain_strips_ansi_injection() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "\x1b[31mINJECTED\x1b[0m".to_string(),
+                languages: vec![],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+            }],
+        };
+        let output = format_project_summary_plain(&analysis);
+        assert!(!output.contains('\x1b'));
+        assert!(output.contains("INJECTED"));
+    }
+
+    #[test]
+    fn format_metadata_plain_full() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![Language::Rust],
+            frameworks: vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+            }],
+            package_manager: Some("cargo".to_string()),
+            description: None,
+        };
+        let lines = format_metadata_lines_plain(&project);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("Languages:") && lines[0].contains("rust"));
+        assert!(lines[1].contains("Packages:") && lines[1].contains("actix-web"));
+        assert!(lines[2].contains("Manager:") && lines[2].contains("cargo"));
     }
 
     // ── MockTerminal trait coverage ──
