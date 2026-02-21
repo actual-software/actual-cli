@@ -170,6 +170,10 @@ jobs:
           name: test-output
           path: test-output.txt
 
+      - name: Upload tui-test captures
+        if: always()
+        uses: ./.github/actions/tui-test-report
+
   # === Test fix-bead jobs ===
   create-test-fix-bead:
     name: Create Test Fix Bead

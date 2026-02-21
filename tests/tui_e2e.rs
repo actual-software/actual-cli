@@ -376,4 +376,95 @@ mod tests {
         let exit_code = session.wait_for_exit().expect("Should exit");
         assert_eq!(exit_code, 0);
     }
+
+    // ── Category 6: Capture integration ─────────────────────────────
+
+    #[test]
+    fn test_tui_capture_produces_artifacts() {
+        use tui_test::CaptureConfig;
+
+        let mut server = mockito::Server::new();
+        let adr = make_adr_json(
+            "adr-cap-001",
+            "Capture Test Rule",
+            &["Test captures work"],
+            &[],
+            &["."],
+        );
+        setup_adr_server(&mut server, &format!("[{}]", adr));
+        let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
+
+        // Use a fixed capture directory so CI can collect the artifacts.
+        // The tui-test-report action looks for **/tui-test-captures/timeline.json.
+        let capture_dir = std::path::PathBuf::from("tui-test-captures");
+        let capture_config = CaptureConfig {
+            output_dir: capture_dir.clone(),
+            auto_capture_on_wait: true,
+            generation_debounce: 1,
+            min_interval_ms: 0,
+            save_on_drop: true,
+            capture_on_drop: true,
+        };
+
+        let bin = actual_binary_path();
+        let cmd = format!("{} sync --force --no-tailor --api-url {}", bin, env.api_url);
+        let mut session = TuiSession::new(&cmd)
+            .size(120, 40)
+            .timeout(Duration::from_secs(30))
+            .env("CLAUDE_BINARY", env.binary_path.to_str().unwrap())
+            .env("ACTUAL_CONFIG", env.config_path.to_str().unwrap())
+            .env("NO_COLOR", "1")
+            .workdir(env.dir.path())
+            .capture_config(capture_config)
+            .spawn()
+            .expect("Failed to spawn actual sync with capture");
+
+        // Wait for all phases to complete
+        wait_for_review_mode(&mut session);
+
+        // Take an explicit screenshot at the final review state
+        let screenshot_name = session.capture().expect("Should capture screenshot");
+        assert!(
+            screenshot_name.ends_with(".png"),
+            "Screenshot should be a PNG"
+        );
+
+        // Save timeline before quitting
+        let timeline_path = session.save_captures().expect("Should save captures");
+        assert!(timeline_path.exists(), "timeline.json should exist");
+
+        // Verify timeline.json is valid and has expected structure
+        let content = std::fs::read_to_string(&timeline_path).unwrap();
+        let timeline: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(
+            timeline["command"].as_str().unwrap().contains("sync"),
+            "Timeline command should contain 'sync'"
+        );
+        assert_eq!(timeline["terminal_size"][0], 120);
+        assert_eq!(timeline["terminal_size"][1], 40);
+        assert!(
+            !timeline["entries"].as_array().unwrap().is_empty(),
+            "Timeline should have entries"
+        );
+
+        // Verify at least one screenshot PNG was created in the capture dir
+        let png_count = std::fs::read_dir(&capture_dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "png")
+            })
+            .count();
+        assert!(png_count > 0, "Should have at least one PNG screenshot");
+
+        session.send_key(Key::Char('q')).unwrap();
+        let exit_code = session.wait_for_exit().expect("Should exit");
+        assert_eq!(exit_code, 0);
+
+        // Clean up capture directory (tests should be hermetic)
+        let _ = std::fs::remove_dir_all(&capture_dir);
+    }
 }
