@@ -50,6 +50,14 @@ fn is_codex_model(model: &str) -> bool {
     model.starts_with("codex-")
 }
 
+/// Returns `true` if the model name matches any known provider pattern.
+fn is_known_model(model: &str) -> bool {
+    is_claude_short_alias(model)
+        || model.contains("claude")
+        || is_openai_model(model)
+        || is_codex_model(model)
+}
+
 impl RunnerChoice {
     /// Human-readable name for display in the Environment section.
     pub fn display_name(&self) -> &'static str {
@@ -68,40 +76,43 @@ impl RunnerChoice {
     /// but a model is specified. Returns the runner most likely to support
     /// the given model based on naming conventions.
     ///
-    /// Falls back to `ClaudeCli` for unrecognized models (safe default since
-    /// Claude Code supports model aliases like "sonnet").
-    pub fn infer_from_model(model: &str) -> Self {
+    /// Returns an error for unrecognized model strings so the user gets a
+    /// clear message at startup instead of a silent fallback.
+    pub fn infer_from_model(model: &str) -> Result<Self, String> {
         let m = model.to_ascii_lowercase();
 
         // Short Claude aliases only valid for claude-cli
         if is_claude_short_alias(&m) {
-            return RunnerChoice::ClaudeCli;
+            return Ok(RunnerChoice::ClaudeCli);
         }
 
         // Anthropic model IDs (full names like "claude-sonnet-4-6")
         if m.contains("claude") {
-            return RunnerChoice::AnthropicApi;
+            return Ok(RunnerChoice::AnthropicApi);
         }
 
         // OpenAI model IDs
         if is_openai_model(&m) {
-            return RunnerChoice::OpenAiApi;
+            return Ok(RunnerChoice::OpenAiApi);
         }
 
         // Codex-specific models
         if is_codex_model(&m) {
-            return RunnerChoice::CodexCli;
+            return Ok(RunnerChoice::CodexCli);
         }
 
-        // Default: Claude CLI (handles custom aliases, fine-tunes, etc.)
-        RunnerChoice::ClaudeCli
+        Err(format!(
+            "Unrecognized model '{model}'. Known patterns: sonnet, opus, haiku, claude-*, gpt-*, o1*, o3*, o4*, chatgpt-*, codex-*. \
+             Use --runner to explicitly select a runner for custom models."
+        ))
     }
 
     /// Check if the given model name is likely incompatible with this runner
     /// and return an actionable warning message if so.
     ///
-    /// Returns `None` when the model appears compatible or is unrecognized
-    /// (custom/fine-tuned models pass without warning).
+    /// Returns `None` when the model appears compatible. Returns a warning
+    /// for unrecognized model names (defense-in-depth when `--runner` is
+    /// explicitly set but the model doesn't match any known pattern).
     pub fn model_compatibility_warning(&self, model: &str) -> Option<String> {
         let m = model.to_ascii_lowercase();
 
@@ -121,6 +132,11 @@ impl RunnerChoice {
                     Some(format!(
                         "Model \"{model}\" looks like a Codex model; \
                          consider --runner codex-cli"
+                    ))
+                } else if !is_known_model(&m) {
+                    Some(format!(
+                        "Model \"{model}\" is not a recognized model name. \
+                         Use --runner to explicitly select a runner for custom models."
                     ))
                 } else {
                     None
@@ -142,6 +158,11 @@ impl RunnerChoice {
                         "Model \"{model}\" looks like a Codex model; \
                          consider --runner codex-cli"
                     ))
+                } else if !is_known_model(&m) {
+                    Some(format!(
+                        "Model \"{model}\" is not a recognized model name. \
+                         Use --runner to explicitly select a runner for custom models."
+                    ))
                 } else {
                     None
                 }
@@ -157,6 +178,11 @@ impl RunnerChoice {
                         "Model \"{model}\" looks like a Codex model; \
                          consider --runner codex-cli"
                     ))
+                } else if !is_known_model(&m) {
+                    Some(format!(
+                        "Model \"{model}\" is not a recognized model name. \
+                         Use --runner to explicitly select a runner for custom models."
+                    ))
                 } else {
                     None
                 }
@@ -166,6 +192,11 @@ impl RunnerChoice {
                     Some(format!(
                         "Model \"{model}\" looks like an Anthropic model; \
                          consider --runner claude-cli or --runner anthropic-api"
+                    ))
+                } else if !is_known_model(&m) {
+                    Some(format!(
+                        "Model \"{model}\" is not a recognized model name. \
+                         Use --runner to explicitly select a runner for custom models."
                     ))
                 } else {
                     // OpenAI models on codex-cli are fine (codex uses OpenAI API)
@@ -901,20 +932,21 @@ mod parse_tests {
     }
 
     #[test]
-    fn test_compat_unknown_model_no_warning() {
-        // Unknown/custom models should not trigger warnings on any runner
+    fn test_compat_unknown_model_warns() {
+        // Unknown/custom models should trigger warnings on all runners (except Cursor)
         assert!(RunnerChoice::ClaudeCli
             .model_compatibility_warning("my-custom-model")
-            .is_none());
+            .is_some());
         assert!(RunnerChoice::AnthropicApi
             .model_compatibility_warning("my-custom-model")
-            .is_none());
+            .is_some());
         assert!(RunnerChoice::OpenAiApi
             .model_compatibility_warning("my-custom-model")
-            .is_none());
+            .is_some());
         assert!(RunnerChoice::CodexCli
             .model_compatibility_warning("my-custom-model")
-            .is_none());
+            .is_some());
+        // Cursor supports all models via its proxy, so no warning needed
         assert!(RunnerChoice::CursorCli
             .model_compatibility_warning("my-custom-model")
             .is_none());
@@ -955,24 +987,24 @@ mod parse_tests {
     #[test]
     fn test_infer_from_model_claude_short_aliases() {
         assert_eq!(
-            RunnerChoice::infer_from_model("sonnet"),
+            RunnerChoice::infer_from_model("sonnet").unwrap(),
             RunnerChoice::ClaudeCli
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("opus"),
+            RunnerChoice::infer_from_model("opus").unwrap(),
             RunnerChoice::ClaudeCli
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("haiku"),
+            RunnerChoice::infer_from_model("haiku").unwrap(),
             RunnerChoice::ClaudeCli
         );
         // Case insensitive
         assert_eq!(
-            RunnerChoice::infer_from_model("Sonnet"),
+            RunnerChoice::infer_from_model("Sonnet").unwrap(),
             RunnerChoice::ClaudeCli
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("HAIKU"),
+            RunnerChoice::infer_from_model("HAIKU").unwrap(),
             RunnerChoice::ClaudeCli
         );
     }
@@ -980,15 +1012,15 @@ mod parse_tests {
     #[test]
     fn test_infer_from_model_anthropic_full_ids() {
         assert_eq!(
-            RunnerChoice::infer_from_model("claude-sonnet-4-6"),
+            RunnerChoice::infer_from_model("claude-sonnet-4-6").unwrap(),
             RunnerChoice::AnthropicApi
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("claude-3-5-sonnet-20241022"),
+            RunnerChoice::infer_from_model("claude-3-5-sonnet-20241022").unwrap(),
             RunnerChoice::AnthropicApi
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("claude-opus-4"),
+            RunnerChoice::infer_from_model("claude-opus-4").unwrap(),
             RunnerChoice::AnthropicApi
         );
     }
@@ -996,32 +1028,32 @@ mod parse_tests {
     #[test]
     fn test_infer_from_model_openai() {
         assert_eq!(
-            RunnerChoice::infer_from_model("gpt-5.2"),
+            RunnerChoice::infer_from_model("gpt-5.2").unwrap(),
             RunnerChoice::OpenAiApi
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("gpt-4o"),
+            RunnerChoice::infer_from_model("gpt-4o").unwrap(),
             RunnerChoice::OpenAiApi
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("o1-preview"),
+            RunnerChoice::infer_from_model("o1-preview").unwrap(),
             RunnerChoice::OpenAiApi
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("o3-mini"),
+            RunnerChoice::infer_from_model("o3-mini").unwrap(),
             RunnerChoice::OpenAiApi
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("o4-mini"),
+            RunnerChoice::infer_from_model("o4-mini").unwrap(),
             RunnerChoice::OpenAiApi
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("chatgpt-4o-latest"),
+            RunnerChoice::infer_from_model("chatgpt-4o-latest").unwrap(),
             RunnerChoice::OpenAiApi
         );
         // Case insensitive
         assert_eq!(
-            RunnerChoice::infer_from_model("GPT-5.2"),
+            RunnerChoice::infer_from_model("GPT-5.2").unwrap(),
             RunnerChoice::OpenAiApi
         );
     }
@@ -1029,29 +1061,24 @@ mod parse_tests {
     #[test]
     fn test_infer_from_model_codex() {
         assert_eq!(
-            RunnerChoice::infer_from_model("codex-mini-latest"),
+            RunnerChoice::infer_from_model("codex-mini-latest").unwrap(),
             RunnerChoice::CodexCli
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("codex-mini"),
+            RunnerChoice::infer_from_model("codex-mini").unwrap(),
             RunnerChoice::CodexCli
         );
     }
 
     #[test]
-    fn test_infer_from_model_unknown_defaults_to_claude() {
-        assert_eq!(
-            RunnerChoice::infer_from_model("my-custom-model"),
-            RunnerChoice::ClaudeCli
-        );
-        assert_eq!(
-            RunnerChoice::infer_from_model("llama-3"),
-            RunnerChoice::ClaudeCli
-        );
-        assert_eq!(
-            RunnerChoice::infer_from_model("gemini-pro"),
-            RunnerChoice::ClaudeCli
-        );
+    fn test_infer_from_model_unknown_returns_error() {
+        assert!(RunnerChoice::infer_from_model("my-custom-model").is_err());
+        assert!(RunnerChoice::infer_from_model("llama-3").is_err());
+        assert!(RunnerChoice::infer_from_model("gemini-pro").is_err());
+        // Verify error message is helpful
+        let err = RunnerChoice::infer_from_model("gemini-pro").unwrap_err();
+        assert!(err.contains("Unrecognized model"), "msg: {err}");
+        assert!(err.contains("--runner"), "msg: {err}");
     }
 
     // ---- model-detection helper tests ----

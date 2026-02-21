@@ -41,17 +41,17 @@ fn infer_runner_from_config(
     openai_model: Option<&str>,
     cursor_model: Option<&str>,
     model: Option<&str>,
-) -> RunnerChoice {
+) -> Result<RunnerChoice, String> {
     if let Some(m) = args_model {
         RunnerChoice::infer_from_model(m)
     } else if let Some(m) = openai_model {
         RunnerChoice::infer_from_model(m)
     } else if cursor_model.is_some() {
-        RunnerChoice::CursorCli
+        Ok(RunnerChoice::CursorCli)
     } else if let Some(m) = model {
         RunnerChoice::infer_from_model(m)
     } else {
-        RunnerChoice::ClaudeCli
+        Ok(RunnerChoice::ClaudeCli)
     }
 }
 
@@ -105,6 +105,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
             cfg.cursor_model.as_deref(),
             cfg.model.as_deref(),
         )
+        .map_err(ActualError::ConfigError)?
     };
 
     // Resolve the per-subprocess timeout: config value takes precedence over the
@@ -399,7 +400,7 @@ mod tests {
     #[test]
     fn infer_runner_nothing_set_defaults_to_claude_cli() {
         assert_eq!(
-            infer_runner_from_config(None, None, None, None),
+            infer_runner_from_config(None, None, None, None).unwrap(),
             RunnerChoice::ClaudeCli,
         );
     }
@@ -407,7 +408,8 @@ mod tests {
     #[test]
     fn infer_runner_args_model_overrides_all() {
         assert_eq!(
-            infer_runner_from_config(Some("gpt-5"), None, Some("cursor-model"), Some("haiku"),),
+            infer_runner_from_config(Some("gpt-5"), None, Some("cursor-model"), Some("haiku"),)
+                .unwrap(),
             RunnerChoice::OpenAiApi,
         );
     }
@@ -415,7 +417,7 @@ mod tests {
     #[test]
     fn infer_runner_args_model_claude_alias() {
         assert_eq!(
-            infer_runner_from_config(Some("sonnet"), None, None, None),
+            infer_runner_from_config(Some("sonnet"), None, None, None).unwrap(),
             RunnerChoice::ClaudeCli,
         );
     }
@@ -423,7 +425,7 @@ mod tests {
     #[test]
     fn infer_runner_args_model_anthropic_full() {
         assert_eq!(
-            infer_runner_from_config(Some("claude-sonnet-4-6"), None, None, None),
+            infer_runner_from_config(Some("claude-sonnet-4-6"), None, None, None).unwrap(),
             RunnerChoice::AnthropicApi,
         );
     }
@@ -431,7 +433,7 @@ mod tests {
     #[test]
     fn infer_runner_openai_model_config() {
         assert_eq!(
-            infer_runner_from_config(None, Some("gpt-5-mini"), None, None),
+            infer_runner_from_config(None, Some("gpt-5-mini"), None, None).unwrap(),
             RunnerChoice::OpenAiApi,
         );
     }
@@ -439,7 +441,7 @@ mod tests {
     #[test]
     fn infer_runner_openai_model_overrides_cfg_model() {
         assert_eq!(
-            infer_runner_from_config(None, Some("gpt-5"), None, Some("haiku")),
+            infer_runner_from_config(None, Some("gpt-5"), None, Some("haiku")).unwrap(),
             RunnerChoice::OpenAiApi,
         );
     }
@@ -447,7 +449,7 @@ mod tests {
     #[test]
     fn infer_runner_openai_model_overrides_cursor_model() {
         assert_eq!(
-            infer_runner_from_config(None, Some("gpt-5"), Some("auto"), None),
+            infer_runner_from_config(None, Some("gpt-5"), Some("auto"), None).unwrap(),
             RunnerChoice::OpenAiApi,
         );
     }
@@ -455,7 +457,7 @@ mod tests {
     #[test]
     fn infer_runner_cursor_model_config() {
         assert_eq!(
-            infer_runner_from_config(None, None, Some("auto"), None),
+            infer_runner_from_config(None, None, Some("auto"), None).unwrap(),
             RunnerChoice::CursorCli,
         );
     }
@@ -463,7 +465,7 @@ mod tests {
     #[test]
     fn infer_runner_cursor_model_overrides_cfg_model() {
         assert_eq!(
-            infer_runner_from_config(None, None, Some("gpt-4o"), Some("haiku")),
+            infer_runner_from_config(None, None, Some("gpt-4o"), Some("haiku")).unwrap(),
             RunnerChoice::CursorCli,
         );
     }
@@ -472,7 +474,7 @@ mod tests {
     fn infer_runner_cursor_model_with_anthropic_name() {
         // Cursor proxies all models, so cursor_model always means CursorCli
         assert_eq!(
-            infer_runner_from_config(None, None, Some("claude-sonnet-4-6"), None),
+            infer_runner_from_config(None, None, Some("claude-sonnet-4-6"), None).unwrap(),
             RunnerChoice::CursorCli,
         );
     }
@@ -480,7 +482,7 @@ mod tests {
     #[test]
     fn infer_runner_cfg_model_anthropic() {
         assert_eq!(
-            infer_runner_from_config(None, None, None, Some("claude-sonnet-4-6")),
+            infer_runner_from_config(None, None, None, Some("claude-sonnet-4-6")).unwrap(),
             RunnerChoice::AnthropicApi,
         );
     }
@@ -488,7 +490,7 @@ mod tests {
     #[test]
     fn infer_runner_cfg_model_short_alias() {
         assert_eq!(
-            infer_runner_from_config(None, None, None, Some("sonnet")),
+            infer_runner_from_config(None, None, None, Some("sonnet")).unwrap(),
             RunnerChoice::ClaudeCli,
         );
     }
@@ -496,7 +498,7 @@ mod tests {
     #[test]
     fn infer_runner_cfg_model_openai() {
         assert_eq!(
-            infer_runner_from_config(None, None, None, Some("gpt-4o")),
+            infer_runner_from_config(None, None, None, Some("gpt-4o")).unwrap(),
             RunnerChoice::OpenAiApi,
         );
     }
@@ -504,7 +506,7 @@ mod tests {
     #[test]
     fn infer_runner_codex_model_via_openai_model() {
         assert_eq!(
-            infer_runner_from_config(None, Some("codex-mini-latest"), None, None),
+            infer_runner_from_config(None, Some("codex-mini-latest"), None, None).unwrap(),
             RunnerChoice::CodexCli,
         );
     }
@@ -513,7 +515,7 @@ mod tests {
     fn infer_runner_openai_model_gpt5_mini_not_claude() {
         // The exact bug scenario: openai_model: "gpt-5-mini" should NOT default to ClaudeCli
         assert_eq!(
-            infer_runner_from_config(None, Some("gpt-5-mini"), None, None),
+            infer_runner_from_config(None, Some("gpt-5-mini"), None, None).unwrap(),
             RunnerChoice::OpenAiApi,
             "openai_model should be considered for runner auto-detection"
         );
@@ -523,9 +525,22 @@ mod tests {
     fn infer_runner_cursor_model_not_claude() {
         // cursor_model: "gpt-4o" should NOT default to ClaudeCli
         assert_eq!(
-            infer_runner_from_config(None, None, Some("gpt-4o"), None),
+            infer_runner_from_config(None, None, Some("gpt-4o"), None).unwrap(),
             RunnerChoice::CursorCli,
             "cursor_model should be considered for runner auto-detection"
+        );
+    }
+
+    #[test]
+    fn infer_runner_unrecognized_model_returns_error() {
+        // Unrecognized models in any position should return an error
+        assert!(infer_runner_from_config(Some("gemini-pro"), None, None, None).is_err());
+        assert!(infer_runner_from_config(None, Some("llama-3"), None, None).is_err());
+        assert!(infer_runner_from_config(None, None, None, Some("my-custom-model")).is_err());
+        // cursor_model always returns CursorCli regardless of model name
+        assert_eq!(
+            infer_runner_from_config(None, None, Some("gemini-pro"), None).unwrap(),
+            RunnerChoice::CursorCli,
         );
     }
 }
