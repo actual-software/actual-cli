@@ -1145,6 +1145,12 @@ impl TuiRenderer {
         self.created_at
     }
 
+    /// Returns the sum of elapsed times across all completed steps,
+    /// excluding any time spent waiting for user input.
+    pub fn steps_elapsed(&self) -> Duration {
+        self.steps.steps.iter().filter_map(|s| s.elapsed).sum()
+    }
+
     /// Redraw the TUI. No-op in Plain and Quiet modes.
     ///
     /// Gap 4: draw errors are logged via `tracing::error!` and the renderer
@@ -2731,6 +2737,46 @@ mod tests {
         r.wait_for_keypress_impl(&mut source);
 
         assert!(source.events.is_empty(), "all events should be consumed");
+    }
+
+    // ── steps_elapsed tests ──
+
+    #[test]
+    fn test_steps_elapsed_sums_completed_steps() {
+        let mut r = TuiRenderer::new(false, true); // Plain mode
+                                                   // Manually set elapsed on steps to get deterministic values.
+        r.steps.steps[0].elapsed = Some(Duration::from_secs_f64(1.5));
+        r.steps.steps[1].elapsed = Some(Duration::from_secs_f64(2.0));
+        r.steps.steps[2].elapsed = Some(Duration::from_secs_f64(0.5));
+        // Steps 3 and 4 have no elapsed (not yet completed).
+        let total = r.steps_elapsed();
+        let expected = Duration::from_secs_f64(1.5)
+            + Duration::from_secs_f64(2.0)
+            + Duration::from_secs_f64(0.5);
+        assert_eq!(
+            total, expected,
+            "steps_elapsed should sum all completed step durations"
+        );
+    }
+
+    #[test]
+    fn test_steps_elapsed_returns_zero_when_no_steps_completed() {
+        let r = TuiRenderer::new(false, true);
+        assert_eq!(
+            r.steps_elapsed(),
+            Duration::ZERO,
+            "steps_elapsed should be zero when no steps have elapsed"
+        );
+    }
+
+    #[test]
+    fn test_steps_elapsed_excludes_none_steps() {
+        let mut r = TuiRenderer::new(false, true);
+        r.steps.steps[0].elapsed = Some(Duration::from_millis(100));
+        // steps[1] has no elapsed
+        r.steps.steps[2].elapsed = Some(Duration::from_millis(200));
+        let total = r.steps_elapsed();
+        assert_eq!(total, Duration::from_millis(300));
     }
 
     #[test]

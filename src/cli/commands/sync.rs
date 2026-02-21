@@ -1377,7 +1377,7 @@ pub fn confirm_and_write(
     let (files_created, files_updated, files_failed) = report_write_results(
         &results,
         files_rejected,
-        pipeline.start_time().elapsed(),
+        pipeline.steps_elapsed(),
         pipeline,
         width,
     );
