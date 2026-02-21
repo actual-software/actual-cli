@@ -1511,12 +1511,7 @@ mod tests {
             if let Value::Object(map) = value {
                 let is_object = map.get("type").and_then(Value::as_str) == Some("object");
                 if is_object && map.contains_key("properties") {
-                    assert_eq!(
-                        map.get("additionalProperties"),
-                        Some(&Value::Bool(false)),
-                        "object node missing additionalProperties: false — keys: {:?}",
-                        map.keys().collect::<Vec<_>>()
-                    );
+                    assert_eq!(map.get("additionalProperties"), Some(&Value::Bool(false)),);
                 }
                 for v in map.values() {
                     check(v);
