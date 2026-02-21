@@ -1139,6 +1139,20 @@ echo "" > "$OUTPUT_FILE"
     // ---- check_codex_auth tests ----
 
     #[test]
+    fn test_check_codex_auth_public_with_api_key() {
+        // Exercises the public wrapper (covers dirs::home_dir path).
+        assert!(check_codex_auth(Some("sk-test-key")).is_ok());
+    }
+
+    #[test]
+    fn test_check_codex_auth_public_without_api_key() {
+        // Exercises the public wrapper without an API key.
+        // Result depends on whether ~/.codex/auth.json exists on the test machine,
+        // so we just verify it doesn't panic and returns a valid Result.
+        let _ = check_codex_auth(None);
+    }
+
+    #[test]
     fn test_check_codex_auth_with_api_key() {
         // Valid API key should always succeed, regardless of auth file.
         assert!(check_codex_auth_inner(Some("sk-test-key"), None).is_ok());
