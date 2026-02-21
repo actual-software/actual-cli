@@ -290,6 +290,8 @@ pub enum Command {
     Auth,
     /// View or edit configuration
     Config(ConfigArgs),
+    /// List all available AI backend runners
+    Runners,
 }
 
 /// Arguments for the `sync` command
