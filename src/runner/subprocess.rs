@@ -330,24 +330,70 @@ async fn run_subprocess<T: DeserializeOwned>(
 /// repetition structurally avoids string-matching on specific error messages.
 const REPETITIVE_LINE_THRESHOLD: usize = 3;
 
+/// Tool-use summary strings that are exempt from repetitive output detection.
+/// These are Claude Code internal tools that legitimately emit the same event
+/// multiple times during normal operation (e.g., structured output extraction).
+const REPETITION_EXEMPT_TOOLS: &[&str] = &["StructuredOutput"];
+
+/// Returns `true` if the given formatted event summary should be excluded from
+/// repetitive output detection. This prevents false-positive abort signals for
+/// Claude Code internal mechanisms that naturally repeat.
+fn is_repetition_exempt(summary: &str) -> bool {
+    let raw = summary.strip_prefix("Claude: ").unwrap_or(summary);
+    REPETITION_EXEMPT_TOOLS
+        .iter()
+        .any(|tool| raw.starts_with(tool))
+}
+
+/// Keywords that indicate a credit/billing/quota problem. When a repeated
+/// message contains any of these (case-insensitive), we classify it as
+/// `CreditBalanceTooLow`. Otherwise, a repetitive loop is treated as a
+/// generic subprocess failure.
+const CREDIT_KEYWORDS: &[&str] = &[
+    "credit",
+    "balance",
+    "billing",
+    "quota",
+    "rate limit",
+    "rate_limit",
+    "insufficient",
+    "payment",
+    "subscription",
+];
+
+/// Returns `true` if the message looks like a credit/billing/quota error.
+fn looks_like_credit_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    CREDIT_KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+
 /// Classify an error result from the Claude Code subprocess into a more
 /// specific `ActualError` variant when possible.
 ///
 /// When the subprocess entered a repetitive error loop (detected by
-/// `repetitive_message` being `Some`), we treat this as a billing/quota
-/// error since that is the primary cause of such loops.
+/// `repetitive_message` being `Some`), we check whether the repeated message
+/// looks like a credit/billing error. Only messages containing credit-related
+/// keywords are mapped to `CreditBalanceTooLow`; other repetitive loops
+/// produce a generic `ClaudeSubprocessFailed` error.
 fn classify_subprocess_error(
     subtype: Option<&str>,
     result_text: &str,
     stderr: &str,
     repetitive_message: Option<&str>,
 ) -> ActualError {
-    // If we detected a repetitive loop, the repeated message is the best
-    // description of the problem. This is a structural signal: the subprocess
-    // was stuck emitting the same thing N+ times.
+    // If we detected a repetitive loop, check whether the message is
+    // credit-related before assuming it's a billing problem.
     if let Some(repeated_msg) = repetitive_message {
-        return ActualError::CreditBalanceTooLow {
-            message: repeated_msg.to_string(),
+        if looks_like_credit_error(repeated_msg) {
+            return ActualError::CreditBalanceTooLow {
+                message: repeated_msg.to_string(),
+            };
+        }
+        // The subprocess was stuck in a loop but the message doesn't look
+        // credit-related — surface it as a generic subprocess failure.
+        return ActualError::ClaudeSubprocessFailed {
+            message: format!("Claude Code entered a repetitive loop: {repeated_msg}"),
+            stderr: stderr.to_string(),
         };
     }
 
@@ -465,6 +511,11 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(tx) = &event_tx {
                 if let Some(summary) = format_stream_event(&line) {
+                    // Skip repetitive detection for known Claude Code
+                    // internal tool names that legitimately repeat during
+                    // normal operation (e.g., structured output extraction).
+                    let exempt = is_repetition_exempt(&summary);
+
                     let is_repeat = last_summary.as_deref() == Some(&summary);
                     if is_repeat {
                         repeat_count += 1;
@@ -475,8 +526,9 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                         let _ = tx.send(summary);
                     }
 
-                    // Signal abort if the subprocess is stuck in a loop.
-                    if repeat_count >= REPETITIVE_LINE_THRESHOLD {
+                    // Signal abort if the subprocess is stuck in a loop,
+                    // but only for non-exempt messages.
+                    if !exempt && repeat_count >= REPETITIVE_LINE_THRESHOLD {
                         // Extract the raw message (strip "Claude: " prefix if present).
                         let raw = last_summary
                             .as_deref()
@@ -542,16 +594,12 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
             let stderr_bytes = stderr_task.await.unwrap_or_default();
             let stderr_str = String::from_utf8_lossy(&stderr_bytes).to_string();
             let repeated = repetitive_msg.lock().unwrap().clone();
-            if let Some(repeated_msg) = repeated {
-                Err(ActualError::CreditBalanceTooLow {
-                    message: repeated_msg,
-                })
-            } else {
-                Err(ActualError::ClaudeSubprocessFailed {
-                    message: "Claude Code exited without producing a result".to_string(),
-                    stderr: stderr_str,
-                })
-            }
+            Err(classify_subprocess_error(
+                None,
+                "Claude Code exited without producing a result",
+                &stderr_str,
+                repeated.as_deref(),
+            ))
         }
         Err(_) => {
             // kill_on_drop fires when `child` goes out of scope at function
@@ -1867,5 +1915,65 @@ mod tests {
             matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
             "expected ClaudeSubprocessFailed for error_max_turns, got: {err:?}"
         );
+    }
+
+    /// A repetitive message that does NOT look like a credit error should
+    /// produce `ClaudeSubprocessFailed`, not `CreditBalanceTooLow`.
+    #[test]
+    fn test_classify_subprocess_error_non_credit_repetitive_msg() {
+        let err =
+            classify_subprocess_error(Some("error"), "error detail", "", Some("StructuredOutput"));
+        assert!(
+            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
+            "expected ClaudeSubprocessFailed for non-credit repetitive msg, got: {err:?}"
+        );
+        // Verify the error message includes the repeated message.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("StructuredOutput"),
+            "expected repeated msg in error: {msg}"
+        );
+        assert!(
+            msg.contains("repetitive loop"),
+            "expected 'repetitive loop' in error: {msg}"
+        );
+    }
+
+    // ── looks_like_credit_error tests ──
+
+    #[test]
+    fn test_looks_like_credit_error_positive() {
+        assert!(looks_like_credit_error("Credit balance is too low"));
+        assert!(looks_like_credit_error("Insufficient credits remaining"));
+        assert!(looks_like_credit_error("Rate limit exceeded"));
+        assert!(looks_like_credit_error("rate_limit_error"));
+        assert!(looks_like_credit_error("Please update your billing info"));
+        assert!(looks_like_credit_error("Payment required"));
+        assert!(looks_like_credit_error("Your subscription has expired"));
+        assert!(looks_like_credit_error("QUOTA exceeded for model"));
+    }
+
+    #[test]
+    fn test_looks_like_credit_error_negative() {
+        assert!(!looks_like_credit_error("StructuredOutput"));
+        assert!(!looks_like_credit_error("Read src/main.rs"));
+        assert!(!looks_like_credit_error("Something went wrong"));
+        assert!(!looks_like_credit_error("timeout"));
+        assert!(!looks_like_credit_error(""));
+    }
+
+    // ── is_repetition_exempt tests ──
+
+    #[test]
+    fn test_is_repetition_exempt_structured_output() {
+        assert!(is_repetition_exempt("Claude: StructuredOutput"));
+        assert!(is_repetition_exempt("StructuredOutput"));
+    }
+
+    #[test]
+    fn test_is_repetition_exempt_non_exempt() {
+        assert!(!is_repetition_exempt("Claude: Read src/main.rs"));
+        assert!(!is_repetition_exempt("Claude: Credit balance is too low"));
+        assert!(!is_repetition_exempt("some random message"));
     }
 }
