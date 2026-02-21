@@ -2073,8 +2073,8 @@ mod tests {
 
         let log_text = pipeline.all_log_text();
         assert!(
-            log_text.contains("Results"),
-            "expected Results panel title in log: {log_text}"
+            log_text.contains("Sync complete"),
+            "expected sync summary in log: {log_text}"
         );
         assert!(
             log_text.contains("created"),
@@ -2803,7 +2803,9 @@ mod tests {
         let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
         assert!(
-            !stripped.contains('\u{256d}') && !stripped.contains('\u{2570}') && !stripped.contains('\u{2502}'),
+            !stripped.contains('\u{256d}')
+                && !stripped.contains('\u{2570}')
+                && !stripped.contains('\u{2502}'),
             "expected no box-drawing characters in log: {stripped}"
         );
     }
