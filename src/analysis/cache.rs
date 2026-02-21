@@ -21,6 +21,18 @@ pub enum CacheStatus {
     Uncacheable,
 }
 
+impl CacheStatus {
+    /// Human-readable label shown next to "Analysis complete" in the pipeline.
+    pub fn label(self) -> &'static str {
+        match self {
+            CacheStatus::Hit => "(cached)",
+            CacheStatus::Miss => "(fresh)",
+            CacheStatus::ForcedMiss => "(forced refresh)",
+            CacheStatus::Uncacheable => "(no cache)",
+        }
+    }
+}
+
 /// Result of [`run_analysis_cached`] with metadata.
 #[derive(Debug)]
 pub struct AnalysisOutcome {
@@ -1013,5 +1025,13 @@ mod tests {
         assert_eq!(outcome.analysis.projects.len(), 1);
 
         assert!(logs_contain("Failed to deserialize cached analysis"));
+    }
+
+    #[test]
+    fn cache_status_label_covers_all_variants() {
+        assert_eq!(CacheStatus::Hit.label(), "(cached)");
+        assert_eq!(CacheStatus::Miss.label(), "(fresh)");
+        assert_eq!(CacheStatus::ForcedMiss.label(), "(forced refresh)");
+        assert_eq!(CacheStatus::Uncacheable.label(), "(no cache)");
     }
 }
