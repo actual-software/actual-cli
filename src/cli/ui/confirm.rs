@@ -1,10 +1,23 @@
 use crate::analysis::confirm::ConfirmAction;
-use crate::analysis::types::{Language, Project, RepoAnalysis};
+use crate::analysis::types::{Language, LanguageStat, Project, RepoAnalysis};
 use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::error::ActualError;
 
 use super::theme;
+
+/// Format a number with comma thousand separators (ASCII-only).
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
 
 /// Abbreviate common language names for compact display.
 fn abbreviate_language(lang: &Language) -> &str {
@@ -28,13 +41,23 @@ fn abbreviate_language(lang: &Language) -> &str {
     }
 }
 
+/// Format a [`LanguageStat`] as abbreviated name with optional LOC count.
+fn format_language_stat(ls: &LanguageStat) -> String {
+    let abbr = abbreviate_language(&ls.language);
+    if ls.loc > 0 {
+        format!("{} ({} loc)", abbr, format_number(ls.loc))
+    } else {
+        abbr.to_string()
+    }
+}
+
 /// Returns indented multi-line metadata detail lines for a project.
 /// Returns empty vec if no metadata is present.
 fn format_metadata_lines(project: &Project) -> Vec<String> {
     let mut lines = Vec::new();
 
     if !project.languages.is_empty() {
-        let langs: Vec<&str> = project.languages.iter().map(abbreviate_language).collect();
+        let langs: Vec<String> = project.languages.iter().map(format_language_stat).collect();
         lines.push(format!(
             "    {}  {}",
             theme::muted("Languages:"),
@@ -121,7 +144,7 @@ fn format_metadata_lines_plain(project: &Project) -> Vec<String> {
     let mut lines = Vec::new();
 
     if !project.languages.is_empty() {
-        let langs: Vec<&str> = project.languages.iter().map(abbreviate_language).collect();
+        let langs: Vec<String> = project.languages.iter().map(format_language_stat).collect();
         lines.push(format!(
             "    {:>width$}  {}",
             "Languages:",
@@ -235,7 +258,7 @@ pub fn prompt_project_confirmation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
+    use crate::analysis::types::{Framework, FrameworkCategory, Language, LanguageStat, Project};
     use crate::cli::ui::test_utils::MockTerminal;
 
     fn make_monorepo_analysis() -> RepoAnalysis {
@@ -246,7 +269,16 @@ mod tests {
                 Project {
                     path: "apps/web".to_string(),
                     name: "Web App".to_string(),
-                    languages: vec![Language::TypeScript, Language::JavaScript],
+                    languages: vec![
+                        LanguageStat {
+                            language: Language::TypeScript,
+                            loc: 0,
+                        },
+                        LanguageStat {
+                            language: Language::JavaScript,
+                            loc: 0,
+                        },
+                    ],
                     frameworks: vec![Framework {
                         name: "nextjs".to_string(),
                         category: FrameworkCategory::WebFrontend,
@@ -259,7 +291,10 @@ mod tests {
                 Project {
                     path: "services/api".to_string(),
                     name: "API Service".to_string(),
-                    languages: vec![Language::Rust],
+                    languages: vec![LanguageStat {
+                        language: Language::Rust,
+                        loc: 0,
+                    }],
                     frameworks: vec![
                         Framework {
                             name: "actix-web".to_string(),
@@ -286,7 +321,10 @@ mod tests {
             projects: vec![Project {
                 path: ".".to_string(),
                 name: "my-cli".to_string(),
-                languages: vec![Language::Rust],
+                languages: vec![LanguageStat {
+                    language: Language::Rust,
+                    loc: 0,
+                }],
                 frameworks: vec![Framework {
                     name: "clap".to_string(),
                     category: FrameworkCategory::Cli,
@@ -552,7 +590,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![Framework {
                 name: "actix-web".to_string(),
                 category: FrameworkCategory::WebBackend,
@@ -586,7 +627,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::TypeScript],
+            languages: vec![LanguageStat {
+                language: Language::TypeScript,
+                loc: 0,
+            }],
             frameworks: vec![],
             package_manager: None,
             description: None,
@@ -623,7 +667,16 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::TypeScript, Language::JavaScript],
+            languages: vec![
+                LanguageStat {
+                    language: Language::TypeScript,
+                    loc: 0,
+                },
+                LanguageStat {
+                    language: Language::JavaScript,
+                    loc: 0,
+                },
+            ],
             frameworks: vec![],
             package_manager: Some("npm".to_string()),
             description: None,
@@ -670,7 +723,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![
                 Framework {
                     name: "actix-web".to_string(),
@@ -1029,7 +1085,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![Framework {
                 name: "actix-web".to_string(),
                 category: FrameworkCategory::WebBackend,
@@ -1053,7 +1112,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![],
             package_manager: None,
             description: None,
@@ -1074,7 +1136,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![],
             package_manager: None,
             description: None,
@@ -1099,7 +1164,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![],
             package_manager: None,
             description: None,
@@ -1122,7 +1190,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![],
             package_manager: None,
             description: None,
@@ -1147,7 +1218,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![Framework {
                 name: "actix-web".to_string(),
                 category: FrameworkCategory::WebBackend,
@@ -1169,6 +1243,117 @@ mod tests {
                 "colon on line {i} at column {pos}, expected {first}"
             );
         }
+    }
+
+    // ── format_number tests ──
+
+    #[test]
+    fn format_number_zero() {
+        assert_eq!(format_number(0), "0");
+    }
+
+    #[test]
+    fn format_number_small() {
+        assert_eq!(format_number(999), "999");
+    }
+
+    #[test]
+    fn format_number_thousand() {
+        assert_eq!(format_number(1000), "1,000");
+    }
+
+    #[test]
+    fn format_number_large() {
+        assert_eq!(format_number(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn format_number_exact_thousands() {
+        assert_eq!(format_number(1000000), "1,000,000");
+    }
+
+    // ── format_language_stat tests ──
+
+    #[test]
+    fn format_language_stat_with_loc() {
+        let ls = LanguageStat {
+            language: Language::TypeScript,
+            loc: 2340,
+        };
+        assert_eq!(format_language_stat(&ls), "ts (2,340 loc)");
+    }
+
+    #[test]
+    fn format_language_stat_zero_loc() {
+        let ls = LanguageStat {
+            language: Language::Rust,
+            loc: 0,
+        };
+        assert_eq!(format_language_stat(&ls), "rust");
+    }
+
+    // ── LOC display in plain formatter ──
+
+    #[test]
+    fn format_summary_plain_shows_loc() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "my-app".to_string(),
+                languages: vec![
+                    LanguageStat {
+                        language: Language::TypeScript,
+                        loc: 2340,
+                    },
+                    LanguageStat {
+                        language: Language::JavaScript,
+                        loc: 180,
+                    },
+                ],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
+            }],
+        };
+        let output = format_project_summary_plain(&analysis);
+        assert!(
+            output.contains("ts (2,340 loc)"),
+            "expected LOC for TypeScript in: {output}"
+        );
+        assert!(
+            output.contains("js (180 loc)"),
+            "expected LOC for JavaScript in: {output}"
+        );
+    }
+
+    #[test]
+    fn format_summary_plain_hides_zero_loc() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "my-app".to_string(),
+                languages: vec![LanguageStat {
+                    language: Language::Rust,
+                    loc: 0,
+                }],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
+            }],
+        };
+        let output = format_project_summary_plain(&analysis);
+        assert!(
+            output.contains("rust") && !output.contains("(0 loc)"),
+            "zero LOC should not show parenthetical in: {output}"
+        );
     }
 
     // ── MockTerminal trait coverage ──
