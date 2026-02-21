@@ -464,7 +464,8 @@ mod tests {
         let exit_code = session.wait_for_exit().expect("Should exit");
         assert_eq!(exit_code, 0);
 
-        // Clean up capture directory (tests should be hermetic)
-        let _ = std::fs::remove_dir_all(&capture_dir);
+        // Leave capture directory in place for the tui-test-report CI action
+        // to collect and upload as artifacts / PR comment images.
+        // The directory is in .gitignore so it won't be committed.
     }
 }
