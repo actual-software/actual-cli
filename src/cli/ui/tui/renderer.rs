@@ -1,9 +1,11 @@
-use std::io::{self, BufWriter, IsTerminal};
+use std::cell::Cell as StdCell;
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    cursor::{Hide, Show},
-    execute,
+    cursor::{Hide, MoveTo, Show},
+    execute, queue,
+    style::Print,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
@@ -116,7 +118,14 @@ struct TuiTerminalImpl<B: Backend + Send>(Terminal<B>);
 
 impl<B: Backend + Send> TuiTerminal for TuiTerminalImpl<B> {
     fn draw_frame(&mut self, ctx: RenderContext<'_>) -> io::Result<()> {
-        render_to(&mut self.0, ctx)
+        let overlay = render_to(&mut self.0, ctx)?;
+        // Write the OSC 8 hyperlink overlay directly to stderr, bypassing
+        // ratatui's buffer.  We use a raw stderr handle because the
+        // CrosstermBackend's BufWriter has already been flushed by draw().
+        if let Some(ref ov) = overlay {
+            let _ = write_hyperlink_overlay(&mut io::stderr(), ov);
+        }
+        Ok(())
     }
 }
 
@@ -186,15 +195,41 @@ const BANNER_BOX_HEIGHT: u16 = 15;
 /// Horizontal padding (left + right) applied inside the Output panel border.
 const HORIZ_PAD: usize = 2;
 
+/// Coordinates for a post-render OSC 8 hyperlink overlay.
+///
+/// Ratatui's buffer diff uses `unicode_width` which incorrectly counts ANSI/OSC
+/// escape sequence bytes as visible characters (ratatui#902).  Instead of
+/// patching buffer cells, we return the position of the URL text so the caller
+/// can write the OSC 8 escape directly to the terminal *after* the frame is
+/// flushed, bypassing the buffer entirely.
+pub(crate) struct HyperlinkOverlay {
+    /// Column where the URL visible text starts.
+    x: u16,
+    /// Row of the top border.
+    y: u16,
+    /// The visible URL text to wrap with OSC 8.
+    url: &'static str,
+}
+
 /// Render the steps and log panes into an arbitrary ratatui terminal backend.
 ///
 /// This is a free function (not a method) so it can be called from tests with
 /// [`ratatui::backend::TestBackend`] without requiring a real TTY or
 /// `CrosstermBackend`.
-pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>) -> io::Result<()> {
+///
+/// Returns an optional [`HyperlinkOverlay`] describing where a clickable URL
+/// was placed in the top border of the logo box.  The caller is responsible for
+/// writing the actual OSC 8 escape sequence to the terminal after the frame has
+/// been flushed (see [`TuiTerminalImpl::draw_frame`]).
+pub(crate) fn render_to<B: Backend>(
+    terminal: &mut Terminal<B>,
+    ctx: RenderContext<'_>,
+) -> io::Result<Option<HyperlinkOverlay>> {
     let size = terminal.size()?;
     let cols = size.width;
     let use_color = console::colors_enabled_stderr();
+    // Smuggle the hyperlink overlay position out of the draw closure.
+    let overlay_cell: StdCell<Option<(u16, u16)>> = StdCell::new(None);
     terminal.draw(|frame| {
         let area = frame.area();
         let frame_area = area;
@@ -330,23 +365,18 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 paint_gradient_border(frame.buffer_mut(), left_chunks[0], frame_area);
             }
 
-            // Patch URL cells with OSC 8 hyperlink escape sequences so the URL
-            // is clickable in terminals that support it (iTerm2, WezTerm, etc.).
-            // This must run AFTER paint_gradient_border because that function
-            // calls set_style() on border cells; we only call set_symbol() here,
-            // so there is no conflict, but ordering after ensures no surprises.
+            // Record the URL position for a post-render OSC 8 overlay.
+            // We cannot patch buffer cells with OSC 8 escape sequences because
+            // ratatui's diff algorithm uses `unicode_width` which counts escape
+            // bytes as visible characters, causing massive cell skipping (ratatui#902).
+            // Instead, the caller writes the OSC 8 sequence directly to the
+            // terminal after the frame is flushed.
             if url_title.is_some() {
                 let top_y = left_chunks[0].y;
                 let right_x = left_chunks[0].x + left_chunks[0].width - 1;
                 let url_start_x = right_x - url_display_len;
-                // Patch the actual URL characters (skip leading/trailing spaces).
-                for (i, ch) in url.chars().enumerate() {
-                    let x = url_start_x + 1 + i as u16; // +1 to skip leading space
-                    if let Some(cell) = frame.buffer_mut().cell_mut((x, top_y)) {
-                        let hyperlink = format!("\x1B]8;;{url}\x07{ch}\x1B]8;;\x07");
-                        cell.set_symbol(&hyperlink);
-                    }
-                }
+                // +1 to skip the leading padding space before the URL text
+                overlay_cell.set(Some((url_start_x + 1, top_y)));
             }
 
             // Steps box (bottom-left)
@@ -432,7 +462,34 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             frame.render_widget(Paragraph::new(log_text), chunks[1]);
         }
     })?;
-    Ok(())
+    let overlay = overlay_cell.get().map(|(x, y)| HyperlinkOverlay {
+        x,
+        y,
+        url: "https://actual.ai",
+    });
+    Ok(overlay)
+}
+
+/// Write an OSC 8 hyperlink overlay directly to the terminal, bypassing
+/// ratatui's buffer.  This must be called *after* `terminal.draw()` so the
+/// visible text is already on screen; we simply re-print each character
+/// wrapped in OSC 8 open/close at the same position.
+fn write_hyperlink_overlay(w: &mut impl Write, overlay: &HyperlinkOverlay) -> io::Result<()> {
+    let url = overlay.url;
+    for (i, ch) in url.chars().enumerate() {
+        queue!(
+            w,
+            MoveTo(overlay.x + i as u16, overlay.y),
+            // OSC 8 open — associate this cell with the URL
+            Print(format_args!("\x1B]8;;{url}\x07")),
+            // Re-print the visible character (already on screen, but terminal
+            // needs it inside the OSC 8 span to make it clickable)
+            Print(ch),
+            // OSC 8 close
+            Print("\x1B]8;;\x07"),
+        )?;
+    }
+    w.flush()
 }
 
 /// The rendering mode chosen at construction time.
