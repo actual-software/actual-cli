@@ -68,7 +68,13 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
             ))
         })?
     } else {
-        RunnerChoice::ClaudeCli
+        // Auto-select runner from model when neither --runner flag nor
+        // config runner is set. Check --model flag first, then config model.
+        let effective_model = args.model.as_deref().or(cfg.model.as_deref());
+        match effective_model {
+            Some(m) => RunnerChoice::infer_from_model(m),
+            None => RunnerChoice::ClaudeCli,
+        }
     };
 
     // Resolve the per-subprocess timeout: config value takes precedence over the
