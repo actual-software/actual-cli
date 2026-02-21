@@ -30,8 +30,10 @@ fn test_version() {
 #[test]
 fn test_sync_without_claude_binary() {
     // When Claude binary is not found, sync should exit with code 2.
+    // Explicitly set --runner to avoid the user's config auto-selecting a
+    // different runner (e.g. codex-cli) which would bypass find_claude_binary().
     cmd()
-        .args(["sync", "--dry-run"])
+        .args(["sync", "--dry-run", "--runner", "claude-cli"])
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
         .code(2)
@@ -187,7 +189,7 @@ fn test_sync_with_flags_without_claude() {
 fn test_sync_dry_run_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
-        .args(["sync", "--dry-run"])
+        .args(["sync", "--dry-run", "--runner", "claude-cli"])
         .current_dir(dir.path())
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
@@ -202,7 +204,7 @@ fn test_sync_dry_run_without_claude() {
 fn test_sync_force_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
-        .args(["sync", "--force"])
+        .args(["sync", "--force", "--runner", "claude-cli"])
         .current_dir(dir.path())
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
@@ -214,7 +216,7 @@ fn test_sync_force_without_claude() {
 fn test_sync_no_tailor_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
-        .args(["sync", "--no-tailor", "--force"])
+        .args(["sync", "--no-tailor", "--force", "--runner", "claude-cli"])
         .current_dir(dir.path())
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
@@ -226,7 +228,7 @@ fn test_sync_no_tailor_without_claude() {
 fn test_sync_force_dry_run_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
-        .args(["sync", "--force", "--dry-run"])
+        .args(["sync", "--force", "--dry-run", "--runner", "claude-cli"])
         .current_dir(dir.path())
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()

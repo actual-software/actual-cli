@@ -184,9 +184,11 @@ fn test_cli_parse_config_path() {
 fn test_run_sync_without_claude() {
     // Sync now requires Claude binary for Phase 1 env check.
     // Without it, we expect exit code 2 (ClaudeNotFound).
+    // Explicitly set --runner to prevent the user's config from auto-selecting
+    // a different runner (e.g. codex-cli) which would bypass find_claude_binary().
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
-    let cli = Cli::parse_from(["actual", "sync", "--dry-run"]);
+    let cli = Cli::parse_from(["actual", "sync", "--dry-run", "--runner", "claude-cli"]);
     assert_eq!(handle_result(run(cli)), 2);
 }
 
@@ -412,7 +414,9 @@ fn test_run_sync_not_authenticated_with_fake_claude() {
 
     let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
 
-    let cli = Cli::parse_from(["actual", "sync", "--force"]);
+    // Explicitly set --runner to prevent the user's config from auto-selecting
+    // a different runner (e.g. codex-cli) which would bypass find_claude_binary().
+    let cli = Cli::parse_from(["actual", "sync", "--force", "--runner", "claude-cli"]);
     let exit_code = handle_result(run(cli));
 
     assert_eq!(
