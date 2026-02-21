@@ -2,10 +2,39 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
+/// The workspace system that manages a monorepo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceType {
+    Pnpm,
+    Npm,
+    Yarn,
+    Lerna,
+    Nx,
+    Cargo,
+    Go,
+}
+
+impl std::fmt::Display for WorkspaceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pnpm => write!(f, "pnpm"),
+            Self::Npm => write!(f, "npm"),
+            Self::Yarn => write!(f, "yarn"),
+            Self::Lerna => write!(f, "lerna"),
+            Self::Nx => write!(f, "nx"),
+            Self::Cargo => write!(f, "cargo"),
+            Self::Go => write!(f, "go"),
+        }
+    }
+}
+
 /// Top-level result of repository analysis.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RepoAnalysis {
     pub is_monorepo: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_type: Option<WorkspaceType>,
     pub projects: Vec<Project>,
 }
 
@@ -277,6 +306,7 @@ mod tests {
     fn serialize_deserialize_round_trip() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![Project {
                 path: "src".to_string(),
                 name: "my-app".to_string(),
@@ -629,5 +659,94 @@ mod tests {
         let deserialized: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.dep_count, 42);
         assert_eq!(deserialized.dev_dep_count, 13);
+    }
+
+    // -- WorkspaceType tests --
+
+    #[test]
+    fn workspace_type_display() {
+        assert_eq!(WorkspaceType::Pnpm.to_string(), "pnpm");
+        assert_eq!(WorkspaceType::Npm.to_string(), "npm");
+        assert_eq!(WorkspaceType::Yarn.to_string(), "yarn");
+        assert_eq!(WorkspaceType::Lerna.to_string(), "lerna");
+        assert_eq!(WorkspaceType::Nx.to_string(), "nx");
+        assert_eq!(WorkspaceType::Cargo.to_string(), "cargo");
+        assert_eq!(WorkspaceType::Go.to_string(), "go");
+    }
+
+    #[test]
+    fn workspace_type_serde_round_trip() {
+        let all = vec![
+            WorkspaceType::Pnpm,
+            WorkspaceType::Npm,
+            WorkspaceType::Yarn,
+            WorkspaceType::Lerna,
+            WorkspaceType::Nx,
+            WorkspaceType::Cargo,
+            WorkspaceType::Go,
+        ];
+        for wt in &all {
+            let json = serde_json::to_string(wt).unwrap();
+            let deserialized: WorkspaceType = serde_json::from_str(&json).unwrap();
+            assert_eq!(&deserialized, wt, "Round-trip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn workspace_type_display_matches_serde() {
+        let all = vec![
+            WorkspaceType::Pnpm,
+            WorkspaceType::Npm,
+            WorkspaceType::Yarn,
+            WorkspaceType::Lerna,
+            WorkspaceType::Nx,
+            WorkspaceType::Cargo,
+            WorkspaceType::Go,
+        ];
+        for wt in all {
+            let display = wt.to_string();
+            let serde = serde_json::to_string(&wt).unwrap();
+            let serde_unquoted = serde.trim_matches('"');
+            assert_eq!(
+                display, serde_unquoted,
+                "Display and serde mismatch for {display}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_type_none_omitted_from_json() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![],
+        };
+        let json = serde_json::to_string(&analysis).unwrap();
+        assert!(
+            !json.contains("workspace_type"),
+            "workspace_type: None should be omitted from JSON: {json}"
+        );
+    }
+
+    #[test]
+    fn workspace_type_some_included_in_json() {
+        let analysis = RepoAnalysis {
+            is_monorepo: true,
+            workspace_type: Some(WorkspaceType::Pnpm),
+            projects: vec![],
+        };
+        let json = serde_json::to_string(&analysis).unwrap();
+        assert!(
+            json.contains("\"workspace_type\":\"pnpm\""),
+            "workspace_type: Some(Pnpm) should be in JSON: {json}"
+        );
+    }
+
+    #[test]
+    fn workspace_type_defaults_to_none_on_missing_key() {
+        // Simulates deserializing cached data that predates the workspace_type field
+        let json = r#"{"is_monorepo":false,"projects":[]}"#;
+        let analysis: RepoAnalysis = serde_json::from_str(json).unwrap();
+        assert_eq!(analysis.workspace_type, None);
     }
 }

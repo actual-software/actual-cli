@@ -291,6 +291,7 @@ mod tests {
     fn valid_analysis() -> RepoAnalysis {
         RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![crate::analysis::types::Project {
                 path: ".".to_string(),
                 name: "test-project".to_string(),

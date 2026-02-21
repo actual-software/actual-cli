@@ -4,6 +4,8 @@ use std::path::Path;
 use ignore::WalkBuilder;
 use serde::Deserialize;
 
+use crate::analysis::types::WorkspaceType;
+
 /// Read a file's contents and include the file path in any I/O error.
 ///
 /// This ensures that callers see `"failed to read /path/to/file.yaml: permission denied"`
@@ -21,6 +23,7 @@ fn read_with_path(path: &Path) -> Result<String, std::io::Error> {
 #[derive(Debug)]
 pub struct MonorepoInfo {
     pub is_monorepo: bool,
+    pub workspace_type: Option<WorkspaceType>,
     pub projects: Vec<ProjectInfo>,
 }
 
@@ -71,6 +74,7 @@ pub fn detect_monorepo(root: &Path) -> Result<MonorepoInfo, std::io::Error> {
     // Single project fallback
     Ok(MonorepoInfo {
         is_monorepo: false,
+        workspace_type: None,
         projects: vec![ProjectInfo {
             path: ".".to_string(),
             name: extract_project_name(root),
@@ -110,6 +114,7 @@ fn detect_pnpm(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
     }
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
+        workspace_type: Some(WorkspaceType::Pnpm),
         projects,
     }))
 }
@@ -138,8 +143,14 @@ fn detect_npm_workspaces(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
     if projects.is_empty() {
         return Ok(None);
     }
+    let workspace_type = if root.join("yarn.lock").exists() {
+        WorkspaceType::Yarn
+    } else {
+        WorkspaceType::Npm
+    };
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
+        workspace_type: Some(workspace_type),
         projects,
     }))
 }
@@ -200,6 +211,7 @@ fn detect_lerna(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
     }
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
+        workspace_type: Some(WorkspaceType::Lerna),
         projects,
     }))
 }
@@ -255,6 +267,7 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
 
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
+        workspace_type: Some(WorkspaceType::Nx),
         projects,
     }))
 }
@@ -292,6 +305,7 @@ fn detect_cargo_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::
     }
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
+        workspace_type: Some(WorkspaceType::Cargo),
         projects,
     }))
 }
@@ -415,6 +429,7 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
 
     Ok(Some(MonorepoInfo {
         is_monorepo: true,
+        workspace_type: Some(WorkspaceType::Go),
         projects,
     }))
 }
@@ -625,6 +640,7 @@ mod tests {
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
+        assert_eq!(info.workspace_type, Some(WorkspaceType::Pnpm));
         assert_eq!(info.projects.len(), 2);
 
         let mut names: Vec<&str> = info.projects.iter().map(|p| p.name.as_str()).collect();
@@ -651,6 +667,7 @@ mod tests {
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
+        assert_eq!(info.workspace_type, Some(WorkspaceType::Npm));
         assert_eq!(info.projects.len(), 1);
         assert_eq!(info.projects[0].name, "@myorg/web");
         assert_eq!(info.projects[0].path, "packages/web");
@@ -676,6 +693,27 @@ mod tests {
     }
 
     #[test]
+    fn test_yarn_workspace_detection() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("package.json"),
+            r#"{"name": "root", "workspaces": ["packages/*"]}"#,
+        )
+        .unwrap();
+        // yarn.lock presence → WorkspaceType::Yarn instead of Npm
+        fs::write(root.join("yarn.lock"), "# yarn lockfile v1\n").unwrap();
+        fs::create_dir_all(root.join("packages/ui")).unwrap();
+
+        let info = detect_monorepo(root).unwrap();
+        assert!(info.is_monorepo);
+        assert_eq!(info.workspace_type, Some(WorkspaceType::Yarn));
+        assert_eq!(info.projects.len(), 1);
+        assert_eq!(info.projects[0].name, "ui");
+    }
+
+    #[test]
     fn test_cargo_workspace_detection() {
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -694,6 +732,7 @@ mod tests {
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
+        assert_eq!(info.workspace_type, Some(WorkspaceType::Cargo));
         assert_eq!(info.projects.len(), 1);
         assert_eq!(info.projects[0].name, "my-core");
         assert_eq!(info.projects[0].path, "crates/core");
@@ -724,6 +763,7 @@ mod tests {
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
+        assert_eq!(info.workspace_type, Some(WorkspaceType::Go));
         assert_eq!(info.projects.len(), 2);
 
         let mut names: Vec<&str> = info.projects.iter().map(|p| p.name.as_str()).collect();
@@ -746,6 +786,7 @@ mod tests {
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
+        assert_eq!(info.workspace_type, Some(WorkspaceType::Lerna));
         assert_eq!(info.projects.len(), 2);
 
         let mut names: Vec<&str> = info.projects.iter().map(|p| p.name.as_str()).collect();
@@ -805,6 +846,7 @@ mod tests {
 
         let info = detect_monorepo(root).unwrap();
         assert!(!info.is_monorepo);
+        assert_eq!(info.workspace_type, None);
         assert_eq!(info.projects.len(), 1);
         assert_eq!(info.projects[0].path, ".");
         assert_eq!(info.projects[0].name, "my-app");
@@ -1158,6 +1200,7 @@ mod tests {
 
         let info = detect_monorepo(root).unwrap();
         assert!(info.is_monorepo);
+        assert_eq!(info.workspace_type, Some(WorkspaceType::Nx));
         assert_eq!(info.projects.len(), 1);
         assert_eq!(info.projects[0].path, "apps/one");
     }

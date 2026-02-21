@@ -4,7 +4,7 @@ use crate::analysis::static_analyzer::frameworks::{detect_frameworks, detect_pac
 use crate::analysis::static_analyzer::languages::detect_languages;
 use crate::analysis::static_analyzer::manifests::parse_dependencies;
 use crate::analysis::static_analyzer::monorepo::detect_monorepo;
-use crate::analysis::types::{Framework, Language, Project, RepoAnalysis};
+use crate::analysis::types::{Framework, Language, Project, RepoAnalysis, WorkspaceType};
 use crate::error::ActualError;
 
 /// Normalize a project path relative to a working directory.
@@ -122,7 +122,12 @@ pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualErr
         });
     }
 
-    assemble_analysis(mono_info.is_monorepo, projects, working_dir)
+    assemble_analysis(
+        mono_info.is_monorepo,
+        mono_info.workspace_type,
+        projects,
+        working_dir,
+    )
 }
 
 /// Assemble a [`RepoAnalysis`] from already-built project list, applying the
@@ -132,6 +137,7 @@ pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualErr
 /// without going through full monorepo detection.
 fn assemble_analysis(
     is_monorepo: bool,
+    workspace_type: Option<WorkspaceType>,
     projects: Vec<Project>,
     working_dir: &Path,
 ) -> Result<RepoAnalysis, ActualError> {
@@ -145,6 +151,7 @@ fn assemble_analysis(
 
     let mut analysis = RepoAnalysis {
         is_monorepo,
+        workspace_type,
         projects,
     };
 
@@ -508,7 +515,7 @@ version = "0.1.0"
         // project, so this path is unreachable — but the guard ensures we
         // fail fast with a clear error if that contract is ever violated.
         let dir = tempfile::tempdir().unwrap();
-        let result = assemble_analysis(false, vec![], dir.path());
+        let result = assemble_analysis(false, None, vec![], dir.path());
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::AnalysisEmpty));
     }
@@ -527,7 +534,7 @@ version = "0.1.0"
             dep_count: 0,
             dev_dep_count: 0,
         };
-        let result = assemble_analysis(false, vec![project], dir.path());
+        let result = assemble_analysis(false, None, vec![project], dir.path());
         let analysis = result.unwrap();
         assert_eq!(analysis.projects.len(), 1);
         assert!(!analysis.is_monorepo);
@@ -547,8 +554,9 @@ version = "0.1.0"
             dep_count: 0,
             dev_dep_count: 0,
         };
-        let result = assemble_analysis(true, vec![project], dir.path());
+        let result = assemble_analysis(true, Some(WorkspaceType::Pnpm), vec![project], dir.path());
         let analysis = result.unwrap();
         assert!(analysis.is_monorepo);
+        assert_eq!(analysis.workspace_type, Some(WorkspaceType::Pnpm));
     }
 }
