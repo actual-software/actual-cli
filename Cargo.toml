@@ -101,3 +101,4 @@ predicates = "3"
 mockito = "1"
 tokio = { version = "1", features = ["test-util"] }
 tracing-test = "0.2"
+tui-test = { path = "crates/tui-test" }
