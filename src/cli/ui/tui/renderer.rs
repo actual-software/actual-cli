@@ -207,12 +207,12 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                     .max_scroll_wrapped(approx_log_height, approx_log_width);
                 if max > 0 {
                     format!(
-                        "  ↑/↓ scroll  Home/End top/bottom  q quit  [{}/{}]",
+                        "  ↑/↓ steps  u/d scroll  g/G top/bottom  q quit  [{}/{}]",
                         ctx.scroll_offset.min(max),
                         max
                     )
                 } else {
-                    "  q to quit".to_string()
+                    "  ↑/↓ steps  q quit".to_string()
                 }
             };
             frame.render_widget(Clear, footer_area);
@@ -2583,5 +2583,111 @@ mod tests {
             r.viewing_step, None,
             "viewing_step must be cleared when entering post-sync review mode"
         );
+    }
+
+    #[test]
+    fn test_review_mode_u_scrolls_up() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // Push enough content to make scrolling possible.
+        for i in 0..50 {
+            r.logs[0].push(format!("line {i}"));
+        }
+        r.start(SyncPhase::Environment, "env");
+
+        // Press 'u' to scroll up, then 'q' to exit.
+        let u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![u, q]);
+        r.wait_for_keypress_impl(&mut source);
+
+        // scroll_offset is reset to 0 on exit, but we verify no panic occurred
+        // and events were consumed.
+        assert!(source.events.is_empty(), "all events should be consumed");
+    }
+
+    #[test]
+    fn test_review_mode_d_scrolls_down() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        for i in 0..50 {
+            r.logs[0].push(format!("line {i}"));
+        }
+        r.start(SyncPhase::Environment, "env");
+
+        // Press 'u' to scroll up, then 'd' to scroll back down, then 'q'.
+        let u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE);
+        let d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![u, d, q]);
+        r.wait_for_keypress_impl(&mut source);
+
+        assert!(source.events.is_empty(), "all events should be consumed");
+    }
+
+    #[test]
+    fn test_review_mode_g_jumps_to_top() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        for i in 0..50 {
+            r.logs[0].push(format!("line {i}"));
+        }
+        r.start(SyncPhase::Environment, "env");
+
+        // Press 'g' (Home/top), then 'q'.
+        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![g, q]);
+        r.wait_for_keypress_impl(&mut source);
+
+        assert!(source.events.is_empty(), "all events should be consumed");
+    }
+
+    #[test]
+    fn test_review_mode_shift_g_jumps_to_bottom() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        for i in 0..50 {
+            r.logs[0].push(format!("line {i}"));
+        }
+        r.start(SyncPhase::Environment, "env");
+
+        // Press 'g' to jump to top, then 'G' to bottom, then 'q'.
+        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        let big_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![g, big_g, q]);
+        r.wait_for_keypress_impl(&mut source);
+
+        assert!(source.events.is_empty(), "all events should be consumed");
+    }
+
+    #[test]
+    fn test_review_mode_up_down_navigates_steps() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.start(SyncPhase::Environment, "env");
+        r.success(SyncPhase::Environment, "ok");
+        r.start(SyncPhase::Analysis, "analysis");
+        r.success(SyncPhase::Analysis, "ok");
+
+        // Press Up to go to step 0, Down to go back, then 'q'.
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![up, down, q]);
+        r.wait_for_keypress_impl(&mut source);
+
+        assert!(source.events.is_empty(), "all events should be consumed");
     }
 }
