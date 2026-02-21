@@ -126,6 +126,8 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
+        set -eo pipefail
+
         STAGING_DIR="${{ steps.collect.outputs.staging-dir }}"
         TOTAL_SESSIONS="${{ steps.collect.outputs.total-sessions }}"
         TOTAL_SCREENSHOTS="${{ steps.collect.outputs.total-screenshots }}"
@@ -136,9 +138,11 @@ runs:
         PR_NUMBER="${{ github.event.pull_request.number }}"
         MAX_IMAGES="${{ inputs.max-images }}"
         IMG_BRANCH="tui-test-images/${RUN_ID}"
+        TMPDIR="${{ runner.temp }}/tui-test-img-upload"
+        mkdir -p "$TMPDIR"
 
         # Upload images via Git API (no local checkout needed)
-        # 1. Create blobs for each PNG
+        # 1. Create blobs for each PNG (using file-based payloads to avoid ARG_MAX)
         # 2. Create a tree from those blobs
         # 3. Create a commit pointing to the tree
         # 4. Create/update the branch ref
@@ -153,13 +157,16 @@ runs:
             [ -z "$png" ] && continue
             dest_name="${session_name}-${png}"
 
-            # Create blob via API (base64-encoded)
-            CONTENT_B64=$(base64 -w 0 "$session_dir/$png" 2>/dev/null || base64 "$session_dir/$png" | tr -d '\n')
+            # Create blob via API using file-based JSON payload
+            # Pipe base64 through stdin to avoid ARG_MAX limits
+            BLOB_PAYLOAD="$TMPDIR/blob-payload.json"
+            (base64 -w 0 "$session_dir/$png" 2>/dev/null || base64 "$session_dir/$png" | tr -d '\n') \
+              | jq -Rs '{content: ., encoding: "base64"}' > "$BLOB_PAYLOAD"
+
             BLOB_SHA=$(gh api "repos/${REPO}/git/blobs" \
               --method POST \
-              -f content="$CONTENT_B64" \
-              -f encoding="base64" \
-              --jq '.sha' 2>/dev/null)
+              --input "$BLOB_PAYLOAD" \
+              --jq '.sha' 2>/dev/null) || true
 
             if [ -z "$BLOB_SHA" ]; then
               echo "::warning::Failed to upload blob for $dest_name"
@@ -180,48 +187,44 @@ runs:
           exit 0
         fi
 
-        # Create tree
-        TREE_SHA=$(echo "$TREE_ENTRIES" | gh api "repos/${REPO}/git/trees" \
+        # Create tree using file-based JSON payload
+        TREE_PAYLOAD="$TMPDIR/tree-payload.json"
+        echo "$TREE_ENTRIES" | jq '{tree: .}' > "$TREE_PAYLOAD"
+        TREE_SHA=$(gh api "repos/${REPO}/git/trees" \
           --method POST \
-          --input - \
-          -f "tree=@-" \
-          --jq '.sha' 2>/dev/null || true)
-
-        # Fallback: construct the full JSON payload if jq piping failed
-        if [ -z "$TREE_SHA" ]; then
-          TREE_PAYLOAD=$(echo "$TREE_ENTRIES" | jq '{tree: .}')
-          TREE_SHA=$(echo "$TREE_PAYLOAD" | gh api "repos/${REPO}/git/trees" \
-            --method POST \
-            --input - \
-            --jq '.sha' 2>/dev/null)
-        fi
+          --input "$TREE_PAYLOAD" \
+          --jq '.sha' 2>/dev/null) || true
 
         if [ -z "$TREE_SHA" ]; then
           echo "::warning::Failed to create git tree for images"
           exit 0
         fi
 
-        # Create commit (orphan — no parents)
+        # Create commit (orphan — no parents) using file-based payload
+        COMMIT_PAYLOAD="$TMPDIR/commit-payload.json"
+        jq -n --arg message "tui-test screenshots for run ${RUN_ID}" --arg tree "$TREE_SHA" \
+          '{message: $message, tree: $tree}' > "$COMMIT_PAYLOAD"
         COMMIT_SHA=$(gh api "repos/${REPO}/git/commits" \
           --method POST \
-          -f message="tui-test screenshots for run ${RUN_ID}" \
-          -f tree="$TREE_SHA" \
-          --jq '.sha' 2>/dev/null)
+          --input "$COMMIT_PAYLOAD" \
+          --jq '.sha' 2>/dev/null) || true
 
         if [ -z "$COMMIT_SHA" ]; then
           echo "::warning::Failed to create git commit for images"
           exit 0
         fi
 
-        # Create branch ref
+        # Create branch ref (or update if it already exists)
+        REF_PAYLOAD="$TMPDIR/ref-payload.json"
+        jq -n --arg ref "refs/heads/${IMG_BRANCH}" --arg sha "$COMMIT_SHA" \
+          '{ref: $ref, sha: $sha}' > "$REF_PAYLOAD"
         gh api "repos/${REPO}/git/refs" \
           --method POST \
-          -f ref="refs/heads/${IMG_BRANCH}" \
-          -f sha="$COMMIT_SHA" 2>/dev/null || \
+          --input "$REF_PAYLOAD" 2>/dev/null || \
         gh api "repos/${REPO}/git/refs/heads/${IMG_BRANCH}" \
           --method PATCH \
           -f sha="$COMMIT_SHA" \
-          -F force=true 2>/dev/null
+          -F force=true 2>/dev/null || true
 
         # Build the PR comment body
         COMMENT_BODY="## tui-test Screenshots\n\n"
@@ -280,21 +283,28 @@ runs:
         FULL_BODY="${COMMENT_MARKER}\n${COMMENT_BODY}"
 
         EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-          --jq ".[] | select(.body | contains(\"${COMMENT_MARKER}\")) | .id" 2>/dev/null | head -1)
+          --jq ".[] | select(.body | contains(\"${COMMENT_MARKER}\")) | .id" 2>/dev/null | head -1) || true
 
         FORMATTED_BODY=$(printf '%b' "$FULL_BODY")
+
+        # Write comment body to file to avoid ARG_MAX with large image URLs
+        COMMENT_FILE="$TMPDIR/comment-body.json"
+        jq -n --arg body "$FORMATTED_BODY" '{body: $body}' > "$COMMENT_FILE"
 
         if [ -n "$EXISTING_COMMENT_ID" ]; then
           gh api "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
             --method PATCH \
-            -f body="$FORMATTED_BODY" 2>/dev/null
+            --input "$COMMENT_FILE" 2>/dev/null || true
           echo "::notice::Updated existing tui-test PR comment (ID: ${EXISTING_COMMENT_ID})"
         else
           gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
             --method POST \
-            -f body="$FORMATTED_BODY" 2>/dev/null
+            --input "$COMMENT_FILE" 2>/dev/null || true
           echo "::notice::Created tui-test PR comment"
         fi
+
+        # Clean up temp files
+        rm -rf "$TMPDIR"
 
     - name: Create step summary
       if: inputs.summary == 'true' && steps.collect.outputs.found == 'true'
