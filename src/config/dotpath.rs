@@ -289,12 +289,12 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             config.output_format = Some(fmt);
         }
         ConfigKey::Runner => match value {
-            "claude-cli" | "anthropic-api" | "openai-api" | "codex-cli" => {
+            "claude-cli" | "anthropic-api" | "openai-api" | "codex-cli" | "cursor-cli" => {
                 config.runner = Some(value.to_string());
             }
             _ => {
                 return Err(ActualError::ConfigError(format!(
-                        "invalid value for {path}: expected \"claude-cli\", \"anthropic-api\", \"openai-api\", or \"codex-cli\", got \"{value}\""
+                        "invalid value for {path}: expected \"claude-cli\", \"anthropic-api\", \"openai-api\", \"codex-cli\", or \"cursor-cli\", got \"{value}\""
                     )));
             }
         },
@@ -899,6 +899,13 @@ mod tests {
         let mut config = Config::default();
         set(&mut config, "runner", "claude-cli").unwrap();
         assert_eq!(get(&config, "runner").unwrap(), "claude-cli");
+    }
+
+    #[test]
+    fn test_set_and_get_cursor_cli_runner() {
+        let mut config = Config::default();
+        set(&mut config, "runner", "cursor-cli").unwrap();
+        assert_eq!(get(&config, "runner").unwrap(), "cursor-cli");
     }
 
     #[test]
