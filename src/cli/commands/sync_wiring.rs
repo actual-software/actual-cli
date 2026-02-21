@@ -16,7 +16,7 @@ use clap::ValueEnum as _;
 use crate::cli::args::{RunnerChoice, SyncArgs};
 use crate::cli::commands::auth::check_auth_with_timeout;
 use crate::cli::commands::sync::{resolve_cwd, run_sync};
-use crate::cli::ui::header::AuthDisplay;
+use crate::cli::ui::header::{AuthDisplay, RunnerDisplay};
 use crate::cli::ui::real_terminal::RealTerminal;
 use crate::config::paths::{config_path, load_from};
 use crate::config::types::DEFAULT_TIMEOUT_SECS;
@@ -89,19 +89,31 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 authenticated: auth_status.logged_in,
                 email: auth_status.email.clone(),
             };
-            let runner = CliClaudeRunner::new(binary_path, subprocess_timeout);
-            let runner = if let Some(t) = cfg.max_turns {
-                runner.with_max_turns(t)
+            let effective_model = args
+                .model
+                .as_deref()
+                .or(cfg.model.as_deref())
+                .unwrap_or("sonnet")
+                .to_string();
+            let runner_display = RunnerDisplay {
+                runner_name: RunnerChoice::ClaudeCli.display_name().to_string(),
+                model: effective_model.clone(),
+                warning: RunnerChoice::ClaudeCli.model_compatibility_warning(&effective_model),
+            };
+            let cli_runner = CliClaudeRunner::new(binary_path, subprocess_timeout);
+            let cli_runner = if let Some(t) = cfg.max_turns {
+                cli_runner.with_max_turns(t)
             } else {
-                runner
+                cli_runner
             };
             run_sync(
                 args,
                 &root_dir,
                 &cfg_path,
                 &term,
-                &runner,
+                &cli_runner,
                 Some(&auth_display),
+                Some(&runner_display),
             )
         }
         RunnerChoice::AnthropicApi => {
@@ -118,14 +130,20 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .or(cfg.model.as_deref())
                 .unwrap_or(DEFAULT_ANTHROPIC_MODEL)
                 .to_string();
-            let runner = AnthropicApiRunner::new(api_key, model, subprocess_timeout)?;
+            let runner_display = RunnerDisplay {
+                runner_name: RunnerChoice::AnthropicApi.display_name().to_string(),
+                model: model.clone(),
+                warning: RunnerChoice::AnthropicApi.model_compatibility_warning(&model),
+            };
+            let api_runner = AnthropicApiRunner::new(api_key, model, subprocess_timeout)?;
             run_sync(
                 args,
                 &root_dir,
                 &cfg_path,
                 &term,
-                &runner,
+                &api_runner,
                 Some(&auth_display),
+                Some(&runner_display),
             )
         }
         RunnerChoice::OpenAiApi => {
@@ -142,14 +160,20 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .or(cfg.model.as_deref())
                 .unwrap_or(DEFAULT_OPENAI_MODEL)
                 .to_string();
-            let runner = OpenAiApiRunner::new(api_key, model, subprocess_timeout)?;
+            let runner_display = RunnerDisplay {
+                runner_name: RunnerChoice::OpenAiApi.display_name().to_string(),
+                model: model.clone(),
+                warning: RunnerChoice::OpenAiApi.model_compatibility_warning(&model),
+            };
+            let api_runner = OpenAiApiRunner::new(api_key, model, subprocess_timeout)?;
             run_sync(
                 args,
                 &root_dir,
                 &cfg_path,
                 &term,
-                &runner,
+                &api_runner,
                 Some(&auth_display),
+                Some(&runner_display),
             )
         }
         RunnerChoice::CodexCli => {
@@ -164,14 +188,20 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 .or(cfg.model.as_deref())
                 .unwrap_or(DEFAULT_CODEX_MODEL)
                 .to_string();
-            let runner = CodexCliRunner::new(binary_path, model, subprocess_timeout);
+            let runner_display = RunnerDisplay {
+                runner_name: RunnerChoice::CodexCli.display_name().to_string(),
+                model: model.clone(),
+                warning: RunnerChoice::CodexCli.model_compatibility_warning(&model),
+            };
+            let codex_runner = CodexCliRunner::new(binary_path, model, subprocess_timeout);
             run_sync(
                 args,
                 &root_dir,
                 &cfg_path,
                 &term,
-                &runner,
+                &codex_runner,
                 Some(&auth_display),
+                Some(&runner_display),
             )
         }
     }
