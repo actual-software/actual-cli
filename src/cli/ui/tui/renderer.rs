@@ -2055,6 +2055,8 @@ mod tests {
                 }],
                 package_manager: Some("cargo".to_string()),
                 description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
             }],
         };
 

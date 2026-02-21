@@ -465,6 +465,8 @@ mod tests {
             }],
             package_manager: Some("cargo".to_string()),
             description: Some(format!("Project {name}")),
+            dep_count: 0,
+            dev_dep_count: 0,
         }
     }
 

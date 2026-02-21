@@ -8,6 +8,26 @@ use crate::config;
 use crate::config::types::{CachedAnalysis, Config};
 use crate::error::ActualError;
 
+/// Whether the analysis result came from cache or was freshly computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheStatus {
+    /// Cache hit — result deserialized from config.
+    Hit,
+    /// Cache miss — fresh static analysis was run.
+    Miss,
+    /// Force flag bypassed cache.
+    ForcedMiss,
+    /// Not a git repo — caching not applicable.
+    Uncacheable,
+}
+
+/// Result of [`run_analysis_cached`] with metadata.
+#[derive(Debug)]
+pub struct AnalysisOutcome {
+    pub analysis: RepoAnalysis,
+    pub cache_status: CacheStatus,
+}
+
 /// Compute a deterministic SHA-256 hash of the config fields that affect
 /// analysis results: `include_categories`, `exclude_categories`,
 /// `include_general`, and `max_per_framework`.
@@ -146,20 +166,25 @@ pub fn run_analysis_cached(
     repo_path: &Path,
     config_path: &Path,
     force: bool,
-) -> Result<RepoAnalysis, ActualError> {
+) -> Result<AnalysisOutcome, ActualError> {
     let head_commit = get_git_head(repo_path);
 
     // Not a git repo — skip caching entirely
     let head_hash = match head_commit {
         Some(h) => h,
-        None => return run_static_analysis(repo_path),
+        None => {
+            return Ok(AnalysisOutcome {
+                analysis: run_static_analysis(repo_path)?,
+                cache_status: CacheStatus::Uncacheable,
+            });
+        }
     };
 
     let mut cfg = config::paths::load_from(config_path)?;
     let cfg_hash = compute_config_hash(&cfg);
 
     // Check for cache hit (skip when force=true)
-    if !force {
+    let cache_status = if !force {
         if let Some(ref cached) = cfg.cached_analysis {
             if cached.repo_path == repo_path.to_string_lossy().as_ref()
                 && cached.head_commit.as_deref() == Some(&head_hash)
@@ -167,7 +192,12 @@ pub fn run_analysis_cached(
             {
                 // Try to deserialize the cached analysis
                 match serde_yaml::from_value::<RepoAnalysis>(cached.analysis.clone()) {
-                    Ok(analysis) => return Ok(analysis),
+                    Ok(analysis) => {
+                        return Ok(AnalysisOutcome {
+                            analysis,
+                            cache_status: CacheStatus::Hit,
+                        });
+                    }
                     Err(e) => {
                         tracing::warn!(
                             "Failed to deserialize cached analysis: {e}. Re-running analysis."
@@ -177,7 +207,10 @@ pub fn run_analysis_cached(
                 }
             }
         }
-    }
+        CacheStatus::Miss
+    } else {
+        CacheStatus::ForcedMiss
+    };
 
     // Cache miss: run fresh analysis
     let analysis = run_static_analysis(repo_path)?;
@@ -193,7 +226,10 @@ pub fn run_analysis_cached(
     cfg.cached_analysis = Some(cached_analysis);
     config::paths::save_to(&cfg, config_path)?;
 
-    Ok(analysis)
+    Ok(AnalysisOutcome {
+        analysis,
+        cache_status,
+    })
 }
 
 #[cfg(test)]
@@ -250,6 +286,8 @@ mod tests {
                 frameworks: vec![],
                 package_manager: None,
                 description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
             }],
         }
     }
@@ -395,11 +433,12 @@ mod tests {
             analysis_value,
         );
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
-        assert!(!result.is_monorepo);
-        assert_eq!(result.projects.len(), 1);
-        assert_eq!(result.projects[0].name, "test-project");
+        assert_eq!(outcome.cache_status, CacheStatus::Hit);
+        assert!(!outcome.analysis.is_monorepo);
+        assert_eq!(outcome.analysis.projects.len(), 1);
+        assert_eq!(outcome.analysis.projects[0].name, "test-project");
     }
 
     #[test]
@@ -421,10 +460,11 @@ mod tests {
             analysis_value,
         );
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
         // Static analysis on the git repo dir succeeds
-        assert_eq!(result.projects.len(), 1);
+        assert_eq!(outcome.cache_status, CacheStatus::Miss);
+        assert_eq!(outcome.analysis.projects.len(), 1);
 
         // Verify the config was updated with the new HEAD
         let cfg = config::paths::load_from(&config_path).unwrap();
@@ -441,10 +481,11 @@ mod tests {
         let config_dir = tempdir().unwrap();
         let config_path = config_dir.path().join("config.yaml");
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
         // Static analysis on empty dir returns one project
-        assert_eq!(result.projects.len(), 1);
+        assert_eq!(outcome.cache_status, CacheStatus::Uncacheable);
+        assert_eq!(outcome.analysis.projects.len(), 1);
 
         // Config should not have been written (no caching for non-git repos)
         assert!(!config_path.exists());
@@ -462,9 +503,10 @@ mod tests {
         let cfg = config::Config::default();
         config::paths::save_to(&cfg, &config_path).unwrap();
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
-        assert_eq!(result.projects.len(), 1);
+        assert_eq!(outcome.cache_status, CacheStatus::Miss);
+        assert_eq!(outcome.analysis.projects.len(), 1);
 
         // Verify result was cached
         let cfg = config::paths::load_from(&config_path).unwrap();
@@ -492,9 +534,10 @@ mod tests {
             analysis_value,
         );
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
-        assert_eq!(result.projects.len(), 1);
+        assert_eq!(outcome.cache_status, CacheStatus::Miss);
+        assert_eq!(outcome.analysis.projects.len(), 1);
 
         // Verify config now has the correct repo_path
         let cfg = config::paths::load_from(&config_path).unwrap();
@@ -522,9 +565,10 @@ mod tests {
             corrupted_value,
         );
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
 
-        assert_eq!(result.projects.len(), 1);
+        assert_eq!(outcome.cache_status, CacheStatus::Miss);
+        assert_eq!(outcome.analysis.projects.len(), 1);
 
         // Verify config was updated with valid cached data
         let cfg = config::paths::load_from(&config_path).unwrap();
@@ -631,13 +675,15 @@ mod tests {
         );
 
         // With force=false, this returns the cached "test-project" name
-        let cached_result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
-        assert_eq!(cached_result.projects[0].name, "test-project");
+        let cached_outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(cached_outcome.cache_status, CacheStatus::Hit);
+        assert_eq!(cached_outcome.analysis.projects[0].name, "test-project");
 
         // With force=true, this bypasses the cache and runs fresh analysis
-        let forced_result = run_analysis_cached(repo_dir.path(), &config_path, true).unwrap();
+        let forced_outcome = run_analysis_cached(repo_dir.path(), &config_path, true).unwrap();
+        assert_eq!(forced_outcome.cache_status, CacheStatus::ForcedMiss);
         assert_ne!(
-            forced_result.projects[0].name, "test-project",
+            forced_outcome.analysis.projects[0].name, "test-project",
             "force=true should bypass cached analysis and return fresh result"
         );
 
@@ -674,8 +720,9 @@ mod tests {
         config::paths::save_to(&cfg, &config_path).unwrap();
 
         // Call with force=true
-        let result = run_analysis_cached(repo_dir.path(), &config_path, true).unwrap();
-        assert_eq!(result.projects.len(), 1);
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, true).unwrap();
+        assert_eq!(outcome.cache_status, CacheStatus::ForcedMiss);
+        assert_eq!(outcome.analysis.projects.len(), 1);
 
         // Verify the cache was updated with a fresh timestamp
         let updated_cfg = config::paths::load_from(&config_path).unwrap();
@@ -702,8 +749,8 @@ mod tests {
         let cfg = config::Config::default();
         config::paths::save_to(&cfg, &config_path).unwrap();
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
-        assert_eq!(result.projects.len(), 1);
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(outcome.analysis.projects.len(), 1);
 
         // Verify the analysis was serialized and saved to cache
         let saved_cfg = config::paths::load_from(&config_path).unwrap();
@@ -713,7 +760,7 @@ mod tests {
         // Verify the cached analysis round-trips correctly
         let deserialized: RepoAnalysis =
             serde_yaml::from_value(cached.analysis).expect("cached analysis should deserialize");
-        assert_eq!(deserialized.projects.len(), result.projects.len());
+        assert_eq!(deserialized.projects.len(), outcome.analysis.projects.len());
     }
 
     #[test]
@@ -868,9 +915,10 @@ mod tests {
         );
 
         // Should be a cache miss: re-runs analysis instead of returning "test-project"
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(outcome.cache_status, CacheStatus::Miss);
         assert_ne!(
-            result.projects[0].name, "test-project",
+            outcome.analysis.projects[0].name, "test-project",
             "cache with missing config_hash must be treated as a miss"
         );
 
@@ -916,9 +964,10 @@ mod tests {
         config::paths::save_to(&modified_cfg, &config_path).unwrap();
 
         // Should be a cache miss because config_hash differs
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(outcome.cache_status, CacheStatus::Miss);
         assert_ne!(
-            result.projects[0].name, "test-project",
+            outcome.analysis.projects[0].name, "test-project",
             "cache must be invalidated when config settings change"
         );
 
@@ -959,8 +1008,9 @@ mod tests {
             corrupted_value,
         );
 
-        let result = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
-        assert_eq!(result.projects.len(), 1);
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(outcome.cache_status, CacheStatus::Miss);
+        assert_eq!(outcome.analysis.projects.len(), 1);
 
         assert!(logs_contain("Failed to deserialize cached analysis"));
     }

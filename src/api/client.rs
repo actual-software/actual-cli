@@ -250,6 +250,8 @@ mod tests {
             frameworks,
             package_manager: None,
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         }
     }
 
