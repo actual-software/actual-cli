@@ -649,4 +649,70 @@ mod tests {
         // Out of bounds cell should return None
         assert!(snap.cell(100, 100).is_none());
     }
+
+    #[test]
+    fn test_screen_buffer_wait_for_zero_remaining_timeout() {
+        // Covers line 174: the `remaining.is_zero()` early-exit path.
+        // Using a zero-duration timeout with the writer still open (reader NOT done)
+        // forces the loop to hit the `remaining.is_zero()` check after the
+        // first predicate failure.
+        let (_writer, reader) = pipe_pair();
+        let buffer = ScreenBuffer::new(Box::new(reader), 24, 80);
+
+        let result = buffer.wait_for(
+            |snap| snap.contains("will never appear"),
+            Duration::from_nanos(0),
+        );
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TuiTestError::Timeout(_)));
+
+        drop(_writer);
+    }
+
+    #[test]
+    fn test_screen_buffer_wait_for_predicate_true_after_condvar_timeout() {
+        // Covers line 187: the post-condvar-timeout predicate success path.
+        //
+        // To reach line 187 we need:
+        //   1. Predicate fails on initial check (line 162)
+        //   2. reader_done is false (line 166)
+        //   3. remaining > 0 (line 173)
+        //   4. condvar wait_timeout returns with timed_out() == true (line 180)
+        //   5. Predicate succeeds on the post-timeout check (line 186)
+        //
+        // The condvar is only notified on screen changes or reader_done. If
+        // we use an external AtomicBool in the predicate (not screen content)
+        // and flip it after a short delay, the condvar will time out (no
+        // screen changes happen) but the predicate will succeed because the
+        // external state changed.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (_writer, reader) = pipe_pair();
+        let buffer = ScreenBuffer::new(Box::new(reader), 24, 80);
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = Arc::clone(&flag);
+
+        // Flip the flag after a short delay. No screen changes occur, so
+        // the condvar will time out.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        // The overall timeout is long enough for the flag to be flipped.
+        // The condvar wait uses `remaining` which will be ~200ms on the
+        // first iteration. It will time out (no notifications), then the
+        // post-timeout predicate check will see the flag is true.
+        let result = buffer.wait_for(
+            |_snap| flag.load(Ordering::SeqCst),
+            Duration::from_millis(200),
+        );
+        assert!(
+            result.is_ok(),
+            "Predicate should succeed in post-condvar-timeout check"
+        );
+
+        drop(_writer);
+    }
 }
