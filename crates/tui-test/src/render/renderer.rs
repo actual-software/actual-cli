@@ -73,41 +73,43 @@ impl ScreenRenderer {
 
         for row in 0..rows {
             for col in 0..cols {
-                if let Some(cell) = screen.cell(row, col) {
-                    // Skip wide continuation cells
-                    if cell.is_wide_continuation() {
-                        continue;
-                    }
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
 
-                    let (fg_rgba, bg_rgba) = self.resolve_cell_colors(cell);
+                // Skip wide continuation cells
+                if cell.is_wide_continuation() {
+                    continue;
+                }
 
-                    // Draw cell background
-                    let cell_x = pad + col as u32 * cw;
-                    let cell_y = pad + row as u32 * ch;
-                    let cell_w = if cell.is_wide() { cw * 2 } else { cw };
-                    Self::fill_rect(&mut img, cell_x, cell_y, cell_w, ch, bg_rgba);
+                let (fg_rgba, bg_rgba) = self.resolve_cell_colors(cell);
 
-                    // Render character
-                    let contents = cell.contents();
-                    if !contents.is_empty() {
-                        for c in contents.chars() {
-                            if c == ' ' || c == '\0' {
-                                continue;
-                            }
-                            let glyph = self.font_atlas.rasterize(c, cell.bold());
-                            let gx = cell_x as i32 + glyph.metrics.xmin;
-                            let gy = cell_y as i32 + ascent.ceil() as i32
-                                - glyph.metrics.height as i32
-                                - glyph.metrics.ymin;
-                            Self::composite_glyph(&mut img, glyph, gx, gy, fg_rgba);
+                // Draw cell background
+                let cell_x = pad + col as u32 * cw;
+                let cell_y = pad + row as u32 * ch;
+                let cell_w = if cell.is_wide() { cw * 2 } else { cw };
+                Self::fill_rect(&mut img, cell_x, cell_y, cell_w, ch, bg_rgba);
+
+                // Render character
+                let contents = cell.contents();
+                if !contents.is_empty() {
+                    for c in contents.chars() {
+                        if c == ' ' || c == '\0' {
+                            continue;
                         }
+                        let glyph = self.font_atlas.rasterize(c, cell.bold());
+                        let gx = cell_x as i32 + glyph.metrics.xmin;
+                        let gy = cell_y as i32 + ascent.ceil() as i32
+                            - glyph.metrics.height as i32
+                            - glyph.metrics.ymin;
+                        Self::composite_glyph(&mut img, glyph, gx, gy, fg_rgba);
                     }
+                }
 
-                    // Underline
-                    if cell.underline() {
-                        let uy = cell_y + ascent.ceil() as u32 + 2;
-                        Self::fill_rect(&mut img, cell_x, uy, cell_w, 1, fg_rgba);
-                    }
+                // Underline
+                if cell.underline() {
+                    let uy = cell_y + ascent.ceil() as u32 + 2;
+                    Self::fill_rect(&mut img, cell_x, uy, cell_w, 1, fg_rgba);
                 }
             }
         }
