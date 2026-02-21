@@ -318,7 +318,7 @@ async fn tailor_single_project<R: TailoringRunner>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::types::{Framework, FrameworkCategory, Language};
+    use crate::analysis::types::{Framework, FrameworkCategory, Language, LanguageStat};
     use crate::api::types::{AdrCategory, AppliesTo};
     use crate::generation::OutputFormat;
     use crate::tailoring::types::{FileOutput, SkippedAdr, TailoringSummary};
@@ -458,7 +458,10 @@ mod tests {
         Project {
             path: format!("apps/{name}"),
             name: name.to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![Framework {
                 name: "tokio".to_string(),
                 category: FrameworkCategory::Library,
