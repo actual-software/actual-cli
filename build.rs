@@ -189,7 +189,8 @@ Return your response as a JSON object matching the provided schema.";
         "applicable": { "type": "integer" },
         "not_applicable": { "type": "integer" },
         "files_generated": { "type": "integer" }
-      }
+      },
+      "required": ["total_input", "applicable", "not_applicable", "files_generated"]
     }
   },
   "required": ["files", "skipped_adrs", "summary"]
