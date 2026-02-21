@@ -73,9 +73,8 @@ impl ScreenRenderer {
 
         for row in 0..rows {
             for col in 0..cols {
-                let Some(cell) = screen.cell(row, col) else {
-                    continue;
-                };
+                // cell() always returns Some for valid (row, col) within screen.size()
+                let cell = screen.cell(row, col).unwrap();
 
                 // Skip wide continuation cells
                 if cell.is_wide_continuation() {
