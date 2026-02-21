@@ -128,6 +128,7 @@ impl TuiSession {
     ///
     /// The command string is split on whitespace: the first token is the command,
     /// and the rest are arguments.
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(command: &str) -> TuiSessionBuilder {
         TuiSessionBuilder::new(command)
     }
@@ -347,12 +348,11 @@ mod tests {
         let result = session.wait_for_exit();
         assert!(result.is_err());
 
-        match result.unwrap_err() {
-            TuiTestError::Timeout(d) => {
-                assert_eq!(d, Duration::from_millis(100));
-            }
-            other => panic!("Expected Timeout error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            TuiTestError::Timeout(d) if d == Duration::from_millis(100)
+        ));
 
         // Clean up: kill the process
         let _ = session.kill();
@@ -372,5 +372,65 @@ mod tests {
             .expect("Failed to send Ctrl+D");
 
         session.wait_for_exit().expect("Failed to wait for exit");
+    }
+
+    #[test]
+    fn test_builder_workdir() {
+        let builder = TuiSessionBuilder::new("/bin/pwd").workdir("/tmp");
+        assert_eq!(builder.workdir, Some(PathBuf::from("/tmp")));
+
+        let mut session = builder
+            .timeout(Duration::from_secs(5))
+            .spawn()
+            .expect("Failed to spawn pwd with workdir");
+
+        let exit_code = session.wait_for_exit().expect("Failed to wait for exit");
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn test_session_timeout_getter() {
+        let session = TuiSession::new("/bin/echo done")
+            .timeout(Duration::from_secs(42))
+            .spawn()
+            .expect("Failed to spawn echo");
+
+        assert_eq!(session.timeout(), Duration::from_secs(42));
+    }
+
+    #[test]
+    fn test_kill_running_session() {
+        let mut session = TuiSession::new("/bin/sleep 60")
+            .timeout(Duration::from_secs(5))
+            .spawn()
+            .expect("Failed to spawn sleep");
+
+        // Process should be running
+        assert!(!session.has_exited());
+
+        // Kill should succeed
+        session.kill().expect("Failed to kill session");
+
+        // After kill, process should eventually exit
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(session.has_exited());
+    }
+
+    #[test]
+    fn test_spawn_invalid_command() {
+        let result = TuiSession::new("/nonexistent/command/that/does/not/exist")
+            .timeout(Duration::from_secs(5))
+            .spawn();
+
+        assert!(result.is_err(), "Expected error for nonexistent command");
+    }
+
+    #[test]
+    fn test_builder_env_multiple() {
+        let builder = TuiSessionBuilder::new("/bin/sh -c exit")
+            .env("KEY1", "val1")
+            .env("KEY2", "val2");
+        assert_eq!(builder.env.get("KEY1").unwrap(), "val1");
+        assert_eq!(builder.env.get("KEY2").unwrap(), "val2");
     }
 }
