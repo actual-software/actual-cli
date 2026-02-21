@@ -19,6 +19,7 @@
 //! session.send_key(Key::Enter).unwrap();
 //! ```
 
+pub mod capture;
 mod error;
 mod keys;
 mod pty;
@@ -26,6 +27,7 @@ pub mod render;
 mod screen;
 mod session;
 
+pub use capture::{CaptureConfig, CaptureStore, EventType, Timeline, TimelineEntry};
 pub use error::TuiTestError;
 pub use keys::Key;
 pub use render::{ColorScheme, ScreenRenderer};
