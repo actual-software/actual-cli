@@ -340,7 +340,10 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 .log
                 .render_to_string(log_height, log_width, ctx.scroll_offset);
             // Insert one blank line at the top for visual breathing room.
-            log_lines.insert(0, String::new());
+            // Pad to `log_width` so Paragraph writes every cell in the row,
+            // preventing stale buffer content from bleeding through.
+            let pad = " ".repeat(log_width);
+            log_lines.insert(0, pad.clone());
             if let Some(cs) = ctx.confirm {
                 log_lines.push(String::new());
                 append_confirm_lines(&mut log_lines, cs);
@@ -348,7 +351,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 log_lines.push(String::new());
                 append_file_select_lines(&mut log_lines, fs);
             } else {
-                log_lines.push(String::new());
+                log_lines.push(pad);
             }
             let log_text = log_lines.join("\n");
             let hint_line = build_hint_line(&ctx, log_height, log_width);
@@ -617,7 +620,7 @@ impl TuiRenderer {
     pub fn all_log_text(&self) -> String {
         self.logs
             .iter()
-            .flat_map(|l| l.render_to_string(10000, 1000, 0))
+            .flat_map(|l| l.raw_lines())
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1558,9 +1561,15 @@ mod tests {
         let ansi_line = "\x1b[38;2;0;251;126mhello\x1b[0m";
         r.println(ansi_line);
         let stored = r.logs[0].render_to_string(10, 100, 0);
+        assert!(
+            stored[0].starts_with("hello"),
+            "ANSI codes should be stripped from log storage, got {:?}",
+            stored[0]
+        );
         assert_eq!(
-            stored[0], "hello",
-            "ANSI codes should be stripped from log storage"
+            stored[0].trim_end(),
+            "hello",
+            "stored content should be 'hello' (possibly right-padded)"
         );
     }
 
