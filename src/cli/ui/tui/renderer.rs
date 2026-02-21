@@ -662,7 +662,7 @@ impl TuiRenderer {
         self.starts[idx] = Some(Instant::now());
         self.steps.steps[idx].status = StepStatus::Running { tick: 0 };
         self.steps.steps[idx].message = String::new();
-        self.logs[idx].push(message.to_string());
+        self.push_log(idx, message);
         // Once there is navigable history (at least one completed step before this one),
         // enable the footer hint so the user knows they can use arrow keys.
         if idx > 0 {
@@ -680,7 +680,7 @@ impl TuiRenderer {
         self.steps.steps[idx].status = StepStatus::Success;
         self.steps.steps[idx].message = String::new();
         self.steps.steps[idx].elapsed = self.starts[idx].map(|s| s.elapsed());
-        self.logs[idx].push(message.to_string());
+        self.push_log(idx, message);
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ✔ {message}");
@@ -692,7 +692,7 @@ impl TuiRenderer {
         let idx = Self::phase_idx(phase);
         self.steps.steps[idx].status = StepStatus::Skipped;
         self.steps.steps[idx].message = String::new();
-        self.logs[idx].push(message.to_string());
+        self.push_log(idx, message);
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ─ {message}");
@@ -705,7 +705,7 @@ impl TuiRenderer {
         self.steps.steps[idx].status = StepStatus::Error;
         self.steps.steps[idx].message = String::new();
         self.steps.steps[idx].elapsed = self.starts[idx].map(|s| s.elapsed());
-        self.logs[idx].push(message.to_string());
+        self.push_log(idx, message);
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ✖ {message}");
@@ -718,7 +718,7 @@ impl TuiRenderer {
         self.steps.steps[idx].status = StepStatus::Warn;
         self.steps.steps[idx].message = String::new();
         self.steps.steps[idx].elapsed = self.starts[idx].map(|s| s.elapsed());
-        self.logs[idx].push(message.to_string());
+        self.push_log(idx, message);
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("  ⚠ {message}");
@@ -766,14 +766,21 @@ impl TuiRenderer {
         if let Mode::Quiet = &self.mode {
             return;
         }
-        // LogPane is rendered by ratatui which does not interpret raw ANSI escape
-        // sequences — strip them before storing so they don't appear as literal text.
-        let plain = console::strip_ansi_codes(line);
-        self.logs[self.active_step].push(plain.into_owned());
+        self.push_log(self.active_step, line);
         self.draw();
         if let Mode::Plain = &self.mode {
             eprintln!("{line}");
         }
+    }
+
+    /// Push a line to a specific step's log pane, stripping ANSI escape codes.
+    ///
+    /// All internal log pushes should go through this method (or through
+    /// [`println`] which delegates here) so that ratatui never receives raw
+    /// escape sequences.
+    fn push_log(&mut self, step: usize, line: &str) {
+        let plain = console::strip_ansi_codes(line);
+        self.logs[step].push(plain.into_owned());
     }
 
     /// Temporarily suspend the TUI for interactive prompts, then restore it.
@@ -910,7 +917,7 @@ impl TuiRenderer {
                 let width = term_size::terminal_width();
                 let summary = format_project_summary(analysis, width);
                 for line in summary.lines() {
-                    self.logs[self.active_step].push(line.to_string());
+                    self.push_log(self.active_step, line);
                 }
                 // Set up confirm state
                 self.confirm_state = Some(ConfirmState {
@@ -1011,10 +1018,13 @@ impl TuiRenderer {
 
                 // Show skipped ADRs in the log pane before the file list.
                 if !output.skipped_adrs.is_empty() {
-                    self.logs[self.active_step].push(format!(
-                        "{} ADR(s) skipped (not applicable)",
-                        output.skipped_adrs.len()
-                    ));
+                    self.push_log(
+                        self.active_step,
+                        &format!(
+                            "{} ADR(s) skipped (not applicable)",
+                            output.skipped_adrs.len()
+                        ),
+                    );
                 }
 
                 if output.files.is_empty() {
@@ -2020,6 +2030,53 @@ mod tests {
         let mut source = MockEventSource::new(vec![]); // no events → EOF error
         let result = r.confirm_project_impl(&analysis, &term, &mut source);
         assert!(result.is_err()); // IO error propagated
+    }
+
+    #[test]
+    fn test_confirm_project_strips_ansi_from_logs() {
+        use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+
+        // Build a non-empty analysis so format_project_summary produces
+        // ANSI-styled output (via theme::heading, theme::hint, etc.).
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "TestProject".to_string(),
+                languages: vec![Language::Rust],
+                frameworks: vec![Framework {
+                    name: "actix".to_string(),
+                    category: FrameworkCategory::WebBackend,
+                }],
+                package_manager: Some("cargo".to_string()),
+                description: None,
+            }],
+        };
+
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![enter]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(matches!(result, Ok(ConfirmAction::Accept)));
+
+        // Every line pushed to the log pane must be free of ANSI escape codes.
+        let raw = r.logs[r.active_step].raw_lines();
+        assert!(
+            !raw.is_empty(),
+            "confirm_project_impl should push at least one log line"
+        );
+        for line in &raw {
+            assert!(
+                !line.contains('\x1b'),
+                "log line should not contain ANSI escape codes, got: {line:?}"
+            );
+        }
     }
 
     // ── render_to with hint/confirm tests ──
