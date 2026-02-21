@@ -82,10 +82,16 @@ const LABEL_WIDTH: usize = 10;
 /// ASCII-only characters and right-aligns labels so values start at the same column.
 pub fn format_project_summary_plain(analysis: &RepoAnalysis) -> String {
     let header = if analysis.is_monorepo {
-        format!(
-            "* Monorepo detected -- {} projects",
-            analysis.projects.len()
-        )
+        match &analysis.workspace_type {
+            Some(wt) => format!(
+                "* {wt} monorepo detected -- {} projects",
+                analysis.projects.len()
+            ),
+            None => format!(
+                "* Monorepo detected -- {} projects",
+                analysis.projects.len()
+            ),
+        }
     } else {
         "* Single project detected".to_string()
     };
@@ -171,10 +177,16 @@ pub fn format_project_summary(analysis: &RepoAnalysis, _width: usize) -> String 
     let diamond = theme::hint(&theme::DIAMOND);
 
     let header = if analysis.is_monorepo {
-        format!(
-            "{diamond} Monorepo detected \u{2014} {} projects",
-            analysis.projects.len()
-        )
+        match &analysis.workspace_type {
+            Some(wt) => format!(
+                "{diamond} {wt} monorepo detected \u{2014} {} projects",
+                analysis.projects.len()
+            ),
+            None => format!(
+                "{diamond} Monorepo detected \u{2014} {} projects",
+                analysis.projects.len()
+            ),
+        }
     } else {
         format!("{diamond} Single project detected")
     };
@@ -229,6 +241,7 @@ mod tests {
     fn make_monorepo_analysis() -> RepoAnalysis {
         RepoAnalysis {
             is_monorepo: true,
+            workspace_type: Some(crate::analysis::types::WorkspaceType::Pnpm),
             projects: vec![
                 Project {
                     path: "apps/web".to_string(),
@@ -269,6 +282,7 @@ mod tests {
     fn make_single_project_analysis() -> RepoAnalysis {
         RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![Project {
                 path: ".".to_string(),
                 name: "my-cli".to_string(),
@@ -288,6 +302,7 @@ mod tests {
     fn make_empty_analysis() -> RepoAnalysis {
         RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![],
         }
     }
@@ -306,7 +321,7 @@ mod tests {
         let plain = strip(&output);
 
         assert!(
-            plain.contains("Monorepo detected"),
+            plain.contains("pnpm monorepo detected"),
             "expected monorepo header in: {plain}"
         );
         assert!(
@@ -435,6 +450,7 @@ mod tests {
     fn format_summary_project_without_optional_fields() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![Project {
                 path: ".".to_string(),
                 name: "bare".to_string(),
@@ -760,6 +776,7 @@ mod tests {
     fn format_summary_strips_ansi_from_project_name() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![Project {
                 path: ".".to_string(),
                 name: "\x1b[31mINJECTED\x1b[0m".to_string(),
@@ -789,6 +806,7 @@ mod tests {
         // Use a monorepo so the path is shown in the output (single-project format omits the path)
         let analysis = RepoAnalysis {
             is_monorepo: true,
+            workspace_type: None,
             projects: vec![Project {
                 path: "\x1b[32mPATH_INJECT\x1b[0m".to_string(),
                 name: "safe-name".to_string(),
@@ -883,7 +901,7 @@ mod tests {
     fn format_summary_plain_monorepo() {
         let analysis = make_monorepo_analysis();
         let output = format_project_summary_plain(&analysis);
-        assert!(output.contains("* Monorepo detected -- 2 projects"));
+        assert!(output.contains("* pnpm monorepo detected -- 2 projects"));
         assert!(output.contains("Web App"));
         assert!(output.contains("API Service"));
         assert!(output.contains("apps/web"));
@@ -929,6 +947,7 @@ mod tests {
     fn format_summary_plain_no_optional_fields() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![Project {
                 path: ".".to_string(),
                 name: "bare".to_string(),
@@ -951,6 +970,7 @@ mod tests {
     fn format_summary_plain_strips_ansi_injection() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![Project {
                 path: ".".to_string(),
                 name: "\x1b[31mINJECTED\x1b[0m".to_string(),

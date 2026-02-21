@@ -234,7 +234,9 @@ pub fn build_match_request(analysis: &RepoAnalysis, config: &Config) -> MatchReq
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::types::{Framework, FrameworkCategory, Language, Project, RepoAnalysis};
+    use crate::analysis::types::{
+        Framework, FrameworkCategory, Language, Project, RepoAnalysis, WorkspaceType,
+    };
 
     /// Helper: create a minimal project with the given languages and frameworks.
     fn make_project(
@@ -259,6 +261,7 @@ mod tests {
     fn test_monorepo_three_projects() {
         let analysis = RepoAnalysis {
             is_monorepo: true,
+            workspace_type: Some(WorkspaceType::Pnpm),
             projects: vec![
                 make_project("apps/web", "web", vec![Language::TypeScript], vec![]),
                 make_project("apps/api", "api", vec![Language::Rust], vec![]),
@@ -274,6 +277,7 @@ mod tests {
     fn test_config_with_include_categories() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![make_project(".", "app", vec![Language::Rust], vec![])],
         };
 
@@ -295,6 +299,7 @@ mod tests {
     fn test_config_with_max_per_framework() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![make_project(".", "app", vec![Language::Rust], vec![])],
         };
         let config = Config {
@@ -311,6 +316,7 @@ mod tests {
     fn test_default_config_options_none() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![make_project(".", "app", vec![Language::Rust], vec![])],
         };
 
@@ -322,6 +328,7 @@ mod tests {
     fn test_language_typescript_serializes_correctly() {
         let analysis = RepoAnalysis {
             is_monorepo: false,
+            workspace_type: None,
             projects: vec![make_project(
                 ".",
                 "app",
