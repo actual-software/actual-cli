@@ -22,8 +22,11 @@
 mod error;
 mod keys;
 mod pty;
+mod screen;
 mod session;
 
 pub use error::TuiTestError;
 pub use keys::Key;
+pub use screen::ScreenSnapshot;
 pub use session::{TuiSession, TuiSessionBuilder};
+pub use vt100;
