@@ -164,7 +164,7 @@ pub fn find_codex_binary() -> Result<PathBuf, ActualError> {
 
 /// Convert an I/O error from subprocess operations into an `ActualError`.
 fn io_err(context: &str, e: std::io::Error) -> ActualError {
-    ActualError::ClaudeSubprocessFailed {
+    ActualError::RunnerFailed {
         message: format!("{context}: {e}"),
         stderr: String::new(),
     }
@@ -271,21 +271,20 @@ async fn run_codex_subprocess(
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        return Err(ActualError::ClaudeSubprocessFailed {
+        return Err(ActualError::RunnerFailed {
             message: format!("Codex CLI exited with code {code}"),
             stderr: stderr_text,
         });
     }
 
     // Read the agent's final message from the output file.
-    let raw =
-        std::fs::read_to_string(output_path).map_err(|e| ActualError::ClaudeSubprocessFailed {
-            message: format!(
-                "Failed to read Codex output file {}: {e}",
-                output_path.display()
-            ),
-            stderr: String::new(),
-        })?;
+    let raw = std::fs::read_to_string(output_path).map_err(|e| ActualError::RunnerFailed {
+        message: format!(
+            "Failed to read Codex output file {}: {e}",
+            output_path.display()
+        ),
+        stderr: String::new(),
+    })?;
 
     // Codex CLI exits 0 even when the model is unsupported or the request
     // fails (e.g. ChatGPT account limitations). In that case the output
@@ -299,7 +298,7 @@ async fn run_codex_subprocess(
         } else {
             "Codex CLI produced no output (output file is empty)".to_string()
         };
-        return Err(ActualError::ClaudeSubprocessFailed {
+        return Err(ActualError::RunnerFailed {
             message,
             stderr: stderr_text,
         });
@@ -420,17 +419,17 @@ mod tests {
     use super::*;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
-    /// Extract `ClaudeSubprocessFailed` fields from an `ActualError`, panicking on mismatch.
+    /// Extract `RunnerFailed` fields from an `ActualError`, panicking on mismatch.
     #[rustfmt::skip]
     fn subprocess_failed(e: ActualError) -> (String, String) {
-        let ActualError::ClaudeSubprocessFailed { message, stderr } = e else { unreachable!() };
+        let ActualError::RunnerFailed { message, stderr } = e else { unreachable!() };
         (message, stderr)
     }
 
-    /// Extract `ClaudeTimeout` seconds from an `ActualError`, panicking on mismatch.
+    /// Extract `RunnerTimeout` seconds from an `ActualError`, panicking on mismatch.
     #[rustfmt::skip]
     fn timeout_seconds(e: ActualError) -> u64 {
-        let ActualError::ClaudeTimeout { seconds } = e else { unreachable!() };
+        let ActualError::RunnerTimeout { seconds } = e else { unreachable!() };
         seconds
     }
 
@@ -495,7 +494,7 @@ echo '{}' > "$OUTPUT_FILE"
         assert_eq!(result.summary.total_input, 0);
     }
 
-    // ---- Test 2: non-zero exit maps to ClaudeSubprocessFailed ----
+    // ---- Test 2: non-zero exit maps to RunnerFailed ----
 
     #[tokio::test]
     #[cfg(unix)]

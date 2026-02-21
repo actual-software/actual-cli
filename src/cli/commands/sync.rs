@@ -535,7 +535,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
                 // Gap 1: surface subprocess stderr directly in the TUI log pane
                 // so the user sees Claude Code diagnostics (quota errors, auth
                 // failures, rate limits, etc.) rather than just the exit-code summary.
-                if let crate::error::ActualError::ClaudeSubprocessFailed { stderr, .. } = &e {
+                if let crate::error::ActualError::RunnerFailed { stderr, .. } = &e {
                     if !stderr.is_empty() {
                         pipeline.println("  Subprocess output:");
                         for line in console::strip_ansi_codes(stderr).lines() {
@@ -5332,7 +5332,7 @@ mod tests {
 
     // ── Gap 1: subprocess stderr is surfaced in the TUI log pane ──
 
-    /// A runner that immediately returns `ClaudeSubprocessFailed` with a
+    /// A runner that immediately returns `RunnerFailed` with a
     /// non-empty stderr so we can verify the stderr-surfacing branch in
     /// `run_sync` (lines 521-527).
     struct FailingRunner {
@@ -5347,14 +5347,14 @@ mod tests {
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
         ) -> Result<TailoringOutput, ActualError> {
-            Err(ActualError::ClaudeSubprocessFailed {
+            Err(ActualError::RunnerFailed {
                 message: "subprocess exited with code 1".to_string(),
                 stderr: self.stderr.clone(),
             })
         }
     }
 
-    /// Verify that when tailoring fails with `ClaudeSubprocessFailed` and
+    /// Verify that when tailoring fails with `RunnerFailed` and
     /// non-empty stderr, `run_sync` returns `Err` and the stderr branch is
     /// exercised (Gap 1 coverage).
     #[test]
@@ -5396,8 +5396,8 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert!(
-            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
-            "expected ClaudeSubprocessFailed error, got: {err:?}"
+            matches!(err, ActualError::RunnerFailed { .. }),
+            "expected RunnerFailed error, got: {err:?}"
         );
     }
 
@@ -5438,8 +5438,8 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert!(
-            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
-            "expected ClaudeSubprocessFailed, got: {err:?}"
+            matches!(err, ActualError::RunnerFailed { .. }),
+            "expected RunnerFailed, got: {err:?}"
         );
     }
 

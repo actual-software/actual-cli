@@ -82,7 +82,7 @@ pub async fn invoke_tailoring<R: TailoringRunner>(
         .await
     {
         Ok(output) => validate_and_filter_output(output, &valid_ids, format),
-        Err(ActualError::ClaudeOutputParse(_)) => {
+        Err(ActualError::RunnerOutputParse(_)) => {
             // Retry once on JSON parse failure
             let output = runner
                 .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
@@ -653,12 +653,11 @@ mod tests {
     #[tokio::test]
     async fn test_non_parse_error_not_retried() {
         let adrs = vec![make_adr("adr-001")];
-        let runner = MockTailoringRunner::new(vec![MockResponse::Error(
-            ActualError::ClaudeSubprocessFailed {
+        let runner =
+            MockTailoringRunner::new(vec![MockResponse::Error(ActualError::RunnerFailed {
                 message: "process crashed".to_string(),
                 stderr: "segfault".to_string(),
-            },
-        )]);
+            })]);
 
         let result = invoke_tailoring(
             &runner,
@@ -673,7 +672,7 @@ mod tests {
         .await;
 
         let err = result.unwrap_err();
-        assert!(matches!(err, ActualError::ClaudeSubprocessFailed { .. }));
+        assert!(matches!(err, ActualError::RunnerFailed { .. }));
         assert_eq!(runner.call_count.load(Ordering::SeqCst), 1);
     }
 
