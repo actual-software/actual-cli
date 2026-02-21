@@ -96,6 +96,8 @@ pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualErr
 
         // Parse manifests for dependencies
         let deps = parse_dependencies(&project_dir);
+        let dep_count = deps.dependencies.len();
+        let dev_dep_count = deps.dev_dependencies.len();
 
         // Detect frameworks from deps + config files.
         // Note: detect_frameworks internally calls detect_config_frameworks
@@ -115,6 +117,8 @@ pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualErr
             frameworks,
             package_manager,
             description,
+            dep_count,
+            dev_dep_count,
         });
     }
 
@@ -520,6 +524,8 @@ version = "0.1.0"
             frameworks: vec![],
             package_manager: None,
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let result = assemble_analysis(false, vec![project], dir.path());
         let analysis = result.unwrap();
@@ -538,6 +544,8 @@ version = "0.1.0"
             frameworks: vec![],
             package_manager: None,
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let result = assemble_analysis(true, vec![project], dir.path());
         let analysis = result.unwrap();

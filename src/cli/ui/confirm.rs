@@ -60,6 +60,16 @@ fn format_metadata_lines(project: &Project) -> Vec<String> {
         lines.push(format!("    {}    {}", theme::muted("Manager:"), value));
     }
 
+    let total_deps = project.dep_count + project.dev_dep_count;
+    if total_deps > 0 {
+        lines.push(format!(
+            "    {}       {} prod, {} dev",
+            theme::muted("Deps:"),
+            project.dep_count,
+            project.dev_dep_count,
+        ));
+    }
+
     lines
 }
 
@@ -134,6 +144,17 @@ fn format_metadata_lines_plain(project: &Project) -> Vec<String> {
             "    {:>width$}  {}",
             "Manager:",
             value,
+            width = LABEL_WIDTH,
+        ));
+    }
+
+    let total_deps = project.dep_count + project.dev_dep_count;
+    if total_deps > 0 {
+        lines.push(format!(
+            "    {:>width$}  {} prod, {} dev",
+            "Deps:",
+            project.dep_count,
+            project.dev_dep_count,
             width = LABEL_WIDTH,
         ));
     }
@@ -219,6 +240,8 @@ mod tests {
                     }],
                     package_manager: Some("npm".to_string()),
                     description: None,
+                    dep_count: 0,
+                    dev_dep_count: 0,
                 },
                 Project {
                     path: "services/api".to_string(),
@@ -236,6 +259,8 @@ mod tests {
                     ],
                     package_manager: Some("cargo".to_string()),
                     description: Some("Backend API".to_string()),
+                    dep_count: 0,
+                    dev_dep_count: 0,
                 },
             ],
         }
@@ -254,6 +279,8 @@ mod tests {
                 }],
                 package_manager: Some("cargo".to_string()),
                 description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
             }],
         }
     }
@@ -415,6 +442,8 @@ mod tests {
                 frameworks: vec![],
                 package_manager: None,
                 description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
             }],
         };
         let output = format_project_summary(&analysis, 80);
@@ -477,6 +506,8 @@ mod tests {
             }],
             package_manager: Some("cargo".to_string()),
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 3, "expected 3 lines, got: {lines:?}");
@@ -506,6 +537,8 @@ mod tests {
             frameworks: vec![],
             package_manager: None,
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 1, "expected 1 line, got: {lines:?}");
@@ -525,6 +558,8 @@ mod tests {
             frameworks: vec![],
             package_manager: None,
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let lines = format_metadata_lines(&project);
         assert!(lines.is_empty(), "expected empty vec, got: {lines:?}");
@@ -539,6 +574,8 @@ mod tests {
             frameworks: vec![],
             package_manager: Some("npm".to_string()),
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 2, "expected 2 lines, got: {lines:?}");
@@ -563,6 +600,8 @@ mod tests {
             frameworks: vec![],
             package_manager: Some("npm".to_string()),
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 1, "expected 1 line, got: {lines:?}");
@@ -591,6 +630,8 @@ mod tests {
             ],
             package_manager: None,
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 2, "expected 2 lines, got: {lines:?}");
@@ -726,6 +767,8 @@ mod tests {
                 frameworks: vec![],
                 package_manager: None,
                 description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
             }],
         };
         let output = format_project_summary(&analysis, 80);
@@ -753,6 +796,8 @@ mod tests {
                 frameworks: vec![],
                 package_manager: None,
                 description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
             }],
         };
         let output = format_project_summary(&analysis, 80);
@@ -779,6 +824,8 @@ mod tests {
             }],
             package_manager: None,
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let lines = format_metadata_lines(&project);
         let joined = lines.join("\n");
@@ -801,6 +848,8 @@ mod tests {
             frameworks: vec![],
             package_manager: Some("\x1b[33mINJECT_PM\x1b[0m".to_string()),
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let lines = format_metadata_lines(&project);
         let joined = lines.join("\n");
@@ -887,6 +936,8 @@ mod tests {
                 frameworks: vec![],
                 package_manager: None,
                 description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
             }],
         };
         let output = format_project_summary_plain(&analysis);
@@ -907,6 +958,8 @@ mod tests {
                 frameworks: vec![],
                 package_manager: None,
                 description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
             }],
         };
         let output = format_project_summary_plain(&analysis);
@@ -926,12 +979,137 @@ mod tests {
             }],
             package_manager: Some("cargo".to_string()),
             description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
         };
         let lines = format_metadata_lines_plain(&project);
         assert_eq!(lines.len(), 3);
         assert!(lines[0].contains("Languages:") && lines[0].contains("rust"));
         assert!(lines[1].contains("Packages:") && lines[1].contains("actix-web"));
         assert!(lines[2].contains("Manager:") && lines[2].contains("cargo"));
+    }
+
+    // ── Deps display tests ──
+
+    #[test]
+    fn format_metadata_shows_deps_when_nonzero() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![Language::Rust],
+            frameworks: vec![],
+            package_manager: None,
+            description: None,
+            dep_count: 12,
+            dev_dep_count: 8,
+        };
+        let lines = format_metadata_lines(&project);
+        assert_eq!(lines.len(), 2, "expected Languages + Deps, got: {lines:?}");
+        let plain = strip(&lines[1]);
+        assert!(
+            plain.contains("Deps:") && plain.contains("12 prod") && plain.contains("8 dev"),
+            "expected Deps: line with counts, got: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_hides_deps_when_zero() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![Language::Rust],
+            frameworks: vec![],
+            package_manager: None,
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+        };
+        let lines = format_metadata_lines(&project);
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected only Languages (no Deps), got: {lines:?}"
+        );
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("Deps:"),
+            "Deps: should not appear when counts are zero, got: {joined}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_plain_shows_deps_when_nonzero() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![Language::Rust],
+            frameworks: vec![],
+            package_manager: None,
+            description: None,
+            dep_count: 5,
+            dev_dep_count: 3,
+        };
+        let lines = format_metadata_lines_plain(&project);
+        assert_eq!(lines.len(), 2, "expected Languages + Deps, got: {lines:?}");
+        assert!(
+            lines[1].contains("Deps:") && lines[1].contains("5 prod") && lines[1].contains("3 dev"),
+            "expected Deps: line with counts, got: {}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn format_metadata_plain_hides_deps_when_zero() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![Language::Rust],
+            frameworks: vec![],
+            package_manager: None,
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+        };
+        let lines = format_metadata_lines_plain(&project);
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected only Languages (no Deps), got: {lines:?}"
+        );
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("Deps:"),
+            "Deps: should not appear when counts are zero, got: {joined}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_plain_deps_right_aligned() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![Language::Rust],
+            frameworks: vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+            }],
+            package_manager: Some("cargo".to_string()),
+            description: None,
+            dep_count: 10,
+            dev_dep_count: 2,
+        };
+        let lines = format_metadata_lines_plain(&project);
+        // With deps, we should have Languages, Packages, Manager, Deps = 4 lines
+        assert_eq!(lines.len(), 4, "expected 4 lines, got: {lines:?}");
+        // Verify all colons align
+        let colon_positions: Vec<usize> = lines.iter().map(|l| l.find(':').unwrap()).collect();
+        let first = colon_positions[0];
+        for (i, pos) in colon_positions.iter().enumerate() {
+            assert_eq!(
+                *pos, first,
+                "colon on line {i} at column {pos}, expected {first}"
+            );
+        }
     }
 
     // ── MockTerminal trait coverage ──

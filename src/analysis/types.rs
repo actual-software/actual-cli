@@ -18,6 +18,10 @@ pub struct Project {
     pub frameworks: Vec<Framework>,
     pub package_manager: Option<String>,
     pub description: Option<String>,
+    #[serde(default)]
+    pub dep_count: usize,
+    #[serde(default)]
+    pub dev_dep_count: usize,
 }
 
 /// Programming language detected in a project.
@@ -289,6 +293,8 @@ mod tests {
                 ],
                 package_manager: Some("cargo".to_string()),
                 description: Some("A CLI tool".to_string()),
+                dep_count: 5,
+                dev_dep_count: 3,
             }],
         };
 
@@ -574,5 +580,54 @@ mod tests {
             let deserialized: FrameworkCategory = serde_json::from_str(&json).unwrap();
             assert_eq!(&deserialized, cat, "Round-trip failed for {json}");
         }
+    }
+
+    // ── dep_count / dev_dep_count backward compat tests ──
+
+    #[test]
+    fn deserialize_project_without_dep_counts_defaults_to_zero() {
+        // Simulates cached data from before dep_count fields existed.
+        let json = r#"{
+            "path": ".",
+            "name": "legacy",
+            "languages": ["rust"],
+            "frameworks": []
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.dep_count, 0);
+        assert_eq!(project.dev_dep_count, 0);
+    }
+
+    #[test]
+    fn deserialize_project_with_dep_counts() {
+        let json = r#"{
+            "path": ".",
+            "name": "modern",
+            "languages": ["rust"],
+            "frameworks": [],
+            "dep_count": 15,
+            "dev_dep_count": 7
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(project.dep_count, 15);
+        assert_eq!(project.dev_dep_count, 7);
+    }
+
+    #[test]
+    fn dep_counts_round_trip() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![Language::Rust],
+            frameworks: vec![],
+            package_manager: None,
+            description: None,
+            dep_count: 42,
+            dev_dep_count: 13,
+        };
+        let json = serde_json::to_string(&project).unwrap();
+        let deserialized: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.dep_count, 42);
+        assert_eq!(deserialized.dev_dep_count, 13);
     }
 }

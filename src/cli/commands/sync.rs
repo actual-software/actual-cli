@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use crate::analysis::cache::{get_git_branch, get_git_head, run_analysis_cached};
+use crate::analysis::cache::{get_git_branch, get_git_head, run_analysis_cached, CacheStatus};
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
@@ -247,9 +247,18 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     // 3. Run analysis (cached if in a git repo)
     pipeline.start(SyncPhase::Analysis, "Analyzing repository...");
     let analysis = match run_analysis_cached(root_dir, cfg_path, args.force) {
-        Ok(a) => {
-            pipeline.success(SyncPhase::Analysis, "Analysis complete");
-            a
+        Ok(outcome) => {
+            let cache_label = match outcome.cache_status {
+                CacheStatus::Hit => "(cached)",
+                CacheStatus::Miss => "(fresh)",
+                CacheStatus::ForcedMiss => "(forced refresh)",
+                CacheStatus::Uncacheable => "(no cache)",
+            };
+            pipeline.success(
+                SyncPhase::Analysis,
+                &format!("Analysis complete {cache_label}"),
+            );
+            outcome.analysis
         }
         Err(e) => {
             pipeline.error(SyncPhase::Analysis, &format!("Analysis failed: {e}"));
@@ -1568,6 +1577,8 @@ mod tests {
                     }],
                     package_manager: Some("npm".to_string()),
                     description: None,
+                    dep_count: 0,
+                    dev_dep_count: 0,
                 },
                 Project {
                     path: "services/api".to_string(),
@@ -1576,6 +1587,8 @@ mod tests {
                     frameworks: vec![],
                     package_manager: Some("cargo".to_string()),
                     description: None,
+                    dep_count: 0,
+                    dev_dep_count: 0,
                 },
             ],
         }
