@@ -42,6 +42,13 @@ impl LogPane {
         self.buffer.is_empty()
     }
 
+    /// Returns all raw buffer lines without wrapping or padding.
+    /// Useful in tests for asserting log content without width/height artefacts.
+    #[cfg(test)]
+    pub fn raw_lines(&self) -> Vec<&str> {
+        self.buffer.iter().map(String::as_str).collect()
+    }
+
     /// Render a window of `height` lines from the buffer, each soft-wrapped to
     /// `width` visible chars.  Returns a Vec of strings (top to bottom).
     ///
@@ -67,7 +74,28 @@ impl LogPane {
         let clamped = scroll_offset.min(total.saturating_sub(1));
         let bottom = total.saturating_sub(clamped);
         let start = bottom.saturating_sub(height);
-        display_lines.into_iter().skip(start).take(height).collect()
+        let mut result: Vec<String> = display_lines.into_iter().skip(start).take(height).collect();
+        // Pad to the full height so the Paragraph widget writes every row in
+        // the inner area.  Without this, rows below the last content line are
+        // not touched by Paragraph, and stale text from a previous frame's
+        // double-buffer can bleed through when switching between steps.
+        //
+        // Each line is also right-padded to the full width so that Paragraph
+        // writes a space character into every cell of every row.  This makes
+        // the output pane immune to artifacts regardless of how the terminal
+        // or ratatui's diff engine handles untouched cells.
+        let pad_line = " ".repeat(width);
+        result.resize(height, pad_line.clone());
+        for line in &mut result {
+            let vis = console::measure_text_width(line);
+            if vis < width {
+                // Right-pad with spaces to fill the row.
+                for _ in 0..(width - vis) {
+                    line.push(' ');
+                }
+            }
+        }
+        result
     }
 
     /// Maximum scroll offset: how many lines the user can scroll up before the
@@ -247,8 +275,8 @@ mod tests {
         // Buffer should only hold 2 items, oldest ("first") dropped
         assert_eq!(pane.len(), 2);
         let rendered = pane.render_to_string(10, 100, 0);
-        assert_eq!(rendered[0], "second");
-        assert_eq!(rendered[1], "third");
+        assert!(rendered[0].starts_with("second"));
+        assert!(rendered[1].starts_with("third"));
     }
 
     #[test]
@@ -257,9 +285,14 @@ mod tests {
         pane.push("line 1".to_string());
         pane.push("line 2".to_string());
         let result = pane.render_to_string(10, 100, 0);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], "line 1");
-        assert_eq!(result[1], "line 2");
+        // Result is padded to the full height (10 lines).
+        assert_eq!(result.len(), 10);
+        assert!(result[0].starts_with("line 1"));
+        assert!(result[1].starts_with("line 2"));
+        // Remaining lines are blank (spaces only).
+        for line in &result[2..] {
+            assert_eq!(line.trim(), "");
+        }
     }
 
     #[test]
@@ -271,9 +304,9 @@ mod tests {
         // Ask for only 3 lines — should get last 3
         let result = pane.render_to_string(3, 100, 0);
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0], "line 7");
-        assert_eq!(result[1], "line 8");
-        assert_eq!(result[2], "line 9");
+        assert!(result[0].starts_with("line 7"));
+        assert!(result[1].starts_with("line 8"));
+        assert!(result[2].starts_with("line 9"));
     }
 
     // ── wrap_line tests ──
@@ -357,11 +390,12 @@ mod tests {
         let mut pane = LogPane::new();
         pane.push("hello world".to_string());
         let result = pane.render_to_string(10, 5, 0);
-        // "hello world" at width=5 should produce 2 display lines
-        assert_eq!(result.len(), 2);
+        // "hello world" at width=5 wraps to 2 content lines, padded to 10 total.
+        assert_eq!(result.len(), 10);
+        // Every line should be exactly 5 visible chars wide (right-padded).
         for part in &result {
             let w = console::measure_text_width(part);
-            assert!(w <= 5);
+            assert_eq!(w, 5, "line {:?} should be padded to width 5", part);
         }
     }
 
@@ -383,8 +417,10 @@ mod tests {
         let mut pane = LogPane::new();
         pane.push("hi".to_string());
         let result = pane.render_to_string(10, 100, 0);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0], "hi");
+        // Padded to full height.
+        assert_eq!(result.len(), 10);
+        assert!(result[0].starts_with("hi"));
+        assert_eq!(console::measure_text_width(&result[0]), 100);
     }
 
     // ── max_scroll_wrapped tests ──
@@ -429,7 +465,8 @@ mod tests {
             assert!(!line.contains('…'), "unexpected ellipsis in: {:?}", line);
         }
         // Both halves of the original line must appear across the display lines
-        let joined = result.join(" ");
+        let trimmed: Vec<&str> = result.iter().map(|l| l.trim_end()).collect();
+        let joined = trimmed.join(" ");
         assert!(joined.contains("hello"), "missing 'hello' in: {:?}", result);
         assert!(joined.contains("world"), "missing 'world' in: {:?}", result);
     }
@@ -440,7 +477,8 @@ mod tests {
         let mut pane = LogPane::new();
         pane.push("hello".to_string());
         let result = pane.render_to_string(10, 10, 0);
-        assert_eq!(result[0], "hello");
+        assert!(result[0].starts_with("hello"));
+        assert_eq!(console::measure_text_width(&result[0]), 10);
     }
 
     #[test]
@@ -465,6 +503,50 @@ mod tests {
         assert!(result2.len() > 1 || console::measure_text_width(&result2[0]) <= 3);
         for part in &result2 {
             assert!(!part.contains('…'), "unexpected ellipsis in: {:?}", part);
+        }
+    }
+
+    // ── padding tests (artifact prevention) ──
+
+    #[test]
+    fn test_render_pads_to_full_height() {
+        let mut pane = LogPane::new();
+        pane.push("only line".to_string());
+        let result = pane.render_to_string(5, 20, 0);
+        assert_eq!(result.len(), 5, "should pad to requested height");
+    }
+
+    #[test]
+    fn test_render_pads_lines_to_full_width() {
+        let mut pane = LogPane::new();
+        pane.push("hi".to_string());
+        let result = pane.render_to_string(3, 10, 0);
+        for (i, line) in result.iter().enumerate() {
+            assert_eq!(
+                console::measure_text_width(line),
+                10,
+                "line {i} should be padded to width 10, got {:?}",
+                line
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_exact_width_line_not_over_padded() {
+        let mut pane = LogPane::new();
+        pane.push("abcde".to_string()); // exactly 5 chars
+        let result = pane.render_to_string(1, 5, 0);
+        assert_eq!(result[0], "abcde", "exact-width line should not grow");
+    }
+
+    #[test]
+    fn test_render_empty_buffer_pads_fully() {
+        let pane = LogPane::new();
+        let result = pane.render_to_string(4, 8, 0);
+        assert_eq!(result.len(), 4);
+        for line in &result {
+            assert_eq!(console::measure_text_width(line), 8);
+            assert_eq!(line.trim(), "");
         }
     }
 }
