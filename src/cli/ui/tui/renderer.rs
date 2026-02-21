@@ -119,6 +119,9 @@ impl<B: Backend + Send> TuiTerminal for TuiTerminalImpl<B> {
     }
 }
 
+/// Number of lines `append_confirm_lines` will push.
+const CONFIRM_LINES: usize = 3;
+
 fn append_confirm_lines(lines: &mut Vec<String>, cs: &ConfirmState) {
     lines.push(format!("  {}", cs.question));
     lines.push("  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string());
@@ -127,6 +130,12 @@ fn append_confirm_lines(lines: &mut Vec<String>, cs: &ConfirmState) {
         ConfirmFocus::Reject => ("[ Accept ]", "[>Reject<]"),
     };
     lines.push(format!("  {accept_label}   {reject_label}"));
+}
+
+/// Number of lines `append_file_select_lines` will push for `n` items.
+fn file_select_line_count(n: usize) -> usize {
+    // header + separator + n items + blank + hint
+    n + 4
 }
 
 fn append_file_select_lines(lines: &mut Vec<String>, fs: &FileSelectState) {
@@ -352,7 +361,23 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             // Reserve 2 lines for padding (top + bottom) inside the Output box.
             const OUTPUT_PADDING: usize = 2;
             let log_inner_height = h_chunks[1].height.saturating_sub(2) as usize;
-            let log_height = log_inner_height.saturating_sub(OUTPUT_PADDING);
+            // When a confirm/file-select overlay is active it appends extra
+            // lines after the log content.  Reduce the log window so the
+            // total (top-pad + log + overlay) fits inside `log_inner_height`.
+            //
+            // Without overlay: 1 (top pad) + log_height + 1 (bottom pad) = inner
+            // With confirm:    1 + log_height + 1 (blank) + CONFIRM_LINES  = inner
+            // With file-sel:   1 + log_height + 1 (blank) + file_sel_lines = inner
+            let overlay_extra = if ctx.confirm.is_some() {
+                // blank separator + CONFIRM_LINES, minus the 1-line bottom pad
+                // that would normally occupy that slot
+                CONFIRM_LINES // 3 extra lines beyond the normal bottom pad
+            } else if let Some(fs) = ctx.file_select {
+                file_select_line_count(fs.items.len()) // extra lines beyond normal bottom pad
+            } else {
+                0
+            };
+            let log_height = log_inner_height.saturating_sub(OUTPUT_PADDING + overlay_extra);
             let log_width = h_chunks[1].width.saturating_sub(2 + 2 * HORIZ_PAD as u16) as usize;
             let mut log_lines = ctx
                 .log
@@ -399,9 +424,18 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
 
             let log_inner_height = chunks[1].height as usize;
             let log_width = area.width as usize;
-            let mut log_lines =
-                ctx.log
-                    .render_to_string(log_inner_height, log_width, ctx.scroll_offset);
+            // Reserve space for overlay lines so they are not clipped.
+            let overlay_extra = if ctx.confirm.is_some() {
+                CONFIRM_LINES
+            } else if let Some(fs) = ctx.file_select {
+                file_select_line_count(fs.items.len())
+            } else {
+                0
+            };
+            let log_height = log_inner_height.saturating_sub(overlay_extra);
+            let mut log_lines = ctx
+                .log
+                .render_to_string(log_height, log_width, ctx.scroll_offset);
             if let Some(cs) = ctx.confirm {
                 append_confirm_lines(&mut log_lines, cs);
             } else if let Some(fs) = ctx.file_select {
