@@ -219,7 +219,7 @@ mod tests {
             .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
             .assert()
             .code(1)
-            .stderr(predicate::str::contains("subprocess failed"));
+            .stderr(predicate::str::contains("Runner failed"));
     }
 
     // ── Analysis error tests ────────────────────────────────────────────
@@ -266,7 +266,7 @@ mod tests {
             .args(["sync", "--force", "--api-url", &env.api_url])
             .assert()
             .code(1)
-            .stderr(predicate::str::contains("subprocess failed"));
+            .stderr(predicate::str::contains("Runner failed"));
     }
 
     #[test]
