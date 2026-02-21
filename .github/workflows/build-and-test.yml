@@ -1,11 +1,15 @@
-name: Test
+name: Build and Test
 
 on:
   pull_request:
     branches: [main]
   merge_group:
 
+env:
+  CARGO_INCREMENTAL: 0
+
 jobs:
+  # === Beads Sync (shared, runs once) ===
   sync-beads:
     name: Sync Beads
     if: github.event_name == 'pull_request'
@@ -16,12 +20,101 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - uses: poiley/bdgha@v2
         with:
           mode: sync
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+  # === Build (release binaries for x86_64 + aarch64) ===
+  build:
+    name: Build
+    needs: sync-beads
+    if: always() && needs.sync-beads.result != 'cancelled'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: actual-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/actual
+
+  # === Build fix-bead jobs ===
+  create-build-fix-bead:
+    name: Create Build Fix Bead
+    if: always() && needs.build.result == 'failure' && github.event_name == 'pull_request'
+    needs: [sync-beads, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: poiley/bdgha@v2
+        with:
+          mode: create
+          failure-type: build_error
+          failure-summary: "Build failed - check CI logs"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  cleanup-build-fix-beads:
+    name: Cleanup Build Fix Beads
+    if: always() && needs.build.result == 'success' && github.event_name == 'pull_request'
+    needs: [sync-beads, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: poiley/bdgha@v2
+        with:
+          mode: cleanup
+          failure-type: build_error
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # === Test (debug mode, unit + integration tests) ===
   test:
     name: Test
     needs: sync-beads
@@ -77,8 +170,9 @@ jobs:
           name: test-output
           path: test-output.txt
 
-  create-fix-bead:
-    name: Create Fix Bead
+  # === Test fix-bead jobs ===
+  create-test-fix-bead:
+    name: Create Test Fix Bead
     if: always() && needs.test.result == 'failure' && github.event_name == 'pull_request'
     needs: [sync-beads, test]
     runs-on: ubuntu-latest
@@ -89,12 +183,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Download test output
         uses: actions/download-artifact@v4
         with:
           name: test-output
-
       - uses: poiley/bdgha@v2
         with:
           mode: create
@@ -103,8 +195,8 @@ jobs:
           failure-details-file: test-output.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-  cleanup-fix-beads:
-    name: Cleanup Fix Beads
+  cleanup-test-fix-beads:
+    name: Cleanup Test Fix Beads
     if: always() && needs.test.result == 'success' && github.event_name == 'pull_request'
     needs: [sync-beads, test]
     runs-on: ubuntu-latest
@@ -115,41 +207,35 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - uses: poiley/bdgha@v2
         with:
           mode: cleanup
           failure-type: test_failure
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+  # === Live E2E (uses pre-built binary from build job) ===
   live-e2e:
     name: Live E2E
-    needs: [sync-beads, test]
-    if: always() && needs.sync-beads.result != 'cancelled' && needs.test.result == 'success' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    needs: [sync-beads, test, build]
+    if: >-
+      always()
+      && needs.sync-beads.result != 'cancelled'
+      && needs.test.result == 'success'
+      && needs.build.result == 'success'
+      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Download actual binary
+        uses: actions/download-artifact@v4
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-live-e2e-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-live-e2e-
-            ${{ runner.os }}-cargo-test-
+          name: actual-x86_64-unknown-linux-gnu
+          path: ./bin
 
-      - name: Build actual binary
-        run: cargo build --release
+      - name: Make binary executable
+        run: chmod +x ./bin/actual
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -171,7 +257,7 @@ jobs:
           ACTUAL_E2E_API_URL: https://api-service.api.staging.actual.ai
         shell: bash
         run: |
-          bash scripts/e2e.sh target/release/actual 2>&1 | tee e2e-output.txt
+          bash scripts/e2e.sh ./bin/actual 2>&1 | tee e2e-output.txt
           E2E_EXIT=${PIPESTATUS[0]}
           exit $E2E_EXIT
 
@@ -199,10 +285,11 @@ jobs:
           path: e2e-output.txt
           if-no-files-found: ignore
 
+  # === Live E2E fix-bead jobs ===
   create-live-e2e-fix-bead:
     name: Create Live E2E Fix Bead
     if: always() && needs.live-e2e.result == 'failure' && github.event_name == 'pull_request'
-    needs: [sync-beads, test, live-e2e]
+    needs: [sync-beads, build, test, live-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -211,19 +298,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Download E2E output
         uses: actions/download-artifact@v4
         with:
           name: e2e-output
         continue-on-error: true
-
       - name: Prepare failure details
         run: |
           if [[ ! -f e2e-output.txt ]]; then
             echo "E2E output not available (job may have failed before producing output)" > e2e-output.txt
           fi
-
       - uses: poiley/bdgha@v2
         with:
           mode: create
@@ -235,7 +319,7 @@ jobs:
   cleanup-live-e2e-fix-beads:
     name: Cleanup Live E2E Fix Beads
     if: always() && needs.live-e2e.result == 'success' && github.event_name == 'pull_request'
-    needs: [sync-beads, test, live-e2e]
+    needs: [sync-beads, build, test, live-e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -244,7 +328,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - uses: poiley/bdgha@v2
         with:
           mode: cleanup
