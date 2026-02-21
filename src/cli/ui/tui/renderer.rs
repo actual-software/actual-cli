@@ -1118,6 +1118,18 @@ impl TuiRenderer {
         }
     }
 
+    /// Adjusts the start time for the given phase forward by `paused` duration,
+    /// effectively excluding that duration from the elapsed time calculation.
+    ///
+    /// All elapsed calculations use `start.elapsed()` (i.e. `Instant::now() - start`).
+    /// By shifting `start` forward, the computed elapsed shrinks by `paused`.
+    pub fn adjust_start_for_pause(&mut self, phase: SyncPhase, paused: Duration) {
+        let idx = Self::phase_idx(phase);
+        if let Some(ref mut start) = self.starts[idx] {
+            *start += paused;
+        }
+    }
+
     /// Returns `true` when running in full TUI mode (crossterm raw mode).
     pub fn is_tui(&self) -> bool {
         matches!(self.mode, Mode::Tui(_))
@@ -1636,6 +1648,32 @@ mod tests {
         r.success(SyncPhase::Tailor, "done");
         // No start → elapsed should remain None
         assert!(r.steps.steps[3].elapsed.is_none());
+    }
+
+    // ── adjust_start_for_pause tests ──
+
+    #[test]
+    fn test_adjust_start_for_pause_reduces_elapsed() {
+        let mut r = TuiRenderer::new(false, true);
+        r.start(SyncPhase::Write, "writing...");
+        // Sleep briefly so there is measurable elapsed time.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let before = r.starts[4].unwrap().elapsed();
+        // Shift start forward by 20ms — elapsed should decrease by ~20ms.
+        r.adjust_start_for_pause(SyncPhase::Write, std::time::Duration::from_millis(20));
+        let after = r.starts[4].unwrap().elapsed();
+        assert!(
+            after < before,
+            "elapsed after adjustment ({after:?}) should be less than before ({before:?})"
+        );
+    }
+
+    #[test]
+    fn test_adjust_start_for_pause_no_start_is_noop() {
+        let mut r = TuiRenderer::new(false, true);
+        // No start() called — adjust should be a no-op without panic.
+        r.adjust_start_for_pause(SyncPhase::Write, std::time::Duration::from_millis(100));
+        assert!(r.starts[4].is_none());
     }
 
     // ── SIGWINCH/resize test ──
