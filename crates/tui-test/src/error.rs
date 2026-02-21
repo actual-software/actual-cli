@@ -14,4 +14,6 @@ pub enum TuiTestError {
     NotStarted,
     #[error("Screen buffer unavailable: {0}")]
     ScreenBufferUnavailable(String),
+    #[error("Render error: {0}")]
+    Render(String),
 }
