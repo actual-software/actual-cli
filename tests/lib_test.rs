@@ -424,3 +424,15 @@ fn test_run_sync_not_authenticated_with_fake_claude() {
         "sync with unauthenticated Claude should exit with code 2"
     );
 }
+
+#[test]
+fn test_cli_parse_models() {
+    let cli = Cli::parse_from(["actual", "models"]);
+    assert!(matches!(cli.command, Command::Models));
+}
+
+#[test]
+fn test_run_models() {
+    let cli = Cli::parse_from(["actual", "models"]);
+    assert_eq!(handle_result(run(cli)), 0);
+}
