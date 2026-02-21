@@ -12,7 +12,7 @@ use crate::api::retry::{with_retry, RetryConfig};
 use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::format_project_summary;
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
-use crate::cli::ui::header::AuthDisplay;
+use crate::cli::ui::header::{AuthDisplay, RunnerDisplay};
 use crate::cli::ui::progress::SyncPhase;
 use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
@@ -97,6 +97,9 @@ fn tilde_collapse(path: &Path, home_dir: Option<&std::path::PathBuf>) -> String 
 ///
 /// `auth_display` is pushed into the TUI log pane as part of the header bar
 /// that follows the banner.  Pass `None` in tests to skip the header.
+///
+/// `runner_display` shows the active runner and model in the Environment
+/// section, with an optional compatibility warning.  Pass `None` in tests.
 pub(crate) fn run_sync<R: TailoringRunner>(
     args: &SyncArgs,
     root_dir: &Path,
@@ -104,6 +107,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     term: &dyn TerminalIO,
     runner: &R,
     auth_display: Option<&AuthDisplay>,
+    runner_display: Option<&RunnerDisplay>,
 ) -> Result<(), ActualError> {
     // ── Phase 1: env check + analysis ──
 
@@ -156,6 +160,15 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         }
         None => {
             pipeline.println(&format!("  {:<9} - Status unknown", "Auth"));
+        }
+    }
+
+    // Runner + Model rows
+    if let Some(rd) = runner_display {
+        pipeline.println(&format!("  {:<9} {}", "Runner", rd.runner_name));
+        pipeline.println(&format!("  {:<9} {}", "Model", rd.model));
+        if let Some(ref warn) = rd.warning {
+            pipeline.println(&format!("  {:<9} {} {warn}", "", theme::WARN));
         }
     }
 
@@ -2173,6 +2186,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         assert!(result.is_ok(), "run_sync with --force should succeed");
         // Output (including "No files to write.") now goes through pipeline.println()
@@ -2192,6 +2206,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         );
         assert!(
@@ -2215,6 +2230,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2237,6 +2253,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2257,6 +2274,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         );
         assert!(
@@ -2279,6 +2297,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         );
         assert!(
@@ -2308,6 +2327,7 @@ mod tests {
             &term,
             &runner,
             Some(&auth),
+            None,
         );
         assert!(result.is_ok(), "authenticated auth_display should succeed");
     }
@@ -2331,6 +2351,7 @@ mod tests {
             &term,
             &runner,
             Some(&auth),
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2352,6 +2373,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         )
         .unwrap();
@@ -2391,6 +2413,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -2411,6 +2434,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         );
         assert!(
@@ -2526,6 +2550,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         assert!(matches!(result, Err(ActualError::ConfigError(_))));
     }
@@ -2585,6 +2610,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
 
         assert!(
@@ -2633,6 +2659,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         );
         assert!(
@@ -3476,6 +3503,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::ApiError(_))),
@@ -3533,6 +3561,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
@@ -3579,6 +3608,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
@@ -3617,7 +3647,7 @@ mod tests {
             runner: None,
             show_errors: false,
         };
-        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None);
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None, None);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
 
         // Verify rejections were cleared
@@ -3683,7 +3713,7 @@ mod tests {
             runner: None,
             show_errors: false,
         };
-        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None);
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None, None);
         // adr-001 is rejected, so no ADRs remain → "No files to write."
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
     }
@@ -3718,6 +3748,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         );
         assert!(result.is_err(), "expected tailoring to fail");
@@ -3758,6 +3789,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         );
         assert!(
@@ -4251,7 +4283,7 @@ mod tests {
             runner: None,
             show_errors: false,
         };
-        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None, None).unwrap();
 
         // Verify cache was stored
         let loaded = load_from(&cfg_path).unwrap();
@@ -4288,7 +4320,7 @@ mod tests {
 
         // Provide "y" for project confirmation and select all files
         let term2 = MockTerminal::new(vec!["y"]).with_selection(Some(vec![0]));
-        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None);
+        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None, None);
         assert!(
             result.is_ok(),
             "expected cache hit run to succeed: {result:?}"
@@ -4332,7 +4364,7 @@ mod tests {
             runner: None,
             show_errors: false,
         };
-        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None, None).unwrap();
 
         let loaded = load_from(&cfg_path).unwrap();
         let first_time = loaded.cached_tailoring.as_ref().unwrap().tailored_at;
@@ -4359,7 +4391,7 @@ mod tests {
             runner: None,
             show_errors: false,
         };
-        run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None).unwrap();
+        run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None, None).unwrap();
 
         // Cache should have been updated with a newer timestamp
         let loaded2 = load_from(&cfg_path).unwrap();
@@ -4434,7 +4466,7 @@ mod tests {
             runner: None,
             show_errors: false,
         };
-        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None, None).unwrap();
 
         // Verify that cache was stored and applicable == 0
         let loaded = load_from(&cfg_path).unwrap();
@@ -4467,7 +4499,7 @@ mod tests {
             runner: None,
             show_errors: false,
         };
-        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None);
+        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None, None);
         assert!(
             result.is_ok(),
             "expected cache-hit run with 0 applicable to succeed: {result:?}"
@@ -4524,7 +4556,7 @@ mod tests {
             runner: None,
             show_errors: false,
         };
-        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None).unwrap();
+        run_sync(&args, dir.path(), &cfg_path, &term, &runner, None, None).unwrap();
 
         // Verify that cache was stored and applicable > 0
         let loaded = load_from(&cfg_path).unwrap();
@@ -4559,7 +4591,7 @@ mod tests {
             runner: None,
             show_errors: false,
         };
-        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None);
+        let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None, None);
         assert!(
             result.is_ok(),
             "expected cache-hit run with files to succeed: {result:?}"
@@ -5300,6 +5332,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         assert!(
             result.is_err(),
@@ -5345,6 +5378,7 @@ mod tests {
             &term,
             &runner,
             None,
+            None,
         );
         let err = result.unwrap_err();
         assert!(
@@ -5386,6 +5420,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
@@ -5572,6 +5607,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
         );
         assert!(
