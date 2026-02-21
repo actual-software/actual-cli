@@ -106,15 +106,23 @@ impl CodexCliRunner {
 ///
 /// Returns `Err(ActualError::CodexNotAuthenticated)` if none are found.
 pub fn check_codex_auth(api_key: Option<&str>) -> Result<(), ActualError> {
+    let auth_path = dirs::home_dir().map(|h| h.join(".codex").join("auth.json"));
+    check_codex_auth_inner(api_key, auth_path.as_deref())
+}
+
+/// Inner implementation that accepts an explicit auth file path for testability.
+fn check_codex_auth_inner(
+    api_key: Option<&str>,
+    auth_path: Option<&std::path::Path>,
+) -> Result<(), ActualError> {
     // If an API key was already resolved (from env var or config), auth is good.
     if api_key.is_some_and(|k| !k.is_empty()) {
         return Ok(());
     }
 
-    // Check if codex login has been run (~/.codex/auth.json exists).
-    if let Some(home) = dirs::home_dir() {
-        let auth_path = home.join(".codex").join("auth.json");
-        if auth_path.is_file() {
+    // Check if codex login has been run (auth file exists).
+    if let Some(path) = auth_path {
+        if path.is_file() {
             return Ok(());
         }
     }
@@ -1132,28 +1140,59 @@ echo "" > "$OUTPUT_FILE"
 
     #[test]
     fn test_check_codex_auth_with_api_key() {
-        let result = check_codex_auth(Some("sk-test-key"));
-        assert!(result.is_ok());
+        // Valid API key should always succeed, regardless of auth file.
+        assert!(check_codex_auth_inner(Some("sk-test-key"), None).is_ok());
     }
 
     #[test]
-    fn test_check_codex_auth_with_empty_api_key_no_login() {
-        // Empty API key should NOT count as valid auth.
-        // Without ~/.codex/auth.json on this system, this should fail.
-        // We can't guarantee auth.json doesn't exist on the test machine,
-        // so we test the "has key" and "no key" paths separately.
-        let result = check_codex_auth(Some(""));
-        // Result depends on whether ~/.codex/auth.json exists on test machine.
-        // This test primarily verifies empty string doesn't short-circuit to Ok.
-        // The actual auth.json check is tested below with tempdir.
-        let _ = result;
+    fn test_check_codex_auth_empty_key_no_auth_file() {
+        // Empty API key + no auth file → error.
+        let result = check_codex_auth_inner(Some(""), None);
+        assert!(matches!(result, Err(ActualError::CodexNotAuthenticated)));
     }
 
     #[test]
-    fn test_check_codex_auth_none_api_key_no_login() {
-        // None API key without codex login — depends on test machine state.
-        let result = check_codex_auth(None);
-        let _ = result;
+    fn test_check_codex_auth_none_key_no_auth_file() {
+        // None API key + no auth file → error.
+        let result = check_codex_auth_inner(None, None);
+        assert!(matches!(result, Err(ActualError::CodexNotAuthenticated)));
+    }
+
+    #[test]
+    fn test_check_codex_auth_none_key_nonexistent_auth_file() {
+        // Auth file path provided but file doesn't exist → error.
+        let result =
+            check_codex_auth_inner(None, Some(std::path::Path::new("/nonexistent/auth.json")));
+        assert!(matches!(result, Err(ActualError::CodexNotAuthenticated)));
+    }
+
+    #[test]
+    fn test_check_codex_auth_none_key_with_auth_file() {
+        // Auth file exists → success even without API key.
+        let dir = tempfile::tempdir().unwrap();
+        let auth_file = dir.path().join("auth.json");
+        std::fs::write(&auth_file, "{}").unwrap();
+        assert!(check_codex_auth_inner(None, Some(&auth_file)).is_ok());
+    }
+
+    #[test]
+    fn test_check_codex_auth_empty_key_with_auth_file() {
+        // Empty API key but auth file exists → success via auth file.
+        let dir = tempfile::tempdir().unwrap();
+        let auth_file = dir.path().join("auth.json");
+        std::fs::write(&auth_file, "{}").unwrap();
+        assert!(check_codex_auth_inner(Some(""), Some(&auth_file)).is_ok());
+    }
+
+    #[test]
+    fn test_check_codex_auth_key_takes_priority_over_auth_file() {
+        // Valid API key should short-circuit without checking auth file.
+        // Pass a nonexistent path — should still succeed because key is valid.
+        assert!(check_codex_auth_inner(
+            Some("sk-key"),
+            Some(std::path::Path::new("/nonexistent/auth.json"))
+        )
+        .is_ok());
     }
 
     #[test]
