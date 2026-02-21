@@ -1,5 +1,5 @@
 name: 'tui-test Report'
-description: 'Upload tui-test capture artifacts (PNGs, timeline.json) and create a step summary'
+description: 'Upload tui-test capture artifacts and post PR comment with screenshot images'
 
 inputs:
   capture-dir:
@@ -18,6 +18,18 @@ inputs:
     description: 'Whether to create a GitHub Step Summary with capture details (true/false)'
     required: false
     default: 'true'
+  pr-comment:
+    description: 'Whether to post a PR comment with screenshot images (true/false). Requires pull-requests: write and contents: write permissions.'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'GitHub token for posting PR comments and uploading images. Defaults to GITHUB_TOKEN.'
+    required: false
+    default: ${{ github.token }}
+  max-images:
+    description: 'Maximum number of images to show directly in the PR comment (rest are collapsed). Default: 5'
+    required: false
+    default: '5'
 
 outputs:
   artifact-id:
@@ -37,34 +49,31 @@ runs:
         STAGING_DIR="${{ runner.temp }}/tui-test-staging"
         mkdir -p "$STAGING_DIR"
 
-        # Find all timeline.json files matching the capture dir pattern
         PATTERN="${{ inputs.capture-dir }}"
         FOUND=0
         TOTAL_SCREENSHOTS=0
         TOTAL_SESSIONS=0
-        SESSION_SUMMARIES=""
 
-        # Use find to locate timeline.json files under matching directories
+        echo "[]" > "$STAGING_DIR/.sessions.json"
+
         while IFS= read -r timeline_file; do
           [ -z "$timeline_file" ] && continue
           FOUND=1
           TOTAL_SESSIONS=$((TOTAL_SESSIONS + 1))
 
           capture_dir="$(dirname "$timeline_file")"
-          # Create a unique subdirectory in staging
           session_name="session-${TOTAL_SESSIONS}"
           dest="$STAGING_DIR/$session_name"
           mkdir -p "$dest"
 
-          # Copy all capture files (PNGs + timeline.json)
           cp "$capture_dir"/*.json "$dest/" 2>/dev/null || true
           cp "$capture_dir"/*.png "$dest/" 2>/dev/null || true
 
-          # Count screenshots in this session
           png_count=$(find "$dest" -name "*.png" -type f | wc -l | tr -d ' ')
           TOTAL_SCREENSHOTS=$((TOTAL_SCREENSHOTS + png_count))
 
-          # Extract command from timeline.json for summary
+          png_list=$(find "$dest" -name "*.png" -type f -exec basename {} \; | sort)
+
           if command -v jq &>/dev/null && [ -f "$dest/timeline.json" ]; then
             cmd=$(jq -r '.command // "unknown"' "$dest/timeline.json" 2>/dev/null || echo "unknown")
             size=$(jq -r '.terminal_size // [0,0] | "\(.[0])x\(.[1])"' "$dest/timeline.json" 2>/dev/null || echo "?x?")
@@ -74,7 +83,17 @@ runs:
             size="?x?"
             events="0"
           fi
-          SESSION_SUMMARIES="${SESSION_SUMMARIES}|${session_name}|${cmd}|${size}|${events}|${png_count}|"$'\n'
+
+          jq --arg name "$session_name" \
+             --arg cmd "$cmd" \
+             --arg size "$size" \
+             --arg events "$events" \
+             --arg pngs "$png_list" \
+             --arg dir "$dest" \
+             --argjson count "$png_count" \
+             '. += [{"name": $name, "command": $cmd, "size": $size, "events": ($events | tonumber), "png_count": $count, "pngs": ($pngs | split("\n") | map(select(. != ""))), "dir": $dir}]' \
+             "$STAGING_DIR/.sessions.json" > "$STAGING_DIR/.sessions.json.tmp" \
+             && mv "$STAGING_DIR/.sessions.json.tmp" "$STAGING_DIR/.sessions.json"
         done < <(find . -path "./$PATTERN/timeline.json" -o -name "timeline.json" -path "*tui-test-captures*" 2>/dev/null | sort)
 
         if [ "$FOUND" = "0" ]; then
@@ -86,8 +105,6 @@ runs:
           echo "staging-dir=$STAGING_DIR" >> "$GITHUB_OUTPUT"
           echo "total-sessions=$TOTAL_SESSIONS" >> "$GITHUB_OUTPUT"
           echo "total-screenshots=$TOTAL_SCREENSHOTS" >> "$GITHUB_OUTPUT"
-          # Write session summaries to a file for the summary step
-          echo "$SESSION_SUMMARIES" > "$STAGING_DIR/.session-summaries.txt"
         fi
 
     - name: Upload captures
@@ -99,6 +116,185 @@ runs:
         path: ${{ steps.collect.outputs.staging-dir }}
         retention-days: ${{ inputs.retention-days }}
         if-no-files-found: ignore
+
+    - name: Upload images and post PR comment
+      if: >-
+        inputs.pr-comment == 'true'
+        && steps.collect.outputs.found == 'true'
+        && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        STAGING_DIR="${{ steps.collect.outputs.staging-dir }}"
+        TOTAL_SESSIONS="${{ steps.collect.outputs.total-sessions }}"
+        TOTAL_SCREENSHOTS="${{ steps.collect.outputs.total-screenshots }}"
+        REPO="${{ github.repository }}"
+        RUN_ID="${{ github.run_id }}"
+        SHA="${{ github.event.pull_request.head.sha }}"
+        SHORT_SHA="${SHA:0:7}"
+        PR_NUMBER="${{ github.event.pull_request.number }}"
+        MAX_IMAGES="${{ inputs.max-images }}"
+        IMG_BRANCH="tui-test-images/${RUN_ID}"
+
+        # Upload images via Git API (no local checkout needed)
+        # 1. Create blobs for each PNG
+        # 2. Create a tree from those blobs
+        # 3. Create a commit pointing to the tree
+        # 4. Create/update the branch ref
+
+        TREE_ENTRIES="[]"
+
+        while IFS= read -r session; do
+          session_name=$(echo "$session" | jq -r '.name')
+          session_dir=$(echo "$session" | jq -r '.dir')
+
+          while IFS= read -r png; do
+            [ -z "$png" ] && continue
+            dest_name="${session_name}-${png}"
+
+            # Create blob via API (base64-encoded)
+            CONTENT_B64=$(base64 -w 0 "$session_dir/$png" 2>/dev/null || base64 "$session_dir/$png" | tr -d '\n')
+            BLOB_SHA=$(gh api "repos/${REPO}/git/blobs" \
+              --method POST \
+              -f content="$CONTENT_B64" \
+              -f encoding="base64" \
+              --jq '.sha' 2>/dev/null)
+
+            if [ -z "$BLOB_SHA" ]; then
+              echo "::warning::Failed to upload blob for $dest_name"
+              continue
+            fi
+
+            TREE_ENTRIES=$(echo "$TREE_ENTRIES" | jq \
+              --arg path "images/$dest_name" \
+              --arg sha "$BLOB_SHA" \
+              '. += [{"path": $path, "mode": "100644", "type": "blob", "sha": $sha}]')
+          done < <(echo "$session" | jq -r '.pngs[]')
+        done < <(jq -c '.[]' "$STAGING_DIR/.sessions.json")
+
+        # Check we have at least one image
+        ENTRY_COUNT=$(echo "$TREE_ENTRIES" | jq 'length')
+        if [ "$ENTRY_COUNT" = "0" ]; then
+          echo "::notice::No PNG screenshots to upload to PR comment"
+          exit 0
+        fi
+
+        # Create tree
+        TREE_SHA=$(echo "$TREE_ENTRIES" | gh api "repos/${REPO}/git/trees" \
+          --method POST \
+          --input - \
+          -f "tree=@-" \
+          --jq '.sha' 2>/dev/null || true)
+
+        # Fallback: construct the full JSON payload if jq piping failed
+        if [ -z "$TREE_SHA" ]; then
+          TREE_PAYLOAD=$(echo "$TREE_ENTRIES" | jq '{tree: .}')
+          TREE_SHA=$(echo "$TREE_PAYLOAD" | gh api "repos/${REPO}/git/trees" \
+            --method POST \
+            --input - \
+            --jq '.sha' 2>/dev/null)
+        fi
+
+        if [ -z "$TREE_SHA" ]; then
+          echo "::warning::Failed to create git tree for images"
+          exit 0
+        fi
+
+        # Create commit (orphan — no parents)
+        COMMIT_SHA=$(gh api "repos/${REPO}/git/commits" \
+          --method POST \
+          -f message="tui-test screenshots for run ${RUN_ID}" \
+          -f tree="$TREE_SHA" \
+          --jq '.sha' 2>/dev/null)
+
+        if [ -z "$COMMIT_SHA" ]; then
+          echo "::warning::Failed to create git commit for images"
+          exit 0
+        fi
+
+        # Create branch ref
+        gh api "repos/${REPO}/git/refs" \
+          --method POST \
+          -f ref="refs/heads/${IMG_BRANCH}" \
+          -f sha="$COMMIT_SHA" 2>/dev/null || \
+        gh api "repos/${REPO}/git/refs/heads/${IMG_BRANCH}" \
+          --method PATCH \
+          -f sha="$COMMIT_SHA" \
+          -F force=true 2>/dev/null
+
+        # Build the PR comment body
+        COMMENT_BODY="## tui-test Screenshots\n\n"
+        COMMENT_BODY+="**${TOTAL_SESSIONS} session(s)** | **${TOTAL_SCREENSHOTS} screenshot(s)** | commit \`${SHORT_SHA}\`\n\n"
+
+        GLOBAL_IMG_INDEX=0
+
+        while IFS= read -r session; do
+          session_name=$(echo "$session" | jq -r '.name')
+          cmd=$(echo "$session" | jq -r '.command')
+          size=$(echo "$session" | jq -r '.size')
+          events=$(echo "$session" | jq -r '.events')
+          png_count=$(echo "$session" | jq -r '.png_count')
+
+          # Truncate long commands
+          display_cmd="$cmd"
+          if [ ${#display_cmd} -gt 80 ]; then
+            display_cmd="${display_cmd:0:77}..."
+          fi
+
+          COMMENT_BODY+="### ${session_name}\n"
+          COMMENT_BODY+="\`${display_cmd}\` (${size}, ${events} events)\n\n"
+
+          session_img_index=0
+          COLLAPSED_IMAGES=""
+
+          while IFS= read -r png; do
+            [ -z "$png" ] && continue
+            session_img_index=$((session_img_index + 1))
+            GLOBAL_IMG_INDEX=$((GLOBAL_IMG_INDEX + 1))
+            dest_name="${session_name}-${png}"
+            img_url="https://raw.githubusercontent.com/${REPO}/${IMG_BRANCH}/images/${dest_name}"
+
+            if [ "$GLOBAL_IMG_INDEX" -le "$MAX_IMAGES" ]; then
+              COMMENT_BODY+="**${png}**\n"
+              COMMENT_BODY+="![${png}](${img_url})\n\n"
+            else
+              COLLAPSED_IMAGES+="**${png}**\n"
+              COLLAPSED_IMAGES+="![${png}](${img_url})\n\n"
+            fi
+          done < <(echo "$session" | jq -r '.pngs[]')
+
+          if [ -n "$COLLAPSED_IMAGES" ]; then
+            remaining=$((TOTAL_SCREENSHOTS - MAX_IMAGES))
+            COMMENT_BODY+="<details><summary>Show ${remaining} more screenshot(s)...</summary>\n\n"
+            COMMENT_BODY+="$COLLAPSED_IMAGES"
+            COMMENT_BODY+="</details>\n\n"
+          fi
+        done < <(jq -c '.[]' "$STAGING_DIR/.sessions.json")
+
+        COMMENT_BODY+="\n---\n*Auto-generated by tui-test-report. "
+        COMMENT_BODY+="[Download full captures](https://github.com/${REPO}/actions/runs/${RUN_ID}).*\n"
+
+        # Post/update the PR comment (idempotent via hidden marker)
+        COMMENT_MARKER="<!-- tui-test-report -->"
+        FULL_BODY="${COMMENT_MARKER}\n${COMMENT_BODY}"
+
+        EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+          --jq ".[] | select(.body | contains(\"${COMMENT_MARKER}\")) | .id" 2>/dev/null | head -1)
+
+        FORMATTED_BODY=$(printf '%b' "$FULL_BODY")
+
+        if [ -n "$EXISTING_COMMENT_ID" ]; then
+          gh api "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
+            --method PATCH \
+            -f body="$FORMATTED_BODY" 2>/dev/null
+          echo "::notice::Updated existing tui-test PR comment (ID: ${EXISTING_COMMENT_ID})"
+        else
+          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --method POST \
+            -f body="$FORMATTED_BODY" 2>/dev/null
+          echo "::notice::Created tui-test PR comment"
+        fi
 
     - name: Create step summary
       if: inputs.summary == 'true' && steps.collect.outputs.found == 'true'
@@ -114,10 +310,11 @@ runs:
           echo "Collected **${TOTAL_SESSIONS} session(s)** with **${TOTAL_SCREENSHOTS} screenshot(s)**."
           echo ""
 
-          if [ -f "$STAGING_DIR/.session-summaries.txt" ]; then
+          if [ -f "$STAGING_DIR/.sessions.json" ]; then
             echo "| Session | Command | Terminal Size | Events | Screenshots |"
             echo "|---------|---------|---------------|--------|-------------|"
-            cat "$STAGING_DIR/.session-summaries.txt"
+            jq -r '.[] | "| \(.name) | `\(.command | if length > 60 then .[:57] + "..." else . end)` | \(.size) | \(.events) | \(.png_count) |"' \
+              "$STAGING_DIR/.sessions.json" 2>/dev/null || true
             echo ""
           fi
 
