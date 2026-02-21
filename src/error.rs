@@ -105,6 +105,24 @@ impl ActualError {
             _ => None,
         }
     }
+
+    /// Returns `true` if this error indicates a model-not-supported or
+    /// model-not-found condition.  Used by runner fallback logic to decide
+    /// whether to retry with a different backend.
+    pub fn is_model_error(&self) -> bool {
+        match self {
+            Self::RunnerFailed { message, .. } => {
+                let lower = message.to_lowercase();
+                lower.contains("model is not supported")
+                    || lower.contains("model is not available")
+                    || lower.contains("model not found")
+                    || lower.contains("does not exist")
+                    || lower.contains("invalid model")
+                    || lower.contains("model_not_found")
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -424,5 +442,57 @@ mod tests {
             "expected billing URL in hint: {:?}",
             hint
         );
+    }
+
+    #[test]
+    fn test_is_model_error_supported_pattern() {
+        let err = ActualError::RunnerFailed {
+            message: "Codex CLI failed: The 'gpt-5.2' model is not supported".to_string(),
+            stderr: String::new(),
+        };
+        assert!(err.is_model_error());
+    }
+
+    #[test]
+    fn test_is_model_error_not_found_pattern() {
+        let err = ActualError::RunnerFailed {
+            message: "model not found: gpt-5-mini".to_string(),
+            stderr: String::new(),
+        };
+        assert!(err.is_model_error());
+    }
+
+    #[test]
+    fn test_is_model_error_does_not_exist_pattern() {
+        let err = ActualError::RunnerFailed {
+            message: "The model 'gpt-99' does not exist".to_string(),
+            stderr: String::new(),
+        };
+        assert!(err.is_model_error());
+    }
+
+    #[test]
+    fn test_is_model_error_case_insensitive() {
+        let err = ActualError::RunnerFailed {
+            message: "MODEL IS NOT SUPPORTED".to_string(),
+            stderr: String::new(),
+        };
+        assert!(err.is_model_error());
+    }
+
+    #[test]
+    fn test_is_model_error_false_for_other_runner_failed() {
+        let err = ActualError::RunnerFailed {
+            message: "Codex CLI exited with code 1".to_string(),
+            stderr: "connection refused".to_string(),
+        };
+        assert!(!err.is_model_error());
+    }
+
+    #[test]
+    fn test_is_model_error_false_for_non_runner_errors() {
+        assert!(!ActualError::UserCancelled.is_model_error());
+        assert!(!ActualError::RunnerTimeout { seconds: 30 }.is_model_error());
+        assert!(!ActualError::ConfigError("bad".to_string()).is_model_error());
     }
 }
