@@ -20,11 +20,11 @@ where
     F: Fn(&reqwest::Error) -> bool,
 {
     if is_timeout(&e) {
-        ActualError::ClaudeTimeout {
+        ActualError::RunnerTimeout {
             seconds: timeout.as_secs(),
         }
     } else {
-        ActualError::ClaudeSubprocessFailed {
+        ActualError::RunnerFailed {
             message: format!("OpenAI API request failed: {e}"),
             stderr: String::new(),
         }
@@ -108,7 +108,7 @@ struct ContentItem {
 
 /// Map a reqwest client build error into an [`ActualError`].
 fn map_client_build_error(e: reqwest::Error) -> ActualError {
-    ActualError::ClaudeSubprocessFailed {
+    ActualError::RunnerFailed {
         message: format!("Failed to initialize HTTP client: {e}"),
         stderr: String::new(),
     }
@@ -219,7 +219,7 @@ impl TailoringRunner for OpenAiApiRunner {
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 attempt += 1;
                 if attempt > MAX_RATE_LIMIT_RETRIES {
-                    return Err(ActualError::ClaudeSubprocessFailed {
+                    return Err(ActualError::RunnerFailed {
                         message: format!(
                             "OpenAI API rate limited after {MAX_RATE_LIMIT_RETRIES} retries"
                         ),
@@ -247,16 +247,16 @@ impl TailoringRunner for OpenAiApiRunner {
                     .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
                 let truncated = &body_bytes[..body_bytes.len().min(4096)];
                 let body_text = String::from_utf8_lossy(truncated).into_owned();
-                return Err(ActualError::ClaudeSubprocessFailed {
+                return Err(ActualError::RunnerFailed {
                     message: format!("OpenAI API error: {status}"),
                     stderr: body_text,
                 });
             }
 
             break response.json().await.map_err(|e| {
-                // reqwest JSON parse failure wraps serde_json; surface as ClaudeSubprocessFailed
+                // reqwest JSON parse failure wraps serde_json; surface as RunnerFailed
                 // with the original message since we can't recover the raw bytes at this point.
-                ActualError::ClaudeSubprocessFailed {
+                ActualError::RunnerFailed {
                     message: format!("Failed to parse OpenAI API response: {e}"),
                     stderr: String::new(),
                 }
@@ -272,7 +272,7 @@ impl TailoringRunner for OpenAiApiRunner {
         let content_items = match message_item {
             Some(item) => item.content.unwrap_or_default(),
             None => {
-                return Err(ActualError::ClaudeSubprocessFailed {
+                return Err(ActualError::RunnerFailed {
                     message: "OpenAI API did not return text output".to_string(),
                     stderr: String::new(),
                 });
@@ -301,7 +301,7 @@ impl TailoringRunner for OpenAiApiRunner {
         let text = match text {
             Some(t) => t,
             None => {
-                return Err(ActualError::ClaudeSubprocessFailed {
+                return Err(ActualError::RunnerFailed {
                     message: "OpenAI API did not return text output".to_string(),
                     stderr: String::new(),
                 });
@@ -436,7 +436,7 @@ mod tests {
         mock.assert_async().await;
     }
 
-    // Test 3: HTTP 429 exhausts all retries and returns ClaudeSubprocessFailed
+    // Test 3: HTTP 429 exhausts all retries and returns RunnerFailed
     #[tokio::test]
     async fn test_429_exhausts_retries() {
         let mut server = Server::new_async().await;
@@ -457,13 +457,13 @@ mod tests {
 
         mock.assert_async().await;
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("rate"),
                     "expected 'rate' in message, got: {message}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
     }
 
@@ -594,7 +594,7 @@ mod tests {
         mock.assert_async().await;
     }
 
-    // Test 5: missing output_text (empty output array) maps to ClaudeSubprocessFailed
+    // Test 5: missing output_text (empty output array) maps to RunnerFailed
     #[tokio::test]
     async fn test_empty_output_maps_to_subprocess_failed() {
         let mut server = Server::new_async().await;
@@ -618,13 +618,13 @@ mod tests {
             .await;
 
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("did not return text output"),
                     "expected 'did not return text output' in: {message}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
 
         mock.assert_async().await;
@@ -655,14 +655,14 @@ mod tests {
 
         let mapped = map_client_build_error(err);
         match mapped {
-            ActualError::ClaudeSubprocessFailed { message, stderr } => {
+            ActualError::RunnerFailed { message, stderr } => {
                 assert!(
                     message.contains("Failed to initialize HTTP client"),
                     "expected 'Failed to initialize HTTP client' prefix in: {message}"
                 );
                 assert!(stderr.is_empty(), "expected empty stderr, got: {stderr}");
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
     }
 
@@ -692,7 +692,7 @@ mod tests {
         mock.assert_async().await;
     }
 
-    // Test 8: HTTP 500 maps to ClaudeSubprocessFailed with status in message
+    // Test 8: HTTP 500 maps to RunnerFailed with status in message
     #[tokio::test]
     async fn test_500_maps_to_subprocess_failed() {
         let mut server = Server::new_async().await;
@@ -710,7 +710,7 @@ mod tests {
             .await;
 
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, stderr }) => {
+            Err(ActualError::RunnerFailed { message, stderr }) => {
                 assert!(
                     message.contains("500"),
                     "expected status code in message: {message}"
@@ -720,7 +720,7 @@ mod tests {
                     "expected body in stderr: {stderr}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
 
         mock.assert_async().await;
@@ -844,13 +844,13 @@ mod tests {
             .await;
 
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("did not return text output"),
                     "expected 'did not return text output' in: {message}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
 
         mock.assert_async().await;
@@ -891,19 +891,19 @@ mod tests {
             .await;
 
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("did not return text output"),
                     "expected 'did not return text output' in: {message}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
 
         mock.assert_async().await;
     }
 
-    // Test 14: HTTP 200 with non-JSON body maps to ClaudeSubprocessFailed (parse error)
+    // Test 14: HTTP 200 with non-JSON body maps to RunnerFailed (parse error)
     #[tokio::test]
     async fn test_malformed_json_response() {
         let mut server = Server::new_async().await;
@@ -922,13 +922,13 @@ mod tests {
             .await;
 
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("Failed to parse OpenAI API response"),
                     "expected parse error message, got: {message}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
 
         mock.assert_async().await;
@@ -963,19 +963,19 @@ mod tests {
             .await;
 
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("did not return text output"),
                     "expected 'did not return text output' in: {message}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
 
         mock.assert_async().await;
     }
 
-    // Test 16: output_text with null text field (and_then returns None → ClaudeSubprocessFailed)
+    // Test 16: output_text with null text field (and_then returns None → RunnerFailed)
     #[tokio::test]
     async fn test_output_text_with_null_text() {
         let mut server = Server::new_async().await;
@@ -1010,13 +1010,13 @@ mod tests {
             .await;
 
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("did not return text output"),
                     "expected 'did not return text output' in: {message}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
 
         mock.assert_async().await;
@@ -1038,19 +1038,18 @@ mod tests {
             .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
             .await;
 
-        // Either ClaudeSubprocessFailed or ClaudeTimeout depending on OS behavior.
+        // Either RunnerFailed or RunnerTimeout depending on OS behavior.
         assert!(
             matches!(
                 result,
-                Err(ActualError::ClaudeSubprocessFailed { .. })
-                    | Err(ActualError::ClaudeTimeout { .. })
+                Err(ActualError::RunnerFailed { .. }) | Err(ActualError::RunnerTimeout { .. })
             ),
             "expected a network-related error, got: {:?}",
             result
         );
     }
 
-    // Test 18a: map_send_error_with — non-timeout classifier → ClaudeSubprocessFailed
+    // Test 18a: map_send_error_with — non-timeout classifier → RunnerFailed
     #[tokio::test]
     async fn test_map_send_error_non_timeout() {
         // Connection refused produces a reliable network error on loopback.
@@ -1064,21 +1063,21 @@ mod tests {
             .await
             .unwrap_err();
 
-        // Force is_timeout → false so we always hit the ClaudeSubprocessFailed branch.
+        // Force is_timeout → false so we always hit the RunnerFailed branch.
         let mapped = map_send_error_with(err, Duration::from_secs(10), |_| false);
         match mapped {
-            ActualError::ClaudeSubprocessFailed { message, stderr } => {
+            ActualError::RunnerFailed { message, stderr } => {
                 assert!(
                     message.contains("OpenAI API request failed"),
                     "expected request-failed prefix in: {message}"
                 );
                 assert!(stderr.is_empty(), "expected empty stderr, got: {stderr}");
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
     }
 
-    // Test 18b: map_send_error_with — timeout classifier → ClaudeTimeout
+    // Test 18b: map_send_error_with — timeout classifier → RunnerTimeout
     #[tokio::test]
     async fn test_map_send_error_timeout_branch() {
         // Connection refused produces a reliable network error on loopback.
@@ -1092,23 +1091,23 @@ mod tests {
             .await
             .unwrap_err();
 
-        // Force is_timeout → true to exercise the ClaudeTimeout branch regardless
+        // Force is_timeout → true to exercise the RunnerTimeout branch regardless
         // of how the OS classifies the underlying network error.
         let mapped = map_send_error_with(err, Duration::from_secs(30), |_| true);
         match mapped {
-            ActualError::ClaudeTimeout { seconds } => {
+            ActualError::RunnerTimeout { seconds } => {
                 assert_eq!(seconds, 30, "expected timeout duration forwarded");
             }
-            other => panic!("expected ClaudeTimeout, got: {:?}", other),
+            other => panic!("expected RunnerTimeout, got: {:?}", other),
         }
     }
 
-    // Test 19: ClaudeTimeout produced when reqwest times out before the server responds.
+    // Test 19: RunnerTimeout produced when reqwest times out before the server responds.
     //
     // We start a TCP server that accepts connections but never sends an HTTP response,
     // then send a request with a 1ms timeout.  The timeout fires before the server
     // responds, giving us a `reqwest::Error` with `is_timeout() == true`, which
-    // `map_send_error` should turn into `ActualError::ClaudeTimeout`.
+    // `map_send_error` should turn into `ActualError::RunnerTimeout`.
     #[tokio::test]
     async fn test_run_tailoring_request_timeout() {
         use std::net::TcpListener;
@@ -1137,17 +1136,16 @@ mod tests {
             .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
             .await;
 
-        // On almost all environments this will be ClaudeTimeout because the 1ms
+        // On almost all environments this will be RunnerTimeout because the 1ms
         // timer fires before we even get HTTP headers back from the silent server.
         // In rare environments where the OS reports an error differently, we also
-        // accept ClaudeSubprocessFailed.
+        // accept RunnerFailed.
         assert!(
             matches!(
                 result,
-                Err(ActualError::ClaudeTimeout { .. })
-                    | Err(ActualError::ClaudeSubprocessFailed { .. })
+                Err(ActualError::RunnerTimeout { .. }) | Err(ActualError::RunnerFailed { .. })
             ),
-            "expected ClaudeTimeout or ClaudeSubprocessFailed, got: {result:?}"
+            "expected RunnerTimeout or RunnerFailed, got: {result:?}"
         );
     }
 
@@ -1191,7 +1189,7 @@ mod tests {
             .await;
 
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { stderr, .. }) => {
+            Err(ActualError::RunnerFailed { stderr, .. }) => {
                 assert_eq!(
                     stderr.len(),
                     4096,
@@ -1199,7 +1197,7 @@ mod tests {
                     stderr.len()
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
 
         mock.assert_async().await;

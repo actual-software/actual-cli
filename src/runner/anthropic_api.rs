@@ -34,7 +34,7 @@ pub struct AnthropicApiRunner {
 
 /// Map a reqwest client build error into an [`ActualError`].
 fn map_client_build_error(e: reqwest::Error) -> ActualError {
-    ActualError::ClaudeSubprocessFailed {
+    ActualError::RunnerFailed {
         message: format!("Failed to initialize HTTP client: {e}"),
         stderr: String::new(),
     }
@@ -92,11 +92,11 @@ impl AnthropicApiRunner {
                 .await
                 .map_err(|e| {
                     if e.is_timeout() {
-                        ActualError::ClaudeTimeout {
+                        ActualError::RunnerTimeout {
                             seconds: self.timeout.as_secs(),
                         }
                     } else {
-                        ActualError::ClaudeSubprocessFailed {
+                        ActualError::RunnerFailed {
                             message: format!("HTTP request failed: {e}"),
                             stderr: String::new(),
                         }
@@ -114,7 +114,7 @@ impl AnthropicApiRunner {
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
                 attempt += 1;
                 if attempt > MAX_RATE_LIMIT_RETRIES {
-                    return Err(ActualError::ClaudeSubprocessFailed {
+                    return Err(ActualError::RunnerFailed {
                         message: format!(
                             "Anthropic API rate limited after {MAX_RATE_LIMIT_RETRIES} retries"
                         ),
@@ -142,20 +142,19 @@ impl AnthropicApiRunner {
                     .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
                 let truncated = &body_bytes[..body_bytes.len().min(4096)];
                 let body = String::from_utf8_lossy(truncated).into_owned();
-                return Err(ActualError::ClaudeSubprocessFailed {
+                return Err(ActualError::RunnerFailed {
                     message: format!("Anthropic API error: {status}"),
                     stderr: body,
                 });
             }
 
-            let json: Value =
-                response
-                    .json()
-                    .await
-                    .map_err(|e| ActualError::ClaudeSubprocessFailed {
-                        message: format!("Failed to parse Anthropic API response: {e}"),
-                        stderr: String::new(),
-                    })?;
+            let json: Value = response
+                .json()
+                .await
+                .map_err(|e| ActualError::RunnerFailed {
+                    message: format!("Failed to parse Anthropic API response: {e}"),
+                    stderr: String::new(),
+                })?;
 
             return Ok(json);
         }
@@ -226,12 +225,12 @@ impl TailoringRunner for AnthropicApiRunner {
         // Propagate deserialization failures so API schema drift produces a
         // specific, actionable error rather than a confusing "no structured result".
         let content_blocks: Vec<ContentBlock> = match response.get("content") {
-            Some(c) => serde_json::from_value(c.clone()).map_err(|e| {
-                ActualError::ClaudeSubprocessFailed {
+            Some(c) => {
+                serde_json::from_value(c.clone()).map_err(|e| ActualError::RunnerFailed {
                     message: format!("Failed to parse API response content blocks: {e}"),
                     stderr: String::new(),
-                }
-            })?,
+                })?
+            }
             None => Vec::new(),
         };
 
@@ -241,7 +240,7 @@ impl TailoringRunner for AnthropicApiRunner {
                 block.block_type == "tool_use" && block.name.as_deref() == Some("return_result")
             })
             .and_then(|block| block.input)
-            .ok_or_else(|| ActualError::ClaudeSubprocessFailed {
+            .ok_or_else(|| ActualError::RunnerFailed {
                 message: "Anthropic API did not return structured result".to_string(),
                 stderr: String::new(),
             })?;
@@ -362,7 +361,7 @@ mod tests {
         );
     }
 
-    // Test 3: 429 exhausts all retries and returns ClaudeSubprocessFailed
+    // Test 3: 429 exhausts all retries and returns RunnerFailed
     #[tokio::test]
     async fn test_429_exhausts_retries() {
         let mut server = Server::new_async().await;
@@ -382,13 +381,13 @@ mod tests {
 
         mock.assert_async().await;
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("rate"),
                     "expected 'rate' in message: {message}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
     }
 
@@ -464,7 +463,7 @@ mod tests {
         );
     }
 
-    // Test 4: 500 maps to ClaudeSubprocessFailed
+    // Test 4: 500 maps to RunnerFailed
     #[tokio::test]
     async fn test_500_maps_to_subprocess_failed() {
         let mut server = Server::new_async().await;
@@ -482,13 +481,13 @@ mod tests {
 
         mock.assert_async().await;
         assert!(
-            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
-            "expected ClaudeSubprocessFailed, got: {:?}",
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed, got: {:?}",
             result
         );
     }
 
-    // Test 5: missing tool_use in response maps to ClaudeSubprocessFailed
+    // Test 5: missing tool_use in response maps to RunnerFailed
     #[tokio::test]
     async fn test_missing_tool_use_maps_to_structured_result_error() {
         let mut server = Server::new_async().await;
@@ -523,13 +522,13 @@ mod tests {
 
         mock.assert_async().await;
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("structured result"),
                     "expected 'structured result' in message: {message}"
                 );
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
     }
 
@@ -592,7 +591,7 @@ mod tests {
         );
     }
 
-    // Test 10: invalid schema JSON maps to ClaudeOutputParse
+    // Test 10: invalid schema JSON maps to RunnerOutputParse
     #[tokio::test]
     async fn test_invalid_schema_json_maps_to_parse_error() {
         let server = Server::new_async().await;
@@ -604,13 +603,13 @@ mod tests {
             .await;
 
         assert!(
-            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
-            "expected ClaudeOutputParse, got: {:?}",
+            matches!(result, Err(ActualError::RunnerOutputParse(_))),
+            "expected RunnerOutputParse, got: {:?}",
             result
         );
     }
 
-    // Test 11: 200 response with non-JSON body maps to ClaudeSubprocessFailed
+    // Test 11: 200 response with non-JSON body maps to RunnerFailed
     #[tokio::test]
     async fn test_200_non_json_body_maps_to_subprocess_failed() {
         let mut server = Server::new_async().await;
@@ -629,13 +628,13 @@ mod tests {
 
         mock.assert_async().await;
         assert!(
-            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
-            "expected ClaudeSubprocessFailed for non-JSON 200 body, got: {:?}",
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed for non-JSON 200 body, got: {:?}",
             result
         );
     }
 
-    // Test 12: tool_use input that doesn't match TailoringOutput schema maps to ClaudeOutputParse
+    // Test 12: tool_use input that doesn't match TailoringOutput schema maps to RunnerOutputParse
     #[tokio::test]
     async fn test_invalid_tool_use_input_maps_to_parse_error() {
         let mut server = Server::new_async().await;
@@ -658,13 +657,13 @@ mod tests {
 
         mock.assert_async().await;
         assert!(
-            matches!(result, Err(ActualError::ClaudeOutputParse(_))),
-            "expected ClaudeOutputParse for bad tool input, got: {:?}",
+            matches!(result, Err(ActualError::RunnerOutputParse(_))),
+            "expected RunnerOutputParse for bad tool input, got: {:?}",
             result
         );
     }
 
-    // Test 13: connection refused maps to ClaudeSubprocessFailed
+    // Test 13: connection refused maps to RunnerFailed
     #[tokio::test]
     async fn test_connection_refused_maps_to_subprocess_failed() {
         // Point at a port that is not listening so reqwest returns a connection error.
@@ -673,13 +672,13 @@ mod tests {
         let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         assert!(
-            matches!(result, Err(ActualError::ClaudeSubprocessFailed { .. })),
-            "expected ClaudeSubprocessFailed for connection refused, got: {:?}",
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed for connection refused, got: {:?}",
             result
         );
     }
 
-    // Test 14: request timeout maps to ClaudeTimeout
+    // Test 14: request timeout maps to RunnerTimeout
     #[tokio::test]
     async fn test_request_timeout_maps_to_claude_timeout() {
         // Bind a TCP listener that accepts connections but never sends data,
@@ -711,8 +710,8 @@ mod tests {
         let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         assert!(
-            matches!(result, Err(ActualError::ClaudeTimeout { .. })),
-            "expected ClaudeTimeout, got: {:?}",
+            matches!(result, Err(ActualError::RunnerTimeout { .. })),
+            "expected RunnerTimeout, got: {:?}",
             result
         );
     }
@@ -746,10 +745,10 @@ mod tests {
 
         mock.assert_async().await;
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(message.contains("structured result"));
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
     }
 
@@ -794,18 +793,18 @@ mod tests {
 
         let mapped = map_client_build_error(err);
         match mapped {
-            ActualError::ClaudeSubprocessFailed { message, stderr } => {
+            ActualError::RunnerFailed { message, stderr } => {
                 assert!(
                     message.contains("Failed to initialize HTTP client"),
                     "expected 'Failed to initialize HTTP client' prefix in: {message}"
                 );
                 assert!(stderr.is_empty(), "expected empty stderr, got: {stderr}");
             }
-            other => panic!("expected ClaudeSubprocessFailed, got: {:?}", other),
+            other => panic!("expected RunnerFailed, got: {:?}", other),
         }
     }
 
-    // Test 16: content blocks deserialization failure maps to ClaudeSubprocessFailed
+    // Test 16: content blocks deserialization failure maps to RunnerFailed
     #[tokio::test]
     async fn test_malformed_content_blocks_maps_to_subprocess_failed() {
         let mut server = Server::new_async().await;
@@ -836,14 +835,14 @@ mod tests {
 
         mock.assert_async().await;
         match result {
-            Err(ActualError::ClaudeSubprocessFailed { message, .. }) => {
+            Err(ActualError::RunnerFailed { message, .. }) => {
                 assert!(
                     message.contains("Failed to parse API response content blocks"),
                     "expected content block parse error in message, got: {message}"
                 );
             }
             other => panic!(
-                "expected ClaudeSubprocessFailed for malformed content, got: {:?}",
+                "expected RunnerFailed for malformed content, got: {:?}",
                 other
             ),
         }

@@ -183,7 +183,7 @@ impl CliClaudeRunner {
 
 /// Convert an I/O error from subprocess operations into an `ActualError`.
 fn io_err(context: &str, e: std::io::Error) -> ActualError {
-    ActualError::ClaudeSubprocessFailed {
+    ActualError::RunnerFailed {
         message: format!("{context}: {e}"),
         stderr: String::new(),
     }
@@ -240,7 +240,7 @@ pub(crate) fn parse_output<T: DeserializeOwned>(
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        return Err(ActualError::ClaudeSubprocessFailed {
+        return Err(ActualError::RunnerFailed {
             message: format!("Claude Code exited with code {code}"),
             stderr,
         });
@@ -253,7 +253,7 @@ pub(crate) fn parse_output<T: DeserializeOwned>(
         {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let detail = error_detail_from_envelope(&envelope, &stderr);
-            return Err(ActualError::ClaudeSubprocessFailed {
+            return Err(ActualError::RunnerFailed {
                 message: format!("Claude Code returned an error: {detail}"),
                 stderr,
             });
@@ -263,7 +263,7 @@ pub(crate) fn parse_output<T: DeserializeOwned>(
         if envelope.result_type.as_deref() == Some("result") {
             return envelope
                 .structured_output
-                .ok_or_else(|| ActualError::ClaudeSubprocessFailed {
+                .ok_or_else(|| ActualError::RunnerFailed {
                     message: "Claude Code envelope missing structured_output field".to_string(),
                     stderr: String::new(),
                 });
@@ -288,7 +288,7 @@ pub(crate) fn resolve_output(
     match result {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(e)) => Err(io_err("Failed to wait for Claude Code", e)),
-        Err(_) => Err(ActualError::ClaudeTimeout {
+        Err(_) => Err(ActualError::RunnerTimeout {
             seconds: timeout.as_secs(),
         }),
     }
@@ -374,7 +374,7 @@ fn looks_like_credit_error(msg: &str) -> bool {
 /// `repetitive_message` being `Some`), we check whether the repeated message
 /// looks like a credit/billing error. Only messages containing credit-related
 /// keywords are mapped to `CreditBalanceTooLow`; other repetitive loops
-/// produce a generic `ClaudeSubprocessFailed` error.
+/// produce a generic `RunnerFailed` error.
 fn classify_subprocess_error(
     subtype: Option<&str>,
     result_text: &str,
@@ -391,7 +391,7 @@ fn classify_subprocess_error(
         }
         // The subprocess was stuck in a loop but the message doesn't look
         // credit-related — surface it as a generic subprocess failure.
-        return ActualError::ClaudeSubprocessFailed {
+        return ActualError::RunnerFailed {
             message: format!("Claude Code entered a repetitive loop: {repeated_msg}"),
             stderr: stderr.to_string(),
         };
@@ -399,7 +399,7 @@ fn classify_subprocess_error(
 
     // Check for the error_max_turns subtype — this is always a generic error.
     if subtype == Some("error_max_turns") {
-        return ActualError::ClaudeSubprocessFailed {
+        return ActualError::RunnerFailed {
             message: format!("Claude Code returned an error: {result_text}"),
             stderr: stderr.to_string(),
         };
@@ -407,7 +407,7 @@ fn classify_subprocess_error(
 
     // Generic subprocess failure — covers `is_error == true` without a special
     // subtype as well as any other unexpected combination.
-    ActualError::ClaudeSubprocessFailed {
+    ActualError::RunnerFailed {
         message: format!("Claude Code returned an error: {result_text}"),
         stderr: stderr.to_string(),
     }
@@ -584,7 +584,7 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                 let _ = stderr_task.await;
                 envelope
                     .structured_output
-                    .ok_or_else(|| ActualError::ClaudeSubprocessFailed {
+                    .ok_or_else(|| ActualError::RunnerFailed {
                         message: "Claude Code envelope missing structured_output field".to_string(),
                         stderr: String::new(),
                     })
@@ -606,7 +606,7 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
             // return; await the stderr drainer so any last-gasp diagnostic
             // lines are flushed through event_tx before we return.
             let _ = stderr_task.await;
-            Err(ActualError::ClaudeTimeout {
+            Err(ActualError::RunnerTimeout {
                 seconds: timeout.as_secs(),
             })
         }
@@ -655,17 +655,17 @@ mod tests {
     use super::*;
     use serde::Deserialize;
 
-    /// Extract `ClaudeSubprocessFailed` fields from an `ActualError`, panicking on mismatch.
+    /// Extract `RunnerFailed` fields from an `ActualError`, panicking on mismatch.
     #[rustfmt::skip]
     fn subprocess_failed(e: ActualError) -> (String, String) {
-        let ActualError::ClaudeSubprocessFailed { message, stderr } = e else { unreachable!() };
+        let ActualError::RunnerFailed { message, stderr } = e else { unreachable!() };
         (message, stderr)
     }
 
-    /// Extract `ClaudeTimeout` seconds from an `ActualError`, panicking on mismatch.
+    /// Extract `RunnerTimeout` seconds from an `ActualError`, panicking on mismatch.
     #[rustfmt::skip]
     fn timeout_seconds(e: ActualError) -> u64 {
-        let ActualError::ClaudeTimeout { seconds } = e else { unreachable!() };
+        let ActualError::RunnerTimeout { seconds } = e else { unreachable!() };
         seconds
     }
 
@@ -690,7 +690,7 @@ mod tests {
             json_response: "not valid json".to_string(),
         };
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
-        assert!(matches!(result, Err(ActualError::ClaudeOutputParse(_))));
+        assert!(matches!(result, Err(ActualError::RunnerOutputParse(_))));
     }
 
     #[tokio::test]
@@ -860,7 +860,7 @@ mod tests {
         let runner = CliClaudeRunner::new(script, Duration::from_secs(10));
         let result: Result<serde_json::Value, _> = runner.run(&[]).await;
 
-        assert!(matches!(result, Err(ActualError::ClaudeOutputParse(_))));
+        assert!(matches!(result, Err(ActualError::RunnerOutputParse(_))));
     }
 
     #[derive(Deserialize, PartialEq, Debug)]
@@ -1894,38 +1894,38 @@ mod tests {
     }
 
     /// Verify that without a repetitive message, `classify_subprocess_error`
-    /// returns `ClaudeSubprocessFailed`.
+    /// returns `RunnerFailed`.
     #[test]
     fn test_classify_subprocess_error_without_repetitive_msg() {
         let err =
             classify_subprocess_error(Some("error"), "Something went wrong", "stderr output", None);
         assert!(
-            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
-            "expected ClaudeSubprocessFailed, got: {err:?}"
+            matches!(err, ActualError::RunnerFailed { .. }),
+            "expected RunnerFailed, got: {err:?}"
         );
     }
 
-    /// Verify that `error_max_turns` subtype always maps to `ClaudeSubprocessFailed`
+    /// Verify that `error_max_turns` subtype always maps to `RunnerFailed`
     /// even with a repetitive message.
     #[test]
     fn test_classify_subprocess_error_max_turns_not_credit() {
         // error_max_turns should NOT map to CreditBalanceTooLow.
         let err = classify_subprocess_error(Some("error_max_turns"), "Hit max turns", "", None);
         assert!(
-            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
-            "expected ClaudeSubprocessFailed for error_max_turns, got: {err:?}"
+            matches!(err, ActualError::RunnerFailed { .. }),
+            "expected RunnerFailed for error_max_turns, got: {err:?}"
         );
     }
 
     /// A repetitive message that does NOT look like a credit error should
-    /// produce `ClaudeSubprocessFailed`, not `CreditBalanceTooLow`.
+    /// produce `RunnerFailed`, not `CreditBalanceTooLow`.
     #[test]
     fn test_classify_subprocess_error_non_credit_repetitive_msg() {
         let err =
             classify_subprocess_error(Some("error"), "error detail", "", Some("StructuredOutput"));
         assert!(
-            matches!(err, ActualError::ClaudeSubprocessFailed { .. }),
-            "expected ClaudeSubprocessFailed for non-credit repetitive msg, got: {err:?}"
+            matches!(err, ActualError::RunnerFailed { .. }),
+            "expected RunnerFailed for non-credit repetitive msg, got: {err:?}"
         );
         // Verify the error message includes the repeated message.
         let msg = err.to_string();

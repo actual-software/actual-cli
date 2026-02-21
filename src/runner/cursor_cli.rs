@@ -128,7 +128,7 @@ pub fn find_cursor_binary() -> Result<PathBuf, ActualError> {
 
 /// Convert an I/O error from subprocess operations into an `ActualError`.
 fn io_err(context: &str, e: std::io::Error) -> ActualError {
-    ActualError::ClaudeSubprocessFailed {
+    ActualError::RunnerFailed {
         message: format!("{context}: {e}"),
         stderr: String::new(),
     }
@@ -258,7 +258,7 @@ async fn run_cursor_subprocess(
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        return Err(ActualError::ClaudeSubprocessFailed {
+        return Err(ActualError::RunnerFailed {
             message: format!("Cursor CLI exited with code {code}"),
             stderr: stderr_text,
         });
@@ -268,7 +268,7 @@ async fn run_cursor_subprocess(
 
     // Parse the JSON envelope from stdout.
     let envelope: CursorEnvelope =
-        serde_json::from_str(&stdout_text).map_err(|e| ActualError::ClaudeSubprocessFailed {
+        serde_json::from_str(&stdout_text).map_err(|e| ActualError::RunnerFailed {
             message: format!("Failed to parse Cursor CLI JSON envelope: {e}"),
             stderr: stderr_text.clone(),
         })?;
@@ -280,19 +280,17 @@ async fn run_cursor_subprocess(
             .as_deref()
             .or(envelope.subtype.as_deref())
             .unwrap_or("unknown error");
-        return Err(ActualError::ClaudeSubprocessFailed {
+        return Err(ActualError::RunnerFailed {
             message: format!("Cursor CLI returned an error: {detail}"),
             stderr: stderr_text,
         });
     }
 
     // Extract the result field.
-    let result_text = envelope
-        .result
-        .ok_or_else(|| ActualError::ClaudeSubprocessFailed {
-            message: "Cursor CLI envelope missing result field".to_string(),
-            stderr: stderr_text,
-        })?;
+    let result_text = envelope.result.ok_or_else(|| ActualError::RunnerFailed {
+        message: "Cursor CLI envelope missing result field".to_string(),
+        stderr: stderr_text,
+    })?;
 
     // Strip markdown JSON fences if present (models sometimes wrap output).
     let json_str = strip_markdown_json_fences(&result_text);
@@ -341,17 +339,17 @@ mod tests {
     use super::*;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
-    /// Extract `ClaudeSubprocessFailed` fields from an `ActualError`, panicking on mismatch.
+    /// Extract `RunnerFailed` fields from an `ActualError`, panicking on mismatch.
     #[rustfmt::skip]
     fn subprocess_failed(e: ActualError) -> (String, String) {
-        let ActualError::ClaudeSubprocessFailed { message, stderr } = e else { unreachable!() };
+        let ActualError::RunnerFailed { message, stderr } = e else { unreachable!() };
         (message, stderr)
     }
 
-    /// Extract `ClaudeTimeout` seconds from an `ActualError`, panicking on mismatch.
+    /// Extract `RunnerTimeout` seconds from an `ActualError`, panicking on mismatch.
     #[rustfmt::skip]
     fn timeout_seconds(e: ActualError) -> u64 {
-        let ActualError::ClaudeTimeout { seconds } = e else { unreachable!() };
+        let ActualError::RunnerTimeout { seconds } = e else { unreachable!() };
         seconds
     }
 
@@ -408,7 +406,7 @@ mod tests {
         assert_eq!(result.summary.total_input, 0);
     }
 
-    // ---- Test 2: non-zero exit maps to ClaudeSubprocessFailed ----
+    // ---- Test 2: non-zero exit maps to RunnerFailed ----
 
     #[tokio::test]
     #[cfg(unix)]
