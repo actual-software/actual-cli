@@ -1488,7 +1488,7 @@ pub(crate) fn load_config_with_fallback(cfg_path: &std::path::Path) -> crate::co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
+    use crate::analysis::types::{Framework, FrameworkCategory, Language, LanguageStat, Project};
     use crate::cli::commands::handle_result;
     use crate::cli::ui::test_utils::MockTerminal;
     use crate::cli::ui::tui::renderer::TuiRenderer;
@@ -1565,7 +1565,10 @@ mod tests {
                 Project {
                     path: "apps/web".to_string(),
                     name: "Web App".to_string(),
-                    languages: vec![Language::TypeScript],
+                    languages: vec![LanguageStat {
+                        language: Language::TypeScript,
+                        loc: 0,
+                    }],
                     frameworks: vec![Framework {
                         name: "nextjs".to_string(),
                         category: FrameworkCategory::WebFrontend,
@@ -1578,7 +1581,10 @@ mod tests {
                 Project {
                     path: "services/api".to_string(),
                     name: "API Service".to_string(),
-                    languages: vec![Language::Rust],
+                    languages: vec![LanguageStat {
+                        language: Language::Rust,
+                        loc: 0,
+                    }],
                     frameworks: vec![],
                     package_manager: Some("cargo".to_string()),
                     description: None,

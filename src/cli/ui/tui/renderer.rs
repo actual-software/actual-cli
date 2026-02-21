@@ -2032,7 +2032,9 @@ mod tests {
 
     #[test]
     fn test_confirm_project_strips_ansi_from_logs() {
-        use crate::analysis::types::{Framework, FrameworkCategory, Language, Project};
+        use crate::analysis::types::{
+            Framework, FrameworkCategory, Language, LanguageStat, Project,
+        };
         use crate::cli::ui::test_utils::MockTerminal;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -2048,7 +2050,10 @@ mod tests {
             projects: vec![Project {
                 path: ".".to_string(),
                 name: "TestProject".to_string(),
-                languages: vec![Language::Rust],
+                languages: vec![LanguageStat {
+                    language: Language::Rust,
+                    loc: 0,
+                }],
                 frameworks: vec![Framework {
                     name: "actix".to_string(),
                     category: FrameworkCategory::WebBackend,

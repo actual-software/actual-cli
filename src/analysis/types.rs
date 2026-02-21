@@ -14,7 +14,7 @@ pub struct RepoAnalysis {
 pub struct Project {
     pub path: String,
     pub name: String,
-    pub languages: Vec<Language>,
+    pub languages: Vec<LanguageStat>,
     pub frameworks: Vec<Framework>,
     pub package_manager: Option<String>,
     pub description: Option<String>,
@@ -22,6 +22,13 @@ pub struct Project {
     pub dep_count: usize,
     #[serde(default)]
     pub dev_dep_count: usize,
+}
+
+/// Language with associated lines-of-code count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageStat {
+    pub language: Language,
+    pub loc: usize,
 }
 
 /// Programming language detected in a project.
@@ -218,7 +225,7 @@ mod tests {
             "projects": [{
                 "path": "apps/web",
                 "name": "Web",
-                "languages": ["typescript"],
+                "languages": [{"language": "typescript", "loc": 1200}],
                 "frameworks": [{"name": "nextjs", "category": "web-frontend"}]
             }]
         }"#;
@@ -230,7 +237,13 @@ mod tests {
         let project = &analysis.projects[0];
         assert_eq!(project.path, "apps/web");
         assert_eq!(project.name, "Web");
-        assert_eq!(project.languages, vec![Language::TypeScript]);
+        assert_eq!(
+            project.languages,
+            vec![LanguageStat {
+                language: Language::TypeScript,
+                loc: 1200
+            }]
+        );
         assert_eq!(project.frameworks.len(), 1);
         assert_eq!(project.frameworks[0].name, "nextjs");
         assert_eq!(
@@ -249,7 +262,10 @@ mod tests {
             "projects": [{
                 "path": ".",
                 "name": "my-app",
-                "languages": ["Rust", "TypeScript"],
+                "languages": [
+                    {"language": "Rust", "loc": 500},
+                    {"language": "TypeScript", "loc": 300}
+                ],
                 "frameworks": [
                     {"name": "cargo", "category": "Build System"},
                     {"name": "nextjs", "category": "Web Frontend"}
@@ -261,7 +277,16 @@ mod tests {
         let project = &analysis.projects[0];
         assert_eq!(
             project.languages,
-            vec![Language::Rust, Language::TypeScript]
+            vec![
+                LanguageStat {
+                    language: Language::Rust,
+                    loc: 500
+                },
+                LanguageStat {
+                    language: Language::TypeScript,
+                    loc: 300
+                },
+            ]
         );
         assert_eq!(
             project.frameworks[0].category,
@@ -280,7 +305,16 @@ mod tests {
             projects: vec![Project {
                 path: "src".to_string(),
                 name: "my-app".to_string(),
-                languages: vec![Language::Rust, Language::Python],
+                languages: vec![
+                    LanguageStat {
+                        language: Language::Rust,
+                        loc: 1500,
+                    },
+                    LanguageStat {
+                        language: Language::Python,
+                        loc: 200,
+                    },
+                ],
                 frameworks: vec![
                     Framework {
                         name: "actix-web".to_string(),
@@ -590,7 +624,7 @@ mod tests {
         let json = r#"{
             "path": ".",
             "name": "legacy",
-            "languages": ["rust"],
+            "languages": [{"language": "rust", "loc": 0}],
             "frameworks": []
         }"#;
         let project: Project = serde_json::from_str(json).unwrap();
@@ -603,7 +637,7 @@ mod tests {
         let json = r#"{
             "path": ".",
             "name": "modern",
-            "languages": ["rust"],
+            "languages": [{"language": "rust", "loc": 0}],
             "frameworks": [],
             "dep_count": 15,
             "dev_dep_count": 7
@@ -618,7 +652,10 @@ mod tests {
         let project = Project {
             path: ".".to_string(),
             name: "test".to_string(),
-            languages: vec![Language::Rust],
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            }],
             frameworks: vec![],
             package_manager: None,
             description: None,
@@ -629,5 +666,39 @@ mod tests {
         let deserialized: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.dep_count, 42);
         assert_eq!(deserialized.dev_dep_count, 13);
+    }
+
+    #[test]
+    fn language_stat_round_trip() {
+        let stats = vec![
+            LanguageStat {
+                language: Language::Rust,
+                loc: 1500,
+            },
+            LanguageStat {
+                language: Language::TypeScript,
+                loc: 0,
+            },
+            LanguageStat {
+                language: Language::Other("haskell".to_string()),
+                loc: 42,
+            },
+        ];
+        for stat in &stats {
+            let json = serde_json::to_string(stat).unwrap();
+            let deserialized: LanguageStat = serde_json::from_str(&json).unwrap();
+            assert_eq!(&deserialized, stat, "Round-trip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn language_stat_serialization_format() {
+        let stat = LanguageStat {
+            language: Language::Rust,
+            loc: 1500,
+        };
+        let json = serde_json::to_string(&stat).unwrap();
+        assert!(json.contains("\"language\":\"rust\""));
+        assert!(json.contains("\"loc\":1500"));
     }
 }

@@ -4,7 +4,7 @@ use crate::analysis::static_analyzer::frameworks::{detect_frameworks, detect_pac
 use crate::analysis::static_analyzer::languages::detect_languages;
 use crate::analysis::static_analyzer::manifests::parse_dependencies;
 use crate::analysis::static_analyzer::monorepo::detect_monorepo;
-use crate::analysis::types::{Framework, Language, Project, RepoAnalysis};
+use crate::analysis::types::{Framework, LanguageStat, Project, RepoAnalysis};
 use crate::error::ActualError;
 
 /// Normalize a project path relative to a working directory.
@@ -88,10 +88,10 @@ pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualErr
     for project_info in &mono_info.projects {
         let project_dir = working_dir.join(&project_info.path);
 
-        // Detect languages via tokei
-        let languages: Vec<Language> = detect_languages(&project_dir)
+        // Detect languages via tokei (preserving LOC counts)
+        let languages: Vec<LanguageStat> = detect_languages(&project_dir)
             .into_iter()
-            .map(|(lang, _loc)| lang)
+            .map(|(language, loc)| LanguageStat { language, loc })
             .collect();
 
         // Parse manifests for dependencies
@@ -153,11 +153,14 @@ fn assemble_analysis(
 }
 
 /// Build a human-readable description from detected languages and frameworks.
-fn build_project_description(languages: &[Language], frameworks: &[Framework]) -> Option<String> {
+fn build_project_description(
+    languages: &[LanguageStat],
+    frameworks: &[Framework],
+) -> Option<String> {
     if languages.is_empty() && frameworks.is_empty() {
         return None;
     }
-    let lang_str: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
+    let lang_str: Vec<String> = languages.iter().map(|ls| ls.language.to_string()).collect();
     let fw_str: Vec<String> = frameworks.iter().map(|f| f.name.clone()).collect();
 
     let mut parts = Vec::new();
@@ -173,7 +176,7 @@ fn build_project_description(languages: &[Language], frameworks: &[Framework]) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::types::FrameworkCategory;
+    use crate::analysis::types::{FrameworkCategory, Language, LanguageStat};
 
     // -- normalize_project_path tests --
 
@@ -321,7 +324,10 @@ actix-web = "4"
         assert!(!result.is_monorepo);
         assert_eq!(result.projects.len(), 1);
         assert_eq!(result.projects[0].path, ".");
-        assert!(result.projects[0].languages.contains(&Language::Rust));
+        assert!(result.projects[0]
+            .languages
+            .iter()
+            .any(|ls| ls.language == Language::Rust));
         assert_eq!(result.projects[0].package_manager.as_deref(), Some("cargo"));
     }
 
@@ -432,7 +438,16 @@ version = "0.1.0"
 
     #[test]
     fn test_build_description_languages_only() {
-        let langs = vec![Language::Rust, Language::Python];
+        let langs = vec![
+            LanguageStat {
+                language: Language::Rust,
+                loc: 0,
+            },
+            LanguageStat {
+                language: Language::Python,
+                loc: 0,
+            },
+        ];
         let desc = build_project_description(&langs, &[]).unwrap();
         assert_eq!(desc, "rust, python");
     }
@@ -449,7 +464,10 @@ version = "0.1.0"
 
     #[test]
     fn test_build_description_both() {
-        let langs = vec![Language::Rust];
+        let langs = vec![LanguageStat {
+            language: Language::Rust,
+            loc: 0,
+        }];
         let fws = vec![Framework {
             name: "actix-web".to_string(),
             category: FrameworkCategory::WebBackend,
@@ -460,7 +478,10 @@ version = "0.1.0"
 
     #[test]
     fn test_build_description_multiple_frameworks() {
-        let langs = vec![Language::TypeScript];
+        let langs = vec![LanguageStat {
+            language: Language::TypeScript,
+            loc: 0,
+        }];
         let fws = vec![
             Framework {
                 name: "react".to_string(),
