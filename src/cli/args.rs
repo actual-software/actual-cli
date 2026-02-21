@@ -91,13 +91,10 @@ impl RunnerChoice {
             return Ok(RunnerChoice::AnthropicApi);
         }
 
-        // OpenAI model IDs
-        if is_openai_model(&m) {
-            return Ok(RunnerChoice::OpenAiApi);
-        }
-
-        // Codex-specific models
-        if is_codex_model(&m) {
+        // All OpenAI-family models (gpt-*, o-series, chatgpt-*, codex-*) go
+        // through Codex CLI which supports ChatGPT OAuth.  The raw OpenAI API
+        // runner is only used when the user explicitly sets --runner openai-api.
+        if is_openai_model(&m) || is_codex_model(&m) {
             return Ok(RunnerChoice::CodexCli);
         }
 
@@ -1027,34 +1024,36 @@ mod parse_tests {
 
     #[test]
     fn test_infer_from_model_openai() {
+        // All OpenAI-family models now route to CodexCli (which supports
+        // ChatGPT OAuth).  OpenAiApi is only used with explicit --runner.
         assert_eq!(
             RunnerChoice::infer_from_model("gpt-5.2").unwrap(),
-            RunnerChoice::OpenAiApi
+            RunnerChoice::CodexCli
         );
         assert_eq!(
             RunnerChoice::infer_from_model("gpt-4o").unwrap(),
-            RunnerChoice::OpenAiApi
+            RunnerChoice::CodexCli
         );
         assert_eq!(
             RunnerChoice::infer_from_model("o1-preview").unwrap(),
-            RunnerChoice::OpenAiApi
+            RunnerChoice::CodexCli
         );
         assert_eq!(
             RunnerChoice::infer_from_model("o3-mini").unwrap(),
-            RunnerChoice::OpenAiApi
+            RunnerChoice::CodexCli
         );
         assert_eq!(
             RunnerChoice::infer_from_model("o4-mini").unwrap(),
-            RunnerChoice::OpenAiApi
+            RunnerChoice::CodexCli
         );
         assert_eq!(
             RunnerChoice::infer_from_model("chatgpt-4o-latest").unwrap(),
-            RunnerChoice::OpenAiApi
+            RunnerChoice::CodexCli
         );
         // Case insensitive
         assert_eq!(
             RunnerChoice::infer_from_model("GPT-5.2").unwrap(),
-            RunnerChoice::OpenAiApi
+            RunnerChoice::CodexCli
         );
     }
 

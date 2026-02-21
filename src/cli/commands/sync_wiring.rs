@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(
             infer_runner_from_config(Some("gpt-5"), None, Some("cursor-model"), Some("haiku"),)
                 .unwrap(),
-            RunnerChoice::OpenAiApi,
+            RunnerChoice::CodexCli,
         );
     }
 
@@ -433,7 +433,7 @@ mod tests {
     fn infer_runner_openai_model_config() {
         assert_eq!(
             infer_runner_from_config(None, Some("gpt-5-mini"), None, None).unwrap(),
-            RunnerChoice::OpenAiApi,
+            RunnerChoice::CodexCli,
         );
     }
 
@@ -441,7 +441,7 @@ mod tests {
     fn infer_runner_openai_model_overrides_cfg_model() {
         assert_eq!(
             infer_runner_from_config(None, Some("gpt-5"), None, Some("haiku")).unwrap(),
-            RunnerChoice::OpenAiApi,
+            RunnerChoice::CodexCli,
         );
     }
 
@@ -449,7 +449,7 @@ mod tests {
     fn infer_runner_openai_model_overrides_cursor_model() {
         assert_eq!(
             infer_runner_from_config(None, Some("gpt-5"), Some("auto"), None).unwrap(),
-            RunnerChoice::OpenAiApi,
+            RunnerChoice::CodexCli,
         );
     }
 
@@ -498,7 +498,7 @@ mod tests {
     fn infer_runner_cfg_model_openai() {
         assert_eq!(
             infer_runner_from_config(None, None, None, Some("gpt-4o")).unwrap(),
-            RunnerChoice::OpenAiApi,
+            RunnerChoice::CodexCli,
         );
     }
 
@@ -515,7 +515,7 @@ mod tests {
         // The exact bug scenario: openai_model: "gpt-5-mini" should NOT default to ClaudeCli
         assert_eq!(
             infer_runner_from_config(None, Some("gpt-5-mini"), None, None).unwrap(),
-            RunnerChoice::OpenAiApi,
+            RunnerChoice::CodexCli,
             "openai_model should be considered for runner auto-detection"
         );
     }
@@ -544,13 +544,13 @@ mod tests {
     }
 
     #[test]
-    fn infer_runner_cfg_model_gpt5_mini_selects_openai() {
-        // When `model: gpt-5-mini` is set (not openai_model), runner should be OpenAiApi.
-        // The OpenAiApi branch should then use cfg.model as fallback after cfg.openai_model.
+    fn infer_runner_cfg_model_gpt5_mini_selects_codex() {
+        // When `model: gpt-5-mini` is set (not openai_model), runner should be CodexCli.
+        // The CodexCli runner supports ChatGPT OAuth and all OpenAI-family models.
         assert_eq!(
             infer_runner_from_config(None, None, None, Some("gpt-5-mini")).unwrap(),
-            RunnerChoice::OpenAiApi,
-            "model: gpt-5-mini should auto-select OpenAiApi runner"
+            RunnerChoice::CodexCli,
+            "model: gpt-5-mini should auto-select CodexCli runner"
         );
     }
 
