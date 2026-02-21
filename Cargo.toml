@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/tui-test"]
+
 [package]
 name = "actual-cli"
 version = "0.1.0"
