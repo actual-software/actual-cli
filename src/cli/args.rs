@@ -293,7 +293,7 @@ pub enum Command {
 }
 
 /// Arguments for the `sync` command
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 pub struct SyncArgs {
     /// Show summary of what would change without writing files
     #[arg(long)]

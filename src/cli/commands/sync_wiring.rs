@@ -295,8 +295,12 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                             };
                             let api_runner =
                                 OpenAiApiRunner::new(key, fallback_model, subprocess_timeout)?;
+                            // Skip confirmation on fallback — user already accepted
+                            // on the initial CodexCli attempt.
+                            let mut fallback_args = args.clone();
+                            fallback_args.force = true;
                             run_sync(
-                                args,
+                                &fallback_args,
                                 &root_dir,
                                 &cfg_path,
                                 &term,
