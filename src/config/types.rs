@@ -107,7 +107,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_api_key: Option<String>,
 
-    /// Maximum number of agentic turns per tailoring invocation (default: 5).
+    /// Maximum number of agentic turns per tailoring invocation (default: 10).
     /// Only applies to the claude-cli runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
