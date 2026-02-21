@@ -27,6 +27,34 @@ use crate::runner::cursor_cli::{find_cursor_binary, CursorCliRunner};
 use crate::runner::openai_api::OpenAiApiRunner;
 use crate::runner::subprocess::CliClaudeRunner;
 
+/// Infer the runner from available model configuration when neither `--runner`
+/// CLI flag nor `runner` config field is set.
+///
+/// Priority order:
+///   1. `args_model` (--model CLI flag overrides everything)
+///   2. `openai_model` (dedicated OpenAI config field signals intent)
+///   3. `cursor_model` (dedicated Cursor config field signals intent)
+///   4. `model` (legacy/Anthropic-oriented config field)
+///   5. Default: `ClaudeCli`
+fn infer_runner_from_config(
+    args_model: Option<&str>,
+    openai_model: Option<&str>,
+    cursor_model: Option<&str>,
+    model: Option<&str>,
+) -> RunnerChoice {
+    if let Some(m) = args_model {
+        RunnerChoice::infer_from_model(m)
+    } else if let Some(m) = openai_model {
+        RunnerChoice::infer_from_model(m)
+    } else if cursor_model.is_some() {
+        RunnerChoice::CursorCli
+    } else if let Some(m) = model {
+        RunnerChoice::infer_from_model(m)
+    } else {
+        RunnerChoice::ClaudeCli
+    }
+}
+
 /// Production wiring for `actual sync`.
 ///
 /// Resolves system dependencies (cwd, terminal, runner) and delegates
@@ -69,12 +97,14 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
         })?
     } else {
         // Auto-select runner from model when neither --runner flag nor
-        // config runner is set. Check --model flag first, then config model.
-        let effective_model = args.model.as_deref().or(cfg.model.as_deref());
-        match effective_model {
-            Some(m) => RunnerChoice::infer_from_model(m),
-            None => RunnerChoice::ClaudeCli,
-        }
+        // config runner is set.  See `infer_runner_from_config` doc comment
+        // for the full priority order.
+        infer_runner_from_config(
+            args.model.as_deref(),
+            cfg.openai_model.as_deref(),
+            cfg.cursor_model.as_deref(),
+            cfg.model.as_deref(),
+        )
     };
 
     // Resolve the per-subprocess timeout: config value takes precedence over the
@@ -293,7 +323,8 @@ pub(crate) fn resolve_api_key(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_api_key;
+    use super::{infer_runner_from_config, resolve_api_key};
+    use crate::cli::args::RunnerChoice;
     use crate::error::ActualError;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
@@ -360,6 +391,141 @@ mod tests {
         assert!(
             std::env::var(TEST_KEY).is_err(),
             "{TEST_KEY} must be cleaned up even after panic"
+        );
+    }
+
+    // ---- infer_runner_from_config tests ----
+
+    #[test]
+    fn infer_runner_nothing_set_defaults_to_claude_cli() {
+        assert_eq!(
+            infer_runner_from_config(None, None, None, None),
+            RunnerChoice::ClaudeCli,
+        );
+    }
+
+    #[test]
+    fn infer_runner_args_model_overrides_all() {
+        assert_eq!(
+            infer_runner_from_config(Some("gpt-5"), None, Some("cursor-model"), Some("haiku"),),
+            RunnerChoice::OpenAiApi,
+        );
+    }
+
+    #[test]
+    fn infer_runner_args_model_claude_alias() {
+        assert_eq!(
+            infer_runner_from_config(Some("sonnet"), None, None, None),
+            RunnerChoice::ClaudeCli,
+        );
+    }
+
+    #[test]
+    fn infer_runner_args_model_anthropic_full() {
+        assert_eq!(
+            infer_runner_from_config(Some("claude-sonnet-4-6"), None, None, None),
+            RunnerChoice::AnthropicApi,
+        );
+    }
+
+    #[test]
+    fn infer_runner_openai_model_config() {
+        assert_eq!(
+            infer_runner_from_config(None, Some("gpt-5-mini"), None, None),
+            RunnerChoice::OpenAiApi,
+        );
+    }
+
+    #[test]
+    fn infer_runner_openai_model_overrides_cfg_model() {
+        assert_eq!(
+            infer_runner_from_config(None, Some("gpt-5"), None, Some("haiku")),
+            RunnerChoice::OpenAiApi,
+        );
+    }
+
+    #[test]
+    fn infer_runner_openai_model_overrides_cursor_model() {
+        assert_eq!(
+            infer_runner_from_config(None, Some("gpt-5"), Some("auto"), None),
+            RunnerChoice::OpenAiApi,
+        );
+    }
+
+    #[test]
+    fn infer_runner_cursor_model_config() {
+        assert_eq!(
+            infer_runner_from_config(None, None, Some("auto"), None),
+            RunnerChoice::CursorCli,
+        );
+    }
+
+    #[test]
+    fn infer_runner_cursor_model_overrides_cfg_model() {
+        assert_eq!(
+            infer_runner_from_config(None, None, Some("gpt-4o"), Some("haiku")),
+            RunnerChoice::CursorCli,
+        );
+    }
+
+    #[test]
+    fn infer_runner_cursor_model_with_anthropic_name() {
+        // Cursor proxies all models, so cursor_model always means CursorCli
+        assert_eq!(
+            infer_runner_from_config(None, None, Some("claude-sonnet-4-6"), None),
+            RunnerChoice::CursorCli,
+        );
+    }
+
+    #[test]
+    fn infer_runner_cfg_model_anthropic() {
+        assert_eq!(
+            infer_runner_from_config(None, None, None, Some("claude-sonnet-4-6")),
+            RunnerChoice::AnthropicApi,
+        );
+    }
+
+    #[test]
+    fn infer_runner_cfg_model_short_alias() {
+        assert_eq!(
+            infer_runner_from_config(None, None, None, Some("sonnet")),
+            RunnerChoice::ClaudeCli,
+        );
+    }
+
+    #[test]
+    fn infer_runner_cfg_model_openai() {
+        assert_eq!(
+            infer_runner_from_config(None, None, None, Some("gpt-4o")),
+            RunnerChoice::OpenAiApi,
+        );
+    }
+
+    #[test]
+    fn infer_runner_codex_model_via_openai_model() {
+        assert_eq!(
+            infer_runner_from_config(None, Some("codex-mini-latest"), None, None),
+            RunnerChoice::CodexCli,
+        );
+    }
+
+    #[test]
+    fn infer_runner_openai_model_gpt5_mini_not_claude() {
+        // The exact bug scenario: openai_model: "gpt-5-mini" should NOT default to ClaudeCli
+        assert_eq!(
+            infer_runner_from_config(None, Some("gpt-5-mini"), None, None),
+            RunnerChoice::OpenAiApi,
+            "openai_model should be considered for runner auto-detection"
+        );
+    }
+
+    #[test]
+    fn infer_runner_cursor_model_not_claude() {
+        // cursor_model: "gpt-4o" should NOT default to ClaudeCli
+        assert_eq!(
+            infer_runner_from_config(None, None, Some("gpt-4o"), None),
+            RunnerChoice::CursorCli,
+            "cursor_model should be considered for runner auto-detection"
         );
     }
 }
