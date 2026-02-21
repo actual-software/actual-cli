@@ -20,6 +20,36 @@ pub enum RunnerChoice {
     CursorCli,
 }
 
+// ---- Model-detection helpers ----
+//
+// Shared by `RunnerChoice::infer_from_model()` and
+// `RunnerChoice::model_compatibility_warning()`.  All inputs must already
+// be lowercased.
+
+/// Returns `true` for short Claude aliases that only work with `claude-cli`.
+fn is_claude_short_alias(model: &str) -> bool {
+    matches!(model, "sonnet" | "opus" | "haiku")
+}
+
+/// Returns `true` for any Anthropic model (full IDs **or** short aliases).
+fn is_anthropic_model(model: &str) -> bool {
+    model.contains("claude") || is_claude_short_alias(model)
+}
+
+/// Returns `true` for OpenAI model IDs (GPT, o-series, ChatGPT).
+fn is_openai_model(model: &str) -> bool {
+    model.starts_with("gpt-")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+        || model.starts_with("chatgpt-")
+}
+
+/// Returns `true` for Codex-specific model IDs.
+fn is_codex_model(model: &str) -> bool {
+    model.starts_with("codex-")
+}
+
 impl RunnerChoice {
     /// Human-readable name for display in the Environment section.
     pub fn display_name(&self) -> &'static str {
@@ -32,6 +62,41 @@ impl RunnerChoice {
         }
     }
 
+    /// Infer the most appropriate runner from a model name.
+    ///
+    /// Used when neither `--runner` CLI flag nor `runner` config field is set,
+    /// but a model is specified. Returns the runner most likely to support
+    /// the given model based on naming conventions.
+    ///
+    /// Falls back to `ClaudeCli` for unrecognized models (safe default since
+    /// Claude Code supports model aliases like "sonnet").
+    pub fn infer_from_model(model: &str) -> Self {
+        let m = model.to_ascii_lowercase();
+
+        // Short Claude aliases only valid for claude-cli
+        if is_claude_short_alias(&m) {
+            return RunnerChoice::ClaudeCli;
+        }
+
+        // Anthropic model IDs (full names like "claude-sonnet-4-6")
+        if m.contains("claude") {
+            return RunnerChoice::AnthropicApi;
+        }
+
+        // OpenAI model IDs
+        if is_openai_model(&m) {
+            return RunnerChoice::OpenAiApi;
+        }
+
+        // Codex-specific models
+        if is_codex_model(&m) {
+            return RunnerChoice::CodexCli;
+        }
+
+        // Default: Claude CLI (handles custom aliases, fine-tunes, etc.)
+        RunnerChoice::ClaudeCli
+    }
+
     /// Check if the given model name is likely incompatible with this runner
     /// and return an actionable warning message if so.
     ///
@@ -40,30 +105,19 @@ impl RunnerChoice {
     pub fn model_compatibility_warning(&self, model: &str) -> Option<String> {
         let m = model.to_ascii_lowercase();
 
-        // Short aliases only valid for claude-cli
-        let is_short_alias = matches!(m.as_str(), "sonnet" | "opus" | "haiku");
-
-        // Anthropic model heuristic: contains "claude" OR is a short alias
-        let is_anthropic = m.contains("claude") || is_short_alias;
-
-        // OpenAI model heuristic
-        let is_openai = m.starts_with("gpt-")
-            || m.starts_with("o1")
-            || m.starts_with("o3")
-            || m.starts_with("o4")
-            || m.starts_with("chatgpt-");
-
-        // Codex model heuristic
-        let is_codex = m.starts_with("codex-");
+        let short_alias = is_claude_short_alias(&m);
+        let anthropic = is_anthropic_model(&m);
+        let openai = is_openai_model(&m);
+        let codex = is_codex_model(&m);
 
         match self {
             RunnerChoice::ClaudeCli => {
-                if is_openai {
+                if openai {
                     Some(format!(
                         "Model \"{model}\" looks like an OpenAI model; \
                          consider --runner openai-api"
                     ))
-                } else if is_codex {
+                } else if codex {
                     Some(format!(
                         "Model \"{model}\" looks like a Codex model; \
                          consider --runner codex-cli"
@@ -73,17 +127,17 @@ impl RunnerChoice {
                 }
             }
             RunnerChoice::AnthropicApi => {
-                if is_short_alias {
+                if short_alias {
                     Some(format!(
                         "Model \"{model}\" is a short alias; anthropic-api \
                          requires a full model name (e.g. claude-sonnet-4-5)"
                     ))
-                } else if is_openai {
+                } else if openai {
                     Some(format!(
                         "Model \"{model}\" looks like an OpenAI model; \
                          consider --runner openai-api"
                     ))
-                } else if is_codex {
+                } else if codex {
                     Some(format!(
                         "Model \"{model}\" looks like a Codex model; \
                          consider --runner codex-cli"
@@ -93,12 +147,12 @@ impl RunnerChoice {
                 }
             }
             RunnerChoice::OpenAiApi => {
-                if is_anthropic {
+                if anthropic {
                     Some(format!(
                         "Model \"{model}\" looks like an Anthropic model; \
                          consider --runner claude-cli or --runner anthropic-api"
                     ))
-                } else if is_codex {
+                } else if codex {
                     Some(format!(
                         "Model \"{model}\" looks like a Codex model; \
                          consider --runner codex-cli"
@@ -108,7 +162,7 @@ impl RunnerChoice {
                 }
             }
             RunnerChoice::CodexCli => {
-                if is_anthropic {
+                if anthropic {
                     Some(format!(
                         "Model \"{model}\" looks like an Anthropic model; \
                          consider --runner claude-cli or --runner anthropic-api"
@@ -894,5 +948,150 @@ mod parse_tests {
         assert!(RunnerChoice::ClaudeCli
             .model_compatibility_warning("chatgpt-4o-latest")
             .is_some());
+    }
+
+    // ---- infer_from_model tests ----
+
+    #[test]
+    fn test_infer_from_model_claude_short_aliases() {
+        assert_eq!(
+            RunnerChoice::infer_from_model("sonnet"),
+            RunnerChoice::ClaudeCli
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("opus"),
+            RunnerChoice::ClaudeCli
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("haiku"),
+            RunnerChoice::ClaudeCli
+        );
+        // Case insensitive
+        assert_eq!(
+            RunnerChoice::infer_from_model("Sonnet"),
+            RunnerChoice::ClaudeCli
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("HAIKU"),
+            RunnerChoice::ClaudeCli
+        );
+    }
+
+    #[test]
+    fn test_infer_from_model_anthropic_full_ids() {
+        assert_eq!(
+            RunnerChoice::infer_from_model("claude-sonnet-4-6"),
+            RunnerChoice::AnthropicApi
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("claude-3-5-sonnet-20241022"),
+            RunnerChoice::AnthropicApi
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("claude-opus-4"),
+            RunnerChoice::AnthropicApi
+        );
+    }
+
+    #[test]
+    fn test_infer_from_model_openai() {
+        assert_eq!(
+            RunnerChoice::infer_from_model("gpt-5.2"),
+            RunnerChoice::OpenAiApi
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("gpt-4o"),
+            RunnerChoice::OpenAiApi
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("o1-preview"),
+            RunnerChoice::OpenAiApi
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("o3-mini"),
+            RunnerChoice::OpenAiApi
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("o4-mini"),
+            RunnerChoice::OpenAiApi
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("chatgpt-4o-latest"),
+            RunnerChoice::OpenAiApi
+        );
+        // Case insensitive
+        assert_eq!(
+            RunnerChoice::infer_from_model("GPT-5.2"),
+            RunnerChoice::OpenAiApi
+        );
+    }
+
+    #[test]
+    fn test_infer_from_model_codex() {
+        assert_eq!(
+            RunnerChoice::infer_from_model("codex-mini-latest"),
+            RunnerChoice::CodexCli
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("codex-mini"),
+            RunnerChoice::CodexCli
+        );
+    }
+
+    #[test]
+    fn test_infer_from_model_unknown_defaults_to_claude() {
+        assert_eq!(
+            RunnerChoice::infer_from_model("my-custom-model"),
+            RunnerChoice::ClaudeCli
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("llama-3"),
+            RunnerChoice::ClaudeCli
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("gemini-pro"),
+            RunnerChoice::ClaudeCli
+        );
+    }
+
+    // ---- model-detection helper tests ----
+
+    #[test]
+    fn test_is_claude_short_alias() {
+        assert!(is_claude_short_alias("sonnet"));
+        assert!(is_claude_short_alias("opus"));
+        assert!(is_claude_short_alias("haiku"));
+        assert!(!is_claude_short_alias("claude-sonnet-4-6"));
+        assert!(!is_claude_short_alias("gpt-4o"));
+    }
+
+    #[test]
+    fn test_is_anthropic_model() {
+        assert!(is_anthropic_model("claude-sonnet-4-6"));
+        assert!(is_anthropic_model("sonnet"));
+        assert!(is_anthropic_model("opus"));
+        assert!(is_anthropic_model("haiku"));
+        assert!(!is_anthropic_model("gpt-4o"));
+        assert!(!is_anthropic_model("codex-mini"));
+    }
+
+    #[test]
+    fn test_is_openai_model() {
+        assert!(is_openai_model("gpt-4o"));
+        assert!(is_openai_model("gpt-5.2"));
+        assert!(is_openai_model("o1-preview"));
+        assert!(is_openai_model("o3-mini"));
+        assert!(is_openai_model("o4-mini"));
+        assert!(is_openai_model("chatgpt-4o-latest"));
+        assert!(!is_openai_model("claude-sonnet-4-6"));
+        assert!(!is_openai_model("codex-mini"));
+    }
+
+    #[test]
+    fn test_is_codex_model() {
+        assert!(is_codex_model("codex-mini"));
+        assert!(is_codex_model("codex-mini-latest"));
+        assert!(!is_codex_model("gpt-4o"));
+        assert!(!is_codex_model("claude-sonnet-4-6"));
     }
 }
