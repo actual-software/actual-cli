@@ -871,4 +871,245 @@ echo '{json}' > "$OUTPUT_FILE"
         );
         assert!(stderr.is_empty());
     }
+
+    // ---- with_api_key and API key injection ----
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_with_api_key_injects_env_var() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let env_file = dir.path().join("captured-env.txt");
+        // Script captures OPENAI_API_KEY and writes valid JSON to the output file.
+        let script_content = format!(
+            r#"#!/bin/sh
+OUTPUT_FILE=""
+NEXT_IS_OUTPUT=false
+for arg in "$@"; do
+    if $NEXT_IS_OUTPUT; then
+        OUTPUT_FILE="$arg"
+        NEXT_IS_OUTPUT=false
+    elif [ "$arg" = "--output-last-message" ]; then
+        NEXT_IS_OUTPUT=true
+    fi
+done
+echo "$OPENAI_API_KEY" > "{env_file}"
+echo '{json}' > "$OUTPUT_FILE"
+"#,
+            env_file = env_file.display(),
+            json = minimal_tailoring_json()
+        );
+        let script = dir.path().join("fake-codex.sh");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner =
+            CodexCliRunner::new(script, Some("gpt-5".to_string()), Duration::from_secs(10))
+                .with_api_key("sk-test-key-12345".to_string());
+
+        runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await
+            .unwrap();
+
+        let captured_key = std::fs::read_to_string(&env_file).unwrap();
+        assert_eq!(captured_key.trim(), "sk-test-key-12345");
+    }
+
+    // ---- Empty output file (exit 0, no content) with error in stdout ----
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_empty_output_with_error_detail_in_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Script writes error to stdout but exits 0 with empty output file.
+        let script_content = r#"#!/bin/sh
+OUTPUT_FILE=""
+NEXT_IS_OUTPUT=false
+for arg in "$@"; do
+    if $NEXT_IS_OUTPUT; then
+        OUTPUT_FILE="$arg"
+        NEXT_IS_OUTPUT=false
+    elif [ "$arg" = "--output-last-message" ]; then
+        NEXT_IS_OUTPUT=true
+    fi
+done
+echo '[2025-01-01T00:00:00Z] ERROR: unexpected status 400 Bad Request: {"detail":"The model is not supported"}' >&1
+echo "" > "$OUTPUT_FILE"
+"#;
+        let script = dir.path().join("fake-codex.sh");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner =
+            CodexCliRunner::new(script, Some("gpt-5".to_string()), Duration::from_secs(10));
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        let (message, _stderr) = subprocess_failed(result.unwrap_err());
+        assert!(
+            message.contains("The model is not supported"),
+            "message should contain detail: {message}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_empty_output_without_error_detail() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Script exits 0 with empty output file and no error details.
+        let script_content = r#"#!/bin/sh
+OUTPUT_FILE=""
+NEXT_IS_OUTPUT=false
+for arg in "$@"; do
+    if $NEXT_IS_OUTPUT; then
+        OUTPUT_FILE="$arg"
+        NEXT_IS_OUTPUT=false
+    elif [ "$arg" = "--output-last-message" ]; then
+        NEXT_IS_OUTPUT=true
+    fi
+done
+echo "" > "$OUTPUT_FILE"
+"#;
+        let script = dir.path().join("fake-codex.sh");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner =
+            CodexCliRunner::new(script, Some("gpt-5".to_string()), Duration::from_secs(10));
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        let (message, _stderr) = subprocess_failed(result.unwrap_err());
+        assert!(
+            message.contains("output file is empty"),
+            "message: {message}"
+        );
+    }
+
+    // ---- Output file read failure (file deleted before read) ----
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_output_file_read_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        // Script deletes the output file (simulating a race or permission issue).
+        // We use /bin/rm with absolute path to ensure it's found.
+        let script_content = "#!/bin/sh\n\
+            OUTPUT_FILE=\"\"\n\
+            NEXT_IS_OUTPUT=false\n\
+            for arg in \"$@\"; do\n\
+                if $NEXT_IS_OUTPUT; then\n\
+                    OUTPUT_FILE=\"$arg\"\n\
+                    NEXT_IS_OUTPUT=false\n\
+                elif [ \"$arg\" = \"--output-last-message\" ]; then\n\
+                    NEXT_IS_OUTPUT=true\n\
+                fi\n\
+            done\n\
+            /bin/rm -f \"$OUTPUT_FILE\"\n";
+        let script = dir.path().join("fake-codex.sh");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner =
+            CodexCliRunner::new(script, Some("gpt-5".to_string()), Duration::from_secs(10));
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        let (message, _stderr) = subprocess_failed(result.unwrap_err());
+        assert!(
+            message.contains("Failed to read Codex output file"),
+            "message: {message}"
+        );
+    }
+
+    // ---- extract_codex_error_detail unit tests ----
+
+    #[test]
+    fn test_extract_error_detail_json_fragment() {
+        let output = r#"[2025-01-01] ERROR: unexpected status 400: {"detail":"The 'gpt-5.2' model is not supported"}"#;
+        let detail = extract_codex_error_detail(output).unwrap();
+        assert_eq!(detail, "The 'gpt-5.2' model is not supported");
+    }
+
+    #[test]
+    fn test_extract_error_detail_error_line_fallback() {
+        let output = "[2025-01-01] ERROR: connection refused\n";
+        let detail = extract_codex_error_detail(output).unwrap();
+        assert_eq!(detail, "connection refused");
+    }
+
+    #[test]
+    fn test_extract_error_detail_none_when_no_match() {
+        let detail = extract_codex_error_detail("all good, no errors here");
+        assert!(detail.is_none());
+    }
+
+    #[test]
+    fn test_extract_error_detail_empty_detail_skipped() {
+        // Empty "detail" value should be skipped, falling through to ERROR line
+        let output = r#"{"detail":""} [ts] ERROR: real error message"#;
+        let detail = extract_codex_error_detail(output).unwrap();
+        assert_eq!(detail, "real error message");
+    }
+
+    #[test]
+    fn test_extract_error_detail_empty_everything() {
+        // No detail, no ERROR lines → None
+        let detail = extract_codex_error_detail(r#"{"detail":""}"#);
+        assert!(detail.is_none());
+    }
+
+    // ---- strip_markdown_json_fences: bare fences without newline ----
+
+    #[test]
+    fn test_strip_fences_bare_block_no_newline() {
+        // Bare ``` immediately followed by content (no newline after opening fence)
+        let input = "```{\"key\": \"value\"}\n```";
+        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
+    }
+
+    #[test]
+    fn test_strip_fences_opening_fence_no_closing() {
+        // Opening ```json found but no closing ``` — returns trimmed input as-is
+        let input = "```json\n{\"key\": \"value\"}";
+        assert_eq!(
+            strip_markdown_json_fences(input),
+            "```json\n{\"key\": \"value\"}"
+        );
+    }
+
+    // ---- extract_codex_error_detail: edge cases ----
+
+    #[test]
+    fn test_extract_error_detail_malformed_no_closing_quote() {
+        // "detail":" found but no closing quote — the inner find('"') returns None,
+        // falls through to the ERROR line fallback.
+        let output = "\"detail\":\"unterminated\n] ERROR: fallback error";
+        let detail = extract_codex_error_detail(output).unwrap();
+        assert_eq!(detail, "fallback error");
+
+        // Case where there is no closing quote AND no ERROR fallback → None
+        let output2 = "\"detail\":\"no closing quote here";
+        assert!(extract_codex_error_detail(output2).is_none());
+    }
+
+    #[test]
+    fn test_extract_error_detail_error_line_empty_message() {
+        // ERROR line exists but the message after it is empty/whitespace only
+        let output = "[ts] ERROR:   \nsome other line";
+        let detail = extract_codex_error_detail(output);
+        // Empty message after ERROR: should be skipped, and no other match → None
+        assert!(detail.is_none());
+    }
 }
