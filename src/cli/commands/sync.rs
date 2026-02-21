@@ -13,7 +13,6 @@ use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::format_project_summary;
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::header::AuthDisplay;
-use crate::cli::ui::panel::Panel;
 use crate::cli::ui::progress::SyncPhase;
 use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
@@ -1386,7 +1385,7 @@ pub fn confirm_and_write(
     })
 }
 
-/// Report per-file write results to the terminal using a Panel.
+/// Report per-file write results to the terminal.
 ///
 /// Returns `(created, updated, failed)` counts.
 fn report_write_results(
@@ -1394,21 +1393,19 @@ fn report_write_results(
     rejected_count: usize,
     elapsed: Duration,
     pipeline: &mut TuiRenderer,
-    width: usize,
+    _width: usize,
 ) -> (usize, usize, usize) {
     let mut files_created = 0;
     let mut files_updated = 0;
     let mut files_failed = 0;
-
-    let mut panel = Panel::titled("Results");
 
     for result in results {
         let safe_path = console::strip_ansi_codes(&result.path);
         match result.action {
             WriteAction::Created => {
                 files_created += 1;
-                panel = panel.line(&format!(
-                    "{} {}    created   v{}",
+                pipeline.println(&format!(
+                    "  {} {}    created   v{}",
                     theme::success(&theme::SUCCESS),
                     safe_path,
                     result.version
@@ -1416,8 +1413,8 @@ fn report_write_results(
             }
             WriteAction::Updated => {
                 files_updated += 1;
-                panel = panel.line(&format!(
-                    "{} {}    updated   v{}",
+                pipeline.println(&format!(
+                    "  {} {}    updated   v{}",
                     theme::success(&theme::SUCCESS),
                     safe_path,
                     result.version
@@ -1426,8 +1423,8 @@ fn report_write_results(
             WriteAction::Failed => {
                 files_failed += 1;
                 let err_msg = result.error.as_deref().unwrap_or("unknown error");
-                panel = panel.line(&format!(
-                    "{} {}    error     {}",
+                pipeline.println(&format!(
+                    "  {} {}    error     {}",
                     theme::error(&theme::ERROR),
                     safe_path,
                     err_msg
@@ -1441,10 +1438,8 @@ fn report_write_results(
         "Sync complete: {files_created} created \u{00b7} {files_updated} updated \u{00b7} {files_failed} failed \u{00b7} {rejected_count} rejected    [{elapsed_secs:.1}s total]"
     );
 
-    panel = panel.separator().footer(&summary);
-    for line in panel.render(width).lines() {
-        pipeline.println(line);
-    }
+    pipeline.println("");
+    pipeline.println(&format!("  {}", theme::muted(&summary)));
 
     (files_created, files_updated, files_failed)
 }
@@ -2771,10 +2766,10 @@ mod tests {
         assert_eq!(failed, 1);
     }
 
-    // ── Panel rendering tests ──
+    // ── Results rendering tests ──
 
     #[test]
-    fn test_report_write_results_panel_has_box_characters() {
+    fn test_report_write_results_has_file_entries() {
         let results = vec![WriteResult {
             path: "CLAUDE.md".to_string(),
             action: WriteAction::Created,
@@ -2788,25 +2783,13 @@ mod tests {
         let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
         assert!(
-            stripped.contains("Results"),
-            "expected panel title 'Results' in log: {stripped}"
-        );
-        assert!(
-            stripped.contains('\u{256d}'), // ╭
-            "expected top-left border in log: {stripped}"
-        );
-        assert!(
-            stripped.contains('\u{2570}'), // ╰
-            "expected bottom-left border in log: {stripped}"
-        );
-        assert!(
-            stripped.contains('\u{2502}'), // │
-            "expected side border in log: {stripped}"
+            stripped.contains("CLAUDE.md") && stripped.contains("created"),
+            "expected file entry in log: {stripped}"
         );
     }
 
     #[test]
-    fn test_report_write_results_panel_has_separator() {
+    fn test_report_write_results_no_box_characters() {
         let results = vec![WriteResult {
             path: "CLAUDE.md".to_string(),
             action: WriteAction::Created,
@@ -2820,13 +2803,13 @@ mod tests {
         let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
         assert!(
-            stripped.contains('\u{251c}') && stripped.contains('\u{2524}'), // ├ and ┤
-            "expected separator T-junctions in log: {stripped}"
+            !stripped.contains('\u{256d}') && !stripped.contains('\u{2570}') && !stripped.contains('\u{2502}'),
+            "expected no box-drawing characters in log: {stripped}"
         );
     }
 
     #[test]
-    fn test_report_write_results_panel_has_timing() {
+    fn test_report_write_results_has_timing() {
         let results = vec![WriteResult {
             path: "CLAUDE.md".to_string(),
             action: WriteAction::Created,
@@ -2846,7 +2829,7 @@ mod tests {
     }
 
     #[test]
-    fn test_report_write_results_panel_dot_separated_summary() {
+    fn test_report_write_results_dot_separated_summary() {
         let results = vec![
             WriteResult {
                 path: "CLAUDE.md".to_string(),
@@ -2881,7 +2864,7 @@ mod tests {
     }
 
     #[test]
-    fn test_report_write_results_panel_mixed_results() {
+    fn test_report_write_results_mixed_results() {
         let results = vec![
             WriteResult {
                 path: "CLAUDE.md".to_string(),
@@ -2917,14 +2900,12 @@ mod tests {
         assert!(stripped.contains("CLAUDE.md") && stripped.contains("updated"));
         assert!(stripped.contains("apps/web/CLAUDE.md") && stripped.contains("created"));
         assert!(stripped.contains("apps/api/CLAUDE.md") && stripped.contains("permission denied"));
-        // Verify panel footer
+        // Verify summary line
         assert!(stripped.contains("1 created"));
         assert!(stripped.contains("1 updated"));
         assert!(stripped.contains("1 failed"));
         assert!(stripped.contains("2 rejected"));
         assert!(stripped.contains("[4.5s total]"));
-        // Verify panel structure
-        assert!(stripped.contains("Results"));
     }
 
     // ── compute_repo_key tests ──
