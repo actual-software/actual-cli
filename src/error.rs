@@ -12,6 +12,9 @@ pub enum ActualError {
     #[error("Claude Code is not authenticated")]
     ClaudeNotAuthenticated,
 
+    #[error("Codex CLI is not authenticated. Set OPENAI_API_KEY or run: codex login")]
+    CodexNotAuthenticated,
+
     #[error("API key not set. Set {env_var} or configure the api key in your config")]
     ApiKeyMissing { env_var: String },
 
@@ -62,6 +65,7 @@ impl ActualError {
             Self::ClaudeNotFound
             | Self::ClaudeNotAuthenticated
             | Self::CodexNotFound
+            | Self::CodexNotAuthenticated
             | Self::ApiKeyMissing { .. } => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
@@ -76,6 +80,9 @@ impl ActualError {
             Self::ClaudeNotFound => Some("npm install -g @anthropic-ai/claude-code"),
             Self::CodexNotFound => Some("npm install -g @openai/codex"),
             Self::ClaudeNotAuthenticated => Some("claude auth login"),
+            Self::CodexNotAuthenticated => {
+                Some("Set OPENAI_API_KEY or run: codex login")
+            }
             Self::ApiKeyMissing { env_var } => {
                 // We can't return a string containing env_var dynamically from a &str hint,
                 // so provide a generic hint pointing users to the config.
@@ -102,6 +109,7 @@ mod tests {
     fn test_exit_codes() {
         assert_eq!(ActualError::ClaudeNotFound.exit_code(), 2);
         assert_eq!(ActualError::ClaudeNotAuthenticated.exit_code(), 2);
+        assert_eq!(ActualError::CodexNotAuthenticated.exit_code(), 2);
         assert_eq!(ActualError::CodexNotFound.exit_code(), 2);
         assert_eq!(
             ActualError::ClaudeSubprocessFailed {
@@ -184,6 +192,16 @@ mod tests {
         assert!(
             msg.contains("not authenticated"),
             "expected 'not authenticated' in: {msg}"
+        );
+
+        let msg = ActualError::CodexNotAuthenticated.to_string();
+        assert!(
+            msg.contains("not authenticated"),
+            "expected 'not authenticated' in: {msg}"
+        );
+        assert!(
+            msg.contains("OPENAI_API_KEY"),
+            "expected 'OPENAI_API_KEY' in: {msg}"
         );
 
         let msg = ActualError::ClaudeSubprocessFailed {
@@ -306,6 +324,14 @@ mod tests {
         assert_eq!(
             ActualError::ClaudeNotAuthenticated.hint(),
             Some("claude auth login")
+        );
+    }
+
+    #[test]
+    fn test_hint_codex_not_authenticated() {
+        assert_eq!(
+            ActualError::CodexNotAuthenticated.hint(),
+            Some("Set OPENAI_API_KEY or run: codex login")
         );
     }
 
