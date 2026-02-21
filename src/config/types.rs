@@ -22,9 +22,22 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_url: Option<String>,
 
-    /// Default model for Claude Code invocations.
+    /// Default model for Claude Code invocations (e.g. "sonnet", "haiku", "opus").
+    ///
+    /// This is the model used by the `claude-cli` runner and `anthropic-api` runner.
+    /// For OpenAI-based runners (`openai-api`, `codex-cli`), use `openai_model` instead.
+    /// The `--model` CLI flag overrides both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+
+    /// Default model for OpenAI-based runners (`openai-api`, `codex-cli`).
+    ///
+    /// Examples: "gpt-5", "gpt-5.2".
+    /// When using `codex-cli`, if this is not set the Codex CLI will use its
+    /// own default model (currently `gpt-5` for ChatGPT OAuth accounts).
+    /// The `--model` CLI flag overrides this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_model: Option<String>,
 
     /// Categories to always include.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +187,7 @@ mod tests {
         let config = Config {
             api_url: Some("https://api.example.com".to_string()),
             model: Some("sonnet".to_string()),
+            openai_model: Some("gpt-5".to_string()),
             include_categories: Some(vec!["testing".to_string(), "security".to_string()]),
             exclude_categories: Some(vec!["deprecated".to_string()]),
             include_general: Some(true),
@@ -355,5 +369,40 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
         let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
+    }
+
+    /// Round-trip test: openai_model field round-trips through YAML.
+    #[test]
+    fn test_round_trip_openai_model() {
+        let config = Config {
+            openai_model: Some("gpt-5".to_string()),
+            ..Config::default()
+        };
+        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        assert!(
+            yaml.contains("openai_model"),
+            "YAML must contain 'openai_model': {yaml}"
+        );
+        assert!(yaml.contains("gpt-5"), "YAML must contain 'gpt-5': {yaml}");
+        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        assert_eq!(config, deserialized);
+    }
+
+    /// Partial YAML with openai_model set deserializes correctly.
+    #[test]
+    fn test_partial_yaml_with_openai_model() {
+        let yaml = "model: haiku\nopenai_model: gpt-5\n";
+        let config: Config = serde_yaml::from_str(yaml).expect("deserialize partial YAML");
+        assert_eq!(config.model, Some("haiku".to_string()));
+        assert_eq!(config.openai_model, Some("gpt-5".to_string()));
+    }
+
+    /// Missing openai_model defaults to None.
+    #[test]
+    fn test_missing_openai_model_defaults_to_none() {
+        let yaml = "model: haiku\n";
+        let config: Config = serde_yaml::from_str(yaml).expect("deserialize partial YAML");
+        assert_eq!(config.model, Some("haiku".to_string()));
+        assert_eq!(config.openai_model, None);
     }
 }
