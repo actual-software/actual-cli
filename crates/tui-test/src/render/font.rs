@@ -48,13 +48,14 @@ impl FontAtlas {
 
     pub fn rasterize(&mut self, ch: char, bold: bool) -> &RasterizedGlyph {
         let key = (ch, bold);
-        if !self.cache.contains_key(&key) {
-            let font = if bold { &self.bold } else { &self.regular };
-            let (metrics, coverage) = font.rasterize(ch, self.font_size);
-            self.cache
-                .insert(key, RasterizedGlyph { metrics, coverage });
-        }
-        &self.cache[&key]
+        let font_size = self.font_size;
+        let regular = &self.regular;
+        let bold_font = &self.bold;
+        self.cache.entry(key).or_insert_with(|| {
+            let font = if bold { bold_font } else { regular };
+            let (metrics, coverage) = font.rasterize(ch, font_size);
+            RasterizedGlyph { metrics, coverage }
+        })
     }
 }
 
