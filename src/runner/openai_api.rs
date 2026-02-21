@@ -192,7 +192,8 @@ impl TailoringRunner for OpenAiApiRunner {
         // The OpenAI runner's `self.model` was already correctly resolved in
         // `sync_wiring` from `--model` flag > `config.openai_model` > default.
         let model = self.model.clone();
-        let schema_value: Value = serde_json::from_str(schema)?;
+        let mut schema_value: Value = serde_json::from_str(schema)?;
+        inject_additional_properties_false(&mut schema_value);
 
         let body = RequestBody {
             model,
@@ -336,6 +337,28 @@ impl TailoringRunner for OpenAiApiRunner {
 
         let output: TailoringOutput = serde_json::from_str(&text)?;
         Ok(output)
+    }
+}
+
+/// Recursively inject `"additionalProperties": false` into every JSON Schema
+/// object node that has `"type": "object"` and a `"properties"` map.
+/// Required by OpenAI's strict structured-output mode.
+fn inject_additional_properties_false(value: &mut Value) {
+    if let Value::Object(map) = value {
+        // If this node is type=object with properties, inject additionalProperties
+        let is_object = map.get("type").and_then(Value::as_str) == Some("object");
+        if is_object && map.contains_key("properties") {
+            map.entry("additionalProperties")
+                .or_insert(Value::Bool(false));
+        }
+        // Recurse into all values (properties, items, etc.)
+        for v in map.values_mut() {
+            inject_additional_properties_false(v);
+        }
+    } else if let Value::Array(arr) = value {
+        for v in arr {
+            inject_additional_properties_false(v);
+        }
     }
 }
 
@@ -1349,5 +1372,139 @@ mod tests {
         let result: Result<Vec<u8>, String> = Err("connection reset".to_string());
         let body = extract_error_body(result, 4096);
         assert_eq!(body, "<body read error: connection reset>");
+    }
+
+    // ── inject_additional_properties_false tests ─────────────────────────────
+
+    // Test 26: flat object with properties gets additionalProperties: false
+    #[test]
+    fn test_inject_additional_properties_simple() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            }
+        });
+        inject_additional_properties_false(&mut schema);
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+    }
+
+    // Test 27: nested objects inside properties and items all get the injection
+    #[test]
+    fn test_inject_additional_properties_nested() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "inner": {
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "integer" }
+                    }
+                },
+                "list": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        });
+        inject_additional_properties_false(&mut schema);
+
+        // Root object
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        // Nested object inside properties
+        assert_eq!(
+            schema["properties"]["inner"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        // Object inside array items
+        assert_eq!(
+            schema["properties"]["list"]["items"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+    }
+
+    // Test 28: already-present additionalProperties is not overwritten
+    #[test]
+    fn test_inject_additional_properties_idempotent() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "additionalProperties": true
+        });
+        inject_additional_properties_false(&mut schema);
+        // Should NOT overwrite the existing `true` value
+        assert_eq!(schema["additionalProperties"], serde_json::json!(true));
+    }
+
+    // Test 29: type=object without properties key is left alone
+    #[test]
+    fn test_inject_additional_properties_no_properties_key() {
+        let mut schema = serde_json::json!({
+            "type": "object"
+        });
+        inject_additional_properties_false(&mut schema);
+        assert!(
+            schema.get("additionalProperties").is_none(),
+            "should not inject additionalProperties on bare type=object without properties"
+        );
+    }
+
+    // Test 30: objects inside array items get the injection
+    #[test]
+    fn test_inject_additional_properties_array_items() {
+        let mut schema = serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" }
+                }
+            }
+        });
+        inject_additional_properties_false(&mut schema);
+        assert_eq!(
+            schema["items"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+    }
+
+    // Test 31: real tailoring schema — all object nodes get additionalProperties: false
+    #[test]
+    fn test_inject_additional_properties_real_schema() {
+        use crate::runner::schemas::tailoring_output_schema;
+
+        let schema_str = tailoring_output_schema().expect("schema should decode");
+        let mut schema: Value = serde_json::from_str(&schema_str).expect("valid JSON");
+        inject_additional_properties_false(&mut schema);
+
+        // Recursively verify: every node with type=object + properties has additionalProperties=false
+        fn check(value: &Value) {
+            if let Value::Object(map) = value {
+                let is_object = map.get("type").and_then(Value::as_str) == Some("object");
+                if is_object && map.contains_key("properties") {
+                    assert_eq!(
+                        map.get("additionalProperties"),
+                        Some(&Value::Bool(false)),
+                        "object node missing additionalProperties: false — keys: {:?}",
+                        map.keys().collect::<Vec<_>>()
+                    );
+                }
+                for v in map.values() {
+                    check(v);
+                }
+            } else if let Value::Array(arr) = value {
+                for v in arr {
+                    check(v);
+                }
+            }
+        }
+        check(&schema);
     }
 }
