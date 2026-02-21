@@ -160,10 +160,14 @@ impl TailoringRunner for OpenAiApiRunner {
         &self,
         prompt: &str,
         schema: &str,
-        model_override: Option<&str>,
+        _model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError> {
-        let model = model_override.unwrap_or(&self.model).to_string();
+        // Ignore `_model_override` — it comes from `ConcurrentTailoringConfig`
+        // which resolves from `config.model` (a Claude Code alias like "haiku").
+        // The OpenAI runner's `self.model` was already correctly resolved in
+        // `sync_wiring` from `--model` flag > `config.openai_model` > default.
+        let model = self.model.clone();
         let schema_value: Value = serde_json::from_str(schema)?;
 
         let body = RequestBody {
@@ -367,7 +371,7 @@ mod tests {
     fn make_runner(server: &Server) -> OpenAiApiRunner {
         let mut runner = OpenAiApiRunner::new(
             "test-key".to_string(),
-            "gpt-4o".to_string(),
+            "gpt-5.2".to_string(),
             Duration::from_secs(10),
         )
         .expect("failed to build test runner")
@@ -631,7 +635,7 @@ mod tests {
     fn test_new_constructs_successfully() {
         let result = OpenAiApiRunner::new(
             "test-key".to_string(),
-            "gpt-4o".to_string(),
+            "gpt-5.2".to_string(),
             Duration::from_secs(10),
         );
         assert!(result.is_ok(), "expected Ok, got: {:?}", result);
@@ -745,7 +749,7 @@ mod tests {
             .run_tailoring(
                 "test prompt",
                 r#"{"type":"object"}"#,
-                Some("gpt-4o-mini"),
+                Some("gpt-5.2-mini"),
                 None,
             )
             .await;
@@ -1024,7 +1028,7 @@ mod tests {
         // Point at a port that won't be listening.
         let runner = OpenAiApiRunner::new(
             "test-key".to_string(),
-            "gpt-4o".to_string(),
+            "gpt-5.2".to_string(),
             Duration::from_secs(10),
         )
         .expect("failed to build test runner")
@@ -1123,7 +1127,7 @@ mod tests {
         // Use a 1ms timeout so the client times out almost immediately.
         let runner = OpenAiApiRunner::new(
             "key".to_string(),
-            "gpt-4o".to_string(),
+            "gpt-5.2".to_string(),
             Duration::from_millis(1),
         )
         .expect("failed to build test runner")
@@ -1157,7 +1161,7 @@ mod tests {
     fn test_with_base_url_non_localhost_retains_client() {
         let runner = OpenAiApiRunner::new(
             "test-key".to_string(),
-            "gpt-4o".to_string(),
+            "gpt-5.2".to_string(),
             Duration::from_secs(10),
         )
         .expect("failed to build test runner")

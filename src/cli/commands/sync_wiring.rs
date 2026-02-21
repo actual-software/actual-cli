@@ -7,9 +7,8 @@
 
 use std::time::Duration;
 
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4o";
-const DEFAULT_CODEX_MODEL: &str = "codex-mini-latest";
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5.2";
 
 use clap::ValueEnum as _;
 
@@ -152,12 +151,13 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 authenticated: true,
                 email: Some("OpenAI API".to_string()),
             };
-            // Full API model name — the OpenAI HTTP API requires the complete model identifier,
-            // unlike the Claude CLI alias in options.rs DEFAULT_MODEL.
+            // Model resolution: --model flag > openai_model config > default.
+            // Uses `openai_model` (not `model`) so that `model: haiku` in config
+            // doesn't leak Claude aliases into the OpenAI API runner.
             let model = args
                 .model
                 .as_deref()
-                .or(cfg.model.as_deref())
+                .or(cfg.openai_model.as_deref())
                 .unwrap_or(DEFAULT_OPENAI_MODEL)
                 .to_string();
             let runner_display = RunnerDisplay {
@@ -178,22 +178,47 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
         }
         RunnerChoice::CodexCli => {
             let binary_path = find_codex_binary()?;
+            // Codex CLI supports two auth methods:
+            // 1. OPENAI_API_KEY env var (API key from platform.openai.com)
+            // 2. `codex login` (OAuth / ChatGPT account)
+            //
+            // We check the env var and config fallback. If an API key is found,
+            // we inject it into the subprocess environment. If not, we let the
+            // subprocess inherit whatever auth the user has configured (env var
+            // or `codex login`). This mirrors the Claude Code runner pattern
+            // where auth is inherited from the parent process.
+            let api_key = std::env::var("OPENAI_API_KEY")
+                .ok()
+                .or_else(|| cfg.openai_api_key.clone());
             let auth_display = AuthDisplay {
                 authenticated: true,
-                email: None,
+                email: api_key.as_ref().map(|_| "OpenAI API".to_string()),
             };
+            // Model resolution: --model flag > openai_model config > None (let
+            // Codex CLI use its own default, currently gpt-5 for ChatGPT OAuth).
+            // Uses `openai_model` (not `model`) so that `model: haiku` in config
+            // doesn't leak Claude aliases into the Codex CLI runner.
+            // Model resolution: --model flag > openai_model config > None (let
+            // Codex CLI use its own default, currently gpt-5 for ChatGPT OAuth).
+            // Uses `openai_model` (not `model`) so that `model: haiku` in config
+            // doesn't leak Claude aliases into the Codex CLI runner.
             let model = args
                 .model
                 .as_deref()
-                .or(cfg.model.as_deref())
-                .unwrap_or(DEFAULT_CODEX_MODEL)
-                .to_string();
+                .or(cfg.openai_model.as_deref())
+                .map(|s| s.to_string());
+            let display_model = model
+                .clone()
+                .unwrap_or_else(|| "(codex default)".to_string());
             let runner_display = RunnerDisplay {
                 runner_name: RunnerChoice::CodexCli.display_name().to_string(),
-                model: model.clone(),
-                warning: RunnerChoice::CodexCli.model_compatibility_warning(&model),
+                model: display_model.clone(),
+                warning: RunnerChoice::CodexCli.model_compatibility_warning(&display_model),
             };
-            let codex_runner = CodexCliRunner::new(binary_path, model, subprocess_timeout);
+            let mut codex_runner = CodexCliRunner::new(binary_path, model, subprocess_timeout);
+            if let Some(key) = api_key {
+                codex_runner = codex_runner.with_api_key(key);
+            }
             run_sync(
                 args,
                 &root_dir,

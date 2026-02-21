@@ -1270,10 +1270,10 @@ mod tests {
 
     #[test]
     fn test_format_stream_event_system_init() {
-        let line = r#"{"type":"system","model":"claude-sonnet-4-5"}"#;
+        let line = r#"{"type":"system","model":"claude-sonnet-4-6"}"#;
         assert_eq!(
             format_stream_event(line),
-            Some("Claude Code started (model: claude-sonnet-4-5)".to_string())
+            Some("Claude Code started (model: claude-sonnet-4-6)".to_string())
         );
     }
 
@@ -1696,7 +1696,7 @@ mod tests {
         });
         let result_line = stream_result_line(tailoring_json);
         // Emit a system event, then a tool-call event, then the result.
-        let system_line = r#"{"type":"system","model":"claude-sonnet-4-5"}"#;
+        let system_line = r#"{"type":"system","model":"claude-sonnet-4-6"}"#;
         let tool_line = serde_json::json!({
             "type": "assistant",
             "message": {
