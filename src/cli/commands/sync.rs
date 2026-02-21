@@ -1290,7 +1290,12 @@ pub fn confirm_and_write(
         })
         .collect();
 
-    // Step 2: Display diff summary
+    // Step 2: Start the Write phase so the steps panel shows it as active.
+    // File confirmation is part of the Write phase — the user needs to see
+    // the diff summary and confirm which files to write.
+    pipeline.start(SyncPhase::Write, "Confirming file changes...");
+
+    // Step 3: Display diff summary (now renders in the Write step's log pane)
     let summary = format_diff_summary(&diffs);
     if !summary.is_empty() {
         for line in summary.lines() {
@@ -1298,7 +1303,7 @@ pub fn confirm_and_write(
         }
     }
 
-    // Step 3: Handle --dry-run
+    // Step 4: Handle --dry-run
     if dry_run {
         if full {
             for file in &output.files {
@@ -1311,6 +1316,7 @@ pub fn confirm_and_write(
                 pipeline.println("── end ──");
             }
         }
+        pipeline.skip(SyncPhase::Write, "Dry run — no files written");
         return Ok(SyncResult {
             files_created: 0,
             files_updated: 0,
@@ -1319,7 +1325,7 @@ pub fn confirm_and_write(
         });
     }
 
-    // Step 4: Run confirmation (if not dry-run).
+    // Step 5: Run confirmation (if not dry-run).
     // Use the native TUI multi-select so the user stays inside the TUI
     // (no suspend/dialoguer teardown).  Plain/Quiet mode falls back to
     // the existing dialoguer-based confirm_files path automatically.
@@ -1327,7 +1333,7 @@ pub fn confirm_and_write(
     let files_rejected = output.files.len() - confirmed.len();
 
     if confirmed.is_empty() {
-        pipeline.println("No files to write.");
+        pipeline.skip(SyncPhase::Write, "No files to write");
         return Ok(SyncResult {
             files_created: 0,
             files_updated: 0,
@@ -1336,8 +1342,8 @@ pub fn confirm_and_write(
         });
     }
 
-    // Step 5: Write confirmed files
-    pipeline.start(SyncPhase::Write, "Writing files...");
+    // Step 6: Write confirmed files
+    pipeline.println("Writing files...");
     let results = write_files(root_dir, &confirmed, format);
 
     // Report Write phase outcome
@@ -1992,8 +1998,8 @@ mod tests {
 
         let log_text = pipeline.all_log_text();
         assert!(
-            log_text.contains("No files to write."),
-            "expected 'No files to write.' in log: {log_text}"
+            log_text.contains("No files to write"),
+            "expected 'No files to write' in log: {log_text}"
         );
     }
 
