@@ -1,0 +1,126 @@
+name: 'tui-test Report'
+description: 'Upload tui-test capture artifacts (PNGs, timeline.json) and create a step summary'
+
+inputs:
+  capture-dir:
+    description: 'Directory (or glob pattern) containing tui-test captures. Defaults to **/tui-test-captures'
+    required: false
+    default: '**/tui-test-captures'
+  artifact-name:
+    description: 'Name for the uploaded artifact'
+    required: false
+    default: 'tui-test-captures'
+  retention-days:
+    description: 'Number of days to retain the artifact (default: 7)'
+    required: false
+    default: '7'
+  summary:
+    description: 'Whether to create a GitHub Step Summary with capture details (true/false)'
+    required: false
+    default: 'true'
+
+outputs:
+  artifact-id:
+    description: 'The ID of the uploaded artifact (empty if no captures found)'
+    value: ${{ steps.upload.outputs.artifact-id }}
+  captures-found:
+    description: 'Whether any tui-test captures were found (true/false)'
+    value: ${{ steps.collect.outputs.found }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Collect tui-test captures
+      id: collect
+      shell: bash
+      run: |
+        STAGING_DIR="${{ runner.temp }}/tui-test-staging"
+        mkdir -p "$STAGING_DIR"
+
+        # Find all timeline.json files matching the capture dir pattern
+        PATTERN="${{ inputs.capture-dir }}"
+        FOUND=0
+        TOTAL_SCREENSHOTS=0
+        TOTAL_SESSIONS=0
+        SESSION_SUMMARIES=""
+
+        # Use find to locate timeline.json files under matching directories
+        while IFS= read -r timeline_file; do
+          [ -z "$timeline_file" ] && continue
+          FOUND=1
+          TOTAL_SESSIONS=$((TOTAL_SESSIONS + 1))
+
+          capture_dir="$(dirname "$timeline_file")"
+          # Create a unique subdirectory in staging
+          session_name="session-${TOTAL_SESSIONS}"
+          dest="$STAGING_DIR/$session_name"
+          mkdir -p "$dest"
+
+          # Copy all capture files (PNGs + timeline.json)
+          cp "$capture_dir"/*.json "$dest/" 2>/dev/null || true
+          cp "$capture_dir"/*.png "$dest/" 2>/dev/null || true
+
+          # Count screenshots in this session
+          png_count=$(find "$dest" -name "*.png" -type f | wc -l | tr -d ' ')
+          TOTAL_SCREENSHOTS=$((TOTAL_SCREENSHOTS + png_count))
+
+          # Extract command from timeline.json for summary
+          if command -v jq &>/dev/null && [ -f "$dest/timeline.json" ]; then
+            cmd=$(jq -r '.command // "unknown"' "$dest/timeline.json" 2>/dev/null || echo "unknown")
+            size=$(jq -r '.terminal_size // [0,0] | "\(.[0])x\(.[1])"' "$dest/timeline.json" 2>/dev/null || echo "?x?")
+            events=$(jq -r '.entries | length' "$dest/timeline.json" 2>/dev/null || echo "0")
+          else
+            cmd="unknown"
+            size="?x?"
+            events="0"
+          fi
+          SESSION_SUMMARIES="${SESSION_SUMMARIES}|${session_name}|${cmd}|${size}|${events}|${png_count}|"$'\n'
+        done < <(find . -path "./$PATTERN/timeline.json" -o -name "timeline.json" -path "*tui-test-captures*" 2>/dev/null | sort)
+
+        if [ "$FOUND" = "0" ]; then
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          echo "staging-dir=" >> "$GITHUB_OUTPUT"
+          echo "::notice::No tui-test captures found matching pattern: $PATTERN"
+        else
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "staging-dir=$STAGING_DIR" >> "$GITHUB_OUTPUT"
+          echo "total-sessions=$TOTAL_SESSIONS" >> "$GITHUB_OUTPUT"
+          echo "total-screenshots=$TOTAL_SCREENSHOTS" >> "$GITHUB_OUTPUT"
+          # Write session summaries to a file for the summary step
+          echo "$SESSION_SUMMARIES" > "$STAGING_DIR/.session-summaries.txt"
+        fi
+
+    - name: Upload captures
+      id: upload
+      if: steps.collect.outputs.found == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.collect.outputs.staging-dir }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: ignore
+
+    - name: Create step summary
+      if: inputs.summary == 'true' && steps.collect.outputs.found == 'true'
+      shell: bash
+      run: |
+        STAGING_DIR="${{ steps.collect.outputs.staging-dir }}"
+        TOTAL_SESSIONS="${{ steps.collect.outputs.total-sessions }}"
+        TOTAL_SCREENSHOTS="${{ steps.collect.outputs.total-screenshots }}"
+
+        {
+          echo "## tui-test Captures"
+          echo ""
+          echo "Collected **${TOTAL_SESSIONS} session(s)** with **${TOTAL_SCREENSHOTS} screenshot(s)**."
+          echo ""
+
+          if [ -f "$STAGING_DIR/.session-summaries.txt" ]; then
+            echo "| Session | Command | Terminal Size | Events | Screenshots |"
+            echo "|---------|---------|---------------|--------|-------------|"
+            cat "$STAGING_DIR/.session-summaries.txt"
+            echo ""
+          fi
+
+          echo ""
+          echo "> Download the **${{ inputs.artifact-name }}** artifact to view PNGs and timeline details."
+        } >> "$GITHUB_STEP_SUMMARY"
