@@ -10,7 +10,7 @@ use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::cli::ui::theme;
 use crate::config;
-use crate::config::types::{Config, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY};
+use crate::config::types::{Config, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_MODEL};
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::OutputFormat;
@@ -115,18 +115,19 @@ fn format_config_section(
         panel_with_config.kv("API URL", api_url)
     };
 
+    // Always show the active model so users can confirm what is configured.
+    panel = if cfg.model.is_none() {
+        panel.kv_annotated("Model", DEFAULT_MODEL, "(default)")
+    } else {
+        panel.kv("Model", cfg.model.as_deref().unwrap_or(DEFAULT_MODEL))
+    };
+
     if verbose {
         let runner = match cfg.runner.as_deref() {
             Some(r) => r.to_string(),
             None => "(inferred from model)".to_string(),
         };
         panel = panel.kv("Runner", &runner);
-
-        let model = cfg
-            .model
-            .as_deref()
-            .unwrap_or("not set (will use server default)");
-        panel = panel.kv("Model", model);
 
         if let Some(ref openai_model) = cfg.openai_model {
             panel = panel.kv("OpenAI model", openai_model);
@@ -437,10 +438,14 @@ mod tests {
         );
         assert!(p.contains("exists"), "should show 'exists' annotation");
         assert!(p.contains("API URL"), "should show API URL label");
-        assert!(p.contains("(default)"), "should show '(default)' for API");
         assert!(
-            !p.contains("Model"),
-            "should not show Model when not verbose"
+            p.contains("(default)"),
+            "should show '(default)' for API or Model"
+        );
+        assert!(p.contains("Model"), "should show Model row always");
+        assert!(
+            p.contains("claude-sonnet-4-6"),
+            "should show default model name"
         );
     }
 
@@ -466,9 +471,53 @@ mod tests {
             p.contains("https://custom.api.com"),
             "should show custom API URL"
         );
+        // API URL row must not show "(default)" since it's explicitly set
+        let api_line = p
+            .lines()
+            .find(|l| l.contains("API URL"))
+            .unwrap_or_default();
         assert!(
-            !p.contains("(default)"),
-            "should not show '(default)' for custom URL"
+            !api_line.contains("(default)"),
+            "should not show '(default)' for custom URL: {api_line}"
+        );
+    }
+
+    #[test]
+    fn test_format_config_section_normal_shows_configured_model() {
+        let cfg = Config {
+            model: Some("claude-haiku-3-5".to_string()),
+            ..Config::default()
+        };
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, false, 80);
+        let p = plain(&output);
+        assert!(p.contains("Model"), "should show Model row: {p}");
+        assert!(
+            p.contains("claude-haiku-3-5"),
+            "should show configured model name: {p}"
+        );
+        // Model row must not show "(default)" since model is explicitly set
+        let model_line = p.lines().find(|l| l.contains("Model")).unwrap_or_default();
+        assert!(
+            !model_line.contains("(default)"),
+            "should not show (default) on Model line when model is explicitly set: {model_line}"
+        );
+    }
+
+    #[test]
+    fn test_format_config_section_normal_shows_default_model_when_not_set() {
+        let cfg = Config::default();
+        let path = PathBuf::from("/tmp/test/config.yaml");
+        let output = format_config_section(&cfg, &path, true, false, 80);
+        let p = plain(&output);
+        assert!(p.contains("Model"), "should show Model row: {p}");
+        assert!(
+            p.contains("claude-sonnet-4-6"),
+            "should show default model name: {p}"
+        );
+        assert!(
+            p.contains("(default)"),
+            "should annotate with (default) when no model is set: {p}"
         );
     }
 
@@ -481,7 +530,7 @@ mod tests {
         let path = PathBuf::from("/tmp/test/config.yaml");
         let output = format_config_section(&cfg, &path, true, true, 80);
         let p = plain(&output);
-        assert!(p.contains("Model"), "should show Model in verbose mode");
+        assert!(p.contains("Model"), "should show Model always");
         assert!(p.contains("opus"), "should show model name");
     }
 
@@ -491,10 +540,14 @@ mod tests {
         let path = PathBuf::from("/tmp/test/config.yaml");
         let output = format_config_section(&cfg, &path, true, true, 80);
         let p = plain(&output);
-        assert!(p.contains("Model"), "should show Model in verbose mode");
+        assert!(p.contains("Model"), "should show Model always");
         assert!(
-            p.contains("not set"),
-            "should show 'not set' for default model"
+            p.contains("claude-sonnet-4-6"),
+            "should show default model name when model not set"
+        );
+        assert!(
+            p.contains("(default)"),
+            "should annotate with (default) when model not set"
         );
     }
 
@@ -622,6 +675,10 @@ mod tests {
         let path = PathBuf::from("/tmp/test/config.yaml");
         let output = format_config_section(&cfg, &path, true, false, 80);
         let p = plain(&output);
+        assert!(
+            p.contains("Model"),
+            "should show Model even when not verbose: {p}"
+        );
         assert!(
             !p.contains("Runner"),
             "should not show Runner when not verbose: {p}"
