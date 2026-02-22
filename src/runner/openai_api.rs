@@ -160,8 +160,7 @@ impl OpenAiApiRunner {
     ///
     /// Rebuilds the inner `reqwest::Client` with `https_only` disabled when the
     /// URL is a loopback address so that mock servers work in tests.
-    #[cfg(test)]
-    fn with_base_url(mut self, base_url: String) -> Self {
+    pub(crate) fn with_base_url(mut self, base_url: String) -> Self {
         let is_localhost = base_url.starts_with("http://localhost")
             || base_url.starts_with("http://127.0.0.1")
             || base_url.starts_with("http://[::1]");

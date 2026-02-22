@@ -201,7 +201,11 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 model: model.clone(),
                 warning: RunnerChoice::AnthropicApi.model_compatibility_warning(&model),
             };
-            let api_runner = AnthropicApiRunner::new(api_key, model, subprocess_timeout)?;
+            let api_runner = if let Ok(base_url) = std::env::var("ANTHROPIC_API_BASE_URL") {
+                AnthropicApiRunner::with_base_url(api_key, model, subprocess_timeout, base_url)?
+            } else {
+                AnthropicApiRunner::new(api_key, model, subprocess_timeout)?
+            };
             run_sync(
                 args,
                 &root_dir,
@@ -233,7 +237,11 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
                 model: model.clone(),
                 warning: RunnerChoice::OpenAiApi.model_compatibility_warning(&model),
             };
-            let api_runner = OpenAiApiRunner::new(api_key, model, subprocess_timeout)?;
+            let api_runner = if let Ok(base_url) = std::env::var("OPENAI_API_BASE_URL") {
+                OpenAiApiRunner::new(api_key, model, subprocess_timeout)?.with_base_url(base_url)
+            } else {
+                OpenAiApiRunner::new(api_key, model, subprocess_timeout)?
+            };
             run_sync(
                 args,
                 &root_dir,
