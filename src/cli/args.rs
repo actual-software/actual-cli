@@ -66,6 +66,31 @@ fn is_known_model(model: &str) -> bool {
         || is_codex_model(model)
 }
 
+/// Returns all runners capable of handling `model`, in tiebreak priority order.
+/// First element is the preferred runner; subsequent elements are fallbacks.
+/// `model` must be pre-lowercased by the caller.
+pub(crate) fn runner_candidates(model: &str) -> Vec<RunnerChoice> {
+    if is_claude_short_alias(model) {
+        return vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi];
+    }
+    if model.contains("claude") {
+        return vec![RunnerChoice::AnthropicApi, RunnerChoice::ClaudeCli];
+    }
+    // is_openai_model and is_codex_model are mutually exclusive (is_openai_model calls !is_codex_model)
+    if is_openai_model(model) {
+        return vec![
+            RunnerChoice::CodexCli,
+            RunnerChoice::OpenAiApi,
+            RunnerChoice::CursorCli,
+        ];
+    }
+    if is_codex_model(model) {
+        return vec![RunnerChoice::CodexCli, RunnerChoice::CursorCli];
+    }
+    // Unrecognized: CursorCli is the catch-all (accepts arbitrary model names)
+    vec![RunnerChoice::CursorCli]
+}
+
 impl RunnerChoice {
     /// Human-readable name for display in the Environment section.
     pub fn display_name(&self) -> &'static str {
@@ -88,28 +113,15 @@ impl RunnerChoice {
     /// clear message at startup instead of a silent fallback.
     pub fn infer_from_model(model: &str) -> Result<Self, String> {
         let m = model.to_ascii_lowercase();
-
-        // Short Claude aliases only valid for claude-cli
-        if is_claude_short_alias(&m) {
-            return Ok(RunnerChoice::ClaudeCli);
+        let candidates = runner_candidates(&m);
+        // Only CursorCli in candidates means unrecognized model — preserve existing error
+        if candidates == vec![RunnerChoice::CursorCli] {
+            return Err(format!(
+                "Unrecognized model '{model}'. Known patterns: sonnet, opus, haiku, claude-*, gpt-*, o1*, o3*, o4*, chatgpt-*, codex-*, gpt-*-codex*. \
+                 Use --runner to explicitly select a runner for custom models."
+            ));
         }
-
-        // Anthropic model IDs (full names like "claude-sonnet-4-6")
-        if m.contains("claude") {
-            return Ok(RunnerChoice::AnthropicApi);
-        }
-
-        // All OpenAI-family models (gpt-*, o-series, chatgpt-*, codex-*) go
-        // through Codex CLI which supports ChatGPT OAuth.  The raw OpenAI API
-        // runner is only used when the user explicitly sets --runner openai-api.
-        if is_openai_model(&m) || is_codex_model(&m) {
-            return Ok(RunnerChoice::CodexCli);
-        }
-
-        Err(format!(
-            "Unrecognized model '{model}'. Known patterns: sonnet, opus, haiku, claude-*, gpt-*, o1*, o3*, o4*, chatgpt-*, codex-*, gpt-*-codex*. \
-             Use --runner to explicitly select a runner for custom models."
-        ))
+        Ok(candidates.into_iter().next().unwrap())
     }
 
     /// Check if the given model name is likely incompatible with this runner
@@ -1130,6 +1142,84 @@ mod parse_tests {
         let err = RunnerChoice::infer_from_model("gemini-pro").unwrap_err();
         assert!(err.contains("Unrecognized model"), "msg: {err}");
         assert!(err.contains("--runner"), "msg: {err}");
+    }
+
+    // ---- runner_candidates tests ----
+
+    #[test]
+    fn test_runner_candidates_short_aliases() {
+        assert_eq!(
+            runner_candidates("sonnet"),
+            vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi]
+        );
+        assert_eq!(
+            runner_candidates("opus"),
+            vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi]
+        );
+        assert_eq!(
+            runner_candidates("haiku"),
+            vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi]
+        );
+    }
+
+    #[test]
+    fn test_runner_candidates_claude_full_ids() {
+        assert_eq!(
+            runner_candidates("claude-sonnet-4-6"),
+            vec![RunnerChoice::AnthropicApi, RunnerChoice::ClaudeCli]
+        );
+        assert_eq!(
+            runner_candidates("claude-opus-4"),
+            vec![RunnerChoice::AnthropicApi, RunnerChoice::ClaudeCli]
+        );
+    }
+
+    #[test]
+    fn test_runner_candidates_openai_models() {
+        let expected = vec![
+            RunnerChoice::CodexCli,
+            RunnerChoice::OpenAiApi,
+            RunnerChoice::CursorCli,
+        ];
+        assert_eq!(runner_candidates("gpt-5.2"), expected);
+        assert_eq!(runner_candidates("gpt-4o"), expected);
+        assert_eq!(runner_candidates("o1-preview"), expected);
+        assert_eq!(runner_candidates("o3-mini"), expected);
+        assert_eq!(runner_candidates("chatgpt-4o-latest"), expected);
+    }
+
+    #[test]
+    fn test_runner_candidates_codex_models() {
+        let expected = vec![RunnerChoice::CodexCli, RunnerChoice::CursorCli];
+        assert_eq!(runner_candidates("gpt-5.2-codex"), expected);
+        assert_eq!(runner_candidates("gpt-5.1-codex-mini"), expected);
+        assert_eq!(runner_candidates("codex-mini"), expected);
+    }
+
+    #[test]
+    fn test_runner_candidates_unrecognized_models() {
+        assert_eq!(
+            runner_candidates("my-custom-model"),
+            vec![RunnerChoice::CursorCli]
+        );
+        assert_eq!(
+            runner_candidates("gemini-pro"),
+            vec![RunnerChoice::CursorCli]
+        );
+    }
+
+    #[test]
+    fn test_runner_candidates_first_element_consistency() {
+        // Consistent with existing infer_from_model behavior
+        assert_eq!(runner_candidates("sonnet")[0], RunnerChoice::ClaudeCli);
+        assert_eq!(runner_candidates("gpt-4o")[0], RunnerChoice::CodexCli);
+    }
+
+    #[test]
+    fn test_runner_candidates_unrecognized_does_not_break_infer_from_model() {
+        // runner_candidates must not break the contract that infer_from_model("gemini-pro") returns Err
+        assert!(RunnerChoice::infer_from_model("gemini-pro").is_err());
+        assert!(RunnerChoice::infer_from_model("my-custom-model").is_err());
     }
 
     // ---- model-detection helper tests ----
