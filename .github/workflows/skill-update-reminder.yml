@@ -1,0 +1,83 @@
+name: Skill Update Reminder
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - src/error.rs
+      - src/config/types.rs
+      - src/config/dotpath.rs
+      - src/config/paths.rs
+      - src/generation/format.rs
+      - src/generation/markers.rs
+      - src/generation/merge.rs
+      - src/cli/args.rs
+      - src/runner/**
+      - src/cli/commands/sync.rs
+      - src/cli/commands/sync_wiring.rs
+
+jobs:
+  remind:
+    name: Skill Update Reminder
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Identify changed skill-relevant files
+        id: changes
+        run: |
+          changed=$(gh pr diff ${{ github.event.pull_request.number }} --name-only | grep -E \
+            '^(src/error\.rs|src/config/(types|dotpath|paths)\.rs|src/generation/(format|markers|merge)\.rs|src/cli/args\.rs|src/runner/|src/cli/commands/sync(_wiring)?\.rs)' \
+            || true)
+          if [ -n "$changed" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            {
+              echo 'files<<EOF'
+              echo "$changed"
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for existing reminder comment
+        if: steps.changes.outputs.found == 'true'
+        id: existing
+        run: |
+          marker="<!-- skill-update-reminder -->"
+          existing=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq "[.[] | select(.body | contains(\"$marker\"))] | length")
+          echo "has_comment=$( [ "$existing" -gt 0 ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post reminder comment
+        if: steps.changes.outputs.found == 'true' && steps.existing.outputs.has_comment != 'true'
+        run: |
+          cat <<'COMMENT' | gh pr comment ${{ github.event.pull_request.number }} --body-file -
+          <!-- skill-update-reminder -->
+          ### /actual skill may need updating
+
+          This PR modifies files that are referenced by the `/actual` skill. If the changes affect user-facing behavior (new errors, config keys, flags, output format changes, runner changes), the corresponding skill reference files should be updated too.
+
+          **Changed files:**
+          ${{ steps.changes.outputs.files }}
+
+          **Skill files to check:**
+          | Changed Area | Skill Reference |
+          |-------------|----------------|
+          | `src/error.rs` | `.claude/skills/actual/references/error-catalog.md` |
+          | `src/config/` | `.claude/skills/actual/references/config-reference.md` |
+          | `src/generation/format.rs` | `.claude/skills/actual/references/output-formats.md` |
+          | `src/generation/markers.rs`, `merge.rs` | `.claude/skills/actual/references/output-formats.md` |
+          | `src/cli/args.rs`, `src/runner/` | `.claude/skills/actual/references/runner-guide.md` |
+          | `src/cli/commands/sync*.rs` | `.claude/skills/actual/references/sync-workflow.md` |
+
+          If the changes are purely internal (refactoring, tests, perf) with no user-facing impact, this reminder can be ignored.
+          COMMENT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
