@@ -1,5 +1,5 @@
 name: 'tui-test Report'
-description: 'Upload tui-test capture artifacts and post PR comment with screenshot images'
+description: 'Upload tui-test capture artifacts and create a step summary'
 
 inputs:
   capture-dir:
@@ -18,18 +18,6 @@ inputs:
     description: 'Whether to create a GitHub Step Summary with capture details (true/false)'
     required: false
     default: 'true'
-  pr-comment:
-    description: 'Whether to post a PR comment with screenshot images (true/false). Requires pull-requests: write and contents: write permissions.'
-    required: false
-    default: 'true'
-  github-token:
-    description: 'GitHub token for posting PR comments and uploading images. Defaults to GITHUB_TOKEN.'
-    required: false
-    default: ${{ github.token }}
-  max-images:
-    description: 'Maximum number of images to show directly in the PR comment (rest are collapsed). Default: 5'
-    required: false
-    default: '5'
 
 outputs:
   artifact-id:
@@ -72,8 +60,6 @@ runs:
           png_count=$(find "$dest" -name "*.png" -type f | wc -l | tr -d ' ')
           TOTAL_SCREENSHOTS=$((TOTAL_SCREENSHOTS + png_count))
 
-          png_list=$(find "$dest" -name "*.png" -type f -exec basename {} \; | sort)
-
           if command -v jq &>/dev/null && [ -f "$dest/timeline.json" ]; then
             cmd=$(jq -r '.command // "unknown"' "$dest/timeline.json" 2>/dev/null || echo "unknown")
             size=$(jq -r '.terminal_size // [0,0] | "\(.[0])x\(.[1])"' "$dest/timeline.json" 2>/dev/null || echo "?x?")
@@ -88,10 +74,8 @@ runs:
              --arg cmd "$cmd" \
              --arg size "$size" \
              --arg events "$events" \
-             --arg pngs "$png_list" \
-             --arg dir "$dest" \
              --argjson count "$png_count" \
-             '. += [{"name": $name, "command": $cmd, "size": $size, "events": ($events | tonumber), "png_count": $count, "pngs": ($pngs | split("\n") | map(select(. != ""))), "dir": $dir}]' \
+             '. += [{"name": $name, "command": $cmd, "size": $size, "events": ($events | tonumber), "png_count": $count}]' \
              "$STAGING_DIR/.sessions.json" > "$STAGING_DIR/.sessions.json.tmp" \
              && mv "$STAGING_DIR/.sessions.json.tmp" "$STAGING_DIR/.sessions.json"
         done < <(find . -path "./$PATTERN/timeline.json" -o -name "timeline.json" -path "*tui-test-captures*" 2>/dev/null | sort)
@@ -116,195 +100,6 @@ runs:
         path: ${{ steps.collect.outputs.staging-dir }}
         retention-days: ${{ inputs.retention-days }}
         if-no-files-found: ignore
-
-    - name: Upload images and post PR comment
-      if: >-
-        inputs.pr-comment == 'true'
-        && steps.collect.outputs.found == 'true'
-        && github.event_name == 'pull_request'
-      shell: bash
-      env:
-        GH_TOKEN: ${{ inputs.github-token }}
-      run: |
-        set -eo pipefail
-
-        STAGING_DIR="${{ steps.collect.outputs.staging-dir }}"
-        TOTAL_SESSIONS="${{ steps.collect.outputs.total-sessions }}"
-        TOTAL_SCREENSHOTS="${{ steps.collect.outputs.total-screenshots }}"
-        REPO="${{ github.repository }}"
-        RUN_ID="${{ github.run_id }}"
-        SHA="${{ github.event.pull_request.head.sha }}"
-        SHORT_SHA="${SHA:0:7}"
-        PR_NUMBER="${{ github.event.pull_request.number }}"
-        MAX_IMAGES="${{ inputs.max-images }}"
-        IMG_BRANCH="tui-test-images/${RUN_ID}"
-        TMPDIR="${{ runner.temp }}/tui-test-img-upload"
-        mkdir -p "$TMPDIR"
-
-        # Upload images via Git API (no local checkout needed)
-        # 1. Create blobs for each PNG (using file-based payloads to avoid ARG_MAX)
-        # 2. Create a tree from those blobs
-        # 3. Create a commit pointing to the tree
-        # 4. Create/update the branch ref
-
-        TREE_ENTRIES="[]"
-
-        while IFS= read -r session; do
-          session_name=$(echo "$session" | jq -r '.name')
-          session_dir=$(echo "$session" | jq -r '.dir')
-
-          while IFS= read -r png; do
-            [ -z "$png" ] && continue
-            dest_name="${session_name}-${png}"
-
-            # Create blob via API using file-based JSON payload
-            # Pipe base64 through stdin to avoid ARG_MAX limits
-            BLOB_PAYLOAD="$TMPDIR/blob-payload.json"
-            (base64 -w 0 "$session_dir/$png" 2>/dev/null || base64 "$session_dir/$png" | tr -d '\n') \
-              | jq -Rs '{content: ., encoding: "base64"}' > "$BLOB_PAYLOAD"
-
-            BLOB_SHA=$(gh api "repos/${REPO}/git/blobs" \
-              --method POST \
-              --input "$BLOB_PAYLOAD" \
-              --jq '.sha' 2>/dev/null) || true
-
-            if [ -z "$BLOB_SHA" ]; then
-              echo "::warning::Failed to upload blob for $dest_name"
-              continue
-            fi
-
-            TREE_ENTRIES=$(echo "$TREE_ENTRIES" | jq \
-              --arg path "images/$dest_name" \
-              --arg sha "$BLOB_SHA" \
-              '. += [{"path": $path, "mode": "100644", "type": "blob", "sha": $sha}]')
-          done < <(echo "$session" | jq -r '.pngs[]')
-        done < <(jq -c '.[]' "$STAGING_DIR/.sessions.json")
-
-        # Check we have at least one image
-        ENTRY_COUNT=$(echo "$TREE_ENTRIES" | jq 'length')
-        if [ "$ENTRY_COUNT" = "0" ]; then
-          echo "::notice::No PNG screenshots to upload to PR comment"
-          exit 0
-        fi
-
-        # Create tree using file-based JSON payload
-        TREE_PAYLOAD="$TMPDIR/tree-payload.json"
-        echo "$TREE_ENTRIES" | jq '{tree: .}' > "$TREE_PAYLOAD"
-        TREE_SHA=$(gh api "repos/${REPO}/git/trees" \
-          --method POST \
-          --input "$TREE_PAYLOAD" \
-          --jq '.sha' 2>/dev/null) || true
-
-        if [ -z "$TREE_SHA" ]; then
-          echo "::warning::Failed to create git tree for images"
-          exit 0
-        fi
-
-        # Create commit (orphan — no parents) using file-based payload
-        COMMIT_PAYLOAD="$TMPDIR/commit-payload.json"
-        jq -n --arg message "tui-test screenshots for run ${RUN_ID}" --arg tree "$TREE_SHA" \
-          '{message: $message, tree: $tree}' > "$COMMIT_PAYLOAD"
-        COMMIT_SHA=$(gh api "repos/${REPO}/git/commits" \
-          --method POST \
-          --input "$COMMIT_PAYLOAD" \
-          --jq '.sha' 2>/dev/null) || true
-
-        if [ -z "$COMMIT_SHA" ]; then
-          echo "::warning::Failed to create git commit for images"
-          exit 0
-        fi
-
-        # Create branch ref (or update if it already exists)
-        REF_PAYLOAD="$TMPDIR/ref-payload.json"
-        jq -n --arg ref "refs/heads/${IMG_BRANCH}" --arg sha "$COMMIT_SHA" \
-          '{ref: $ref, sha: $sha}' > "$REF_PAYLOAD"
-        gh api "repos/${REPO}/git/refs" \
-          --method POST \
-          --input "$REF_PAYLOAD" 2>/dev/null || \
-        gh api "repos/${REPO}/git/refs/heads/${IMG_BRANCH}" \
-          --method PATCH \
-          -f sha="$COMMIT_SHA" \
-          -F force=true 2>/dev/null || true
-
-        # Build the PR comment body
-        COMMENT_BODY="## tui-test Screenshots\n\n"
-        COMMENT_BODY+="**${TOTAL_SESSIONS} session(s)** | **${TOTAL_SCREENSHOTS} screenshot(s)** | commit \`${SHORT_SHA}\`\n\n"
-
-        GLOBAL_IMG_INDEX=0
-
-        while IFS= read -r session; do
-          session_name=$(echo "$session" | jq -r '.name')
-          cmd=$(echo "$session" | jq -r '.command')
-          size=$(echo "$session" | jq -r '.size')
-          events=$(echo "$session" | jq -r '.events')
-          png_count=$(echo "$session" | jq -r '.png_count')
-
-          # Truncate long commands
-          display_cmd="$cmd"
-          if [ ${#display_cmd} -gt 80 ]; then
-            display_cmd="${display_cmd:0:77}..."
-          fi
-
-          COMMENT_BODY+="### ${session_name}\n"
-          COMMENT_BODY+="\`${display_cmd}\` (${size}, ${events} events)\n\n"
-
-          session_img_index=0
-          COLLAPSED_IMAGES=""
-
-          while IFS= read -r png; do
-            [ -z "$png" ] && continue
-            session_img_index=$((session_img_index + 1))
-            GLOBAL_IMG_INDEX=$((GLOBAL_IMG_INDEX + 1))
-            dest_name="${session_name}-${png}"
-            img_url="https://raw.githubusercontent.com/${REPO}/${IMG_BRANCH}/images/${dest_name}"
-
-            if [ "$GLOBAL_IMG_INDEX" -le "$MAX_IMAGES" ]; then
-              COMMENT_BODY+="**${png}**\n"
-              COMMENT_BODY+="![${png}](${img_url})\n\n"
-            else
-              COLLAPSED_IMAGES+="**${png}**\n"
-              COLLAPSED_IMAGES+="![${png}](${img_url})\n\n"
-            fi
-          done < <(echo "$session" | jq -r '.pngs[]')
-
-          if [ -n "$COLLAPSED_IMAGES" ]; then
-            remaining=$((TOTAL_SCREENSHOTS - MAX_IMAGES))
-            COMMENT_BODY+="<details><summary>Show ${remaining} more screenshot(s)...</summary>\n\n"
-            COMMENT_BODY+="$COLLAPSED_IMAGES"
-            COMMENT_BODY+="</details>\n\n"
-          fi
-        done < <(jq -c '.[]' "$STAGING_DIR/.sessions.json")
-
-        COMMENT_BODY+="\n---\n*Auto-generated by tui-test-report. "
-        COMMENT_BODY+="[Download full captures](https://github.com/${REPO}/actions/runs/${RUN_ID}).*\n"
-
-        # Post/update the PR comment (idempotent via hidden marker)
-        COMMENT_MARKER="<!-- tui-test-report -->"
-        FULL_BODY="${COMMENT_MARKER}\n${COMMENT_BODY}"
-
-        EXISTING_COMMENT_ID=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-          --jq ".[] | select(.body | contains(\"${COMMENT_MARKER}\")) | .id" 2>/dev/null | head -1) || true
-
-        FORMATTED_BODY=$(printf '%b' "$FULL_BODY")
-
-        # Write comment body to file to avoid ARG_MAX with large image URLs
-        COMMENT_FILE="$TMPDIR/comment-body.json"
-        jq -n --arg body "$FORMATTED_BODY" '{body: $body}' > "$COMMENT_FILE"
-
-        if [ -n "$EXISTING_COMMENT_ID" ]; then
-          gh api "repos/${REPO}/issues/comments/${EXISTING_COMMENT_ID}" \
-            --method PATCH \
-            --input "$COMMENT_FILE" 2>/dev/null || true
-          echo "::notice::Updated existing tui-test PR comment (ID: ${EXISTING_COMMENT_ID})"
-        else
-          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            --method POST \
-            --input "$COMMENT_FILE" 2>/dev/null || true
-          echo "::notice::Created tui-test PR comment"
-        fi
-
-        # Clean up temp files
-        rm -rf "$TMPDIR"
 
     - name: Create step summary
       if: inputs.summary == 'true' && steps.collect.outputs.found == 'true'
