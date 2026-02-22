@@ -32,7 +32,7 @@ impl std::fmt::Display for WorkspaceType {
 }
 
 /// Top-level result of repository analysis.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoAnalysis {
     pub is_monorepo: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,7 +41,7 @@ pub struct RepoAnalysis {
 }
 
 /// A single project detected within the repository.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub path: String,
     pub name: String,
@@ -161,7 +161,7 @@ impl std::fmt::Display for Language {
 }
 
 /// A framework detected in a project.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Framework {
     pub name: String,
     pub category: FrameworkCategory,
@@ -187,7 +187,7 @@ impl Framework {
 
 /// The user's narrowed selection from detected analysis.
 /// Enforces single language + single framework.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSelection {
     /// The single selected language.
     pub language: LanguageStat,
