@@ -541,8 +541,8 @@ mod tests {
 
         // Construct a CachedTailoring with a serde_yaml::Value that cannot be
         // serialized by serde_yaml 0.9 to YAML: a Mapping whose key is itself a
-        // Mapping (complex mapping keys are not valid in YAML flow scalars and
-        // cause serde_yaml to return an error).
+        // Mapping. serde_yaml cannot emit mapping keys that are themselves
+        // mappings (not valid YAML) and returns an error.
         let mut inner_key = serde_yaml::Mapping::new();
         inner_key.insert(
             serde_yaml::Value::String("k".to_string()),
@@ -555,15 +555,12 @@ mod tests {
         );
         let bad_value = serde_yaml::Value::Mapping(outer);
 
-        // Confirm this value actually fails to serialize so the test is meaningful.
-        let pre_check = serde_yaml::to_string(&bad_value);
-        if pre_check.is_ok() {
-            // serde_yaml serialized the complex key without error (library version
-            // may accept this). Skip the test body — we can't reliably trigger the
-            // error path with a `Config` value, but the code change (unwrap → ?)
-            // is still verified by the compiler.
-            return;
-        }
+        // Verify the value is actually unserializable (guards against library
+        // version changes that may start accepting this).
+        assert!(
+            serde_yaml::to_string(&bad_value).is_err(),
+            "serde_yaml must reject a mapping with mapping keys for this test to be valid"
+        );
 
         let config = Config {
             cached_tailoring: Some(CachedTailoring {

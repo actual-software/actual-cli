@@ -42,6 +42,11 @@ fn run_with_resolver(
     run_with_path(args, &path)
 }
 
+fn serialize_config_for_display(cfg: &config::Config) -> Result<String, ActualError> {
+    serde_yaml::to_string(cfg)
+        .map_err(|e| ActualError::ConfigError(format!("Failed to serialize config to YAML: {e}")))
+}
+
 fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
     match &args.action {
         ConfigAction::Path => {
@@ -50,9 +55,7 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
         }
         ConfigAction::Show => {
             let cfg = config::paths::load_from(path)?;
-            let yaml = serde_yaml::to_string(&cfg).map_err(|e| {
-                ActualError::ConfigError(format!("Failed to serialize config to YAML: {e}"))
-            })?;
+            let yaml = serialize_config_for_display(&cfg)?;
             print!("{}", redact_yaml(&yaml));
             Ok(())
         }
@@ -306,6 +309,51 @@ mod tests {
     }
 
     // --- Tests for config set redaction via run_with_path ---
+
+    /// Exercise the `serde_yaml::to_string` error branch in `serialize_config_for_display`.
+    ///
+    /// A config with an unserializable `serde_yaml::Value` field (mapping-as-key)
+    /// must return a `ConfigError` rather than panicking.
+    #[test]
+    fn test_serialize_config_for_display_error_is_wrapped_as_config_error() {
+        use crate::config::types::CachedTailoring;
+
+        // Construct a mapping-as-key value that serde_yaml cannot serialize.
+        let mut inner_key = serde_yaml::Mapping::new();
+        inner_key.insert(
+            serde_yaml::Value::String("k".to_string()),
+            serde_yaml::Value::String("v".to_string()),
+        );
+        let mut outer = serde_yaml::Mapping::new();
+        outer.insert(
+            serde_yaml::Value::Mapping(inner_key),
+            serde_yaml::Value::String("value".to_string()),
+        );
+        let bad_value = serde_yaml::Value::Mapping(outer);
+
+        // Verify this value is actually unserializable.
+        assert!(
+            serde_yaml::to_string(&bad_value).is_err(),
+            "serde_yaml must reject a mapping with mapping keys for this test to be valid"
+        );
+
+        let cfg = config::Config {
+            cached_tailoring: Some(CachedTailoring {
+                cache_key: "key".to_string(),
+                repo_path: "/tmp/repo".to_string(),
+                tailoring: bad_value,
+                tailored_at: chrono::Utc::now(),
+            }),
+            ..config::Config::default()
+        };
+
+        let err = serialize_config_for_display(&cfg).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to serialize config to YAML"),
+            "error must be wrapped as ConfigError, got: {err}"
+        );
+    }
 
     #[test]
     fn test_set_api_key_does_not_echo_raw_value() {
