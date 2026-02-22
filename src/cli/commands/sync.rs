@@ -1298,10 +1298,19 @@ pub fn confirm_and_write(
                 .and_then(markers::extract_managed_content)
                 .map(markers::strip_managed_metadata);
 
-            FileDiff::from_change_detection(
+            // Extract old per-ADR sections for per-section diffing.
+            let old_sections = existing_content
+                .as_deref()
+                .and_then(markers::extract_managed_content)
+                .map(markers::extract_adr_sections)
+                .unwrap_or_default();
+
+            FileDiff::from_sections(
                 &file.path,
                 &detection,
                 is_new_file,
+                &old_sections,
+                &file.sections,
                 old_managed,
                 file.content(),
             )
