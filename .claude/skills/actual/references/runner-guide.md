@@ -24,7 +24,7 @@ Runners are the AI backends that power `actual sync`'s tailoring step. Each runn
 | anthropic-api | Direct API | (none) | `ANTHROPIC_API_KEY` env var | claude-sonnet-4-6 |
 | openai-api | Direct API | (none) | `OPENAI_API_KEY` env var | gpt-5.2 |
 | codex-cli | CLI wrapper | `codex` | `OPENAI_API_KEY` env var or `codex login` (ChatGPT OAuth) | gpt-5.2 |
-| cursor-cli | CLI wrapper | `agent` | Optional `CURSOR_API_KEY` env var | (cursor default) |
+| cursor-cli | CLI wrapper | `cursor-agent` | Optional `CURSOR_API_KEY` env var | `auto` |
 
 ## claude-cli
 
