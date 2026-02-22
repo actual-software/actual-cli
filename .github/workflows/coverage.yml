@@ -20,11 +20,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
 
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: sync
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -35,15 +35,15 @@ jobs:
     if: always() && needs.sync-beads.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
         with:
           components: llvm-tools-preview
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.cargo/bin/
@@ -56,7 +56,7 @@ jobs:
             ${{ runner.os }}-cargo-coverage-
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@934c8243ef762518efe4cd4a73c56c5d3a6ac1e8  # cargo-llvm-cov
 
       - name: Run coverage
         run: |
@@ -170,7 +170,7 @@ jobs:
 
       - name: Upload coverage artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: coverage-report
           path: |
@@ -187,16 +187,16 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
 
       - name: Download coverage report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: coverage-report
 
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: create
           failure-type: coverage_gap
@@ -213,11 +213,11 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
 
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: cleanup
           failure-type: coverage_gap

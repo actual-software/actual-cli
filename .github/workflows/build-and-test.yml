@@ -17,10 +17,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: sync
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -39,10 +39,10 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -53,7 +53,7 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.cargo/bin/
@@ -71,7 +71,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: actual-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/actual
@@ -86,10 +86,10 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: create
           failure-type: build_error
@@ -105,10 +105,10 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: cleanup
           failure-type: build_error
@@ -121,13 +121,13 @@ jobs:
     if: always() && needs.sync-beads.result != 'cancelled'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: |
             ~/.cargo/bin/
@@ -165,7 +165,7 @@ jobs:
 
       - name: Upload test output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: test-output
           path: test-output.txt
@@ -184,14 +184,14 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
       - name: Download test output
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: test-output
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: create
           failure-type: test_failure
@@ -208,10 +208,10 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: cleanup
           failure-type: test_failure
@@ -230,10 +230,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Download actual binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: actual-x86_64-unknown-linux-gnu
           path: ./bin
@@ -242,7 +242,7 @@ jobs:
         run: chmod +x ./bin/actual
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
           node-version: '20'
 
@@ -283,7 +283,7 @@ jobs:
 
       - name: Upload E2E output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: e2e-output
           path: e2e-output.txt
@@ -299,11 +299,11 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
       - name: Download E2E output
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
           name: e2e-output
         continue-on-error: true
@@ -312,7 +312,7 @@ jobs:
           if [[ ! -f e2e-output.txt ]]; then
             echo "E2E output not available (job may have failed before producing output)" > e2e-output.txt
           fi
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: create
           failure-type: live_e2e_failure
@@ -329,10 +329,10 @@ jobs:
       contents: write
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
-      - uses: poiley/bdgha@v2
+      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
         with:
           mode: cleanup
           failure-type: live_e2e_failure
