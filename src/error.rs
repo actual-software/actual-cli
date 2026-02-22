@@ -156,6 +156,7 @@ mod tests {
         assert_eq!(ActualError::CodexNotAuthenticated.exit_code(), 2);
         assert_eq!(ActualError::CodexNotFound.exit_code(), 2);
         assert_eq!(ActualError::CursorNotFound.exit_code(), 2);
+        assert_eq!(ActualError::CursorNotAuthenticated.exit_code(), 2);
         assert_eq!(
             ActualError::RunnerFailed {
                 message: "fail".to_string(),
@@ -261,6 +262,16 @@ mod tests {
         assert!(
             msg.contains("OPENAI_API_KEY"),
             "expected 'OPENAI_API_KEY' in: {msg}"
+        );
+
+        let msg = ActualError::CursorNotAuthenticated.to_string();
+        assert!(
+            msg.contains("not authenticated"),
+            "expected 'not authenticated' in: {msg}"
+        );
+        assert!(
+            msg.contains("CURSOR_API_KEY"),
+            "expected 'CURSOR_API_KEY' in: {msg}"
         );
 
         let msg = ActualError::RunnerFailed {
@@ -420,6 +431,14 @@ mod tests {
         assert_eq!(
             ActualError::CodexNotAuthenticated.hint(),
             Some("Set OPENAI_API_KEY or run: codex login")
+        );
+    }
+
+    #[test]
+    fn test_hint_cursor_not_authenticated() {
+        assert_eq!(
+            ActualError::CursorNotAuthenticated.hint(),
+            Some("Set CURSOR_API_KEY or run: cursor-agent login")
         );
     }
 
