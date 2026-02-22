@@ -129,10 +129,6 @@ fn format_config_section(
         };
         panel = panel.kv("Runner", &runner);
 
-        if let Some(ref openai_model) = cfg.openai_model {
-            panel = panel.kv("OpenAI model", openai_model);
-        }
-
         if let Some(ref cursor_model) = cfg.cursor_model {
             panel = panel.kv("Cursor model", cursor_model);
         }
@@ -582,30 +578,38 @@ mod tests {
     }
 
     #[test]
-    fn test_format_config_section_verbose_shows_openai_model() {
+    fn test_format_config_section_verbose_shows_gpt_model_in_model_row() {
+        // Now that openai_model is removed, a gpt model set via `model` shows in the Model row.
         let cfg = Config {
-            openai_model: Some("gpt-5".to_string()),
+            model: Some("gpt-5".to_string()),
             ..Config::default()
         };
         let path = PathBuf::from("/tmp/test/config.yaml");
         let output = format_config_section(&cfg, &path, true, true, 80);
         let p = plain(&output);
         assert!(
-            p.contains("OpenAI model"),
-            "should show OpenAI model in verbose mode: {p}"
+            p.contains("Model"),
+            "should show Model row in verbose mode: {p}"
         );
-        assert!(p.contains("gpt-5"), "should show openai model value: {p}");
+        assert!(
+            p.contains("gpt-5"),
+            "should show model value in Model row: {p}"
+        );
+        assert!(
+            !p.contains("OpenAI model"),
+            "should NOT show a separate OpenAI model row: {p}"
+        );
     }
 
     #[test]
-    fn test_format_config_section_verbose_hides_openai_model_when_not_set() {
+    fn test_format_config_section_verbose_no_openai_model_row() {
         let cfg = Config::default();
         let path = PathBuf::from("/tmp/test/config.yaml");
         let output = format_config_section(&cfg, &path, true, true, 80);
         let p = plain(&output);
         assert!(
             !p.contains("OpenAI model"),
-            "should not show OpenAI model when not set: {p}"
+            "OpenAI model row should never appear after deprecation: {p}"
         );
     }
 
@@ -645,7 +649,6 @@ mod tests {
         let cfg = Config {
             runner: Some("openai-api".to_string()),
             model: Some("sonnet".to_string()),
-            openai_model: Some("gpt-5.2".to_string()),
             cursor_model: Some("cursor-small".to_string()),
             ..Config::default()
         };
@@ -656,8 +659,10 @@ mod tests {
         assert!(p.contains("openai-api"), "should show runner value: {p}");
         assert!(p.contains("Model"), "should show Model: {p}");
         assert!(p.contains("sonnet"), "should show model value: {p}");
-        assert!(p.contains("OpenAI model"), "should show OpenAI model: {p}");
-        assert!(p.contains("gpt-5.2"), "should show openai model value: {p}");
+        assert!(
+            !p.contains("OpenAI model"),
+            "should NOT show separate OpenAI model row: {p}"
+        );
         assert!(p.contains("Cursor model"), "should show Cursor model: {p}");
         assert!(
             p.contains("cursor-small"),
@@ -669,7 +674,6 @@ mod tests {
     fn test_format_config_section_verbose_not_shown_when_not_verbose() {
         let cfg = Config {
             runner: Some("anthropic-api".to_string()),
-            openai_model: Some("gpt-5".to_string()),
             cursor_model: Some("cursor-fast".to_string()),
             ..Config::default()
         };
@@ -686,7 +690,7 @@ mod tests {
         );
         assert!(
             !p.contains("OpenAI model"),
-            "should not show OpenAI model when not verbose: {p}"
+            "should not show OpenAI model row: {p}"
         );
         assert!(
             !p.contains("Cursor model"),
