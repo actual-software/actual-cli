@@ -35,7 +35,7 @@ actual config path
 | `model` | string | claude-sonnet-4-6 | non-empty | Model for Anthropic runners |
 | `openai_model` | string | gpt-5.2 | non-empty | Model for OpenAI runners |
 | `cursor_model` | string | (none) | non-empty | Model for cursor-cli (setting this auto-infers cursor-cli) |
-| `runner` | enum | claude-cli | One of: claude-cli, anthropic-api, openai-api, codex-cli, cursor-cli | AI runner backend |
+| `runner` | enum | claude-cli | One of: claude-cli, anthropic-api, openai-api, codex-cli, cursor-cli | AI runner backend. `claude-cli` is never written to config (see note) |
 | `batch_size` | u32 | 15 | min 1 | ADRs per API batch |
 | `concurrency` | u32 | 10 | min 1 | Parallel API requests |
 | `invocation_timeout_secs` | u64 | 600 | min 1 | Runner timeout in seconds |
@@ -63,6 +63,8 @@ The runner resolution order is:
 4. `model` config (infers runner from model name)
 5. `runner` config or `--runner` flag
 6. Default: claude-cli
+
+**Important: `claude-cli` is never persisted to `config.yaml`.** It is the default runner, and storing it in the config would suppress model-based runner inference (e.g. setting an OpenAI model would be ignored if `runner: claude-cli` were present in the file). Running `actual config set runner claude-cli` prints a warning and clears the runner field rather than writing it. Existing config files that contain `runner: claude-cli` are silently normalized (the field is cleared) when the config is loaded.
 
 ### Numeric Keys
 

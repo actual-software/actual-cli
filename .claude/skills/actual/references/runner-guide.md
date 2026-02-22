@@ -60,9 +60,14 @@ Returns auth status. If not authenticated, the error `ClaudeNotAuthenticated` (e
 ### Config
 
 ```bash
-actual config set runner claude-cli
+# claude-cli is the default — no config change is needed to use it.
+# Running the command below prints a warning and clears the runner field
+# (it does NOT persist "claude-cli" to config.yaml).
+actual config set runner claude-cli  # clears runner, restores default behavior
 actual config set model claude-sonnet-4-6  # or just "sonnet"
 ```
+
+> **Note:** `claude-cli` is never written to `config.yaml`. Persisting it would override model-based runner inference, causing incorrect runner selection when an OpenAI model is also configured. To reset to the default runner, use `actual config set runner claude-cli` (which clears the field) or manually remove the `runner:` line from the config file.
 
 ## anthropic-api
 
