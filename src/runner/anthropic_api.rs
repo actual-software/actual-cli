@@ -50,7 +50,7 @@ impl AnthropicApiRunner {
     }
 
     /// Create a runner with a custom base URL (used in tests to point at a mock server).
-    fn with_base_url(
+    pub(crate) fn with_base_url(
         api_key: String,
         model: String,
         timeout: Duration,
