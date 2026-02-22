@@ -46,9 +46,6 @@ mod tests {
             required_strs.contains(&"skipped_adrs"),
             "required should contain 'skipped_adrs'"
         );
-        assert!(
-            required_strs.contains(&"summary"),
-            "required should contain 'summary'"
-        );
+        // summary is intentionally optional (computed in Rust from files/skipped_adrs)
     }
 }

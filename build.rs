@@ -44,9 +44,8 @@ and generating {0} file content.
 {1}
 
 ## Pre-bundled Repository Context
-The following repository context has been pre-bundled for you. Use it as your \
-primary source of truth — only use Read/Glob/Grep tools when you need information \
-about a specific file NOT already included here.
+The following repository context has been pre-bundled for you. Only use \
+Read/Glob/Grep tools for files NOT included here.
 {4}
 
 ## Existing {0} Files
@@ -60,11 +59,8 @@ understand the current state, but only generate content for the managed section)
 
 ## Instructions
 
-1. **Tailor each ADR**: Use the pre-bundled repository context above as your \
-   primary source of truth. Reference actual paths, files, and patterns from it. \
-   Identify conflicts with existing code. Merge duplicates. Keep policies concise \
-   (1-2 sentences each). Only use Read/Glob/Grep tools for targeted lookups of \
-   specific files NOT already included in the pre-bundled context.
+1. **Tailor each ADR**: Reference actual paths, files, and patterns from the \
+pre-bundled context. Identify conflicts with existing code. Merge duplicates.
 
 2. **Skip inapplicable ADRs**: If an ADR doesn't apply (e.g., it recommends Tailwind \
    but the project uses styled-components), mark it as skipped with a reason.
@@ -74,15 +70,13 @@ understand the current state, but only generate content for the managed section)
    that have project-specific ADRs. Only create subdirectory files when there are \
    ADRs specific to that project -- don't create empty or redundant files.
 
-4. **Format as markdown**: Generate the content that goes inside the managed section \
-   markers. Use terse, actionable directive-style instructions optimized for Claude's \
-   consumption. Organize content naturally -- use headings, bullet points, and inline \
-   code references as appropriate.
+4. **Format as markdown**: Content goes inside the managed section markers. \
+Organize with headings, bullet points, and inline code references.
 
 5. **Preserve intent**: Don't change the fundamental decision -- only make it more \
    specific and actionable for this codebase.
 
-Return your response as a JSON object matching the provided schema.";
+Return ONLY a JSON object matching the provided schema. No commentary outside the JSON.";
 
     // --- CursorRules prompt template ---
     // Uses {0} = cursor_rules_path (e.g. ".cursor/rules/actual-policies.mdc"),
@@ -98,9 +92,8 @@ and generating Cursor IDE rule files ({0}).
 {1}
 
 ## Pre-bundled Repository Context
-The following repository context has been pre-bundled for you. Use it as your \
-primary source of truth — only use Read/Glob/Grep tools when you need information \
-about a specific file NOT already included here.
+The following repository context has been pre-bundled for you. Only use \
+Read/Glob/Grep tools for files NOT included here.
 {4}
 
 ## Existing Cursor Rule Files
@@ -114,11 +107,8 @@ understand the current state, but only generate content for the managed section)
 
 ## Instructions
 
-1. **Tailor each ADR**: Use the pre-bundled repository context above as your \
-   primary source of truth. Reference actual paths, files, and patterns from it. \
-   Identify conflicts with existing code. Merge duplicates. Keep policies concise \
-   (1-2 sentences each). Only use Read/Glob/Grep tools for targeted lookups of \
-   specific files NOT already included in the pre-bundled context.
+1. **Tailor each ADR**: Reference actual paths, files, and patterns from the \
+pre-bundled context. Identify conflicts with existing code. Merge duplicates.
 
 2. **Skip inapplicable ADRs**: If an ADR doesn't apply (e.g., it recommends Tailwind \
    but the project uses styled-components), mark it as skipped with a reason.
@@ -130,15 +120,13 @@ understand the current state, but only generate content for the managed section)
    don't create empty or redundant files.
 
 4. **Format as Cursor MDC**: Each file path must end with `{0}`. \
-   Generate only the content that goes inside the managed section markers (do NOT \
-   include the YAML frontmatter -- that is added automatically). Use terse, \
-   actionable directive-style instructions. Organize content naturally -- use \
-   headings, bullet points, and inline code references as appropriate.
+Content goes inside managed section markers (YAML frontmatter is added \
+automatically). Organize with headings, bullet points, and inline code references.
 
 5. **Preserve intent**: Don't change the fundamental decision -- only make it more \
    specific and actionable for this codebase.
 
-Return your response as a JSON object matching the provided schema.";
+Return ONLY a JSON object matching the provided schema. No commentary outside the JSON.";
 
     // --- Output schema ---
     let schema = r#"{
@@ -151,15 +139,15 @@ Return your response as a JSON object matching the provided schema.";
         "properties": {
           "path": {
             "type": "string",
-            "description": "File path relative to repo root (e.g., 'CLAUDE.md' or 'apps/web/CLAUDE.md')"
+            "description": "Relative path from repo root (e.g. 'CLAUDE.md', 'apps/web/CLAUDE.md')"
           },
           "content": {
             "type": "string",
-            "description": "Rendered markdown content for inside the managed section markers"
+            "description": "Terse directive-style markdown for inside managed section markers. 1-2 sentences per policy. Reference actual repo paths. No preamble."
           },
           "reasoning": {
             "type": "string",
-            "description": "Brief explanation of what rules this file contains and why"
+            "description": "One-sentence label, max 15 words (e.g. 'Cross-cutting Rust style rules for the workspace')"
           },
           "adr_ids": {
             "type": "array",
@@ -176,7 +164,7 @@ Return your response as a JSON object matching the provided schema.";
         "type": "object",
         "properties": {
           "id": { "type": "string" },
-          "reason": { "type": "string" }
+          "reason": { "type": "string", "description": "Short reason, max 8 words (e.g. 'no mobile project detected')" }
         },
         "required": ["id", "reason"]
       },
@@ -193,7 +181,7 @@ Return your response as a JSON object matching the provided schema.";
       "required": ["total_input", "applicable", "not_applicable", "files_generated"]
     }
   },
-  "required": ["files", "skipped_adrs", "summary"]
+  "required": ["files", "skipped_adrs"]
 }"#;
 
     let encoded_prompt = xor_encode(prompt_template.as_bytes());
