@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::analysis::cache::{get_git_branch, get_git_head, run_analysis_cached};
 use crate::analysis::confirm::ConfirmAction;
-use crate::analysis::types::RepoAnalysis;
+use crate::analysis::types::{Project, ProjectSelection, RepoAnalysis};
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
 use crate::cli::args::SyncArgs;
@@ -267,7 +267,13 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         pipeline.finish_remaining();
     })?;
 
-    // 5. Confirmation (unless --force)
+    // 5. Auto-select language/framework for each project
+    let mut analysis = analysis;
+    for project in &mut analysis.projects {
+        auto_select_for_project(project);
+    }
+
+    // 6. Confirmation loop (unless --force)
     if args.force {
         // Show project summary even in --force mode for visibility.
         // Use pipeline.println() so the output stays inside the TUI log pane
@@ -277,10 +283,22 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             pipeline.println(line);
         }
     } else {
-        let action = pipeline.confirm_project(&analysis, term)?;
-        if matches!(action, ConfirmAction::Reject) {
-            pipeline.finish_remaining();
-            return Err(ActualError::UserCancelled);
+        loop {
+            let action = pipeline.confirm_project(&analysis, term)?;
+            match action {
+                ConfirmAction::Accept => break,
+                ConfirmAction::Reject => {
+                    pipeline.finish_remaining();
+                    return Err(ActualError::UserCancelled);
+                }
+                ConfirmAction::Change => {
+                    // User wants to re-select language/framework
+                    for project in &mut analysis.projects {
+                        user_select_for_project(project, &mut pipeline, term)?;
+                    }
+                    // Loop back to show updated summary and re-confirm
+                }
+            }
         }
     }
 
@@ -783,6 +801,130 @@ where
             }
         }
     }
+}
+
+/// Auto-select the top language (by LOC) and first compatible framework for a project.
+///
+/// The language list is already sorted descending by LOC from `detect_languages`,
+/// so index 0 is the top language. The first framework whose manifest source is
+/// compatible with that language is selected; if none are compatible, `framework`
+/// is set to `None`.
+fn auto_select_for_project(project: &mut Project) {
+    if project.languages.is_empty() {
+        return;
+    }
+    let selected_lang = project.languages[0].clone();
+
+    let selected_fw = project
+        .frameworks
+        .iter()
+        .find(|fw| fw.is_compatible_with(&selected_lang.language))
+        .cloned();
+
+    project.selection = Some(ProjectSelection {
+        language: selected_lang,
+        framework: selected_fw,
+        auto_selected: true,
+    });
+}
+
+/// Let the user select language and framework interactively.
+///
+/// Shows a single-select list for the language, then (if more than one compatible
+/// framework exists) a single-select list for the framework. Single-option cases
+/// are auto-resolved without prompting.
+fn user_select_for_project(
+    project: &mut Project,
+    pipeline: &mut TuiRenderer,
+    term: &dyn TerminalIO,
+) -> Result<(), ActualError> {
+    if project.languages.is_empty() {
+        return Ok(());
+    }
+
+    // Format language items for display
+    let lang_items: Vec<String> = project
+        .languages
+        .iter()
+        .map(|ls| {
+            let name = ls.language.to_string();
+            if ls.loc > 0 {
+                format!("{} ({} loc)", name, ls.loc)
+            } else {
+                name
+            }
+        })
+        .collect();
+
+    // Find the currently selected language index (if any) for default
+    let current_lang_idx = project
+        .selection
+        .as_ref()
+        .and_then(|sel| {
+            project
+                .languages
+                .iter()
+                .position(|ls| ls.language == sel.language.language)
+        })
+        .unwrap_or(0);
+
+    let lang_idx = pipeline.select_one_in_tui(
+        "Select primary language:",
+        &lang_items,
+        Some(current_lang_idx),
+        term,
+    )?;
+
+    let selected_lang = project.languages[lang_idx].clone();
+
+    // Filter frameworks compatible with selected language
+    let compatible_fws: Vec<(usize, _)> = project
+        .frameworks
+        .iter()
+        .enumerate()
+        .filter(|(_, fw)| fw.is_compatible_with(&selected_lang.language))
+        .collect();
+
+    let selected_fw = if compatible_fws.is_empty() {
+        None
+    } else if compatible_fws.len() == 1 {
+        Some(project.frameworks[compatible_fws[0].0].clone())
+    } else {
+        // Multiple compatible frameworks — ask user
+        let fw_items: Vec<String> = compatible_fws
+            .iter()
+            .map(|(_, fw)| format!("{} ({})", fw.name, fw.category.as_str()))
+            .collect();
+
+        // Find current framework selection in filtered list
+        let current_fw_idx = project
+            .selection
+            .as_ref()
+            .and_then(|sel| sel.framework.as_ref())
+            .and_then(|sel_fw| {
+                compatible_fws
+                    .iter()
+                    .position(|(_, fw)| fw.name == sel_fw.name)
+            })
+            .unwrap_or(0);
+
+        let fw_idx = pipeline.select_one_in_tui(
+            "Select primary framework:",
+            &fw_items,
+            Some(current_fw_idx),
+            term,
+        )?;
+
+        Some(project.frameworks[compatible_fws[fw_idx].0].clone())
+    };
+
+    project.selection = Some(ProjectSelection {
+        language: selected_lang,
+        framework: selected_fw,
+        auto_selected: false,
+    });
+
+    Ok(())
 }
 
 /// Filter the analysis to only include projects matching the given filters.
@@ -5739,5 +5881,252 @@ mod tests {
     fn test_tilde_collapse_no_home_dir() {
         let path = std::path::Path::new("/tmp/other");
         assert_eq!(tilde_collapse(path, None), "/tmp/other");
+    }
+
+    // ── auto_select_for_project tests ──
+
+    fn make_project_for_selection(
+        languages: Vec<LanguageStat>,
+        frameworks: Vec<Framework>,
+    ) -> Project {
+        Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages,
+            frameworks,
+            package_manager: None,
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+            selection: None,
+        }
+    }
+
+    #[test]
+    fn test_auto_select_one_language_one_framework() {
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::Rust,
+                loc: 1500,
+            }],
+            vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+                source: Some(
+                    crate::analysis::static_analyzer::manifests::ManifestSource::CargoToml,
+                ),
+            }],
+        );
+
+        auto_select_for_project(&mut project);
+
+        let sel = project.selection.unwrap();
+        assert_eq!(sel.language.language, Language::Rust);
+        assert_eq!(sel.language.loc, 1500);
+        assert_eq!(sel.framework.unwrap().name, "actix-web");
+        assert!(sel.auto_selected);
+    }
+
+    #[test]
+    fn test_auto_select_picks_top_language_and_first_compatible_framework() {
+        let mut project = make_project_for_selection(
+            vec![
+                LanguageStat {
+                    language: Language::TypeScript,
+                    loc: 5000,
+                },
+                LanguageStat {
+                    language: Language::Rust,
+                    loc: 2000,
+                },
+            ],
+            vec![
+                Framework {
+                    name: "actix-web".to_string(),
+                    category: FrameworkCategory::WebBackend,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::CargoToml,
+                    ),
+                },
+                Framework {
+                    name: "react".to_string(),
+                    category: FrameworkCategory::WebFrontend,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::PackageJson,
+                    ),
+                },
+            ],
+        );
+
+        auto_select_for_project(&mut project);
+
+        let sel = project.selection.unwrap();
+        // Top language is TypeScript (5000 LOC)
+        assert_eq!(sel.language.language, Language::TypeScript);
+        // First compatible framework for TypeScript is react (PackageJson source)
+        assert_eq!(sel.framework.unwrap().name, "react");
+        assert!(sel.auto_selected);
+    }
+
+    #[test]
+    fn test_auto_select_languages_no_frameworks() {
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::Python,
+                loc: 800,
+            }],
+            vec![],
+        );
+
+        auto_select_for_project(&mut project);
+
+        let sel = project.selection.unwrap();
+        assert_eq!(sel.language.language, Language::Python);
+        assert!(sel.framework.is_none());
+        assert!(sel.auto_selected);
+    }
+
+    #[test]
+    fn test_auto_select_no_languages() {
+        let mut project = make_project_for_selection(vec![], vec![]);
+
+        auto_select_for_project(&mut project);
+
+        assert!(
+            project.selection.is_none(),
+            "projects with no languages should not get a selection"
+        );
+    }
+
+    // ── user_select_for_project tests ──
+
+    #[test]
+    fn test_user_select_for_project_single_language_single_framework() {
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::Rust,
+                loc: 1500,
+            }],
+            vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+                source: Some(
+                    crate::analysis::static_analyzer::manifests::ManifestSource::CargoToml,
+                ),
+            }],
+        );
+
+        // select_one is called once for language (choose index 0)
+        // framework is auto-selected since only 1 compatible
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        user_select_for_project(&mut project, &mut pipeline, &term).unwrap();
+
+        let sel = project.selection.unwrap();
+        assert_eq!(sel.language.language, Language::Rust);
+        assert_eq!(sel.framework.unwrap().name, "actix-web");
+        assert!(!sel.auto_selected);
+    }
+
+    #[test]
+    fn test_user_select_for_project_no_languages() {
+        let mut project = make_project_for_selection(vec![], vec![]);
+
+        let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        user_select_for_project(&mut project, &mut pipeline, &term).unwrap();
+
+        assert!(
+            project.selection.is_none(),
+            "should return Ok without setting selection for empty languages"
+        );
+    }
+
+    #[test]
+    fn test_user_select_for_project_multiple_compatible_frameworks() {
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::TypeScript,
+                loc: 3000,
+            }],
+            vec![
+                Framework {
+                    name: "react".to_string(),
+                    category: FrameworkCategory::WebFrontend,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::PackageJson,
+                    ),
+                },
+                Framework {
+                    name: "nextjs".to_string(),
+                    category: FrameworkCategory::WebFrontend,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::PackageJson,
+                    ),
+                },
+            ],
+        );
+
+        // select_one called twice: language (index 0), framework (index 1 = nextjs)
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0, 1]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        user_select_for_project(&mut project, &mut pipeline, &term).unwrap();
+
+        let sel = project.selection.unwrap();
+        assert_eq!(sel.language.language, Language::TypeScript);
+        assert_eq!(sel.framework.unwrap().name, "nextjs");
+        assert!(!sel.auto_selected);
+    }
+
+    // ── sync flow integration: Change loop ──
+
+    #[test]
+    fn test_run_sync_accept_works_with_auto_selection() {
+        // Existing test pattern: "y" in plain mode → Accept. After auto-select,
+        // the summary should still render and Accept should proceed.
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec!["y"]).with_selection(Some(vec![]));
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, false, false, &server.url());
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "run_sync with Accept after auto-select should succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_force_auto_selects_without_prompting() {
+        // --force mode should auto-select and proceed without confirmation.
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "run_sync with --force should auto-select and succeed: {result:?}"
+        );
     }
 }
