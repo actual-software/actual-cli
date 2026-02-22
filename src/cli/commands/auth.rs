@@ -393,10 +393,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let not_executable = dir.path().join("not-executable");
         std::fs::write(&not_executable, "not a script").unwrap();
-        // File exists but is NOT executable — goes through exec -> run_auth -> run_auth_with_binary
+        // File exists but is NOT executable — find_claude_binary rejects it
+        // with ClaudeNotFound (exit code 2) before reaching the subprocess.
         let _guard = EnvGuard::set("CLAUDE_BINARY", not_executable.to_str().unwrap());
         let code = handle_result(exec());
-        assert_eq!(code, 1);
+        assert_eq!(code, 2);
     }
 
     #[cfg(unix)]
