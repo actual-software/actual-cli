@@ -31,7 +31,7 @@ const CURSOR_BINARY_ENV: &str = "CURSOR_BINARY";
 /// # Invocation
 ///
 /// ```text
-/// cursor-agent -p --output-format json \
+/// cursor-agent -p --output-format json --trust \
 ///     [--model <model>] \
 ///     "<prompt_with_embedded_schema>"
 /// ```
@@ -138,9 +138,10 @@ fn io_err(context: &str, e: std::io::Error) -> ActualError {
 
 /// Build the argument list for the Cursor CLI invocation.
 ///
-/// Produces: `-p --output-format json [--model <model>] <prompt>`
+/// Produces: `-p --output-format json --trust [--model <model>] <prompt>`
 ///
 /// The `-p` flag runs Cursor in non-interactive (print) mode.
+/// `--trust` bypasses the workspace trust prompt required in headless mode.
 /// `--output-format json` produces a JSON envelope on stdout containing the
 /// agent's response in the `result` field.
 ///
@@ -169,6 +170,7 @@ fn build_cursor_args(prompt: &str, model: Option<&str>) -> Result<Vec<String>, A
         "-p".to_string(),
         "--output-format".to_string(),
         "json".to_string(),
+        "--trust".to_string(),
     ];
     if let Some(m) = model {
         args.push("--model".to_string());
@@ -606,6 +608,12 @@ echo '{envelope}'
             "--output-format json missing"
         );
 
+        // Verify --trust flag (required for headless/non-interactive mode)
+        assert!(
+            captured.contains("--trust\n"),
+            "--trust flag missing (required to bypass workspace trust prompt in headless mode)"
+        );
+
         // Verify self.model ("gpt-5.2") is used, NOT model_override ("haiku")
         assert!(
             captured.contains("--model\ngpt-5.2\n"),
@@ -675,9 +683,10 @@ echo '{envelope}'
         assert_eq!(args[0], "-p");
         assert_eq!(args[1], "--output-format");
         assert_eq!(args[2], "json");
-        assert_eq!(args[3], "--model");
-        assert_eq!(args[4], "gpt-5.2");
-        assert_eq!(args[5], "my prompt");
+        assert_eq!(args[3], "--trust");
+        assert_eq!(args[4], "--model");
+        assert_eq!(args[5], "gpt-5.2");
+        assert_eq!(args[6], "my prompt");
     }
 
     // ---- Test 13: build_cursor_args without model ----
@@ -688,7 +697,8 @@ echo '{envelope}'
         assert_eq!(args[0], "-p");
         assert_eq!(args[1], "--output-format");
         assert_eq!(args[2], "json");
-        assert_eq!(args[3], "my prompt");
+        assert_eq!(args[3], "--trust");
+        assert_eq!(args[4], "my prompt");
         // No --model flag — Cursor CLI uses its own default
         assert!(
             !args.iter().any(|a| a == "--model"),
