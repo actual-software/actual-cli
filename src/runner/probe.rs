@@ -22,6 +22,22 @@ pub use crate::runner::cursor_cli::find_cursor_binary;
 
 // ── Claude auth probe ─────────────────────────────────────────────────────────
 
+/// Convert a tokio runtime build error into an [`ActualError`].
+fn runtime_build_error(e: std::io::Error) -> ActualError {
+    ActualError::RunnerFailed {
+        message: format!("failed to build tokio runtime: {e}"),
+        stderr: String::new(),
+    }
+}
+
+/// Convert a `wait_with_output` I/O error into an [`ActualError`].
+fn wait_io_error(e: std::io::Error) -> ActualError {
+    ActualError::RunnerFailed {
+        message: format!("failed to wait for claude: {e}"),
+        stderr: String::new(),
+    }
+}
+
 /// Check Claude Code authentication by spawning `claude auth status --json`.
 ///
 /// Blocks the calling thread using a single-threaded tokio runtime.
@@ -33,10 +49,7 @@ pub fn probe_claude_auth(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| ActualError::RunnerFailed {
-            message: format!("failed to build tokio runtime: {e}"),
-            stderr: String::new(),
-        })?;
+        .map_err(runtime_build_error)?;
     rt.block_on(probe_claude_auth_async(binary_path, timeout))
 }
 
@@ -69,10 +82,7 @@ pub(crate) async fn probe_claude_auth_async(
             // Round up so sub-second timeouts display as "1s" rather than "0s".
             seconds: timeout.as_secs_f64().ceil() as u64,
         })?
-        .map_err(|e| ActualError::RunnerFailed {
-            message: format!("failed to wait for claude: {e}"),
-            stderr: String::new(),
-        })?;
+        .map_err(wait_io_error)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -176,6 +186,48 @@ pub(crate) fn resolve_api_key(
 mod tests {
     use super::*;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+    // ── error helper function tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_runtime_build_error_helper() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "runtime failed");
+        let err = runtime_build_error(io_err);
+        match err {
+            ActualError::RunnerFailed { message, stderr } => {
+                assert!(
+                    message.contains("failed to build tokio runtime"),
+                    "expected 'failed to build tokio runtime' in: {message}"
+                );
+                assert!(
+                    message.contains("runtime failed"),
+                    "expected 'runtime failed' in: {message}"
+                );
+                assert!(stderr.is_empty());
+            }
+            other => panic!("expected RunnerFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wait_io_error_helper() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broken");
+        let err = wait_io_error(io_err);
+        match err {
+            ActualError::RunnerFailed { message, stderr } => {
+                assert!(
+                    message.contains("failed to wait for claude"),
+                    "expected 'failed to wait for claude' in: {message}"
+                );
+                assert!(
+                    message.contains("pipe broken"),
+                    "expected 'pipe broken' in: {message}"
+                );
+                assert!(stderr.is_empty());
+            }
+            other => panic!("expected RunnerFailed, got: {other:?}"),
+        }
+    }
 
     // ── probe_codex_auth tests ────────────────────────────────────────────────
 
