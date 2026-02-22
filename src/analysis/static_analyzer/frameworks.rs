@@ -23,6 +23,7 @@ pub fn detect_frameworks(deps: &DependencyInfo, project_dir: &Path) -> Vec<Frame
                 frameworks.push(Framework {
                     name: sig.framework_name.to_string(),
                     category: FrameworkCategory::from_str_insensitive(sig.category),
+                    source: None,
                 });
             }
         }
@@ -92,6 +93,7 @@ pub fn detect_config_frameworks(project_dir: &Path) -> Vec<Framework> {
             frameworks.push(Framework {
                 name: name.to_string(),
                 category: FrameworkCategory::from_str_insensitive(category),
+                source: None,
             });
         }
     }
@@ -105,6 +107,7 @@ pub fn detect_config_frameworks(project_dir: &Path) -> Vec<Framework> {
             frameworks.push(Framework {
                 name: "terraform".to_string(),
                 category: FrameworkCategory::from_str_insensitive("devops"),
+                source: None,
             });
         }
     }
@@ -114,6 +117,7 @@ pub fn detect_config_frameworks(project_dir: &Path) -> Vec<Framework> {
         frameworks.push(Framework {
             name: "github-actions".to_string(),
             category: FrameworkCategory::from_str_insensitive("devops"),
+            source: None,
         });
     }
 
