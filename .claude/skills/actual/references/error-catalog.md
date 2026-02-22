@@ -20,8 +20,9 @@ Complete catalog of all error types in the actual CLI. Load this when troublesho
 | ClaudeNotAuthenticated | 2 | Auth/Setup | Run `claude auth login` |
 | CodexNotFound | 2 | Auth/Setup | Install Codex CLI, ensure `codex` is in PATH |
 | CodexNotAuthenticated | 2 | Auth/Setup | Set `OPENAI_API_KEY` or run `codex login` |
-| CursorNotFound | 2 | Auth/Setup | Install Cursor CLI, ensure `agent` is in PATH |
-| ApiKeyMissing | 2 | Auth/Setup | Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` |
+ | CursorNotFound | 2 | Auth/Setup | Install Cursor CLI, ensure `agent` is in PATH |
+ | CursorNotAuthenticated | 2 | Auth/Setup | Set `CURSOR_API_KEY` or run `cursor-agent login` |
+ | ApiKeyMissing | 2 | Auth/Setup | Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` |
 | CodexCliModelRequiresApiKey | 2 | Auth/Setup | Set `OPENAI_API_KEY` (ChatGPT OAuth only supports default model) |
 | CreditBalanceTooLow | 3 | Billing/API | Add credits to your account |
 | ApiError | 3 | Billing/API | Check API URL, network, credentials |
@@ -118,6 +119,26 @@ which agent
 ```
 
 **Fix**: Install Cursor CLI per its documentation.
+
+### CursorNotAuthenticated
+
+**Cause**: The Cursor CLI is installed but not authenticated.
+
+**Hint**: Set `CURSOR_API_KEY` or run `cursor-agent login`.
+
+**Diagnosis**:
+```bash
+agent --version  # verify binary works
+echo $CURSOR_API_KEY | head -c 7  # check key prefix without revealing it
+```
+
+**Fix**:
+```bash
+# Option 1: API key
+export CURSOR_API_KEY="..."
+# Option 2: OAuth login
+cursor-agent login
+```
 
 ### ApiKeyMissing
 
