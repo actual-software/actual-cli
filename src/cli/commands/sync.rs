@@ -31,6 +31,9 @@ use crate::runner::subprocess::TailoringRunner;
 use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfig};
 use crate::tailoring::filter::pre_filter_rejected;
 use crate::tailoring::types::{FileOutput, TailoringEvent, TailoringOutput, TailoringSummary};
+use crate::telemetry::identity::hash_repo_identity;
+use crate::telemetry::metrics::SyncMetrics;
+use crate::telemetry::reporter::report_metrics;
 
 /// Result summary from the confirm + write phase.
 #[derive(Debug, Clone, PartialEq)]
@@ -307,14 +310,15 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     let rejected_ids = get_rejections(&config, &repo_key);
 
     // 2b. Fetch ADRs from API with retry
-    let api_url = args
+    let api_url: String = args
         .api_url
         .as_deref()
         .or(config.api_url.as_deref())
-        .unwrap_or(DEFAULT_API_URL);
+        .unwrap_or(DEFAULT_API_URL)
+        .to_string();
 
     let request = build_match_request(&analysis, &config);
-    let client = ActualApiClient::new(api_url)?;
+    let client = ActualApiClient::new(&api_url)?;
 
     if args.verbose {
         pipeline.suspend(|| {
@@ -376,7 +380,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             r
         }
         Err(e) => {
-            let msg = fetch_error_message(&e, api_url);
+            let msg = fetch_error_message(&e, &api_url);
             pipeline.error(SyncPhase::Fetch, &msg);
             pipeline.finish_remaining();
             return Err(e);
@@ -569,7 +573,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     // ── Phase 3: confirm + write (fully implemented) ──
     // pipeline stays alive through confirm+write so output goes into the TUI
     // log pane. It drops naturally at end of run_sync.
-    confirm_and_write(
+    let sync_result = confirm_and_write(
         &output,
         root_dir,
         args.force,
@@ -620,6 +624,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         let commit_hash = get_git_head(root_dir).unwrap_or_default();
         let repo_hash = hash_repo_identity(&repo_url, &commit_hash);
 
+        let adrs_fetched = output.summary.total_input as u64;
         let adrs_written = (sync_result.files_created + sync_result.files_updated) as u64;
         let metrics = SyncMetrics {
             adrs_fetched,
@@ -863,8 +868,7 @@ fn confirm_or_change_loop(
 /// Inner implementation that accepts a confirm function for testability.
 ///
 /// In production the confirm function is `pipeline.confirm_project(...)`.
-/// In tests it can be replaced to return `Change` (which plain-mode confirm
-/// never produces).
+/// In tests it can be replaced to inject specific action sequences.
 fn confirm_or_change_loop_with<F>(
     analysis: &mut RepoAnalysis,
     pipeline: &mut TuiRenderer,
@@ -2532,8 +2536,10 @@ mod tests {
     fn test_run_sync_no_flags_prompts_user() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
-        // "y" for project confirm (dialoguer y/n), select_files handles file confirm
-        let term = MockTerminal::new(vec!["y"]).with_selection(Some(vec![]));
+        // select_one(0) = Accept for project confirm, select_files handles file confirm
+        let term = MockTerminal::new(vec![])
+            .with_select_one(vec![0])
+            .with_selection(Some(vec![]));
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let args = make_sync_args(false, false, false, false, &server.url());
         let result = run_sync(
@@ -2554,8 +2560,8 @@ mod tests {
     #[test]
     fn test_run_sync_user_rejects_returns_cancelled() {
         let dir = tempfile::tempdir().unwrap();
-        // "n" for project confirm — rejected before API call
-        let term = MockTerminal::new(vec!["n"]);
+        // select_one(2) = Reject for project confirm — rejected before API call
+        let term = MockTerminal::new(vec![]).with_select_one(vec![2]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let args = make_sync_args(false, false, false, false, "http://unused");
         let result = run_sync(
@@ -2709,8 +2715,8 @@ mod tests {
     fn test_run_sync_dry_run_writes_no_files() {
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
-        // "y" for project confirm (dry_run, force=false)
-        let term = MockTerminal::new(vec!["y"]);
+        // select_one(0) = Accept for project confirm (dry_run, force=false)
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let args = make_sync_args(true, false, false, false, &server.url());
         run_sync(
@@ -2931,8 +2937,10 @@ mod tests {
             .create();
 
         let dir = tempfile::tempdir().unwrap();
-        // "y" for project confirm, file confirm cancelled via select_files
-        let term = MockTerminal::new(vec!["y"]).with_selection(None);
+        // select_one(0) = Accept for project confirm, file confirm cancelled via select_files
+        let term = MockTerminal::new(vec![])
+            .with_select_one(vec![0])
+            .with_selection(None);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         // force=false, no_tailor=true so we get raw output and enter confirmation flow
         let args = SyncArgs {
@@ -4676,8 +4684,10 @@ mod tests {
             show_errors: false,
         };
 
-        // Provide "y" for project confirmation and select all files
-        let term2 = MockTerminal::new(vec!["y"]).with_selection(Some(vec![0]));
+        // Provide select_one(0) = Accept for project confirmation and select all files
+        let term2 = MockTerminal::new(vec![])
+            .with_select_one(vec![0])
+            .with_selection(Some(vec![0]));
         let result = run_sync(&args2, dir.path(), &cfg_path, &term2, &runner, None, None);
         assert!(
             result.is_ok(),
@@ -4838,9 +4848,9 @@ mod tests {
         let first_key = cached_tailoring.cache_key.clone();
 
         // Second run: force=false → should hit the cache (applicable=0 path)
-        // Provide "y" for project confirmation; no file selection needed (0 files)
+        // Provide select_one(0) = Accept for project confirmation; no file selection needed (0 files)
         let server2 = mock_api_server();
-        let term2 = MockTerminal::new(vec!["y"]);
+        let term2 = MockTerminal::new(vec![]).with_select_one(vec![0]);
         let args2 = SyncArgs {
             dry_run: false,
             full: false,
@@ -4932,7 +4942,9 @@ mod tests {
 
         // Second run: force=false → should hit the cache (with-files path)
         let server2 = mock_api_server_with_adrs();
-        let term2 = MockTerminal::new(vec!["y"]).with_selection(Some(vec![0]));
+        let term2 = MockTerminal::new(vec![])
+            .with_select_one(vec![0])
+            .with_selection(Some(vec![0]));
         let args2 = SyncArgs {
             dry_run: false,
             full: false,
@@ -6305,7 +6317,7 @@ mod tests {
     #[test]
     fn test_confirm_or_change_loop_accept() {
         let mut analysis = make_monorepo_analysis();
-        let term = MockTerminal::new(vec!["y"]);
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]); // 0 = Accept
         let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_or_change_loop(&mut analysis, &mut pipeline, &term);
@@ -6315,7 +6327,7 @@ mod tests {
     #[test]
     fn test_confirm_or_change_loop_reject() {
         let mut analysis = make_monorepo_analysis();
-        let term = MockTerminal::new(vec!["n"]);
+        let term = MockTerminal::new(vec![]).with_select_one(vec![2]); // 2 = Reject
         let mut pipeline = TuiRenderer::new(false, true);
 
         let result = confirm_or_change_loop(&mut analysis, &mut pipeline, &term);
@@ -6327,8 +6339,8 @@ mod tests {
 
     #[test]
     fn test_confirm_or_change_loop_change_then_accept() {
-        // Use confirm_or_change_loop_with to inject Change → Accept sequence,
-        // since plain-mode confirm can never produce Change.
+        // Use confirm_or_change_loop_with to inject Change → Accept sequence
+        // to test the re-selection logic without needing a full terminal mock.
         let mut analysis = RepoAnalysis {
             is_monorepo: false,
             workspace_type: None,
@@ -6535,11 +6547,13 @@ mod tests {
 
     #[test]
     fn test_run_sync_accept_works_with_auto_selection() {
-        // Existing test pattern: "y" in plain mode → Accept. After auto-select,
+        // select_one(0) = Accept in plain mode. After auto-select,
         // the summary should still render and Accept should proceed.
         let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
-        let term = MockTerminal::new(vec!["y"]).with_selection(Some(vec![]));
+        let term = MockTerminal::new(vec![])
+            .with_select_one(vec![0])
+            .with_selection(Some(vec![]));
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
         let args = make_sync_args(false, false, false, false, &server.url());
         let result = run_sync(

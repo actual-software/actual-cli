@@ -2060,30 +2060,37 @@ mod tests {
     #[test]
     fn test_confirm_project_plain_mode_delegates() {
         use crate::cli::ui::test_utils::MockTerminal;
-        // MockTerminal with default (accept) response
-        let term = MockTerminal::new(vec![]);
+        // MockTerminal with select_one(0) = Accept
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
         let mut r = TuiRenderer::new(false, true); // Plain mode
-                                                   // Just test it doesn't panic; result depends on MockTerminal default
         let analysis = RepoAnalysis {
             is_monorepo: false,
             workspace_type: None,
             projects: vec![],
         };
-        // This calls prompt_project_confirmation which uses MockTerminal
-        let _ = r.confirm_project(&analysis, &term);
+        // This calls prompt_project_confirmation which uses select_one
+        let result = r.confirm_project(&analysis, &term);
+        assert!(
+            matches!(result, Ok(ConfirmAction::Accept)),
+            "plain mode Accept should work: {result:?}"
+        );
     }
 
     #[test]
     fn test_confirm_project_quiet_mode_delegates() {
         use crate::cli::ui::test_utils::MockTerminal;
-        let term = MockTerminal::new(vec![]);
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]); // Accept
         let mut r = TuiRenderer::new(true, false); // Quiet mode
         let analysis = RepoAnalysis {
             is_monorepo: false,
             workspace_type: None,
             projects: vec![],
         };
-        let _ = r.confirm_project(&analysis, &term);
+        let result = r.confirm_project(&analysis, &term);
+        assert!(
+            matches!(result, Ok(ConfirmAction::Accept)),
+            "quiet mode Accept should work: {result:?}"
+        );
     }
 
     #[test]

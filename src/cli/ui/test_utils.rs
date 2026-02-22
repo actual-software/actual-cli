@@ -185,6 +185,13 @@ mod tests {
     }
 
     #[test]
+    fn confirm_unrecognized_input_defaults_to_false() {
+        // Covers the wildcard `_ => Ok(false)` branch in the default confirm() impl
+        let term = MockTerminal::new(vec!["x"]);
+        assert!(!term.confirm("proceed?").unwrap());
+    }
+
+    #[test]
     fn confirm_with_cancel_default_wraps_confirm_result_in_some() {
         // The default `confirm_with_cancel` delegates to `confirm` and wraps in `Some`.
         // MockTerminal uses the default implementation (does not override it).
