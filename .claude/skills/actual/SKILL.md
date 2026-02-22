@@ -196,7 +196,6 @@ Most-used config keys:
 |-----|---------|---------|
 | `runner` | claude-cli | Which runner to use |
 | `model` | claude-sonnet-4-6 | Model for Anthropic runners |
-| `openai_model` | gpt-5.2 | Model for OpenAI runners |
 | `output_format` | claude-md | Output format: claude-md, agents-md, cursor-rules |
 | `batch_size` | 15 | ADRs per batch (min 1) |
 | `concurrency` | 10 | Parallel requests (min 1) |

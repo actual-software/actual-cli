@@ -743,12 +743,12 @@ mod tests {
     }
 
     #[test]
-    fn test_openai_api_openai_model_config() {
-        // Verify openai_model config field is resolved in the OpenAiApi arm.
+    fn test_openai_api_model_config() {
+        // Verify model config field is resolved in the OpenAiApi arm.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("OPENAI_API_KEY", "sk-openai-test");
         let dir = tempfile::tempdir().unwrap();
-        let _g2 = with_temp_config(&dir, "openai_model: gpt-5\n");
+        let _g2 = with_temp_config(&dir, "model: gpt-5\n");
         let args = make_sync_args(Some(RunnerChoice::OpenAiApi));
         let result = sync_run_inner(&args, auth_not_authenticated);
         assert!(
@@ -933,19 +933,19 @@ mod tests {
     }
 
     #[test]
-    fn test_preamble_inferred_from_openai_model() {
-        // When openai_model is set in config and no --runner flag, runner is inferred.
+    fn test_preamble_inferred_from_model() {
+        // When model is set in config and no --runner flag, runner is inferred.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("CODEX_BINARY", "/nonexistent/codex");
         let _g2 = EnvGuard::remove("OPENAI_API_KEY");
         let dir = tempfile::tempdir().unwrap();
-        let _g3 = with_temp_config(&dir, "openai_model: gpt-5\n");
+        let _g3 = with_temp_config(&dir, "model: gpt-5\n");
         let args = make_sync_args(None);
         let result = sync_run_inner(&args, auth_not_authenticated);
         // Inferred runner = CodexCli; binary not found → CodexNotFound
         assert!(
             matches!(result, Err(ActualError::CodexNotFound)),
-            "expected CodexNotFound when openai_model set + binary absent, got: {result:?}"
+            "expected CodexNotFound when model set + binary absent, got: {result:?}"
         );
     }
 
@@ -1084,7 +1084,7 @@ mod tests {
 
     #[test]
     fn infer_runner_model_config_gpt_selects_codex() {
-        // model: gpt-5-mini should auto-select CodexCli (same behaviour previously via openai_model)
+        // model: gpt-5-mini should auto-select CodexCli
         assert_eq!(
             infer_runner_from_config(None, None, Some("gpt-5-mini")).unwrap(),
             RunnerChoice::CodexCli,
@@ -1151,7 +1151,7 @@ mod tests {
 
     #[test]
     fn infer_runner_codex_model_via_model_field() {
-        // Previously tested via openai_model; now tests the same via the unified model field.
+        // Codex model name is correctly resolved via the unified model field.
         assert_eq!(
             infer_runner_from_config(None, None, Some("gpt-5.2-codex")).unwrap(),
             RunnerChoice::CodexCli,

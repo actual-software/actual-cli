@@ -33,13 +33,7 @@ pub struct Config {
     /// OpenAI-based runners (`openai-api`, `codex-cli`) alike.
     /// The `--model` CLI flag overrides this value.
     ///
-    /// Legacy config files that used `openai_model:` are automatically read into
-    /// this field via the `#[serde(alias)]` below.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "openai_model"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
     /// Categories to always include.
@@ -385,32 +379,5 @@ mod tests {
         let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
         let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
-    }
-
-    /// Legacy openai_model YAML key is automatically migrated to model field.
-    #[test]
-    fn test_legacy_openai_model_yaml_migrates_to_model() {
-        let yaml = "openai_model: gpt-5\n";
-        let config: Config = serde_yaml::from_str(yaml).expect("deserialize legacy YAML");
-        assert_eq!(
-            config.model,
-            Some("gpt-5".to_string()),
-            "openai_model alias must be read into model field"
-        );
-    }
-
-    /// Serialized config does not emit the openai_model key.
-    #[test]
-    fn test_serialized_config_does_not_emit_openai_model_key() {
-        let config = Config {
-            model: Some("gpt-5".to_string()),
-            ..Config::default()
-        };
-        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
-        assert!(
-            !yaml.contains("openai_model"),
-            "serialized YAML must not contain 'openai_model' key: {yaml}"
-        );
-        assert!(yaml.contains("gpt-5"), "YAML must contain 'gpt-5': {yaml}");
     }
 }

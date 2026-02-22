@@ -154,14 +154,14 @@ actual config set openai_api_key "sk-..."
 
 **Diagnosis**:
 ```bash
-actual config show  # check if openai_model is set
+actual config show  # check if model is set
 echo $OPENAI_API_KEY | head -c 7  # check if key is set
 ```
 
 **Fix**: Either remove the explicit model (use default) or set `OPENAI_API_KEY`:
 ```bash
 # Option 1: Use default model
-actual config set openai_model ""
+actual config set model ""
 # Option 2: Set API key for explicit model support
 export OPENAI_API_KEY="sk-..."
 ```

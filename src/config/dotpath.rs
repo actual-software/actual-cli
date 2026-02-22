@@ -51,9 +51,6 @@ macro_rules! define_config_keys {
                     "rejected_adrs" | "cached_analysis" => Err(ActualError::ConfigError(format!(
                         "complex config key, use config file directly: {path}"
                     ))),
-                    "openai_model" => Err(ActualError::ConfigError(
-                        "openai_model is deprecated; use model instead: actual config set model <value>".to_string()
-                    )),
                     _ => Err(ActualError::ConfigError(format!(
                         "unknown config key: {path}"
                     ))),
@@ -1075,20 +1072,6 @@ mod tests {
         let mut config = Config::default();
         set(&mut config, "max_turns", "1").unwrap();
         assert_eq!(config.max_turns, Some(1));
-    }
-
-    // --- openai_model deprecation tests ---
-
-    #[test]
-    fn test_set_openai_model_returns_deprecation_error() {
-        let mut config = Config::default();
-        let err = set(&mut config, "openai_model", "gpt-5.2").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("openai_model is deprecated"), "got: {msg}");
-        assert!(
-            msg.contains("model"),
-            "deprecation error should mention 'model': {msg}"
-        );
     }
 
     // --- cursor_model tests ---
