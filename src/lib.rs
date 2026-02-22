@@ -30,3 +30,15 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Runners => cli::commands::runners::exec(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_run_runners_returns_ok() {
+        let cli = Cli::parse_from(["actual", "runners"]);
+        assert!(run(cli).is_ok());
+    }
+}
