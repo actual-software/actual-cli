@@ -32,8 +32,7 @@ actual config path
 | Key | Type | Default | Validation | Purpose |
 |-----|------|---------|------------|---------|
 | `api_url` | string | (built-in) | URL format | API server URL |
-| `model` | string | claude-sonnet-4-6 | non-empty | Model for Anthropic runners |
-| `openai_model` | string | gpt-5.2 | non-empty | Model for OpenAI runners |
+| `model` | string | (none) | non-empty | Default model for ALL runners (runner is auto-inferred from model name) |
 | `cursor_model` | string | (none) | non-empty | Model for cursor-cli (setting this auto-infers cursor-cli) |
 | `runner` | enum | claude-cli | One of: claude-cli, anthropic-api, openai-api, codex-cli, cursor-cli | AI runner backend |
 | `batch_size` | u32 | 15 | min 1 | ADRs per API batch |
@@ -54,15 +53,16 @@ actual config path
 
 ### Runner and Model Keys
 
-Setting `model` directly is used for Anthropic runners (claude-cli, anthropic-api). Setting `openai_model` is used for OpenAI runners (openai-api, codex-cli). Setting `cursor_model` always implies cursor-cli.
+The `model` key is the **unified model config key** for all runners. The runner is automatically inferred from the model name — setting `model: gpt-5` selects CodexCli, `model: claude-sonnet-4-6` selects AnthropicApi, etc. Setting `cursor_model` always implies cursor-cli.
+
+> **Note:** `openai_model` was removed in a previous version. Existing config files with `openai_model:` are automatically read into the `model` field for backward compatibility, but writing `actual config set openai_model` will return a deprecation error. Use `model` instead.
 
 The runner resolution order is:
 1. `--model` CLI flag (infers runner from model name)
-2. `openai_model` config (implies OpenAI runner)
-3. `cursor_model` config (implies cursor-cli)
-4. `model` config (infers runner from model name)
-5. `runner` config or `--runner` flag
-6. Default: claude-cli
+2. `cursor_model` config (always implies cursor-cli)
+3. `model` config (infers runner from model name)
+4. `runner` config or `--runner` flag
+5. Default: claude-cli
 
 ### Numeric Keys
 

@@ -124,7 +124,7 @@ export OPENAI_API_KEY="sk-..."
 
 ```bash
 actual config set runner openai-api
-actual config set openai_model gpt-5.2
+actual config set model gpt-5.2
 # Or set the API key in config:
 actual config set openai_api_key "sk-..."
 ```
@@ -170,7 +170,7 @@ If codex-cli fails with a model-related error, the CLI automatically falls back 
 
 ```bash
 actual config set runner codex-cli
-actual config set openai_model gpt-5.2
+actual config set model gpt-5.2
 ```
 
 ## cursor-cli
@@ -207,11 +207,12 @@ actual config set cursor_model <model-name>
 When determining which runner to use, the CLI checks in this priority order:
 
 1. **`--model` CLI flag** (if provided): infers runner from model name pattern
-2. **`openai_model` config key** (if set): implies an OpenAI runner
-3. **`cursor_model` config key** (if set): always implies cursor-cli
-4. **`model` config key** (if set): infers runner from model name pattern
-5. **`--runner` CLI flag or `runner` config key**: explicit runner choice
-6. **Default**: claude-cli
+2. **`cursor_model` config key** (if set): always implies cursor-cli
+3. **`model` config key** (if set): infers runner from model name pattern
+4. **`--runner` CLI flag or `runner` config key**: explicit runner choice
+5. **Default**: claude-cli
+
+> **Note:** `openai_model` config key was removed. Use `model` instead. Existing config files with `openai_model:` are automatically migrated; writing `actual config set openai_model` returns a deprecation error.
 
 The `--runner` flag always takes precedence when explicitly set alongside `--model`. But when only `--model` is provided, the runner is inferred from the model name.
 

@@ -584,8 +584,6 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         &mut pipeline,
     )?;
 
-    let adrs_fetched = filtered_adrs.len() as u64;
-
     // ── Telemetry (fire-and-forget) ──
     // Only fires on the happy path (after `?` above). Errors in telemetry are
     // silently swallowed inside `report_metrics`. Runtime build failures cause
@@ -641,7 +639,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             .enable_all()
             .build()
         {
-            tel_rt.block_on(report_metrics(&metrics, &config, api_url));
+            tel_rt.block_on(report_metrics(&metrics, &config, &api_url));
         }
     }
 
