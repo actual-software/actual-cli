@@ -71,6 +71,7 @@ impl EventSource for CrosstermEventSource {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConfirmFocus {
     Accept,
+    Change,
     Reject,
 }
 
@@ -90,12 +91,20 @@ pub struct FileSelectState {
     pub cursor: usize,
 }
 
+/// State for an inline single-select widget (one item picked from a list).
+pub struct SingleSelectState {
+    pub prompt: String,
+    pub items: Vec<String>,
+    pub cursor: usize,
+}
+
 /// Rendering context passed to `render_to` and `draw_frame`.
 pub struct RenderContext<'a> {
     pub steps: &'a StepsPane,
     pub log: &'a LogPane,
     pub confirm: Option<&'a ConfirmState>,
     pub file_select: Option<&'a FileSelectState>,
+    pub single_select: Option<&'a SingleSelectState>,
     pub hint: bool,
     pub scroll_offset: usize,
     pub selected: Option<usize>,
@@ -125,11 +134,22 @@ const CONFIRM_LINES: usize = 3;
 fn append_confirm_lines(lines: &mut Vec<String>, cs: &ConfirmState) {
     lines.push(format!("  {}", cs.question));
     lines.push("  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string());
-    let (accept_label, reject_label) = match cs.focus {
-        ConfirmFocus::Accept => ("[>Accept<]", "[ Reject ]"),
-        ConfirmFocus::Reject => ("[ Accept ]", "[>Reject<]"),
+    let accept = if matches!(cs.focus, ConfirmFocus::Accept) {
+        "[>Accept<]"
+    } else {
+        "[ Accept ]"
     };
-    lines.push(format!("  {accept_label}   {reject_label}"));
+    let change = if matches!(cs.focus, ConfirmFocus::Change) {
+        "[>Change<]"
+    } else {
+        "[ Change ]"
+    };
+    let reject = if matches!(cs.focus, ConfirmFocus::Reject) {
+        "[>Reject<]"
+    } else {
+        "[ Reject ]"
+    };
+    lines.push(format!("  {accept}  {change}  {reject}"));
 }
 
 /// Number of lines `append_file_select_lines` will push for `n` items.
@@ -150,21 +170,44 @@ fn append_file_select_lines(lines: &mut Vec<String>, fs: &FileSelectState) {
     lines.push("  Space toggle  Enter confirm  Esc cancel".to_string());
 }
 
+/// Number of lines `append_single_select_lines` will push for `n` items.
+fn single_select_line_count(n: usize) -> usize {
+    // blank + prompt + separator + n items + blank + hint
+    n + 5
+}
+
+fn append_single_select_lines(lines: &mut Vec<String>, ss: &SingleSelectState) {
+    lines.push(String::new());
+    lines.push(format!("  {}", ss.prompt));
+    lines.push("  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}".to_string());
+    for (i, item) in ss.items.iter().enumerate() {
+        let prefix = if i == ss.cursor { "  > " } else { "    " };
+        lines.push(format!("{prefix}{item}"));
+    }
+    lines.push(String::new());
+    lines.push("  \u{2191}\u{2193} navigate  Enter select  Esc cancel".to_string());
+}
+
 /// Build the keybinding hint text as a ratatui `Line` for embedding in the bottom border.
 fn build_hint_line(
     ctx: &RenderContext<'_>,
     log_height: usize,
     log_width: usize,
 ) -> Option<Line<'static>> {
-    let has_hint = ctx.hint || ctx.confirm.is_some() || ctx.file_select.is_some();
+    let has_hint = ctx.hint
+        || ctx.confirm.is_some()
+        || ctx.file_select.is_some()
+        || ctx.single_select.is_some();
     if !has_hint {
         return None;
     }
 
     let hint_text = if ctx.confirm.is_some() {
-        " ← → select  Enter confirm ".to_string()
+        " \u{2190} \u{2192} select  Enter confirm ".to_string()
     } else if ctx.file_select.is_some() {
-        " ↑/↓ move  Space toggle  Enter confirm  Esc cancel ".to_string()
+        " \u{2191}/\u{2193} move  Space toggle  Enter confirm  Esc cancel ".to_string()
+    } else if ctx.single_select.is_some() {
+        " \u{2191}/\u{2193} navigate  Enter select  Esc cancel ".to_string()
     } else {
         let max = ctx.log.max_scroll_wrapped(log_height, log_width);
         if max > 0 {
@@ -208,7 +251,10 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
         let frame_area = area;
 
         // ── Outer vertical split: content area on top, footer hint row on bottom ──
-        let has_hint = ctx.hint || ctx.confirm.is_some() || ctx.file_select.is_some();
+        let has_hint = ctx.hint
+            || ctx.confirm.is_some()
+            || ctx.file_select.is_some()
+            || ctx.single_select.is_some();
         // In wide mode, hints go into the Output pane's bottom border — no separate footer row.
         // In narrow mode, keep the footer row since there's no bordered panel.
         let needs_footer_row = has_hint && cols < 80;
@@ -227,9 +273,11 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
         if needs_footer_row {
             let approx_log_height = content_area.height.saturating_sub(2) as usize;
             let hint_text = if ctx.confirm.is_some() {
-                "  ← → select  Enter confirm".to_string()
+                "  \u{2190} \u{2192} select  Enter confirm".to_string()
             } else if ctx.file_select.is_some() {
-                "  ↑/↓ move  Space toggle  Enter confirm  Esc cancel".to_string()
+                "  \u{2191}/\u{2193} move  Space toggle  Enter confirm  Esc cancel".to_string()
+            } else if ctx.single_select.is_some() {
+                "  \u{2191}/\u{2193} navigate  Enter select  Esc cancel".to_string()
             } else {
                 let approx_log_width = content_area.width.saturating_sub(2) as usize;
                 let max = ctx
@@ -374,6 +422,8 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 CONFIRM_LINES // 3 extra lines beyond the normal bottom pad
             } else if let Some(fs) = ctx.file_select {
                 file_select_line_count(fs.items.len()) // extra lines beyond normal bottom pad
+            } else if let Some(ss) = ctx.single_select {
+                single_select_line_count(ss.items.len())
             } else {
                 0
             };
@@ -393,6 +443,8 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             } else if let Some(fs) = ctx.file_select {
                 log_lines.push(String::new());
                 append_file_select_lines(&mut log_lines, fs);
+            } else if let Some(ss) = ctx.single_select {
+                append_single_select_lines(&mut log_lines, ss);
             } else {
                 log_lines.push(pad);
             }
@@ -429,6 +481,8 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 CONFIRM_LINES
             } else if let Some(fs) = ctx.file_select {
                 file_select_line_count(fs.items.len())
+            } else if let Some(ss) = ctx.single_select {
+                single_select_line_count(ss.items.len())
             } else {
                 0
             };
@@ -440,6 +494,8 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 append_confirm_lines(&mut log_lines, cs);
             } else if let Some(fs) = ctx.file_select {
                 append_file_select_lines(&mut log_lines, fs);
+            } else if let Some(ss) = ctx.single_select {
+                append_single_select_lines(&mut log_lines, ss);
             }
             let log_text = log_lines.join("\n");
             frame.render_widget(Clear, chunks[1]);
@@ -481,6 +537,8 @@ pub struct TuiRenderer {
     confirm_state: Option<ConfirmState>,
     /// State for the inline file multi-select (None when not active).
     file_select_state: Option<FileSelectState>,
+    /// State for the inline single-select (None when not active).
+    single_select_state: Option<SingleSelectState>,
     /// Which step is highlighted in review mode (None = show active_step's log).
     selected_step: Option<usize>,
     /// Which step the user is viewing during execution (None = follow active_step).
@@ -534,6 +592,7 @@ impl TuiRenderer {
             hint: false,
             confirm_state: None,
             file_select_state: None,
+            single_select_state: None,
             selected_step: None,
             viewing_step: None,
             scroll_offset: 0,
@@ -587,6 +646,7 @@ impl TuiRenderer {
             hint: false,
             confirm_state: None,
             file_select_state: None,
+            single_select_state: None,
             selected_step: None,
             viewing_step: None,
             scroll_offset: 0,
@@ -983,26 +1043,40 @@ impl TuiRenderer {
                         .as_ref()
                         .map(|cs| cs.focus)
                         .unwrap_or(ConfirmFocus::Accept);
-                    return if focus == ConfirmFocus::Accept {
-                        Ok(ConfirmAction::Accept)
-                    } else {
-                        Ok(ConfirmAction::Reject)
+                    return match focus {
+                        ConfirmFocus::Accept => Ok(ConfirmAction::Accept),
+                        ConfirmFocus::Change => Ok(ConfirmAction::Change),
+                        ConfirmFocus::Reject => Ok(ConfirmAction::Reject),
                     };
                 }
                 (KeyCode::Left, _) | (KeyCode::BackTab, _) => {
                     if let Some(ref mut cs) = self.confirm_state {
-                        cs.focus = ConfirmFocus::Accept;
+                        cs.focus = match cs.focus {
+                            ConfirmFocus::Accept => ConfirmFocus::Reject,
+                            ConfirmFocus::Change => ConfirmFocus::Accept,
+                            ConfirmFocus::Reject => ConfirmFocus::Change,
+                        };
                     }
                     self.draw();
                 }
                 (KeyCode::Right, _) | (KeyCode::Tab, _) => {
                     if let Some(ref mut cs) = self.confirm_state {
-                        cs.focus = ConfirmFocus::Reject;
+                        cs.focus = match cs.focus {
+                            ConfirmFocus::Accept => ConfirmFocus::Change,
+                            ConfirmFocus::Change => ConfirmFocus::Reject,
+                            ConfirmFocus::Reject => ConfirmFocus::Accept,
+                        };
                     }
                     self.draw();
                 }
                 (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
                     return Ok(ConfirmAction::Accept);
+                }
+                (KeyCode::Char('c'), m) if !m.contains(KeyModifiers::CONTROL) => {
+                    return Ok(ConfirmAction::Change);
+                }
+                (KeyCode::Char('C'), _) => {
+                    return Ok(ConfirmAction::Change);
                 }
                 (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) => {
                     return Ok(ConfirmAction::Reject);
@@ -1182,6 +1256,94 @@ impl TuiRenderer {
         }
     }
 
+    /// Show an inline single-select prompt.
+    ///
+    /// In TUI mode: renders a navigable list at the bottom of the log pane.
+    /// In Plain/Quiet mode: delegates to `TerminalIO::select_one`.
+    pub fn select_one_in_tui(
+        &mut self,
+        prompt: &str,
+        items: &[String],
+        default: Option<usize>,
+        term: &dyn TerminalIO,
+    ) -> Result<usize, crate::error::ActualError> {
+        self.select_one_in_tui_impl(prompt, items, default, term, &mut CrosstermEventSource)
+    }
+
+    fn select_one_in_tui_impl(
+        &mut self,
+        prompt: &str,
+        items: &[String],
+        default: Option<usize>,
+        term: &dyn TerminalIO,
+        source: &mut dyn EventSource,
+    ) -> Result<usize, crate::error::ActualError> {
+        match &self.mode {
+            Mode::Tui(_) => {
+                self.single_select_state = Some(SingleSelectState {
+                    prompt: prompt.to_string(),
+                    items: items.to_vec(),
+                    cursor: default.unwrap_or(0),
+                });
+                self.draw();
+                let result = self.run_single_select_loop(source);
+                self.single_select_state = None;
+                self.draw();
+                match result? {
+                    Some(idx) => Ok(idx),
+                    None => Err(crate::error::ActualError::UserCancelled),
+                }
+            }
+            Mode::Plain | Mode::Quiet => term.select_one(prompt, items, default),
+        }
+    }
+
+    /// Inner event loop for the single-select widget.
+    ///
+    /// Returns `Ok(Some(index))` for a confirmed selection, `Ok(None)` for cancel,
+    /// or `Err` on I/O failure.
+    fn run_single_select_loop(
+        &mut self,
+        source: &mut dyn EventSource,
+    ) -> Result<Option<usize>, crate::error::ActualError> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        loop {
+            let key = source.next_key().map_err(|e| {
+                crate::error::ActualError::InternalError(format!("event read failed: {e}"))
+            })?;
+            match (key.code, key.modifiers) {
+                (KeyCode::Up, _) => {
+                    if let Some(ref mut ss) = self.single_select_state {
+                        if ss.cursor == 0 {
+                            ss.cursor = ss.items.len().saturating_sub(1);
+                        } else {
+                            ss.cursor -= 1;
+                        }
+                    }
+                    self.draw();
+                }
+                (KeyCode::Down, _) => {
+                    if let Some(ref mut ss) = self.single_select_state {
+                        let len = ss.items.len().max(1);
+                        ss.cursor = (ss.cursor + 1) % len;
+                    }
+                    self.draw();
+                }
+                (KeyCode::Enter, _) => {
+                    let idx = self.single_select_state.as_ref().map(|ss| ss.cursor);
+                    return Ok(idx);
+                }
+                (KeyCode::Esc, _) | (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) => {
+                    return Ok(None);
+                }
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    return Err(crate::error::ActualError::UserCancelled);
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Adjusts the start time for the given phase forward by `paused` duration,
     /// effectively excluding that duration from the elapsed time calculation.
     ///
@@ -1243,6 +1405,7 @@ impl TuiRenderer {
                 log: &self.logs[log_idx],
                 confirm: self.confirm_state.as_ref(),
                 file_select: self.file_select_state.as_ref(),
+                single_select: self.single_select_state.as_ref(),
                 hint: self.hint,
                 scroll_offset: self.scroll_offset,
                 selected,
@@ -1323,6 +1486,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1351,6 +1515,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1380,6 +1545,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1414,6 +1580,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1776,6 +1943,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1796,6 +1964,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1828,6 +1997,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -1845,6 +2015,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -2009,8 +2180,8 @@ mod tests {
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let mut source = MockEventSource::new(vec![tab, enter]);
         let result = r.confirm_project_impl(&analysis, &term, &mut source);
-        // After Tab, focus moves to Reject, then Enter confirms Reject
-        assert!(matches!(result, Ok(ConfirmAction::Reject)));
+        // After Tab, focus moves to Change (Accept→Change), then Enter confirms Change
+        assert!(matches!(result, Ok(ConfirmAction::Change)));
     }
 
     #[test]
@@ -2031,7 +2202,7 @@ mod tests {
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let mut source = MockEventSource::new(vec![right, left, enter]);
         let result = r.confirm_project_impl(&analysis, &term, &mut source);
-        // Right → Reject, Left → Accept, Enter confirms Accept
+        // Right → Change (Accept→Change), Left → Accept (Change→Accept), Enter confirms Accept
         assert!(matches!(result, Ok(ConfirmAction::Accept)));
     }
 
@@ -2144,6 +2315,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: true,
                 scroll_offset: 0,
                 selected: None,
@@ -2170,6 +2342,7 @@ mod tests {
                 log: &log,
                 confirm: Some(&cs),
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -2196,6 +2369,7 @@ mod tests {
                 log: &log,
                 confirm: Some(&cs),
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -2218,6 +2392,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: None,
+                single_select: None,
                 hint: true,
                 scroll_offset: 0,
                 selected: None,
@@ -2244,6 +2419,7 @@ mod tests {
                 log: &log,
                 confirm: Some(&cs),
                 file_select: None,
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -2276,6 +2452,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: Some(&fs),
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -2303,6 +2480,7 @@ mod tests {
                 log: &log,
                 confirm: None,
                 file_select: Some(&fs),
+                single_select: None,
                 hint: false,
                 scroll_offset: 0,
                 selected: None,
@@ -2935,5 +3113,401 @@ mod tests {
         r.wait_for_keypress_impl(&mut source);
 
         assert!(source.events.is_empty(), "all events should be consumed");
+    }
+
+    // ── append_single_select_lines tests ──
+
+    #[test]
+    fn test_append_single_select_lines_produces_expected_output() {
+        let ss = SingleSelectState {
+            prompt: "Choose a language:".to_string(),
+            items: vec!["Rust".to_string(), "Python".to_string(), "Go".to_string()],
+            cursor: 1,
+        };
+        let mut lines = Vec::new();
+        append_single_select_lines(&mut lines, &ss);
+        assert_eq!(lines.len(), single_select_line_count(3));
+        assert_eq!(lines[0], ""); // blank line
+        assert_eq!(lines[1], "  Choose a language:");
+        // lines[2] is separator
+        assert!(lines[3].contains("Rust"));
+        assert!(lines[3].starts_with("    ")); // not selected
+        assert!(lines[4].contains("Python"));
+        assert!(lines[4].starts_with("  > ")); // cursor
+        assert!(lines[5].contains("Go"));
+        assert!(lines[5].starts_with("    ")); // not selected
+        assert_eq!(lines[6], ""); // blank
+        assert!(lines[7].contains("navigate")); // hint
+    }
+
+    #[test]
+    fn test_append_single_select_lines_empty_items() {
+        let ss = SingleSelectState {
+            prompt: "Pick:".to_string(),
+            items: vec![],
+            cursor: 0,
+        };
+        let mut lines = Vec::new();
+        append_single_select_lines(&mut lines, &ss);
+        assert_eq!(lines.len(), single_select_line_count(0));
+    }
+
+    #[test]
+    fn test_single_select_line_count() {
+        // n items → n + 5 lines (blank + prompt + separator + n items + blank + hint)
+        assert_eq!(single_select_line_count(0), 5);
+        assert_eq!(single_select_line_count(3), 8);
+        assert_eq!(single_select_line_count(10), 15);
+    }
+
+    // ── render_to with single_select tests ──
+
+    #[test]
+    fn test_render_to_with_single_select() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        let ss = SingleSelectState {
+            prompt: "Choose:".to_string(),
+            items: vec!["Option A".to_string(), "Option B".to_string()],
+            cursor: 0,
+        };
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                file_select: None,
+                single_select: Some(&ss),
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_render_to_narrow_with_single_select() {
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        let ss = SingleSelectState {
+            prompt: "Choose:".to_string(),
+            items: vec!["Option A".to_string()],
+            cursor: 0,
+        };
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                file_select: None,
+                single_select: Some(&ss),
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
+    }
+
+    // ── select_one_in_tui tests ──
+
+    #[test]
+    fn test_select_one_in_tui_plain_mode_delegates() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        let mut r = TuiRenderer::new(false, true); // Plain mode
+        let term = MockTerminal::new(vec![]).with_select_one(vec![1]);
+        let items = vec!["Rust".to_string(), "Python".to_string()];
+        let result = r.select_one_in_tui("Choose:", &items, None, &term);
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_select_one_in_tui_enter_selects_default() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let items = vec!["Rust".to_string(), "Python".to_string(), "Go".to_string()];
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![enter]);
+        let result = r.select_one_in_tui_impl("Choose:", &items, Some(1), &term, &mut source);
+        assert_eq!(result.unwrap(), 1); // default cursor=1
+        assert!(
+            r.single_select_state.is_none(),
+            "state must be cleared after selection"
+        );
+    }
+
+    #[test]
+    fn test_select_one_in_tui_navigate_down_and_select() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let items = vec!["Rust".to_string(), "Python".to_string(), "Go".to_string()];
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        // Down twice from cursor=0 → cursor=2 ("Go"), then Enter
+        let mut source = MockEventSource::new(vec![down, down, enter]);
+        let result = r.select_one_in_tui_impl("Choose:", &items, None, &term, &mut source);
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn test_select_one_in_tui_navigate_wraps_around() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let items = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        // Up from cursor=0 wraps to cursor=2 ("C"), then Enter
+        let mut source = MockEventSource::new(vec![up, enter]);
+        let result = r.select_one_in_tui_impl("Choose:", &items, None, &term, &mut source);
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn test_select_one_in_tui_down_wraps_around() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let items = vec!["A".to_string(), "B".to_string()];
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        // Down 3 times on 2 items: 0→1→0→1, then Enter picks index 1
+        let mut source = MockEventSource::new(vec![down, down, down, enter]);
+        let result = r.select_one_in_tui_impl("Choose:", &items, None, &term, &mut source);
+        assert_eq!(result.unwrap(), 1);
+    }
+
+    #[test]
+    fn test_select_one_in_tui_esc_cancels() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let items = vec!["A".to_string(), "B".to_string()];
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![esc]);
+        let result = r.select_one_in_tui_impl("Choose:", &items, None, &term, &mut source);
+        assert!(
+            matches!(result, Err(crate::error::ActualError::UserCancelled)),
+            "Esc should return UserCancelled"
+        );
+        assert!(r.single_select_state.is_none());
+    }
+
+    #[test]
+    fn test_select_one_in_tui_q_cancels() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let items = vec!["A".to_string(), "B".to_string()];
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![q]);
+        let result = r.select_one_in_tui_impl("Choose:", &items, None, &term, &mut source);
+        assert!(
+            matches!(result, Err(crate::error::ActualError::UserCancelled)),
+            "q should return UserCancelled"
+        );
+    }
+
+    #[test]
+    fn test_select_one_in_tui_ctrl_c_cancels() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let items = vec!["A".to_string(), "B".to_string()];
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let mut source = MockEventSource::new(vec![ctrl_c]);
+        let result = r.select_one_in_tui_impl("Choose:", &items, None, &term, &mut source);
+        assert!(
+            matches!(result, Err(crate::error::ActualError::UserCancelled)),
+            "Ctrl-C should return UserCancelled"
+        );
+    }
+
+    #[test]
+    fn test_select_one_in_tui_source_exhausted() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let items = vec!["A".to_string()];
+        let mut source = MockEventSource::new(vec![]);
+        let result = r.select_one_in_tui_impl("Choose:", &items, None, &term, &mut source);
+        assert!(result.is_err());
+        assert!(
+            r.single_select_state.is_none(),
+            "state must be cleared on error"
+        );
+    }
+
+    // ── 3-button confirm tests ──
+
+    #[test]
+    fn test_append_confirm_lines_three_buttons_accept_focus() {
+        let cs = ConfirmState {
+            question: "Proceed?".to_string(),
+            focus: ConfirmFocus::Accept,
+        };
+        let mut lines = Vec::new();
+        append_confirm_lines(&mut lines, &cs);
+        assert_eq!(lines.len(), CONFIRM_LINES);
+        let button_line = &lines[2];
+        assert!(
+            button_line.contains("[>Accept<]"),
+            "Accept should be focused: {button_line}"
+        );
+        assert!(
+            button_line.contains("[ Change ]"),
+            "Change should not be focused: {button_line}"
+        );
+        assert!(
+            button_line.contains("[ Reject ]"),
+            "Reject should not be focused: {button_line}"
+        );
+    }
+
+    #[test]
+    fn test_append_confirm_lines_three_buttons_change_focus() {
+        let cs = ConfirmState {
+            question: "Proceed?".to_string(),
+            focus: ConfirmFocus::Change,
+        };
+        let mut lines = Vec::new();
+        append_confirm_lines(&mut lines, &cs);
+        let button_line = &lines[2];
+        assert!(
+            button_line.contains("[ Accept ]"),
+            "Accept should not be focused: {button_line}"
+        );
+        assert!(
+            button_line.contains("[>Change<]"),
+            "Change should be focused: {button_line}"
+        );
+        assert!(
+            button_line.contains("[ Reject ]"),
+            "Reject should not be focused: {button_line}"
+        );
+    }
+
+    #[test]
+    fn test_append_confirm_lines_three_buttons_reject_focus() {
+        let cs = ConfirmState {
+            question: "Proceed?".to_string(),
+            focus: ConfirmFocus::Reject,
+        };
+        let mut lines = Vec::new();
+        append_confirm_lines(&mut lines, &cs);
+        let button_line = &lines[2];
+        assert!(
+            button_line.contains("[ Accept ]"),
+            "Accept should not be focused: {button_line}"
+        );
+        assert!(
+            button_line.contains("[ Change ]"),
+            "Change should not be focused: {button_line}"
+        );
+        assert!(
+            button_line.contains("[>Reject<]"),
+            "Reject should be focused: {button_line}"
+        );
+    }
+
+    #[test]
+    fn test_confirm_project_tui_c_change() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![],
+        };
+        let c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![c]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(matches!(result, Ok(ConfirmAction::Change)));
+    }
+
+    #[test]
+    fn test_confirm_project_tui_tab_tab_enter_reject() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![],
+        };
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        // Tab: Accept→Change, Tab: Change→Reject, Enter confirms Reject
+        let mut source = MockEventSource::new(vec![tab, tab, enter]);
+        let result = r.confirm_project_impl(&analysis, &term, &mut source);
+        assert!(matches!(result, Ok(ConfirmAction::Reject)));
+    }
+
+    #[test]
+    fn test_render_to_with_confirm_change_focus() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        let cs = ConfirmState {
+            question: "Proceed?".to_string(),
+            focus: ConfirmFocus::Change,
+        };
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: Some(&cs),
+                file_select: None,
+                single_select: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+            },
+        )
+        .unwrap();
     }
 }
