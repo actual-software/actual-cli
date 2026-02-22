@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::collections::HashSet;
 
 use super::markers::{self, END_MARKER};
-use crate::tailoring::types::{FileOutput, SkippedAdr, TailoringOutput, TailoringSummary};
+use crate::tailoring::types::{
+    AdrSection, FileOutput, SkippedAdr, TailoringOutput, TailoringSummary,
+};
 
 /// Merge multiple [`TailoringOutput`]s into a single combined output.
 ///
@@ -91,15 +93,45 @@ pub struct MergeResult {
     pub content: String,
 }
 
+/// Merge per-ADR sections from a managed block with new sections.
+///
+/// Performs surgical section-level merge:
+/// - Existing sections that are also in `new_sections`: replaced (in existing order)
+/// - Existing sections NOT in `new_sections`: dropped (removed)
+/// - New sections NOT in existing: appended at the end
+fn merge_adr_sections(existing_managed: &str, new_sections: &[AdrSection]) -> String {
+    let existing_sections = markers::extract_adr_sections(existing_managed);
+    let existing_ids: HashSet<&str> = existing_sections.iter().map(|s| s.id.as_str()).collect();
+
+    let mut result: Vec<String> = Vec::new();
+
+    // Keep existing order for sections being updated
+    for existing in &existing_sections {
+        if let Some(new) = new_sections.iter().find(|s| s.adr_id == existing.id) {
+            result.push(markers::wrap_adr_section(&new.adr_id, &new.content));
+        }
+        // else: section removed, skip
+    }
+
+    // Append new sections not in existing
+    for new in new_sections {
+        if !existing_ids.contains(new.adr_id.as_str()) {
+            result.push(markers::wrap_adr_section(&new.adr_id, &new.content));
+        }
+    }
+
+    result.join("\n\n")
+}
+
 /// Merge new managed content into an existing (or new) output file.
 ///
 /// # Arguments
 /// * `existing_content` - The current file content, or `None` for a new file.
-/// * `managed_content` - The new AI-generated content to place inside markers.
+/// * `sections` - Per-ADR sections to place inside the managed block. Each section
+///   is wrapped with `<!-- adr:UUID start/end -->` markers.
 /// * `version` - The version number for the managed section header.
 /// * `is_root` - Whether this is the root-level output file (adds a format-specific
 ///   header for new files).
-/// * `adr_ids` - ADR IDs to include in the managed section metadata.
 /// * `root_header` - Optional header string to prepend for new root files (e.g.
 ///   `"# Project Guidelines"` for ClaudeMd/AgentsMd, or the YAML frontmatter block
 ///   for CursorRules).  Pass `None` to suppress the header.
@@ -109,23 +141,31 @@ pub struct MergeResult {
 ///    Output starts with `root_header` (if `Some`), followed by managed section.
 /// 2. New subdirectory file (`existing_content` is `None`, `is_root` is `false`):
 ///    Output is just the managed section.
-/// 3. Existing file with markers: content between markers is replaced (from start of
-///    START_MARKER line to end of END_MARKER line), content outside preserved exactly.
-/// 4. Existing file without markers: managed section is appended after existing content
+/// 3. Existing file with markers AND per-ADR section markers inside: surgical
+///    section-level merge (preserve order, replace updated, add new, remove deleted).
+/// 4. Existing file with markers but NO per-ADR section markers (old format):
+///    whole managed block is replaced (one-time migration to per-ADR format).
+/// 5. Existing file without markers: managed section is appended after existing content
 ///    (separated by `"\n\n"`).
 pub fn merge_content(
     existing_content: Option<&str>,
-    managed_content: &str,
+    sections: &[AdrSection],
     version: u32,
     is_root: bool,
-    adr_ids: &[String],
     root_header: Option<&str>,
 ) -> MergeResult {
-    let managed_section = markers::wrap_in_markers(managed_content, version, adr_ids);
+    // Build managed content from sections with per-ADR markers
+    let managed_content = sections
+        .iter()
+        .map(|s| markers::wrap_adr_section(&s.adr_id, &s.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let adr_ids: Vec<String> = sections.iter().map(|s| s.adr_id.clone()).collect();
 
     let content = match existing_content {
         None => {
             // New file
+            let managed_section = markers::wrap_in_markers(&managed_content, version, &adr_ids);
             if is_root {
                 if let Some(header) = root_header {
                     format!("{header}\n\n{managed_section}\n")
@@ -138,6 +178,21 @@ pub fn merge_content(
         }
         Some(existing) => {
             if let Some((start_idx, end_idx)) = markers::find_managed_section_bounds(existing) {
+                // Extract existing managed content to check for per-ADR markers
+                let existing_managed =
+                    markers::extract_managed_content(existing).unwrap_or_default();
+                let existing_adr_sections = markers::extract_adr_sections(existing_managed);
+
+                let final_managed = if existing_adr_sections.is_empty() {
+                    // Old format: no per-ADR markers, replace whole block (migration)
+                    managed_content
+                } else {
+                    // Surgical section-level merge
+                    merge_adr_sections(existing_managed, sections)
+                };
+
+                let managed_section = markers::wrap_in_markers(&final_managed, version, &adr_ids);
+
                 // Replace content between markers (inclusive of marker lines)
                 let end_idx = end_idx + END_MARKER.len();
                 // Also consume the trailing newline after END_MARKER if present
@@ -151,6 +206,7 @@ pub fn merge_content(
                 format!("{before}{managed_section}\n{after}")
             } else {
                 // Append managed section after existing content
+                let managed_section = markers::wrap_in_markers(&managed_content, version, &adr_ids);
                 if existing.ends_with('\n') {
                     format!("{existing}\n{managed_section}\n")
                 } else {
@@ -392,16 +448,21 @@ mod tests {
     const CURSOR_FRONTMATTER: &str =
         "---\ndescription: actual.ai ADR policies for this project\nalwaysApply: true\n---";
 
+    fn make_section(adr_id: &str, content: &str) -> AdrSection {
+        AdrSection {
+            adr_id: adr_id.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    fn make_sections(pairs: &[(&str, &str)]) -> Vec<AdrSection> {
+        pairs.iter().map(|(id, c)| make_section(id, c)).collect()
+    }
+
     #[test]
     fn test_new_root_file_has_header_and_managed_section() {
-        let result = merge_content(
-            None,
-            "some content",
-            1,
-            true,
-            &[],
-            Some(PROJECT_GUIDELINES_HEADER),
-        );
+        let sections = make_sections(&[("adr-1", "some content")]);
+        let result = merge_content(None, &sections, 1, true, Some(PROJECT_GUIDELINES_HEADER));
         assert!(
             result.content.starts_with("# Project Guidelines\n\n"),
             "expected root header, got: {}",
@@ -419,7 +480,8 @@ mod tests {
 
     #[test]
     fn test_new_subdirectory_file_is_managed_section_only() {
-        let result = merge_content(None, "some content", 1, false, &[], Some("# Header"));
+        let sections = make_sections(&[("adr-1", "some content")]);
+        let result = merge_content(None, &sections, 1, false, Some("# Header"));
         assert!(
             result.content.starts_with(START_MARKER),
             "expected output to start with START_MARKER, got: {}",
@@ -441,7 +503,8 @@ mod tests {
 
     #[test]
     fn test_new_root_no_header_when_none() {
-        let result = merge_content(None, "some content", 1, true, &[], None);
+        let sections = make_sections(&[("adr-1", "some content")]);
+        let result = merge_content(None, &sections, 1, true, None);
         assert!(
             result.content.starts_with(START_MARKER),
             "expected output to start with START_MARKER when root_header is None, got: {}",
@@ -455,8 +518,10 @@ mod tests {
 
     #[test]
     fn test_existing_with_markers_replaces_content() {
+        // Old format: no per-ADR markers inside existing managed block
         let existing = format!("{}\n", markers::wrap_in_markers("old content", 1, &[]));
-        let result = merge_content(Some(&existing), "new content", 2, false, &[], None);
+        let sections = make_sections(&[("adr-1", "new content")]);
+        let result = merge_content(Some(&existing), &sections, 2, false, None);
         assert!(
             result.content.contains("new content"),
             "expected new content in output: {}",
@@ -476,7 +541,8 @@ mod tests {
     #[test]
     fn test_existing_without_markers_appends() {
         let existing = "# My Custom Rules\n\nDo stuff";
-        let result = merge_content(Some(existing), "managed stuff", 1, false, &[], None);
+        let sections = make_sections(&[("adr-1", "managed stuff")]);
+        let result = merge_content(Some(existing), &sections, 1, false, None);
         assert!(
             result.content.starts_with("# My Custom Rules\n\nDo stuff"),
             "expected existing content preserved at start: {}",
@@ -494,9 +560,11 @@ mod tests {
 
     #[test]
     fn test_existing_preserves_content_above_and_below_markers() {
+        // Old format: no per-ADR markers
         let managed = markers::wrap_in_markers("old managed", 1, &[]);
         let existing = format!("# User Header\n\n{managed}\n\n## User Footer\n");
-        let result = merge_content(Some(&existing), "new managed", 2, false, &[], None);
+        let sections = make_sections(&[("adr-1", "new managed")]);
+        let result = merge_content(Some(&existing), &sections, 2, false, None);
         assert!(
             result.content.contains("# User Header"),
             "expected user header preserved: {}",
@@ -521,7 +589,8 @@ mod tests {
 
     #[test]
     fn test_empty_managed_content() {
-        let result = merge_content(None, "", 1, false, &[], None);
+        let sections: Vec<AdrSection> = vec![];
+        let result = merge_content(None, &sections, 1, false, None);
         assert!(
             markers::has_managed_section(&result.content),
             "expected valid managed section even with empty content"
@@ -535,8 +604,10 @@ mod tests {
 
     #[test]
     fn test_existing_markers_only_replaces() {
+        // Old format: no per-ADR markers inside existing managed block
         let existing = format!("{}\n", markers::wrap_in_markers("original", 1, &[]));
-        let result = merge_content(Some(&existing), "replacement", 2, false, &[], None);
+        let sections = make_sections(&[("adr-1", "replacement")]);
+        let result = merge_content(Some(&existing), &sections, 2, false, None);
         assert!(
             result.content.contains("replacement"),
             "expected replacement content: {}",
@@ -556,7 +627,8 @@ mod tests {
     #[test]
     fn test_existing_without_markers_appends_when_trailing_newline() {
         let existing = "# My Custom Rules\n\nDo stuff\n";
-        let result = merge_content(Some(existing), "managed stuff", 1, false, &[], None);
+        let sections = make_sections(&[("adr-1", "managed stuff")]);
+        let result = merge_content(Some(existing), &sections, 1, false, None);
         assert!(
             result
                 .content
@@ -572,10 +644,11 @@ mod tests {
 
     #[test]
     fn test_existing_with_markers_no_trailing_newline() {
-        // END_MARKER is not followed by \n (no trailing newline)
+        // Old format: END_MARKER is not followed by \n (no trailing newline)
         let managed = markers::wrap_in_markers("old content", 1, &[]);
         let existing = managed.clone(); // no trailing \n
-        let result = merge_content(Some(&existing), "new content", 2, false, &[], None);
+        let sections = make_sections(&[("adr-1", "new content")]);
+        let result = merge_content(Some(&existing), &sections, 2, false, None);
         assert!(
             result.content.contains("new content"),
             "expected new content: {}",
@@ -594,19 +667,12 @@ mod tests {
 
     #[test]
     fn test_new_root_file_roundtrip() {
-        let original = "line one\nline two\nline three";
-        let result = merge_content(
-            None,
-            original,
-            1,
-            true,
-            &[],
-            Some(PROJECT_GUIDELINES_HEADER),
-        );
+        let sections = make_sections(&[("adr-1", "line one\nline two\nline three")]);
+        let result = merge_content(None, &sections, 1, true, Some(PROJECT_GUIDELINES_HEADER));
         let extracted =
             markers::extract_managed_content(&result.content).expect("should extract content");
         assert!(
-            extracted.contains(original),
+            extracted.contains("line one\nline two\nline three"),
             "expected original content in extracted: {:?}",
             extracted
         );
@@ -616,7 +682,6 @@ mod tests {
     fn test_existing_with_reversed_markers_appends_instead_of_replacing() {
         // When END_MARKER appears before START_MARKER, find_managed_section_bounds returns None,
         // so merge_content must fall through to the append path rather than replacing.
-        // We verify by checking the bounds helper and confirming the new content is appended.
         let existing = format!("{END_MARKER}\nsome content\n{START_MARKER}\n");
 
         // find_managed_section_bounds must return None for reversed markers.
@@ -625,7 +690,8 @@ mod tests {
             "expected None for reversed markers"
         );
 
-        let result = merge_content(Some(&existing), "new managed", 1, false, &[], None);
+        let sections = make_sections(&[("adr-1", "new managed")]);
+        let result = merge_content(Some(&existing), &sections, 1, false, None);
 
         // The original reversed-marker content must be preserved verbatim at the start.
         assert!(
@@ -654,14 +720,8 @@ mod tests {
 
     #[test]
     fn test_new_cursor_rules_root_file_has_frontmatter() {
-        let result = merge_content(
-            None,
-            "Use Tailwind for all styling.",
-            1,
-            true,
-            &[],
-            Some(CURSOR_FRONTMATTER),
-        );
+        let sections = make_sections(&[("adr-1", "Use Tailwind for all styling.")]);
+        let result = merge_content(None, &sections, 1, true, Some(CURSOR_FRONTMATTER));
         assert!(
             result.content.starts_with("---\n"),
             "cursor-rules root file must start with YAML front-matter delimiter, got: {}",
@@ -684,9 +744,229 @@ mod tests {
     #[test]
     fn test_cursor_rules_frontmatter_separator() {
         // The frontmatter should be separated from the managed section by \n\n
-        let result = merge_content(None, "content", 1, true, &[], Some(CURSOR_FRONTMATTER));
+        let sections = make_sections(&[("adr-1", "content")]);
+        let result = merge_content(None, &sections, 1, true, Some(CURSOR_FRONTMATTER));
         let frontmatter_end = CURSOR_FRONTMATTER.len();
         let after_frontmatter = &result.content[frontmatter_end..];
         assert!(after_frontmatter.starts_with("\n\n"));
+    }
+
+    // ---- Per-ADR section merge tests ----
+
+    #[test]
+    fn test_merge_content_writes_per_adr_section_markers() {
+        let sections = make_sections(&[("adr-001", "Rule one"), ("adr-002", "Rule two")]);
+        let result = merge_content(None, &sections, 1, false, None);
+        assert!(
+            result.content.contains("<!-- adr:adr-001 start -->"),
+            "expected adr-001 start marker in: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("<!-- adr:adr-001 end -->"),
+            "expected adr-001 end marker in: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("<!-- adr:adr-002 start -->"),
+            "expected adr-002 start marker in: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("<!-- adr:adr-002 end -->"),
+            "expected adr-002 end marker in: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("Rule one"),
+            "expected content for adr-001"
+        );
+        assert!(
+            result.content.contains("Rule two"),
+            "expected content for adr-002"
+        );
+    }
+
+    #[test]
+    fn test_merge_content_resync_replaces_changed_section() {
+        // Existing has A (old), B; new has A (updated), B
+        let old_managed = format!(
+            "{}\n\n{}",
+            markers::wrap_adr_section("adr-A", "Old A content"),
+            markers::wrap_adr_section("adr-B", "B content"),
+        );
+        let existing = format!(
+            "{}\n",
+            markers::wrap_in_markers(&old_managed, 1, &["adr-A".to_string(), "adr-B".to_string()])
+        );
+
+        let sections = make_sections(&[("adr-A", "New A content"), ("adr-B", "B content")]);
+        let result = merge_content(Some(&existing), &sections, 2, false, None);
+
+        assert!(
+            result.content.contains("New A content"),
+            "expected updated A content: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("Old A content"),
+            "expected old A content replaced: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("B content"),
+            "expected B content preserved: {}",
+            result.content
+        );
+    }
+
+    #[test]
+    fn test_merge_content_resync_adds_new_section() {
+        // Existing has A; new has A, B — verify B is appended
+        let old_managed = markers::wrap_adr_section("adr-A", "A content");
+        let existing = format!(
+            "{}\n",
+            markers::wrap_in_markers(&old_managed, 1, &["adr-A".to_string()])
+        );
+
+        let sections = make_sections(&[("adr-A", "A content"), ("adr-B", "B content")]);
+        let result = merge_content(Some(&existing), &sections, 2, false, None);
+
+        assert!(
+            result.content.contains("A content"),
+            "expected A content: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("B content"),
+            "expected new B content appended: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("<!-- adr:adr-B start -->"),
+            "expected adr-B section markers: {}",
+            result.content
+        );
+    }
+
+    #[test]
+    fn test_merge_content_resync_removes_deleted_section() {
+        // Existing has A, B; new has A only — verify B is removed
+        let old_managed = format!(
+            "{}\n\n{}",
+            markers::wrap_adr_section("adr-A", "A content"),
+            markers::wrap_adr_section("adr-B", "B content"),
+        );
+        let existing = format!(
+            "{}\n",
+            markers::wrap_in_markers(&old_managed, 1, &["adr-A".to_string(), "adr-B".to_string()])
+        );
+
+        let sections = make_sections(&[("adr-A", "A content")]);
+        let result = merge_content(Some(&existing), &sections, 2, false, None);
+
+        assert!(
+            result.content.contains("A content"),
+            "expected A content: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("B content"),
+            "expected B content removed: {}",
+            result.content
+        );
+        assert!(
+            !result.content.contains("<!-- adr:adr-B"),
+            "expected adr-B markers removed: {}",
+            result.content
+        );
+    }
+
+    #[test]
+    fn test_merge_content_resync_preserves_order() {
+        // Existing has B, A; new has A', B' — verify order is B', A' (existing order)
+        let old_managed = format!(
+            "{}\n\n{}",
+            markers::wrap_adr_section("adr-B", "Old B"),
+            markers::wrap_adr_section("adr-A", "Old A"),
+        );
+        let existing = format!(
+            "{}\n",
+            markers::wrap_in_markers(&old_managed, 1, &["adr-B".to_string(), "adr-A".to_string()])
+        );
+
+        let sections = make_sections(&[("adr-A", "New A"), ("adr-B", "New B")]);
+        let result = merge_content(Some(&existing), &sections, 2, false, None);
+
+        // B should come before A in the output (existing order preserved)
+        let b_pos = result
+            .content
+            .find("<!-- adr:adr-B start -->")
+            .expect("adr-B should exist");
+        let a_pos = result
+            .content
+            .find("<!-- adr:adr-A start -->")
+            .expect("adr-A should exist");
+        assert!(
+            b_pos < a_pos,
+            "expected adr-B before adr-A (preserving existing order), B at {b_pos}, A at {a_pos}"
+        );
+        assert!(
+            result.content.contains("New B"),
+            "expected updated B content"
+        );
+        assert!(
+            result.content.contains("New A"),
+            "expected updated A content"
+        );
+    }
+
+    #[test]
+    fn test_merge_content_backward_compat_no_adr_markers() {
+        // Existing managed block has NO per-ADR markers (old format) — should be
+        // replaced wholesale with new per-ADR format
+        let existing = format!(
+            "{}\n",
+            markers::wrap_in_markers("Old flat content", 1, &["adr-old".to_string()])
+        );
+
+        let sections = make_sections(&[("adr-new", "New content with markers")]);
+        let result = merge_content(Some(&existing), &sections, 2, false, None);
+
+        assert!(
+            !result.content.contains("Old flat content"),
+            "expected old flat content replaced: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("New content with markers"),
+            "expected new content: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("<!-- adr:adr-new start -->"),
+            "expected per-ADR markers in migrated output: {}",
+            result.content
+        );
+    }
+
+    #[test]
+    fn test_merge_content_roundtrip_with_adr_sections() {
+        // Write sections, then extract them back via markers::extract_adr_sections
+        let sections = make_sections(&[
+            ("adr-alpha", "Alpha rules\nMulti-line"),
+            ("adr-beta", "Beta rules"),
+        ]);
+        let result = merge_content(None, &sections, 1, false, None);
+
+        let managed =
+            markers::extract_managed_content(&result.content).expect("should have managed section");
+        let extracted = markers::extract_adr_sections(managed);
+
+        assert_eq!(extracted.len(), 2, "expected 2 sections extracted");
+        assert_eq!(extracted[0].id, "adr-alpha");
+        assert_eq!(extracted[0].content, "Alpha rules\nMulti-line");
+        assert_eq!(extracted[1].id, "adr-beta");
+        assert_eq!(extracted[1].content, "Beta rules");
     }
 }
