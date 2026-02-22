@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
+const DEFAULT_ANTHROPIC_MODEL: &str = DEFAULT_MODEL;
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5.2";
 
 use clap::ValueEnum as _;
@@ -18,7 +18,7 @@ use crate::cli::commands::sync::{resolve_cwd, run_sync};
 use crate::cli::ui::header::{AuthDisplay, RunnerDisplay};
 use crate::cli::ui::real_terminal::RealTerminal;
 use crate::config::paths::{config_path, load_from};
-use crate::config::types::DEFAULT_TIMEOUT_SECS;
+use crate::config::types::{DEFAULT_MODEL, DEFAULT_TIMEOUT_SECS};
 use crate::error::ActualError;
 use crate::runner::anthropic_api::AnthropicApiRunner;
 use crate::runner::binary::find_claude_binary;

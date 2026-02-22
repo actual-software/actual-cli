@@ -12,6 +12,9 @@ pub const DEFAULT_CONCURRENCY: usize = 10;
 /// Default per-project tailoring timeout in seconds.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
+/// Default model for Claude/Anthropic-based runners.
+pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+
 /// Top-level configuration for the actual CLI.
 ///
 /// Stored as YAML at `~/.actualai/actual/config.yaml`.
