@@ -67,7 +67,7 @@ which = "7"
 tempfile = "3"
 
 # Static analysis
-tokei = "12"
+tokei = { version = "14", default-features = false }
 ignore = "0.4"
 
 # Tree-sitter parsing
