@@ -707,9 +707,7 @@ fn insert_gradle_coord(
         let group = parts[0].to_string();
         let combined = format!("{}:{}", parts[0], parts[1]);
         deps.insert(group.clone());
-        sources
-            .entry(group)
-            .or_insert_with(|| manifest_source.clone());
+        sources.entry(group).or_insert(manifest_source.clone());
         deps.insert(combined.clone());
         sources.entry(combined).or_insert(manifest_source);
     }
