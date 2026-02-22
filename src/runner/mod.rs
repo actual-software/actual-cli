@@ -6,6 +6,7 @@ pub mod cursor_cli;
 pub mod obfuscation;
 pub mod openai_api;
 pub mod options;
+pub mod probe;
 pub mod prompts;
 pub mod schemas;
 pub mod subprocess;
