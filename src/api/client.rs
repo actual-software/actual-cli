@@ -261,6 +261,7 @@ mod tests {
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         }
     }
 
@@ -343,6 +344,7 @@ mod tests {
                 vec![Framework {
                     name: "nextjs".to_string(),
                     category: FrameworkCategory::WebFrontend,
+                    source: None,
                 }],
             )],
         };

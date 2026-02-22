@@ -282,11 +282,13 @@ mod tests {
                     frameworks: vec![Framework {
                         name: "nextjs".to_string(),
                         category: FrameworkCategory::WebFrontend,
+                        source: None,
                     }],
                     package_manager: Some("npm".to_string()),
                     description: None,
                     dep_count: 0,
                     dev_dep_count: 0,
+                    selection: None,
                 },
                 Project {
                     path: "services/api".to_string(),
@@ -299,16 +301,19 @@ mod tests {
                         Framework {
                             name: "actix-web".to_string(),
                             category: FrameworkCategory::WebBackend,
+                            source: None,
                         },
                         Framework {
                             name: "diesel".to_string(),
                             category: FrameworkCategory::Data,
+                            source: None,
                         },
                     ],
                     package_manager: Some("cargo".to_string()),
                     description: Some("Backend API".to_string()),
                     dep_count: 0,
                     dev_dep_count: 0,
+                    selection: None,
                 },
             ],
         }
@@ -328,11 +333,13 @@ mod tests {
                 frameworks: vec![Framework {
                     name: "clap".to_string(),
                     category: FrameworkCategory::Cli,
+                    source: None,
                 }],
                 package_manager: Some("cargo".to_string()),
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         }
     }
@@ -499,6 +506,7 @@ mod tests {
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         };
         let themed = strip(&format_project_summary(&analysis, 80));
@@ -535,6 +543,7 @@ mod tests {
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         };
         let output = format_project_summary(&analysis, 80);
@@ -597,11 +606,13 @@ mod tests {
             frameworks: vec![Framework {
                 name: "actix-web".to_string(),
                 category: FrameworkCategory::WebBackend,
+                source: None,
             }],
             package_manager: Some("cargo".to_string()),
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 3, "expected 3 lines, got: {lines:?}");
@@ -636,6 +647,7 @@ mod tests {
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 1, "expected 1 line, got: {lines:?}");
@@ -657,6 +669,7 @@ mod tests {
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         assert!(lines.is_empty(), "expected empty vec, got: {lines:?}");
@@ -682,6 +695,7 @@ mod tests {
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 2, "expected 2 lines, got: {lines:?}");
@@ -708,6 +722,7 @@ mod tests {
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 1, "expected 1 line, got: {lines:?}");
@@ -731,16 +746,19 @@ mod tests {
                 Framework {
                     name: "actix-web".to_string(),
                     category: FrameworkCategory::WebBackend,
+                    source: None,
                 },
                 Framework {
                     name: "diesel".to_string(),
                     category: FrameworkCategory::Data,
+                    source: None,
                 },
             ],
             package_manager: None,
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 2, "expected 2 lines, got: {lines:?}");
@@ -879,6 +897,7 @@ mod tests {
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         };
         let output = format_project_summary(&analysis, 80);
@@ -909,6 +928,7 @@ mod tests {
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         };
         let output = format_project_summary(&analysis, 80);
@@ -932,11 +952,13 @@ mod tests {
             frameworks: vec![Framework {
                 name: "\x1b[31mMALICIOUS\x1b[0m".to_string(),
                 category: FrameworkCategory::WebFrontend,
+                source: None,
             }],
             package_manager: None,
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         let joined = lines.join("\n");
@@ -961,6 +983,7 @@ mod tests {
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         let joined = lines.join("\n");
@@ -1050,6 +1073,7 @@ mod tests {
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         };
         let output = format_project_summary_plain(&analysis);
@@ -1073,6 +1097,7 @@ mod tests {
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         };
         let output = format_project_summary_plain(&analysis);
@@ -1092,11 +1117,13 @@ mod tests {
             frameworks: vec![Framework {
                 name: "actix-web".to_string(),
                 category: FrameworkCategory::WebBackend,
+                source: None,
             }],
             package_manager: Some("cargo".to_string()),
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines_plain(&project);
         assert_eq!(lines.len(), 3);
@@ -1121,6 +1148,7 @@ mod tests {
             description: None,
             dep_count: 12,
             dev_dep_count: 8,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(lines.len(), 2, "expected Languages + Deps, got: {lines:?}");
@@ -1145,6 +1173,7 @@ mod tests {
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines(&project);
         assert_eq!(
@@ -1173,6 +1202,7 @@ mod tests {
             description: None,
             dep_count: 5,
             dev_dep_count: 3,
+            selection: None,
         };
         let lines = format_metadata_lines_plain(&project);
         assert_eq!(lines.len(), 2, "expected Languages + Deps, got: {lines:?}");
@@ -1199,6 +1229,7 @@ mod tests {
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let lines = format_metadata_lines_plain(&project);
         assert_eq!(
@@ -1225,11 +1256,13 @@ mod tests {
             frameworks: vec![Framework {
                 name: "actix-web".to_string(),
                 category: FrameworkCategory::WebBackend,
+                source: None,
             }],
             package_manager: Some("cargo".to_string()),
             description: None,
             dep_count: 10,
             dev_dep_count: 2,
+            selection: None,
         };
         let lines = format_metadata_lines_plain(&project);
         // With deps, we should have Languages, Packages, Manager, Deps = 4 lines
@@ -1317,6 +1350,7 @@ mod tests {
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         };
         let output = format_project_summary_plain(&analysis);
@@ -1347,6 +1381,7 @@ mod tests {
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         };
         let output = format_project_summary_plain(&analysis);

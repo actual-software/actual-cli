@@ -119,6 +119,7 @@ pub fn run_static_analysis(working_dir: &Path) -> Result<RepoAnalysis, ActualErr
             description,
             dep_count,
             dev_dep_count,
+            selection: None,
         });
     }
 
@@ -464,6 +465,7 @@ version = "0.1.0"
         let fws = vec![Framework {
             name: "actix-web".to_string(),
             category: FrameworkCategory::WebBackend,
+            source: None,
         }];
         let desc = build_project_description(&[], &fws).unwrap();
         assert_eq!(desc, "using actix-web");
@@ -478,6 +480,7 @@ version = "0.1.0"
         let fws = vec![Framework {
             name: "actix-web".to_string(),
             category: FrameworkCategory::WebBackend,
+            source: None,
         }];
         let desc = build_project_description(&langs, &fws).unwrap();
         assert_eq!(desc, "rust using actix-web");
@@ -493,10 +496,12 @@ version = "0.1.0"
             Framework {
                 name: "react".to_string(),
                 category: FrameworkCategory::WebFrontend,
+                source: None,
             },
             Framework {
                 name: "nextjs".to_string(),
                 category: FrameworkCategory::WebFrontend,
+                source: None,
             },
         ];
         let desc = build_project_description(&langs, &fws).unwrap();
@@ -554,6 +559,7 @@ version = "0.1.0"
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let result = assemble_analysis(false, None, vec![project], dir.path());
         let analysis = result.unwrap();
@@ -574,6 +580,7 @@ version = "0.1.0"
             description: None,
             dep_count: 0,
             dev_dep_count: 0,
+            selection: None,
         };
         let result = assemble_analysis(true, Some(WorkspaceType::Pnpm), vec![project], dir.path());
         let analysis = result.unwrap();

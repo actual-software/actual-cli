@@ -2,6 +2,8 @@ use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 
+use crate::analysis::static_analyzer::manifests::ManifestSource;
+
 /// The workspace system that manages a monorepo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -51,6 +53,9 @@ pub struct Project {
     pub dep_count: usize,
     #[serde(default)]
     pub dev_dep_count: usize,
+    /// User's narrowed selection. None before selection step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ProjectSelection>,
 }
 
 /// Language with associated lines-of-code count.
@@ -156,10 +161,40 @@ impl std::fmt::Display for Language {
 }
 
 /// A framework detected in a project.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Framework {
     pub name: String,
     pub category: FrameworkCategory,
+    /// Which manifest detected this framework. None for legacy/unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ManifestSource>,
+}
+
+impl Framework {
+    /// Check if this framework is compatible with the given language.
+    /// Frameworks with no source or ConfigFile source are compatible with all languages.
+    pub fn is_compatible_with(&self, language: &Language) -> bool {
+        match &self.source {
+            None => true,
+            Some(ManifestSource::ConfigFile) => true,
+            Some(source) => {
+                let compatible = source.compatible_languages();
+                compatible.is_empty() || compatible.contains(language)
+            }
+        }
+    }
+}
+
+/// The user's narrowed selection from detected analysis.
+/// Enforces single language + single framework.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSelection {
+    /// The single selected language.
+    pub language: LanguageStat,
+    /// The single selected framework (if any detected).
+    pub framework: Option<Framework>,
+    /// Whether this was auto-selected (only 1 detected) or user-chosen.
+    pub auto_selected: bool,
 }
 
 /// Category classification for a framework.
@@ -349,16 +384,19 @@ mod tests {
                     Framework {
                         name: "actix-web".to_string(),
                         category: FrameworkCategory::WebBackend,
+                        source: None,
                     },
                     Framework {
                         name: "clap".to_string(),
                         category: FrameworkCategory::Cli,
+                        source: None,
                     },
                 ],
                 package_manager: Some("cargo".to_string()),
                 description: Some("A CLI tool".to_string()),
                 dep_count: 5,
                 dev_dep_count: 3,
+                selection: None,
             }],
         };
 
@@ -691,6 +729,7 @@ mod tests {
             description: None,
             dep_count: 42,
             dev_dep_count: 13,
+            selection: None,
         };
         let json = serde_json::to_string(&project).unwrap();
         let deserialized: Project = serde_json::from_str(&json).unwrap();
@@ -819,5 +858,236 @@ mod tests {
         let json = serde_json::to_string(&stat).unwrap();
         assert!(json.contains("\"language\":\"rust\""));
         assert!(json.contains("\"loc\":1500"));
+    }
+
+    // ── Framework source field tests ──
+
+    #[test]
+    fn framework_serde_round_trip_with_source() {
+        let fw = Framework {
+            name: "actix-web".to_string(),
+            category: FrameworkCategory::WebBackend,
+            source: Some(ManifestSource::CargoToml),
+        };
+        let json = serde_json::to_string(&fw).unwrap();
+        assert!(json.contains("\"source\":\"cargo_toml\""));
+        let deserialized: Framework = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "actix-web");
+        assert_eq!(deserialized.category, FrameworkCategory::WebBackend);
+        assert_eq!(deserialized.source, Some(ManifestSource::CargoToml));
+    }
+
+    #[test]
+    fn framework_serde_round_trip_without_source() {
+        let fw = Framework {
+            name: "clap".to_string(),
+            category: FrameworkCategory::Cli,
+            source: None,
+        };
+        let json = serde_json::to_string(&fw).unwrap();
+        assert!(
+            !json.contains("source"),
+            "source: None should be omitted from JSON: {json}"
+        );
+        let deserialized: Framework = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "clap");
+        assert_eq!(deserialized.source, None);
+    }
+
+    #[test]
+    fn framework_backward_compat_no_source_field() {
+        // Simulates cached data from before the source field existed.
+        let json = r#"{"name":"react","category":"web-frontend"}"#;
+        let fw: Framework = serde_json::from_str(json).unwrap();
+        assert_eq!(fw.name, "react");
+        assert_eq!(fw.category, FrameworkCategory::WebFrontend);
+        assert_eq!(fw.source, None);
+    }
+
+    // ── Framework::is_compatible_with tests ──
+
+    #[test]
+    fn framework_compatible_cargo_toml_with_rust() {
+        let fw = Framework {
+            name: "actix-web".to_string(),
+            category: FrameworkCategory::WebBackend,
+            source: Some(ManifestSource::CargoToml),
+        };
+        assert!(fw.is_compatible_with(&Language::Rust));
+    }
+
+    #[test]
+    fn framework_incompatible_cargo_toml_with_python() {
+        let fw = Framework {
+            name: "actix-web".to_string(),
+            category: FrameworkCategory::WebBackend,
+            source: Some(ManifestSource::CargoToml),
+        };
+        assert!(!fw.is_compatible_with(&Language::Python));
+    }
+
+    #[test]
+    fn framework_compatible_package_json_with_typescript() {
+        let fw = Framework {
+            name: "react".to_string(),
+            category: FrameworkCategory::WebFrontend,
+            source: Some(ManifestSource::PackageJson),
+        };
+        assert!(fw.is_compatible_with(&Language::TypeScript));
+    }
+
+    #[test]
+    fn framework_compatible_package_json_with_javascript() {
+        let fw = Framework {
+            name: "react".to_string(),
+            category: FrameworkCategory::WebFrontend,
+            source: Some(ManifestSource::PackageJson),
+        };
+        assert!(fw.is_compatible_with(&Language::JavaScript));
+    }
+
+    #[test]
+    fn framework_compatible_none_source_with_any_language() {
+        let fw = Framework {
+            name: "unknown".to_string(),
+            category: FrameworkCategory::Other("unknown".to_string()),
+            source: None,
+        };
+        assert!(fw.is_compatible_with(&Language::Rust));
+        assert!(fw.is_compatible_with(&Language::Python));
+        assert!(fw.is_compatible_with(&Language::TypeScript));
+        assert!(fw.is_compatible_with(&Language::Go));
+    }
+
+    #[test]
+    fn framework_compatible_config_file_with_any_language() {
+        let fw = Framework {
+            name: "docker".to_string(),
+            category: FrameworkCategory::Devops,
+            source: Some(ManifestSource::ConfigFile),
+        };
+        assert!(fw.is_compatible_with(&Language::Rust));
+        assert!(fw.is_compatible_with(&Language::Python));
+        assert!(fw.is_compatible_with(&Language::TypeScript));
+        assert!(fw.is_compatible_with(&Language::Go));
+    }
+
+    // ── ProjectSelection tests ──
+
+    #[test]
+    fn project_selection_serde_round_trip() {
+        let sel = ProjectSelection {
+            language: LanguageStat {
+                language: Language::Rust,
+                loc: 1500,
+            },
+            framework: Some(Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+                source: Some(ManifestSource::CargoToml),
+            }),
+            auto_selected: true,
+        };
+        let json = serde_json::to_string(&sel).unwrap();
+        let deserialized: ProjectSelection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.language.language, Language::Rust);
+        assert_eq!(deserialized.language.loc, 1500);
+        assert!(deserialized.framework.is_some());
+        let fw = deserialized.framework.unwrap();
+        assert_eq!(fw.name, "actix-web");
+        assert_eq!(fw.source, Some(ManifestSource::CargoToml));
+        assert!(deserialized.auto_selected);
+    }
+
+    #[test]
+    fn project_selection_without_framework() {
+        let sel = ProjectSelection {
+            language: LanguageStat {
+                language: Language::Python,
+                loc: 500,
+            },
+            framework: None,
+            auto_selected: false,
+        };
+        let json = serde_json::to_string(&sel).unwrap();
+        let deserialized: ProjectSelection = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.language.language, Language::Python);
+        assert!(deserialized.framework.is_none());
+        assert!(!deserialized.auto_selected);
+    }
+
+    // ── Project selection field backward compat tests ──
+
+    #[test]
+    fn project_backward_compat_no_selection_field() {
+        // Simulates cached data from before the selection field existed.
+        let json = r#"{
+            "path": ".",
+            "name": "legacy",
+            "languages": [{"language": "rust", "loc": 0}],
+            "frameworks": []
+        }"#;
+        let project: Project = serde_json::from_str(json).unwrap();
+        assert!(project.selection.is_none());
+    }
+
+    #[test]
+    fn project_selection_omitted_when_none() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![],
+            frameworks: vec![],
+            package_manager: None,
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+            selection: None,
+        };
+        let json = serde_json::to_string(&project).unwrap();
+        assert!(
+            !json.contains("selection"),
+            "selection: None should be omitted from JSON: {json}"
+        );
+    }
+
+    #[test]
+    fn project_selection_round_trip() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 1500,
+            }],
+            frameworks: vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+                source: Some(ManifestSource::CargoToml),
+            }],
+            package_manager: Some("cargo".to_string()),
+            description: None,
+            dep_count: 5,
+            dev_dep_count: 2,
+            selection: Some(ProjectSelection {
+                language: LanguageStat {
+                    language: Language::Rust,
+                    loc: 1500,
+                },
+                framework: Some(Framework {
+                    name: "actix-web".to_string(),
+                    category: FrameworkCategory::WebBackend,
+                    source: Some(ManifestSource::CargoToml),
+                }),
+                auto_selected: true,
+            }),
+        };
+        let json = serde_json::to_string(&project).unwrap();
+        assert!(json.contains("\"selection\""));
+        let deserialized: Project = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.selection.is_some());
+        let sel = deserialized.selection.unwrap();
+        assert_eq!(sel.language.language, Language::Rust);
+        assert!(sel.auto_selected);
     }
 }
