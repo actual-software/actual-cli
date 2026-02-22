@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+use crate::cli::commands::models::known_cursor_model_names;
 use crate::generation::OutputFormat;
 
 /// AI backend runner selection for the `--runner` flag.
@@ -208,9 +209,18 @@ impl RunnerChoice {
                 }
             }
             RunnerChoice::CursorCli => {
-                // Cursor supports all models via its proxy (OpenAI, Anthropic, etc.)
-                // so no compatibility warnings are needed.
-                None
+                // Warn when the model is not in the known cursor model list.
+                // This is a soft warning only — Cursor may support additional models
+                // not included in the curated list (run cursor-agent models to verify).
+                let known = known_cursor_model_names();
+                if !known.contains(&m.as_str()) {
+                    Some(format!(
+                        "cursor model '{model}' not in known list — \
+                         run cursor-agent models to verify it's available on your account"
+                    ))
+                } else {
+                    None
+                }
             }
         }
     }
@@ -921,28 +931,48 @@ mod parse_tests {
     }
 
     #[test]
-    fn test_compat_cursor_cli_no_warnings() {
-        // Cursor supports all models via its proxy — no warnings for any model type
-        assert!(RunnerChoice::CursorCli
-            .model_compatibility_warning("claude-sonnet-4-5")
-            .is_none());
-        assert!(RunnerChoice::CursorCli
-            .model_compatibility_warning("gpt-4o")
-            .is_none());
-        assert!(RunnerChoice::CursorCli
-            .model_compatibility_warning("gpt-5.2-codex")
-            .is_none());
-        assert!(RunnerChoice::CursorCli
-            .model_compatibility_warning("haiku")
-            .is_none());
+    fn test_compat_cursor_cli_known_models_no_warning() {
+        // Known cursor models should not produce warnings
         assert!(RunnerChoice::CursorCli
             .model_compatibility_warning("auto")
+            .is_none());
+        assert!(RunnerChoice::CursorCli
+            .model_compatibility_warning("opus-4.6")
+            .is_none());
+        assert!(RunnerChoice::CursorCli
+            .model_compatibility_warning("sonnet-4.6")
+            .is_none());
+        assert!(RunnerChoice::CursorCli
+            .model_compatibility_warning("grok")
+            .is_none());
+        assert!(RunnerChoice::CursorCli
+            .model_compatibility_warning("kimi-k2.5")
             .is_none());
     }
 
     #[test]
+    fn test_compat_cursor_cli_unknown_model_warns() {
+        // Unknown models should produce a soft warning with helpful message
+        let warn = RunnerChoice::CursorCli
+            .model_compatibility_warning("claude-sonnet-4-5")
+            .unwrap();
+        assert!(warn.contains("not in known list"), "msg: {warn}");
+        assert!(warn.contains("cursor-agent models"), "msg: {warn}");
+
+        let warn = RunnerChoice::CursorCli
+            .model_compatibility_warning("gpt-4o")
+            .unwrap();
+        assert!(warn.contains("not in known list"), "msg: {warn}");
+
+        let warn = RunnerChoice::CursorCli
+            .model_compatibility_warning("my-custom-model")
+            .unwrap();
+        assert!(warn.contains("not in known list"), "msg: {warn}");
+    }
+
+    #[test]
     fn test_compat_unknown_model_warns() {
-        // Unknown/custom models should trigger warnings on all runners (except Cursor)
+        // Unknown/custom models should trigger warnings on all runners
         assert!(RunnerChoice::ClaudeCli
             .model_compatibility_warning("my-custom-model")
             .is_some());
@@ -955,10 +985,10 @@ mod parse_tests {
         assert!(RunnerChoice::CodexCli
             .model_compatibility_warning("my-custom-model")
             .is_some());
-        // Cursor supports all models via its proxy, so no warning needed
+        // Cursor also warns for unknown models (soft warning — may still work)
         assert!(RunnerChoice::CursorCli
             .model_compatibility_warning("my-custom-model")
-            .is_none());
+            .is_some());
     }
 
     #[test]

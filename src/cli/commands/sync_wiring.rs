@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn infer_runner_cursor_model_with_anthropic_name() {
-        // Cursor proxies all models, so cursor_model always means CursorCli
+        // cursor_model is always routed to CursorCli regardless of the model name value
         assert_eq!(
             infer_runner_from_config(None, None, Some("claude-sonnet-4-6"), None).unwrap(),
             RunnerChoice::CursorCli,
