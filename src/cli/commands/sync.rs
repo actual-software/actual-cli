@@ -579,6 +579,65 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         term,
         &mut pipeline,
     )?;
+
+    // ── Telemetry (fire-and-forget) ──
+    // Only fires on the happy path (after `?` above). Errors in telemetry are
+    // silently swallowed inside `report_metrics`. Runtime build failures cause
+    // telemetry to be silently skipped (fire-and-forget preserved).
+    {
+        // Fetch git remote URL for repo identity hashing.
+        let repo_url = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()
+            .and_then(|rt| {
+                rt.block_on(async {
+                    let mut cmd = tokio::process::Command::new("git");
+                    cmd.args(["remote", "get-url", "origin"]);
+                    cmd.current_dir(root_dir);
+                    cmd.stdin(std::process::Stdio::null());
+                    cmd.kill_on_drop(true);
+                    let child = cmd
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .ok()?;
+                    let out = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        child.wait_with_output(),
+                    )
+                    .await
+                    .ok()?
+                    .ok()?;
+                    out.status
+                        .success()
+                        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+            })
+            .unwrap_or_default();
+
+        let commit_hash = get_git_head(root_dir).unwrap_or_default();
+        let repo_hash = hash_repo_identity(&repo_url, &commit_hash);
+
+        let adrs_written = (sync_result.files_created + sync_result.files_updated) as u64;
+        let metrics = SyncMetrics {
+            adrs_fetched,
+            adrs_tailored: output.summary.applicable as u64,
+            adrs_rejected: output.summary.not_applicable as u64,
+            adrs_written,
+            repo_hash,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        if let Ok(tel_rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            tel_rt.block_on(report_metrics(&metrics, &config, &api_url));
+        }
+    }
+
     pipeline.wait_for_keypress();
     Ok(())
 }
