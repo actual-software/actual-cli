@@ -107,10 +107,6 @@ fn parse_adr_section_start(trimmed: &str) -> Option<String> {
     if id.is_empty() {
         return None;
     }
-    // Make sure it's not an end marker
-    if trimmed.ends_with(ADR_SECTION_END_SUFFIX) && !trimmed.ends_with(ADR_SECTION_START_SUFFIX) {
-        return None;
-    }
     Some(id.to_string())
 }
 
@@ -974,6 +970,14 @@ mod tests {
     fn test_extract_adr_sections_empty() {
         let sections = extract_adr_sections("no sections here");
         assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn test_extract_adr_sections_empty_id_ignored() {
+        // <!-- adr: start --> has an empty id and should be ignored
+        let content = "<!-- adr: start -->\nSome content\n<!-- adr: end -->";
+        let sections = extract_adr_sections(content);
+        assert!(sections.is_empty(), "empty id should be ignored");
     }
 
     #[test]
