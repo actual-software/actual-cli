@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use crate::cli::commands::models::known_model_names;
 use crate::config::types::{Config, TelemetryConfig};
 use crate::error::ActualError;
 use crate::generation::OutputFormat;
@@ -181,6 +182,11 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
         }
         ConfigKey::Model => {
             config.model = Some(value.to_string());
+            if !known_model_names().contains(&value) {
+                eprintln!(
+                    "Warning: '{value}' is not a known model name. Run 'actual models' to see known models."
+                );
+            }
         }
         ConfigKey::OpenaiModel => {
             config.openai_model = Some(value.to_string());
@@ -399,6 +405,72 @@ mod tests {
         let mut config = Config::default();
         set(&mut config, "model", "sonnet").unwrap();
         assert_eq!(get(&config, "model").unwrap(), "sonnet");
+    }
+
+    // --- Model name validation tests ---
+
+    #[test]
+    fn test_set_known_model_succeeds_and_is_recognised() {
+        // A known model name should be accepted with no error and should be
+        // present in the known_model_names list (i.e. no warning would fire).
+        let known = known_model_names();
+        for name in &[
+            "claude-sonnet-4-6",
+            "claude-opus-4-5",
+            "claude-haiku-3-5",
+            "sonnet",
+            "opus",
+            "haiku",
+            "gpt-5.2",
+            "codex-mini-latest",
+        ] {
+            let mut config = Config::default();
+            set(&mut config, "model", name).unwrap();
+            assert_eq!(get(&config, "model").unwrap(), *name);
+            assert!(
+                known.contains(name),
+                "expected '{}' to be in known_model_names()",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_unknown_model_still_succeeds() {
+        // An unknown model name must NOT return an error — it's a soft warning only.
+        let mut config = Config::default();
+        let result = set(&mut config, "model", "totally-invalid-model-xyz");
+        assert!(
+            result.is_ok(),
+            "set() must succeed even for unknown model names"
+        );
+        assert_eq!(get(&config, "model").unwrap(), "totally-invalid-model-xyz");
+    }
+
+    #[test]
+    fn test_unknown_model_not_in_known_list() {
+        // Verify that the warning predicate fires for clearly bogus names.
+        let known = known_model_names();
+        for name in &["totally-invalid-model-xyz", "gpt-99", "llama-999"] {
+            assert!(
+                !known.contains(name),
+                "'{}' should not be in known_model_names()",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_known_model_names_excludes_placeholder() {
+        // The Cursor "(any model)" placeholder must not appear in the list.
+        let known = known_model_names();
+        for name in &known {
+            assert!(
+                !name.starts_with('('),
+                "placeholder '{}' should be excluded from known_model_names()",
+                name
+            );
+        }
     }
 
     #[test]
