@@ -53,7 +53,6 @@ static RUNNER_FAMILIES: &[RunnerFamily] = &[
         models: &[
             ModelEntry::new("claude-opus-4-5"),
             ModelEntry::default_model("claude-sonnet-4-6"),
-            ModelEntry::new("claude-haiku-3-5"),
             ModelEntry::with_note("sonnet", "short alias, claude-cli only"),
             ModelEntry::with_note("opus", "short alias, claude-cli only"),
             ModelEntry::with_note("haiku", "short alias, claude-cli only"),
@@ -248,10 +247,6 @@ mod tests {
             ids.contains(&"claude-opus-4-5"),
             "should include claude-opus-4-5"
         );
-        assert!(
-            ids.contains(&"claude-haiku-3-5"),
-            "should include claude-haiku-3-5"
-        );
     }
 
     #[test]
@@ -281,7 +276,6 @@ mod tests {
         let names = known_model_names();
         assert!(names.contains(&"claude-sonnet-4-6"));
         assert!(names.contains(&"claude-opus-4-5"));
-        assert!(names.contains(&"claude-haiku-3-5"));
         assert!(names.contains(&"sonnet"));
         assert!(names.contains(&"opus"));
         assert!(names.contains(&"haiku"));

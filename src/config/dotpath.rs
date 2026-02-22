@@ -417,7 +417,6 @@ mod tests {
         for name in &[
             "claude-sonnet-4-6",
             "claude-opus-4-5",
-            "claude-haiku-3-5",
             "sonnet",
             "opus",
             "haiku",
