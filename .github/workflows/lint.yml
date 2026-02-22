@@ -29,6 +29,8 @@ jobs:
     needs: sync-beads
     if: always() && needs.sync-beads.result != 'cancelled'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
