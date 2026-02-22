@@ -19,14 +19,11 @@ fn model_name_regex() -> &'static Regex {
         .get_or_init(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._/\-]{0,99}$").expect("valid regex"))
 }
 
-/// The default binary name to search for on PATH.
-const CURSOR_BINARY_NAME: &str = "agent";
-
 /// Environment variable that overrides the default binary lookup.
 /// Useful for testing and CI environments.
 const CURSOR_BINARY_ENV: &str = "CURSOR_BINARY";
 
-/// Production implementation that spawns `agent` (Cursor CLI) as a subprocess.
+/// Production implementation that spawns `cursor-agent` (Cursor CLI) as a subprocess.
 ///
 /// Cursor CLI is Cursor's headless agent tool. This runner invokes it in
 /// non-interactive mode using `-p --output-format json`.
@@ -34,7 +31,7 @@ const CURSOR_BINARY_ENV: &str = "CURSOR_BINARY";
 /// # Invocation
 ///
 /// ```text
-/// agent -p --output-format json \
+/// cursor-agent -p --output-format json \
 ///     [--model <model>] \
 ///     "<prompt_with_embedded_schema>"
 /// ```
@@ -51,7 +48,7 @@ const CURSOR_BINARY_ENV: &str = "CURSOR_BINARY";
 ///
 /// Cursor CLI supports two auth methods:
 /// - `CURSOR_API_KEY` environment variable
-/// - `agent login` (OAuth / Cursor account)
+/// - `cursor-agent login` (OAuth / Cursor account)
 ///
 /// If `api_key` is provided (from config or env), it is injected as
 /// `CURSOR_API_KEY` in the subprocess environment. If not provided, the
@@ -94,11 +91,12 @@ impl CursorCliRunner {
     }
 }
 
-/// Locate the Cursor CLI binary (`agent`) on the system.
+/// Locate the Cursor CLI binary on the system.
 ///
 /// Resolution order:
 /// 1. If `CURSOR_BINARY` env var is set, use that path (must exist and be executable).
-/// 2. Otherwise, search PATH for `agent` using `which::which`.
+/// 2. Otherwise, search PATH for `cursor-agent` (Homebrew install) first,
+///    then fall back to `agent` (older or alternative installs).
 ///
 /// Returns the absolute path to the binary on success, or
 /// `ActualError::CursorNotFound` if the binary cannot be located or is invalid.
@@ -123,7 +121,11 @@ pub fn find_cursor_binary() -> Result<PathBuf, ActualError> {
         }
         return Ok(path);
     }
-    which::which(CURSOR_BINARY_NAME).map_err(|_| ActualError::CursorNotFound)
+    // Try `cursor-agent` first (canonical Homebrew install), then fall back to
+    // `agent` for older or alternative installs.
+    which::which("cursor-agent")
+        .or_else(|_| which::which("agent"))
+        .map_err(|_| ActualError::CursorNotFound)
 }
 
 /// Convert an I/O error from subprocess operations into an `ActualError`.
