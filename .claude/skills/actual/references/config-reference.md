@@ -47,6 +47,7 @@ actual config path
 | `output_format` | enum | claude-md | One of: claude-md, agents-md, cursor-rules | Output file format |
 | `anthropic_api_key` | string | (none) | non-empty | Anthropic API key |
 | `openai_api_key` | string | (none) | non-empty | OpenAI API key |
+| `cursor_api_key` | string | (none) | non-empty | Cursor API key |
 | `telemetry.enabled` | bool | (none) | true/false | Enable/disable telemetry |
 
 ## Key Details
@@ -90,9 +91,10 @@ API keys set via `config set` are stored in the config YAML file. The file is cr
 ```bash
 actual config set anthropic_api_key "sk-ant-..."
 actual config set openai_api_key "sk-..."
+actual config set cursor_api_key "..."
 ```
 
-Environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) take precedence over config file values.
+Environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CURSOR_API_KEY`) take precedence over config file values.
 
 ## Dotpath Syntax
 
@@ -127,7 +129,7 @@ There is no `config get <key>` subcommand. Use `config show` to view all values.
 |---------|---------------------|-------|
 | `ANTHROPIC_API_KEY` | `anthropic_api_key` | Takes precedence over config |
 | `OPENAI_API_KEY` | `openai_api_key` | Takes precedence over config |
-| `CURSOR_API_KEY` | (cursor auth) | Used by cursor-cli runner |
+| `CURSOR_API_KEY` | `cursor_api_key` | Used by cursor-cli runner |
 | `ACTUAL_CONFIG` | Config file path | Exact file path |
 | `ACTUAL_CONFIG_DIR` | Config directory | Must be absolute, no `..` |
 
