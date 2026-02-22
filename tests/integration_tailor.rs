@@ -13,11 +13,14 @@ mod tests {
         let file_objects: Vec<serde_json::Value> = files
             .iter()
             .map(|(path, content, reasoning, adr_ids)| {
+                let sections: Vec<serde_json::Value> = adr_ids
+                    .iter()
+                    .map(|id| serde_json::json!({"adr_id": id, "content": content}))
+                    .collect();
                 serde_json::json!({
                     "path": path,
-                    "content": content,
+                    "sections": sections,
                     "reasoning": reasoning,
-                    "adr_ids": adr_ids,
                 })
             })
             .collect();
@@ -71,8 +74,10 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&json_str).expect("output must be valid JSON");
 
-        // File content should round-trip correctly
-        let content = parsed["files"][0]["content"].as_str().unwrap();
+        // File content should round-trip correctly (now stored in sections)
+        let content = parsed["files"][0]["sections"][0]["content"]
+            .as_str()
+            .unwrap();
         assert!(
             content.contains("\"quotes\""),
             "double quotes should be preserved"

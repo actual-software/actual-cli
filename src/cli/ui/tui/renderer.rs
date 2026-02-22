@@ -1068,7 +1068,7 @@ impl TuiRenderer {
                     .files
                     .iter()
                     .map(|file| {
-                        let count = file.adr_ids.len();
+                        let count = file.sections.len();
                         let plural = if count == 1 { "" } else { "s" };
                         let safe_path = console::strip_ansi_codes(&file.path);
                         format!("{safe_path}  ({count} ADR{plural})")
@@ -2315,13 +2315,15 @@ mod tests {
     // ── select_files_in_tui tests ──
 
     fn make_tailoring_output(file_count: usize) -> crate::tailoring::types::TailoringOutput {
-        use crate::tailoring::types::{FileOutput, TailoringSummary};
+        use crate::tailoring::types::{AdrSection, FileOutput, TailoringSummary};
         let files: Vec<FileOutput> = (1..=file_count)
             .map(|i| FileOutput {
                 path: format!("file{i}.md"),
-                content: format!("content {i}"),
+                sections: vec![AdrSection {
+                    adr_id: format!("adr-{i:03}"),
+                    content: format!("content {i}"),
+                }],
                 reasoning: format!("reason {i}"),
-                adr_ids: vec![format!("adr-{i:03}")],
             })
             .collect();
         crate::tailoring::types::TailoringOutput {

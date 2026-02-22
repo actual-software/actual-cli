@@ -6,9 +6,8 @@ use crate::tailoring::types::{FileOutput, SkippedAdr, TailoringOutput, Tailoring
 
 /// Merge multiple [`TailoringOutput`]s into a single combined output.
 ///
-/// - Overlapping file paths (same `path`): content is concatenated with `"\n\n"`,
-///   `adr_ids` are merged (deduplicated, preserving first-seen order), and
-///   `reasoning` strings are combined with `"; "`.
+/// - Overlapping file paths (same `path`): sections are merged (deduplicated by
+///   `adr_id`, last occurrence wins), and `reasoning` strings are combined with `"; "`.
 /// - Different file paths: both are included in the result.
 /// - `skipped_adrs` are deduplicated by `id` (first occurrence wins).
 /// - `summary` is recomputed from deduplicated data: `applicable` counts unique ADR IDs
@@ -24,15 +23,19 @@ pub fn merge_outputs(outputs: Vec<TailoringOutput>) -> TailoringOutput {
             file_map
                 .entry(file.path.clone())
                 .and_modify(|existing| {
-                    // Concatenate content
-                    existing.content.push_str("\n\n");
-                    existing.content.push_str(&file.content);
-
-                    // Merge adr_ids (deduplicated, preserving order)
-                    let existing_ids: HashSet<String> = existing.adr_ids.iter().cloned().collect();
-                    for id in &file.adr_ids {
-                        if !existing_ids.contains(id) {
-                            existing.adr_ids.push(id.clone());
+                    // Merge sections by adr_id: if same adr_id exists,
+                    // concatenate content; otherwise append new section.
+                    for section in &file.sections {
+                        if let Some(pos) = existing
+                            .sections
+                            .iter()
+                            .position(|s| s.adr_id == section.adr_id)
+                        {
+                            // Same adr_id: concatenate content
+                            existing.sections[pos].content.push_str("\n\n");
+                            existing.sections[pos].content.push_str(&section.content);
+                        } else {
+                            existing.sections.push(section.clone());
                         }
                     }
 
@@ -60,13 +63,13 @@ pub fn merge_outputs(outputs: Vec<TailoringOutput>) -> TailoringOutput {
     let applicable: usize = {
         let mut unique_adr_ids: HashSet<&str> = HashSet::new();
         for file in &files {
-            for id in &file.adr_ids {
-                unique_adr_ids.insert(id.as_str());
+            for section in &file.sections {
+                unique_adr_ids.insert(section.adr_id.as_str());
             }
         }
         unique_adr_ids.len()
     };
-    let not_applicable = skipped_adrs.len(); // Already deduplicated (lines 46-55)
+    let not_applicable = skipped_adrs.len(); // Already deduplicated
     let total_input = applicable + not_applicable;
     let files_generated = files.len();
 
@@ -164,9 +167,10 @@ pub fn merge_content(
 mod tests {
     use super::*;
     use crate::generation::markers::START_MARKER;
+    use crate::tailoring::types::AdrSection;
 
     fn make_output(files: Vec<FileOutput>, skipped: Vec<SkippedAdr>) -> TailoringOutput {
-        let applicable = files.iter().map(|f| f.adr_ids.len()).sum::<usize>();
+        let applicable = files.iter().map(|f| f.sections.len()).sum::<usize>();
         let not_applicable = skipped.len();
         let total_input = applicable + not_applicable;
         TailoringOutput {
@@ -186,9 +190,17 @@ mod tests {
         let out1 = make_output(
             vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: "# Batch 1 rules".to_string(),
+                sections: vec![
+                    AdrSection {
+                        adr_id: "adr-001".to_string(),
+                        content: "# Batch 1 rules".to_string(),
+                    },
+                    AdrSection {
+                        adr_id: "adr-002".to_string(),
+                        content: "# Batch 1 rules".to_string(),
+                    },
+                ],
                 reasoning: "First batch".to_string(),
-                adr_ids: vec!["adr-001".to_string(), "adr-002".to_string()],
             }],
             vec![],
         );
@@ -196,9 +208,17 @@ mod tests {
         let out2 = make_output(
             vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: "# Batch 2 rules".to_string(),
+                sections: vec![
+                    AdrSection {
+                        adr_id: "adr-002".to_string(),
+                        content: "# Batch 2 rules".to_string(),
+                    },
+                    AdrSection {
+                        adr_id: "adr-003".to_string(),
+                        content: "# Batch 2 rules".to_string(),
+                    },
+                ],
                 reasoning: "Second batch".to_string(),
-                adr_ids: vec!["adr-002".to_string(), "adr-003".to_string()],
             }],
             vec![],
         );
@@ -210,11 +230,8 @@ mod tests {
         let file = &merged.files[0];
         assert_eq!(file.path, "CLAUDE.md");
 
-        // Content concatenated with "\n\n"
-        assert_eq!(file.content, "# Batch 1 rules\n\n# Batch 2 rules");
-
-        // adr_ids deduplicated, preserving order
-        assert_eq!(file.adr_ids, vec!["adr-001", "adr-002", "adr-003"]);
+        // adr_ids deduplicated, preserving order (adr-002 content updated to batch 2)
+        assert_eq!(file.adr_ids(), vec!["adr-001", "adr-002", "adr-003"]);
 
         // Reasoning combined with "; "
         assert_eq!(file.reasoning, "First batch; Second batch");
@@ -231,9 +248,11 @@ mod tests {
         let out1 = make_output(
             vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: "root rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "root rules".to_string(),
+                }],
                 reasoning: "root".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             vec![],
         );
@@ -241,9 +260,11 @@ mod tests {
         let out2 = make_output(
             vec![FileOutput {
                 path: "apps/web/CLAUDE.md".to_string(),
-                content: "web rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-002".to_string(),
+                    content: "web rules".to_string(),
+                }],
                 reasoning: "web".to_string(),
-                adr_ids: vec!["adr-002".to_string()],
             }],
             vec![],
         );
@@ -271,9 +292,17 @@ mod tests {
         let out1 = make_output(
             vec![FileOutput {
                 path: "project-a/CLAUDE.md".to_string(),
-                content: "content A".to_string(),
+                sections: vec![
+                    AdrSection {
+                        adr_id: "adr-a1".to_string(),
+                        content: "content A".to_string(),
+                    },
+                    AdrSection {
+                        adr_id: shared_adr.to_string(),
+                        content: "content A".to_string(),
+                    },
+                ],
                 reasoning: "reason A".to_string(),
-                adr_ids: vec!["adr-a1".to_string(), shared_adr.to_string()],
             }],
             vec![SkippedAdr {
                 id: "adr-skip1".to_string(),
@@ -283,9 +312,17 @@ mod tests {
         let out2 = make_output(
             vec![FileOutput {
                 path: "project-b/CLAUDE.md".to_string(),
-                content: "content B".to_string(),
+                sections: vec![
+                    AdrSection {
+                        adr_id: "adr-b1".to_string(),
+                        content: "content B".to_string(),
+                    },
+                    AdrSection {
+                        adr_id: shared_adr.to_string(),
+                        content: "content B".to_string(),
+                    },
+                ],
                 reasoning: "reason B".to_string(),
-                adr_ids: vec!["adr-b1".to_string(), shared_adr.to_string()],
             }],
             vec![SkippedAdr {
                 id: "adr-skip1".to_string(), // Same skipped ADR
