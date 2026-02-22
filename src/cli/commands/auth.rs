@@ -14,36 +14,6 @@ fn run_auth() -> Result<(), ActualError> {
     run_auth_with_binary(&binary_path)
 }
 
-/// Check Claude Code authentication status using the given binary path.
-///
-/// Runs `claude auth status --json`, parses the response, and returns the
-/// status. This is a plain blocking call with no timeout — callers that need
-/// a bounded wait should use [`check_auth_with_timeout`] directly.
-pub(crate) fn check_auth(binary_path: &Path) -> Result<ClaudeAuthStatus, ActualError> {
-    let output = std::process::Command::new(binary_path)
-        .args(["auth", "status", "--json"])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| ActualError::RunnerFailed {
-            message: format!("failed to execute claude: {e}"),
-            stderr: String::new(),
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(ActualError::RunnerFailed {
-            message: format!(
-                "claude auth status exited with code {}",
-                output.status.code().unwrap_or(-1)
-            ),
-            stderr,
-        });
-    }
-
-    let status: ClaudeAuthStatus = serde_json::from_slice(&output.stdout)?;
-    Ok(status)
-}
-
 /// Check Claude Code authentication status with a timeout.
 ///
 /// Uses `tokio::process::Command` with `kill_on_drop(true)` so that when the
@@ -128,7 +98,7 @@ async fn check_auth_async(
 }
 
 fn run_auth_with_binary(binary_path: &Path) -> Result<(), ActualError> {
-    let status = check_auth(binary_path)?;
+    let status = check_auth_with_timeout(binary_path, std::time::Duration::from_secs(10))?;
 
     print_auth_status(&status);
 
