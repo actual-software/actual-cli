@@ -26,6 +26,7 @@ use crate::runner::binary::find_claude_binary;
 use crate::runner::codex_cli::{check_codex_auth, find_codex_binary, CodexCliRunner};
 use crate::runner::cursor_cli::{find_cursor_binary, CursorCliRunner};
 use crate::runner::openai_api::OpenAiApiRunner;
+use crate::runner::probe::resolve_api_key;
 use crate::runner::subprocess::CliClaudeRunner;
 
 /// Enforce that an explicit Codex CLI model override is only used with an API key.
@@ -442,30 +443,16 @@ where
     }
 }
 
-/// Resolve an API key from an environment variable or a config fallback.
-///
-/// Returns `Err(ActualError::ApiKeyMissing)` if neither source provides a key.
-pub(crate) fn resolve_api_key(
-    env_var: &str,
-    config_key: Option<&str>,
-) -> Result<String, ActualError> {
-    std::env::var(env_var)
-        .ok()
-        .or_else(|| config_key.map(|s| s.to_string()))
-        .ok_or_else(|| ActualError::ApiKeyMissing {
-            env_var: env_var.to_string(),
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         codex_cli_fallback_if_model_error, infer_runner_from_config, require_api_key_for_model,
-        resolve_api_key, sync_run_inner,
+        sync_run_inner,
     };
     use crate::cli::args::{RunnerChoice, SyncArgs};
     use crate::error::ActualError;
     use crate::runner::auth::ClaudeAuthStatus;
+    use crate::runner::probe::resolve_api_key;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
     // ── Shared test helpers ──────────────────────────────────────────────────
