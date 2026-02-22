@@ -31,6 +31,9 @@ use crate::runner::subprocess::TailoringRunner;
 use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfig};
 use crate::tailoring::filter::pre_filter_rejected;
 use crate::tailoring::types::{FileOutput, TailoringEvent, TailoringOutput, TailoringSummary};
+use crate::telemetry::identity::hash_repo_identity;
+use crate::telemetry::metrics::SyncMetrics;
+use crate::telemetry::reporter::report_metrics;
 
 /// Result summary from the confirm + write phase.
 #[derive(Debug, Clone, PartialEq)]
@@ -311,10 +314,11 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         .api_url
         .as_deref()
         .or(config.api_url.as_deref())
-        .unwrap_or(DEFAULT_API_URL);
+        .unwrap_or(DEFAULT_API_URL)
+        .to_owned();
 
     let request = build_match_request(&analysis, &config);
-    let client = ActualApiClient::new(api_url)?;
+    let client = ActualApiClient::new(&api_url)?;
 
     if args.verbose {
         pipeline.suspend(|| {
@@ -364,9 +368,11 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     let existing_paths = existing_paths
         .map_err(|e| ActualError::InternalError(format!("CLAUDE.md discovery task failed: {e}")))?;
 
+    let adrs_fetched: u64;
     let response = match response {
         Ok(r) => {
             let count = r.matched_adrs.len();
+            adrs_fetched = count as u64;
             pipeline.success(SyncPhase::Fetch, &format!("Fetched {count} ADRs"));
             if count == 0 {
                 for line in zero_adr_context_lines(&request) {
@@ -376,7 +382,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             r
         }
         Err(e) => {
-            let msg = fetch_error_message(&e, api_url);
+            let msg = fetch_error_message(&e, &api_url);
             pipeline.error(SyncPhase::Fetch, &msg);
             pipeline.finish_remaining();
             return Err(e);
@@ -569,7 +575,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     // ── Phase 3: confirm + write (fully implemented) ──
     // pipeline stays alive through confirm+write so output goes into the TUI
     // log pane. It drops naturally at end of run_sync.
-    confirm_and_write(
+    let sync_result = confirm_and_write(
         &output,
         root_dir,
         args.force,

@@ -82,8 +82,17 @@ pub fn load_from(path: &Path) -> Result<Config, ActualError> {
         _ => {}
     }
     match std::fs::read_to_string(path) {
-        Ok(contents) => serde_yaml::from_str(&contents)
-            .map_err(|e| config_error(format!("Failed to parse config YAML: {e}"))),
+        Ok(contents) => {
+            let mut config: Config = serde_yaml::from_str(&contents)
+                .map_err(|e| config_error(format!("Failed to parse config YAML: {e}")))?;
+            // Normalize: claude-cli is the default runner and must not be stored.
+            // Persisting it overrides model-based runner inference, which causes
+            // incorrect runner selection (e.g. runner=claude-cli + openai model).
+            if config.runner.as_deref() == Some("claude-cli") {
+                config.runner = None;
+            }
+            Ok(config)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let default = Config::default();
             save_to(&default, path)?;
@@ -577,6 +586,58 @@ mod tests {
             err.to_string()
                 .contains("Failed to serialize config to YAML"),
             "Expected serialization error, got: {err}"
+        );
+    }
+
+    // Tests for actual-7nv.2: do not persist claude-cli as runner
+
+    /// Loading a config that has `runner: claude-cli` normalizes it to None.
+    ///
+    /// This heals existing configs that may have persisted the default runner.
+    #[test]
+    fn test_load_from_normalizes_claude_cli_runner() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        std::fs::write(&config_file, "runner: claude-cli\n").unwrap();
+
+        let config = load_from(&config_file).unwrap();
+        assert_eq!(
+            config.runner, None,
+            "runner: claude-cli in config.yaml must be normalized to None on load"
+        );
+    }
+
+    /// Loading a config with a non-default runner preserves it.
+    #[test]
+    fn test_load_from_preserves_non_default_runner() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        std::fs::write(&config_file, "runner: anthropic-api\n").unwrap();
+
+        let config = load_from(&config_file).unwrap();
+        assert_eq!(
+            config.runner,
+            Some("anthropic-api".to_string()),
+            "non-default runner must be preserved on load"
+        );
+    }
+
+    /// Saving a Config with runner=Some("claude-cli") must not write `runner:` to the file.
+    #[test]
+    fn test_save_to_does_not_write_claude_cli_runner() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+
+        let config = Config {
+            runner: Some("claude-cli".to_string()),
+            ..Config::default()
+        };
+        save_to(&config, &config_file).unwrap();
+
+        let contents = std::fs::read_to_string(&config_file).unwrap();
+        assert!(
+            !contents.contains("runner:"),
+            "config.yaml must not contain 'runner:' when runner is claude-cli, got: {contents}"
         );
     }
 

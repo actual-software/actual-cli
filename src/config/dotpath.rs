@@ -311,7 +311,19 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             config.output_format = Some(fmt);
         }
         ConfigKey::Runner => match value {
-            "claude-cli" | "anthropic-api" | "openai-api" | "codex-cli" | "cursor-cli" => {
+            "claude-cli" => {
+                // claude-cli is the default runner; persisting it overrides
+                // model-based runner inference (root cause of the bug where
+                // runner=claude-cli + openai model → wrong runner selected).
+                eprintln!(
+                    "Warning: 'claude-cli' is the default runner and does not need to be \
+                     set explicitly. The runner config has been cleared so model-based \
+                     runner selection continues to work correctly."
+                );
+                config.runner = None;
+                return Ok(());
+            }
+            "anthropic-api" | "openai-api" | "codex-cli" | "cursor-cli" => {
                 config.runner = Some(value.to_string());
             }
             _ => {
@@ -985,9 +997,60 @@ mod tests {
 
     #[test]
     fn test_set_and_get_runner() {
+        // Setting runner to claude-cli (the default) must clear the field,
+        // not persist it.  get("runner") will therefore return "not set".
         let mut config = Config::default();
         set(&mut config, "runner", "claude-cli").unwrap();
-        assert_eq!(get(&config, "runner").unwrap(), "claude-cli");
+        assert_eq!(
+            config.runner, None,
+            "runner field must be None after set(runner, claude-cli)"
+        );
+        let err = get(&config, "runner").unwrap_err();
+        assert!(
+            err.to_string().contains("not set"),
+            "get(runner) must return 'not set' after set(runner, claude-cli), got: {err}"
+        );
+    }
+
+    /// set(runner, claude-cli) must succeed (no error) even though it clears the field.
+    #[test]
+    fn test_set_runner_claude_cli_does_not_error() {
+        let mut config = Config::default();
+        let result = set(&mut config, "runner", "claude-cli");
+        assert!(
+            result.is_ok(),
+            "set(runner, claude-cli) must return Ok(()), got: {result:?}"
+        );
+    }
+
+    /// After set(runner, claude-cli), config.runner must be None.
+    #[test]
+    fn test_set_runner_claude_cli_clears_field() {
+        let mut config = Config::default();
+        set(&mut config, "runner", "claude-cli").unwrap();
+        assert_eq!(
+            config.runner, None,
+            "config.runner must be None after set(runner, claude-cli)"
+        );
+    }
+
+    /// Non-default runners must still be persisted correctly (regression guard).
+    #[test]
+    fn test_set_and_get_non_default_runners() {
+        for runner in &["anthropic-api", "openai-api", "codex-cli", "cursor-cli"] {
+            let mut config = Config::default();
+            set(&mut config, "runner", runner).unwrap();
+            assert_eq!(
+                config.runner,
+                Some(runner.to_string()),
+                "config.runner must be Some({runner}) after set"
+            );
+            assert_eq!(
+                get(&config, "runner").unwrap(),
+                *runner,
+                "get(runner) must return {runner} after set"
+            );
+        }
     }
 
     #[test]

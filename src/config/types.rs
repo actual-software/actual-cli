@@ -3,6 +3,15 @@ use std::collections::HashMap;
 
 use crate::generation::OutputFormat;
 
+/// Returns `true` when the runner field should be omitted from serialized YAML.
+///
+/// `claude-cli` is the default runner; persisting it in `config.yaml` overrides
+/// model-based runner inference, which causes incorrect runner selection when the
+/// user also sets an OpenAI model (e.g. `gpt-5.1-codex-mini`).
+fn runner_is_default(r: &Option<String>) -> bool {
+    matches!(r.as_deref(), None | Some("claude-cli"))
+}
+
 /// Default batch size for ADR tailoring.
 pub const DEFAULT_BATCH_SIZE: usize = 15;
 
@@ -112,7 +121,10 @@ pub struct Config {
     /// AI backend runner for tailoring (default: "claude-cli").
     ///
     /// Supported values: "claude-cli", "anthropic-api", "openai-api", "codex-cli", "cursor-cli"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// `claude-cli` is never serialized to config.yaml because it is the default;
+    /// persisting it would suppress model-based runner inference.
+    #[serde(default, skip_serializing_if = "runner_is_default")]
     pub runner: Option<String>,
 
     /// Fallback Anthropic API key (used when runner = "anthropic-api" and ANTHROPIC_API_KEY not set).
@@ -417,5 +429,42 @@ mod tests {
         let config: Config = serde_yaml::from_str(yaml).expect("deserialize partial YAML");
         assert_eq!(config.model, Some("haiku".to_string()));
         assert_eq!(config.openai_model, None);
+    }
+
+    /// `claude-cli` runner must NOT be serialized to YAML (it is the default).
+    ///
+    /// Persisting `runner: claude-cli` in config.yaml would override model-based
+    /// runner inference, causing wrong runner selection with OpenAI models.
+    #[test]
+    fn test_claude_cli_runner_not_serialized() {
+        let config = Config {
+            runner: Some("claude-cli".to_string()),
+            ..Config::default()
+        };
+        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        assert!(
+            !yaml.contains("runner:"),
+            "YAML must not contain 'runner:' when runner is claude-cli, got: {yaml}"
+        );
+    }
+
+    /// Non-default runners are still serialized to YAML.
+    #[test]
+    fn test_non_default_runner_is_serialized() {
+        for runner in &["anthropic-api", "openai-api", "codex-cli", "cursor-cli"] {
+            let config = Config {
+                runner: Some(runner.to_string()),
+                ..Config::default()
+            };
+            let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+            assert!(
+                yaml.contains("runner:"),
+                "YAML must contain 'runner:' for runner={runner}, got: {yaml}"
+            );
+            assert!(
+                yaml.contains(runner),
+                "YAML must contain runner value '{runner}', got: {yaml}"
+            );
+        }
     }
 }
