@@ -1,8 +1,5 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
-
-use sha2::{Digest, Sha256};
 
 use crate::analysis::cache::{get_git_branch, get_git_head, run_analysis_cached};
 use crate::analysis::confirm::ConfirmAction;
@@ -11,51 +8,32 @@ use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
 use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::format_project_summary_plain;
-use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::header::{AuthDisplay, RunnerDisplay};
 use crate::cli::ui::progress::SyncPhase;
-use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
 use crate::cli::ui::tui::renderer::TuiRenderer;
 use crate::config::paths::{load_from, save_to};
 use crate::config::rejections::{clear_rejections, get_rejections};
-use crate::config::types::{
-    CachedTailoring, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_SECS,
-};
+use crate::config::types::{DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_SECS};
 use crate::error::ActualError;
-use crate::generation::markers;
-use crate::generation::writer::{write_files, WriteAction, WriteResult};
-use crate::generation::OutputFormat;
 use crate::runner::subprocess::TailoringRunner;
 use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfig};
 use crate::tailoring::filter::pre_filter_rejected;
-use crate::tailoring::types::{FileOutput, TailoringEvent, TailoringOutput, TailoringSummary};
+use crate::tailoring::types::{TailoringEvent, TailoringOutput};
 use crate::telemetry::identity::hash_repo_identity;
 use crate::telemetry::metrics::SyncMetrics;
 use crate::telemetry::reporter::report_metrics;
 
-/// Result summary from the confirm + write phase.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SyncResult {
-    pub files_created: usize,
-    pub files_updated: usize,
-    pub files_failed: usize,
-    pub files_rejected: usize,
-}
+use super::adr_utils::{
+    fetch_error_message, find_existing_output_files, raw_adrs_to_output, zero_adr_context_lines,
+};
+use super::cache::{
+    compute_repo_key, compute_tailoring_cache_key, load_config_with_fallback,
+    store_tailoring_cache, tailoring_cache_skip_msg,
+};
+use super::write::confirm_and_write;
 
-/// Entry point for `actual sync`.
-///
-/// Production wiring (`CliClaudeRunner`, `RealTerminal`) lives in
-/// `sync_wiring.rs` (which is excluded from coverage) so that the only
-/// generic instantiation of `run_sync` in `sync.rs` is `MockRunner` from
-/// unit tests.
-pub fn exec(args: &SyncArgs) -> Result<(), ActualError> {
-    super::sync_wiring::sync_run(args)
-}
-
-/// Resolve the current working directory, falling back to `"."` if
-/// unavailable (e.g. the directory was deleted while the process was running).
 pub(crate) fn resolve_cwd() -> std::path::PathBuf {
     let fallback = std::path::PathBuf::from(".");
     std::env::current_dir().unwrap_or(fallback)
@@ -497,7 +475,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         // `sync_kb_poller::setup` optionally spawns a background poller thread
         // and returns a combined OS-signal + keyboard cancel future, plus a
         // nav channel receiver for arrow-key navigation during execution.
-        let (kb_poller, nav_rx, cancel) = super::sync_kb_poller::setup(pipeline.is_tui());
+        let (kb_poller, nav_rx, cancel) = super::super::sync_kb_poller::setup(pipeline.is_tui());
         pipeline.set_nav_rx_opt(nav_rx);
 
         let result = rt.block_on(async {
@@ -652,24 +630,6 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 /// Distinguishes between a cached result with no applicable ADRs (deterministic
 /// empty output) and one with applicable ADRs, so users can tell at a glance
 /// why tailoring was skipped.
-fn tailoring_cache_skip_msg(applicable: usize) -> &'static str {
-    if applicable == 0 {
-        "No ADRs applicable to this project (cached)"
-    } else {
-        "Using cached tailoring result"
-    }
-}
-
-/// Apply a single [`TailoringEvent`] to the progress pipeline.
-///
-/// Logs per-project and per-batch status lines to the pipeline as work
-/// progresses.  The spinner message/tick is managed by the heartbeat timer in
-/// `run_tailoring_with_cancel` instead, so the display stays live even when
-/// Claude is thinking and no progress events are flowing.
-///
-/// Extracted from the select loop so both the real-time event path and the
-/// drain-on-completion path share the same logic and the function can be
-/// tested independently.
 fn apply_tailoring_event(event: TailoringEvent, pipeline: &mut TuiRenderer, completed: &mut usize) {
     match event {
         TailoringEvent::ProjectStarted {
@@ -1080,683 +1040,6 @@ fn filter_projects(
 /// Falls back to hashing the root directory path if not a git repo or
 /// if the remote URL cannot be determined. Applies a 5-second timeout to
 /// the git subprocess; on timeout, silently falls back to the path hash.
-fn compute_repo_key(root_dir: &Path) -> String {
-    compute_repo_key_with_timeout(root_dir, std::time::Duration::from_secs(5))
-}
-
-fn compute_repo_key_with_timeout(root_dir: &Path, timeout: std::time::Duration) -> String {
-    let root_dir_buf = root_dir.to_path_buf();
-
-    // Use tokio::process::Command with kill_on_drop(true) so that when the
-    // timeout fires the child is sent SIGKILL rather than left as an orphan.
-    // A single-threaded runtime is used to keep this function synchronous.
-    let url = (|| -> Option<String> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-
-        rt.block_on(async move {
-            let mut cmd = tokio::process::Command::new("git");
-            cmd.args(["remote", "get-url", "origin"]);
-            cmd.current_dir(&root_dir_buf);
-            cmd.stdin(std::process::Stdio::null());
-            cmd.kill_on_drop(true);
-
-            let child = cmd
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .ok()?;
-
-            let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-
-            match result {
-                Ok(Ok(output)) if output.status.success() => {
-                    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if s.is_empty() {
-                        None
-                    } else {
-                        Some(s)
-                    }
-                }
-                _ => None,
-            }
-        })
-    })();
-
-    let input = url.unwrap_or_else(|| root_dir.to_string_lossy().to_string());
-
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-/// Serialize a value to `serde_yaml::Value`, logging a warning and returning
-/// `None` if serialization fails.
-///
-/// In practice `TailoringOutput` contains only string/number/vec fields and
-/// serialization never fails.  The `Option` return defends against a future
-/// type change that adds a non-YAML-representable field (e.g. `f64::NAN`).
-fn serialize_tailoring_output<T: serde::Serialize>(output: &T) -> Option<serde_yaml::Value> {
-    match serde_yaml::to_value(output) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            // Gap 5: route through tracing so the warning is visible in the log
-            // file (TUI mode) or stderr (plain mode) rather than being lost when
-            // the TUI alternate screen is active.
-            tracing::warn!("failed to serialize tailoring cache: {e}");
-            None
-        }
-    }
-}
-
-/// Store a tailoring result in the config cache (best-effort).
-///
-/// Skips caching when `cache_key` is `None`.
-/// Disk persistence failures are silently ignored because the cache
-/// is an optimisation — a write failure should never abort a sync.
-///
-/// The output is generic over any `serde::Serialize` type so that tests can
-/// inject a type that always fails serialization to exercise the warning path.
-/// In production the concrete type is always `TailoringOutput`.
-fn store_tailoring_cache<T: serde::Serialize>(
-    config: &mut crate::config::types::Config,
-    cfg_path: &Path,
-    cache_key: Option<&str>,
-    root_dir: &Path,
-    output: &T,
-) {
-    let Some(key) = cache_key else {
-        return;
-    };
-    let Some(tailoring_value) = serialize_tailoring_output(output) else {
-        return;
-    };
-    config.cached_tailoring = Some(CachedTailoring {
-        cache_key: key.to_string(),
-        repo_path: root_dir.to_string_lossy().to_string(),
-        tailoring: tailoring_value,
-        tailored_at: chrono::Utc::now(),
-    });
-    // Best-effort persist: if disk write fails, the in-memory cache is
-    // still populated for subsequent operations in this process.
-    // Gap 5: use tracing so the warning reaches the log file in TUI mode.
-    if let Err(e) = save_to(config, cfg_path) {
-        tracing::warn!("failed to save tailoring cache: {e}");
-    }
-}
-
-/// Compute a cache key for the tailoring step by hashing all inputs
-/// that affect the tailoring output.
-///
-/// The key incorporates: full ADR content (sorted by ID for determinism),
-/// the no_tailor flag, sorted project paths, existing CLAUDE.md content,
-/// and model override. Any change in these inputs produces a different cache
-/// key. The git HEAD commit is intentionally excluded so that commits
-/// unrelated to ADR content or repo structure do not invalidate the cache.
-fn compute_tailoring_cache_key(
-    adrs: &[crate::api::types::Adr],
-    no_tailor: bool,
-    project_paths: &[String],
-    existing_claude_md: &str,
-    model: Option<&str>,
-) -> String {
-    let mut hasher = Sha256::new();
-
-    // Sort ADRs by ID for determinism regardless of iteration order.
-    let mut sorted_adrs: Vec<&crate::api::types::Adr> = adrs.iter().collect();
-    sorted_adrs.sort_by(|a, b| a.id.cmp(&b.id));
-
-    // Field-boundary bytes used below:
-    //   \x00 — value separator within a list element (prevents "ab"+"c" == "a"+"bc")
-    //   \xfe — list-field separator within an ADR (prevents policies/instructions
-    //           ambiguity: ["a"]+[] == []+["a"] without a separator)
-    //   \xff — ADR separator between successive ADRs in the outer loop (prevents
-    //           ["a","b"]+["c"] == ["a"]+["b","c"] across ADR boundaries)
-    for adr in sorted_adrs {
-        hasher.update(adr.id.as_bytes());
-        hasher.update(b"\x00");
-        hasher.update(adr.title.as_bytes());
-        hasher.update(b"\x00");
-        hasher.update(adr.context.as_deref().unwrap_or("").as_bytes());
-        hasher.update(b"\x00");
-
-        let mut policies = adr.policies.clone();
-        policies.sort();
-        for policy in &policies {
-            hasher.update(policy.as_bytes());
-            hasher.update(b"\x00");
-        }
-        hasher.update(b"\xfe"); // end of policies list
-
-        let mut instructions = adr.instructions.clone().unwrap_or_default();
-        instructions.sort();
-        for instruction in &instructions {
-            hasher.update(instruction.as_bytes());
-            hasher.update(b"\x00");
-        }
-        hasher.update(b"\xfe"); // end of instructions list
-
-        // AdrCategory: hash its id, name, and path fields.
-        hasher.update(adr.category.id.as_bytes());
-        hasher.update(b"\x00");
-        hasher.update(adr.category.name.as_bytes());
-        hasher.update(b"\x00");
-        hasher.update(adr.category.path.as_bytes());
-        hasher.update(b"\x00");
-
-        // AppliesTo: hash sorted languages and frameworks.
-        let mut languages = adr.applies_to.languages.clone();
-        languages.sort();
-        for lang in &languages {
-            hasher.update(lang.as_bytes());
-            hasher.update(b"\x00");
-        }
-        hasher.update(b"\xfe"); // end of languages list
-
-        let mut frameworks = adr.applies_to.frameworks.clone();
-        frameworks.sort();
-        for fw in &frameworks {
-            hasher.update(fw.as_bytes());
-            hasher.update(b"\x00");
-        }
-        hasher.update(b"\xfe"); // end of frameworks list
-
-        // matched_projects (sorted).
-        let mut matched = adr.matched_projects.clone();
-        matched.sort();
-        for mp in &matched {
-            hasher.update(mp.as_bytes());
-            hasher.update(b"\x00");
-        }
-        hasher.update(b"\xfe"); // end of matched_projects list
-                                // ADR boundary marker: prevents two distinct ADR sets from producing
-                                // the same byte stream (e.g. ["a", "b"] + ["c"] vs ["a"] + ["b", "c"]).
-        hasher.update(b"\xff");
-    }
-
-    hasher.update(if no_tailor {
-        &b"no_tailor"[..]
-    } else {
-        &b"tailor"[..]
-    });
-    hasher.update(b"\x00");
-    for path in project_paths {
-        hasher.update(path.as_bytes());
-        hasher.update(b"\x00");
-    }
-    hasher.update(existing_claude_md.as_bytes());
-    hasher.update(b"\x00");
-    if let Some(m) = model {
-        hasher.update(m.as_bytes());
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-/// Produce contextual follow-up lines for a zero-ADR fetch result.
-///
-/// Examines the languages and frameworks in the match request and returns one
-/// or more indented lines explaining *why* no ADRs were matched:
-///
-/// - No languages detected → indicates the repo language is not recognized.
-/// - Languages but no frameworks → only general ADRs were eligible.
-/// - Languages + frameworks → the combination has no ADR coverage yet.
-fn zero_adr_context_lines(request: &crate::api::types::MatchRequest) -> Vec<String> {
-    let mut langs: Vec<&str> = request
-        .projects
-        .iter()
-        .flat_map(|p| p.languages.iter().map(|l| l.as_str()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    langs.sort_unstable();
-
-    let mut fws: Vec<&str> = request
-        .projects
-        .iter()
-        .flat_map(|p| p.frameworks.iter().map(|f| f.name.as_str()))
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-    fws.sort_unstable();
-
-    if langs.is_empty() {
-        vec!["  No supported languages detected \u{2014} unable to match ADRs".to_string()]
-    } else if fws.is_empty() {
-        vec![
-            format!("  Languages: {}", langs.join(", ")),
-            "  No frameworks detected; only general ADRs were eligible".to_string(),
-        ]
-    } else {
-        vec![
-            format!("  Languages: {}", langs.join(", ")),
-            format!("  Frameworks: {}", fws.join(", ")),
-            "  No ADRs available for this stack yet".to_string(),
-        ]
-    }
-}
-
-/// Produce a user-friendly error message for an ADR fetch failure.
-///
-/// Distinguishes connection failures, timeouts, structured API errors (4xx/5xx),
-/// and falls back to a raw message for unrecognized errors.
-fn fetch_error_message(e: &ActualError, api_url: &str) -> String {
-    match e {
-        ActualError::ApiError(s)
-            if s.contains("error trying to connect")
-                || s.contains("Connection refused")
-                || s.contains("connection refused")
-                || s.contains("dns error") =>
-        {
-            format!(
-                "Unable to connect to Actual AI ({api_url}) \u{2014} check your network connection"
-            )
-        }
-        ActualError::ApiError(s)
-            if s.contains("timed out") || s.contains("operation timed out") =>
-        {
-            "Connection to Actual AI timed out \u{2014} try again later".to_string()
-        }
-        ActualError::ApiResponseError { code, message } => {
-            format!("Actual AI returned an error ({code}): {message}")
-        }
-        _ => format!("API request failed: {e}"),
-    }
-}
-
-/// Strip non-printable ASCII control characters from server-controlled ADR content.
-///
-/// Keeps newlines (`\n`), carriage returns (`\r`), and tabs (`\t`) as they are
-/// legitimate in markdown, but removes other control characters (bytes < 0x20
-/// and DEL 0x7F) that could be used for terminal manipulation.
-fn strip_control_chars(s: &str) -> String {
-    s.chars()
-        .filter(|&c| c >= ' ' || c == '\n' || c == '\r' || c == '\t')
-        .filter(|&c| c != '\x7f')
-        .collect()
-}
-
-/// Validate a server-controlled project path before using it to construct output file paths.
-///
-/// Rejects paths that:
-/// - Contain `..` components (path traversal)
-/// - Start with `/` or `\` (absolute paths)
-/// - Contain null bytes
-fn validate_project_path(p: &str) -> Result<(), ActualError> {
-    if p.contains('\0') {
-        return Err(ActualError::InternalError(format!(
-            "project path '{p}' contains null bytes"
-        )));
-    }
-    if p.starts_with('/') || p.starts_with('\\') {
-        return Err(ActualError::InternalError(format!(
-            "project path '{p}' must be a relative path"
-        )));
-    }
-    if std::path::Path::new(p)
-        .components()
-        .any(|c| c == std::path::Component::ParentDir)
-    {
-        return Err(ActualError::InternalError(format!(
-            "project path '{p}' contains path traversal components"
-        )));
-    }
-    Ok(())
-}
-
-/// Convert raw ADRs into a [`TailoringOutput`] without Claude tailoring.
-///
-/// Groups ADRs by their `matched_projects` field. Each group produces a
-/// `FileOutput` whose content is the ADR policies/instructions formatted as
-/// markdown. ADRs with no `matched_projects` are assigned to the root output
-/// file (e.g. `CLAUDE.md` or `AGENTS.md` depending on `format`).
-fn raw_adrs_to_output(adrs: &[crate::api::types::Adr], format: &OutputFormat) -> TailoringOutput {
-    let filename = format.filename();
-    let mut project_adrs: HashMap<String, Vec<&crate::api::types::Adr>> = HashMap::new();
-
-    for adr in adrs {
-        if adr.matched_projects.is_empty() {
-            project_adrs
-                .entry(filename.to_string())
-                .or_default()
-                .push(adr);
-        } else {
-            for project_path in &adr.matched_projects {
-                if validate_project_path(project_path).is_err() {
-                    tracing::warn!(
-                        "skipping invalid project path '{}' for ADR '{}'",
-                        console::strip_ansi_codes(project_path),
-                        adr.id
-                    );
-                    continue;
-                }
-                let file_path = if project_path == "." {
-                    filename.to_string()
-                } else {
-                    format!("{project_path}/{filename}")
-                };
-                project_adrs.entry(file_path).or_default().push(adr);
-            }
-        }
-    }
-
-    let mut files: Vec<FileOutput> = project_adrs
-        .into_iter()
-        .map(|(path, adrs_for_file)| {
-            use crate::tailoring::types::AdrSection;
-
-            let sections: Vec<AdrSection> = adrs_for_file
-                .iter()
-                .map(|adr| {
-                    let safe_title = strip_control_chars(&adr.title);
-                    let mut content = format!("## {safe_title}\n");
-                    for policy in &adr.policies {
-                        let safe_policy = strip_control_chars(policy);
-                        content.push_str(&format!("- {safe_policy}\n"));
-                    }
-                    if let Some(instructions) = &adr.instructions {
-                        if !instructions.is_empty() {
-                            content.push('\n');
-                            for instruction in instructions {
-                                let safe_instruction = strip_control_chars(instruction);
-                                content.push_str(&format!("- {safe_instruction}\n"));
-                            }
-                        }
-                    }
-                    AdrSection {
-                        adr_id: adr.id.clone(),
-                        content,
-                    }
-                })
-                .collect();
-
-            FileOutput {
-                path,
-                sections,
-                reasoning: "Raw ADR output (--no-tailor mode)".to_string(),
-            }
-        })
-        .collect();
-
-    // Sort for deterministic output
-    files.sort_by(|a, b| a.path.cmp(&b.path));
-
-    let applicable = adrs.len();
-    let files_generated = files.len();
-
-    TailoringOutput {
-        files,
-        skipped_adrs: vec![],
-        summary: TailoringSummary {
-            total_input: applicable,
-            applicable,
-            not_applicable: 0,
-            files_generated,
-        },
-    }
-}
-
-/// Scan the repository for existing output files (CLAUDE.md or AGENTS.md depending on format)
-/// and return their contents concatenated as a string, for use as context during tailoring.
-fn find_existing_output_files(root_dir: &Path, format: &OutputFormat) -> String {
-    let files = super::find_output_files(root_dir, format);
-    // `find_output_files` returns paths in sorted order, and `filter_map`
-    // preserves that order, so no additional sort is needed here.
-    let results: Vec<String> = files
-        .iter()
-        .filter_map(|path| {
-            let content = std::fs::read_to_string(path).ok()?;
-            let rel = path
-                .strip_prefix(root_dir)
-                .unwrap_or(path)
-                .to_string_lossy();
-            let cleaned = markers::strip_managed_metadata(&content);
-            Some(format!("=== {rel} ===\n{cleaned}"))
-        })
-        .collect();
-    results.join("\n\n")
-}
-
-/// Execute the confirm + write phase of the sync pipeline.
-///
-/// Given a `TailoringOutput` from the fetch+tailor phase, this function:
-/// 1. Computes per-file diffs against existing output files
-/// 2. Displays a diff summary
-/// 3. In dry-run mode: prints summary (and full content if --full), returns
-/// 4. In normal mode: runs the confirmation flow (or skips with --force)
-/// 5. Writes confirmed files to disk
-/// 6. Reports per-file results (created/updated/failed)
-///
-/// The `format` parameter controls the header prepended to new root-level files.
-///
-/// Write errors on individual files do NOT abort the batch.
-#[allow(clippy::too_many_arguments)]
-pub fn confirm_and_write(
-    output: &TailoringOutput,
-    root_dir: &Path,
-    force: bool,
-    dry_run: bool,
-    full: bool,
-    format: &OutputFormat,
-    term: &dyn TerminalIO,
-    pipeline: &mut TuiRenderer,
-) -> Result<SyncResult, ActualError> {
-    // Step 1: Compute diffs
-    let diffs: Vec<FileDiff> = output
-        .files
-        .iter()
-        .map(|file| {
-            let full_path = root_dir.join(&file.path);
-            let existing_content = std::fs::read_to_string(&full_path).ok();
-            let is_new_file = existing_content.is_none();
-            let detection = markers::detect_changes(existing_content.as_deref(), &file.adr_ids());
-
-            // Extract old managed content stripped of metadata for text diffing.
-            let old_managed = existing_content
-                .as_deref()
-                .and_then(markers::extract_managed_content)
-                .map(markers::strip_managed_metadata);
-
-            // Extract old per-ADR sections for per-section diffing.
-            let old_sections = existing_content
-                .as_deref()
-                .and_then(markers::extract_managed_content)
-                .map(markers::extract_adr_sections)
-                .unwrap_or_default();
-
-            FileDiff::from_sections(
-                &file.path,
-                &detection,
-                is_new_file,
-                &old_sections,
-                &file.sections,
-                old_managed,
-                file.content(),
-            )
-        })
-        .collect();
-
-    // Step 2: Start the Write phase so the steps panel shows it as active.
-    // File confirmation is part of the Write phase — the user needs to see
-    // the diff summary and confirm which files to write.
-    pipeline.start(SyncPhase::Write, "Confirming file changes...");
-
-    // Step 3: Display diff summary (now renders in the Write step's log pane)
-    let summary = format_diff_summary(&diffs);
-    if !summary.is_empty() {
-        for line in summary.lines() {
-            pipeline.println(line);
-        }
-    }
-
-    // Step 4: Handle --dry-run
-    if dry_run {
-        if full {
-            for file in &output.files {
-                let safe_path = console::strip_ansi_codes(&file.path);
-                let content = file.content();
-                let safe_content = console::strip_ansi_codes(&content);
-                pipeline.println(&format!("── {safe_path} ──"));
-                for line in safe_content.lines() {
-                    pipeline.println(line);
-                }
-                pipeline.println("── end ──");
-            }
-        }
-        pipeline.skip(SyncPhase::Write, "Dry run — no files written");
-        return Ok(SyncResult {
-            files_created: 0,
-            files_updated: 0,
-            files_failed: 0,
-            files_rejected: 0,
-        });
-    }
-
-    // Step 5: Run confirmation (if not dry-run).
-    // Use the native TUI multi-select so the user stays inside the TUI
-    // (no suspend/dialoguer teardown).  Plain/Quiet mode falls back to
-    // the existing dialoguer-based confirm_files path automatically.
-    //
-    // Record prompt duration so we can exclude user wait time from the
-    // Write phase elapsed timer.
-    let prompt_start = std::time::Instant::now();
-    let confirmed = pipeline.select_files_in_tui(output, force, term)?;
-    pipeline.adjust_start_for_pause(SyncPhase::Write, prompt_start.elapsed());
-    let files_rejected = output.files.len() - confirmed.len();
-
-    if confirmed.is_empty() {
-        pipeline.skip(SyncPhase::Write, "No files to write");
-        return Ok(SyncResult {
-            files_created: 0,
-            files_updated: 0,
-            files_failed: 0,
-            files_rejected,
-        });
-    }
-
-    // Step 6: Write confirmed files
-    pipeline.println("Writing files...");
-    let results = write_files(root_dir, &confirmed, format);
-
-    // Report Write phase outcome
-    let write_created: usize = results
-        .iter()
-        .filter(|r| r.action == WriteAction::Created)
-        .count();
-    let write_updated: usize = results
-        .iter()
-        .filter(|r| r.action == WriteAction::Updated)
-        .count();
-    let write_failed: usize = results
-        .iter()
-        .filter(|r| r.action == WriteAction::Failed)
-        .count();
-    let write_summary = format!(
-        "{write_created} created \u{00b7} {write_updated} updated \u{00b7} {write_failed} failed"
-    );
-    if write_failed > 0 {
-        pipeline.warn(SyncPhase::Write, &write_summary);
-    } else {
-        pipeline.success(SyncPhase::Write, &write_summary);
-    }
-
-    // Step 6: Report results and return SyncResult
-    let width = term_size::terminal_width();
-    let (files_created, files_updated, files_failed) = report_write_results(
-        &results,
-        files_rejected,
-        pipeline.steps_elapsed(),
-        pipeline,
-        width,
-    );
-
-    Ok(SyncResult {
-        files_created,
-        files_updated,
-        files_failed,
-        files_rejected,
-    })
-}
-
-/// Report per-file write results to the terminal.
-///
-/// Returns `(created, updated, failed)` counts.
-fn report_write_results(
-    results: &[WriteResult],
-    rejected_count: usize,
-    elapsed: Duration,
-    pipeline: &mut TuiRenderer,
-    _width: usize,
-) -> (usize, usize, usize) {
-    let mut files_created = 0;
-    let mut files_updated = 0;
-    let mut files_failed = 0;
-
-    for result in results {
-        let safe_path = console::strip_ansi_codes(&result.path);
-        match result.action {
-            WriteAction::Created => {
-                files_created += 1;
-                pipeline.println(&format!(
-                    "  {} {}    created   v{}",
-                    theme::success(&theme::SUCCESS),
-                    safe_path,
-                    result.version
-                ));
-            }
-            WriteAction::Updated => {
-                files_updated += 1;
-                pipeline.println(&format!(
-                    "  {} {}    updated   v{}",
-                    theme::success(&theme::SUCCESS),
-                    safe_path,
-                    result.version
-                ));
-            }
-            WriteAction::Failed => {
-                files_failed += 1;
-                let err_msg = result.error.as_deref().unwrap_or("unknown error");
-                pipeline.println(&format!(
-                    "  {} {}    error     {}",
-                    theme::error(&theme::ERROR),
-                    safe_path,
-                    err_msg
-                ));
-            }
-        }
-    }
-
-    let elapsed_secs = elapsed.as_secs_f64();
-    let summary = format!(
-        "Sync complete: {files_created} created \u{00b7} {files_updated} updated \u{00b7} {files_failed} failed \u{00b7} {rejected_count} rejected    [{elapsed_secs:.1}s total]"
-    );
-
-    pipeline.println("");
-    pipeline.println(&format!("  {}", theme::muted(&summary)));
-
-    (files_created, files_updated, files_failed)
-}
-
-/// Load config from `path`, falling back to `Config::default()` if the file
-/// cannot be parsed.  A `tracing::warn!` is emitted on failure so the message
-/// appears in the log file (TUI mode) or stderr (plain mode).
-///
-/// This early load is non-fatal: if the config is unreadable or corrupt the
-/// run continues with defaults and the second, hard `load_from(cfg_path)?`
-/// call in Phase 2 will surface a proper error to the user.
-pub(crate) fn load_config_with_fallback(cfg_path: &std::path::Path) -> crate::config::Config {
-    match load_from(cfg_path) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                "failed to load config from {}: {e} — using defaults",
-                cfg_path.display()
-            );
-            Default::default()
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1767,7 +1050,23 @@ mod tests {
     use crate::cli::ui::tui::renderer::TuiRenderer;
     use crate::error::ActualError;
     use crate::generation::markers;
+    use crate::generation::writer::{WriteAction, WriteResult};
+    use crate::generation::OutputFormat;
     use crate::tailoring::types::{AdrSection, FileOutput, TailoringSummary};
+
+    // Pull in exec from the parent sync module (mod.rs).
+    use super::super::exec;
+
+    // Pull in items from sibling modules that tests reference directly.
+    use super::super::adr_utils::{
+        fetch_error_message, find_existing_output_files, raw_adrs_to_output, strip_control_chars,
+        validate_project_path, zero_adr_context_lines,
+    };
+    use super::super::cache::{
+        compute_repo_key, compute_repo_key_with_timeout, serialize_tailoring_output,
+        tailoring_cache_skip_msg,
+    };
+    use super::super::write::{report_write_results, SyncResult};
 
     /// Valid fixture JSON matching the RepoAnalysis schema.
     const VALID_ANALYSIS_JSON: &str = r#"{
@@ -3828,7 +3127,7 @@ mod tests {
     #[test]
     fn test_find_existing_claude_md_skips_all_ignored_dirs() {
         let dir = tempfile::tempdir().unwrap();
-        for skip in super::super::SKIP_DIRS {
+        for skip in super::super::super::SKIP_DIRS {
             let d = dir.path().join(skip);
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join("CLAUDE.md"), "# Skip").unwrap();
