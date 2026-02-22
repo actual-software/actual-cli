@@ -29,6 +29,7 @@ use std::sync::Mutex;
 pub struct MockTerminal {
     inputs: Mutex<Vec<String>>,
     select_result: Mutex<Option<Option<Vec<usize>>>>,
+    select_one_results: Mutex<Vec<usize>>,
     output: Mutex<Vec<String>>,
 }
 
@@ -41,6 +42,7 @@ impl MockTerminal {
         Self {
             inputs: Mutex::new(inputs.into_iter().map(|s| s.to_string()).collect()),
             select_result: Mutex::new(None),
+            select_one_results: Mutex::new(Vec::new()),
             output: Mutex::new(Vec::new()),
         }
     }
@@ -52,6 +54,7 @@ impl MockTerminal {
         Self {
             inputs: Mutex::new(Vec::new()),
             select_result: Mutex::new(Some(result)),
+            select_one_results: Mutex::new(Vec::new()),
             output: Mutex::new(Vec::new()),
         }
     }
@@ -59,6 +62,15 @@ impl MockTerminal {
     /// Set the file-selection result (builder pattern).
     pub fn with_selection(mut self, result: Option<Vec<usize>>) -> Self {
         self.select_result = Mutex::new(Some(result));
+        self
+    }
+
+    /// Set the single-selection results (builder pattern).
+    ///
+    /// Each call to `select_one()` consumes the next value from the list.
+    /// When the list is exhausted, `select_one()` returns `Err(UserCancelled)`.
+    pub fn with_select_one(self, results: Vec<usize>) -> Self {
+        *self.select_one_results.lock().unwrap() = results;
         self
     }
 
@@ -92,6 +104,20 @@ impl TerminalIO for MockTerminal {
             .unwrap()
             .take()
             .ok_or(ActualError::UserCancelled)
+    }
+
+    fn select_one(
+        &self,
+        _prompt: &str,
+        _items: &[String],
+        _default: Option<usize>,
+    ) -> Result<usize, ActualError> {
+        let mut results = self.select_one_results.lock().unwrap();
+        if results.is_empty() {
+            Err(ActualError::UserCancelled)
+        } else {
+            Ok(results.remove(0))
+        }
     }
 }
 
@@ -174,5 +200,27 @@ mod tests {
         let term = MockTerminal::new(vec![]).with_selection(None);
         let result = term.select_files("p", &[], &[]).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn select_one_returns_scripted_results() {
+        let term = MockTerminal::new(vec![]).with_select_one(vec![2, 0]);
+        assert_eq!(
+            term.select_one("pick", &["a".into(), "b".into(), "c".into()], None)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            term.select_one("pick", &["x".into(), "y".into()], None)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn select_one_empty_returns_cancelled() {
+        let term = MockTerminal::new(vec![]).with_select_one(vec![]);
+        let result = term.select_one("pick", &["a".into()], None);
+        assert!(matches!(result, Err(ActualError::UserCancelled)));
     }
 }

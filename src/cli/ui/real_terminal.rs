@@ -5,6 +5,7 @@
 //! that cannot be made to return errors in unit tests.
 
 use dialoguer::MultiSelect;
+use dialoguer::Select;
 
 use dialoguer::Confirm as DialoguerConfirm;
 
@@ -70,6 +71,23 @@ impl TerminalIO for RealTerminal {
             .interact_on_opt(&self.term)
             .map_err(|e| terminal_io_error("file selection failed", e))
     }
+
+    fn select_one(
+        &self,
+        prompt: &str,
+        items: &[String],
+        default: Option<usize>,
+    ) -> Result<usize, ActualError> {
+        let theme = dialoguer::theme::ColorfulTheme::default();
+        let mut select = Select::with_theme(&theme).with_prompt(prompt).items(items);
+        if let Some(d) = default {
+            select = select.default(d);
+        }
+        select
+            .interact_on_opt(&self.term)
+            .map_err(|e| terminal_io_error("single selection failed", e))?
+            .ok_or(ActualError::UserCancelled)
+    }
 }
 
 #[cfg(test)]
@@ -107,6 +125,15 @@ mod tests {
             _items: &[String],
             _defaults: &[bool],
         ) -> Result<Option<Vec<usize>>, ActualError> {
+            unimplemented!("not used in these tests")
+        }
+
+        fn select_one(
+            &self,
+            _prompt: &str,
+            _items: &[String],
+            _default: Option<usize>,
+        ) -> Result<usize, ActualError> {
             unimplemented!("not used in these tests")
         }
 
