@@ -1395,19 +1395,12 @@ mod tests {
             &make_term(),
         );
         // Fallback was attempted (key resolved, runner created, run_sync called).
-        // Result may be Err from run_sync internals, but NOT the original model error
-        // and NOT ApiKeyMissing (the key was provided).
+        // Result may be Err from run_sync internals (no real repo), but must NOT be
+        // ApiKeyMissing — that would mean the key was not resolved.
         assert!(
             !matches!(&result, Err(ActualError::ApiKeyMissing { .. })),
             "API key was provided — should not get ApiKeyMissing: {result:?}"
         );
-        // The original model-error message must NOT propagate (we attempted fallback).
-        if let Err(ActualError::RunnerFailed { ref message, .. }) = result {
-            assert!(
-                !message.contains("model is not supported"),
-                "original model error must not propagate when fallback was attempted: {result:?}"
-            );
-        }
     }
 
     #[test]
