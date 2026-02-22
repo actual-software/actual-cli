@@ -156,14 +156,6 @@ pub fn get_git_branch(repo_path: &Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// Serialize a value to a YAML [`serde_yaml::Value`], mapping any serialization
-/// error to [`ActualError::ConfigError`].
-fn serialize_for_cache<T: serde::Serialize>(value: &T) -> Result<serde_yaml::Value, ActualError> {
-    serde_yaml::to_value(value).map_err(|e| {
-        ActualError::ConfigError(format!("Failed to serialize analysis for caching: {e}"))
-    })
-}
-
 /// Run repository analysis with caching based on git HEAD.
 ///
 /// If the repository has a git HEAD that matches the cached analysis,
@@ -202,21 +194,10 @@ pub fn run_analysis_cached(
                 && cached.head_commit.as_deref() == Some(&head_hash)
                 && cached.config_hash.as_deref() == Some(cfg_hash.as_str())
             {
-                // Try to deserialize the cached analysis
-                match serde_yaml::from_value::<RepoAnalysis>(cached.analysis.clone()) {
-                    Ok(analysis) => {
-                        return Ok(AnalysisOutcome {
-                            analysis,
-                            cache_status: CacheStatus::Hit,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to deserialize cached analysis: {e}. Re-running analysis."
-                        );
-                        // fall through to cache miss
-                    }
-                }
+                return Ok(AnalysisOutcome {
+                    analysis: cached.analysis.clone(),
+                    cache_status: CacheStatus::Hit,
+                });
             }
         }
         CacheStatus::Miss
@@ -232,7 +213,7 @@ pub fn run_analysis_cached(
         repo_path: repo_path.to_string_lossy().to_string(),
         head_commit: Some(head_hash),
         config_hash: Some(cfg_hash),
-        analysis: serialize_for_cache(&analysis)?,
+        analysis: analysis.clone(),
         analyzed_at: chrono::Utc::now(),
     };
     cfg.cached_analysis = Some(cached_analysis);
@@ -316,14 +297,14 @@ mod tests {
         repo_path: &str,
         head_commit: Option<&str>,
         config_hash: Option<&str>,
-        analysis_value: serde_yaml::Value,
+        analysis: RepoAnalysis,
     ) {
         let cfg = config::Config {
             cached_analysis: Some(CachedAnalysis {
                 repo_path: repo_path.to_string(),
                 head_commit: head_commit.map(|s| s.to_string()),
                 config_hash: config_hash.map(|s| s.to_string()),
-                analysis: analysis_value,
+                analysis,
                 analyzed_at: chrono::Utc::now(),
             }),
             ..config::Config::default()
@@ -436,7 +417,6 @@ mod tests {
 
         // Write config with cached analysis matching current HEAD
         let analysis = valid_analysis();
-        let analysis_value = serde_yaml::to_value(&analysis).unwrap();
         let default_cfg = config::Config::default();
         let cfg_hash = compute_config_hash(&default_cfg);
         write_config_with_cache(
@@ -444,7 +424,7 @@ mod tests {
             &repo_dir.path().to_string_lossy(),
             Some(&head_hash),
             Some(&cfg_hash),
-            analysis_value,
+            analysis,
         );
 
         let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
@@ -465,13 +445,12 @@ mod tests {
 
         // Write config with a different HEAD hash
         let analysis = valid_analysis();
-        let analysis_value = serde_yaml::to_value(&analysis).unwrap();
         write_config_with_cache(
             &config_path,
             &repo_dir.path().to_string_lossy(),
             Some("different_head_hash"),
             None,
-            analysis_value,
+            analysis,
         );
 
         let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
@@ -539,13 +518,12 @@ mod tests {
         // Write config with a different repo_path but same HEAD
         let head_hash = get_git_head(repo_dir.path()).unwrap();
         let analysis = valid_analysis();
-        let analysis_value = serde_yaml::to_value(&analysis).unwrap();
         write_config_with_cache(
             &config_path,
             "/some/other/repo",
             Some(&head_hash),
             None,
-            analysis_value,
+            analysis,
         );
 
         let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
@@ -557,37 +535,6 @@ mod tests {
         let cfg = config::paths::load_from(&config_path).unwrap();
         let cached = cfg.cached_analysis.unwrap();
         assert_eq!(cached.repo_path, repo_dir.path().to_string_lossy().as_ref());
-    }
-
-    #[test]
-    fn test_corrupted_cache_reruns_analysis() {
-        let repo_dir = tempdir().unwrap();
-        let head_hash = create_git_repo(repo_dir.path());
-
-        let config_dir = tempdir().unwrap();
-        let config_path = config_dir.path().join("config.yaml");
-
-        // Write config with matching HEAD but corrupted analysis value
-        let corrupted_value = serde_yaml::to_value("this is a string, not a RepoAnalysis").unwrap();
-        let default_cfg = config::Config::default();
-        let cfg_hash = compute_config_hash(&default_cfg);
-        write_config_with_cache(
-            &config_path,
-            &repo_dir.path().to_string_lossy(),
-            Some(&head_hash),
-            Some(&cfg_hash),
-            corrupted_value,
-        );
-
-        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
-
-        assert_eq!(outcome.cache_status, CacheStatus::Miss);
-        assert_eq!(outcome.analysis.projects.len(), 1);
-
-        // Verify config was updated with valid cached data
-        let cfg = config::paths::load_from(&config_path).unwrap();
-        let cached = cfg.cached_analysis.unwrap();
-        assert_eq!(cached.head_commit, Some(head_hash));
     }
 
     #[test]
@@ -677,7 +624,6 @@ mod tests {
 
         // Write config with cached analysis matching current HEAD (would be a cache hit)
         let analysis = valid_analysis();
-        let analysis_value = serde_yaml::to_value(&analysis).unwrap();
         let default_cfg = config::Config::default();
         let cfg_hash = compute_config_hash(&default_cfg);
         write_config_with_cache(
@@ -685,7 +631,7 @@ mod tests {
             &repo_dir.path().to_string_lossy(),
             Some(&head_hash),
             Some(&cfg_hash),
-            analysis_value,
+            analysis,
         );
 
         // With force=false, this returns the cached "test-project" name
@@ -726,7 +672,7 @@ mod tests {
                 repo_path: repo_dir.path().to_string_lossy().to_string(),
                 head_commit: Some(head_hash.clone()),
                 config_hash: Some(cfg_hash),
-                analysis: serde_yaml::to_value(&analysis).unwrap(),
+                analysis,
                 analyzed_at: old_time,
             }),
             ..config::Config::default()
@@ -749,10 +695,9 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_save_serialization_does_not_panic() {
-        // Exercises the cache save path where serde_yaml::to_value is called.
-        // Previously this used .unwrap() which would panic on serialization failure.
-        // Now it uses .map_err()? to propagate errors properly.
+    fn test_cache_save_and_retrieval_round_trip() {
+        // Exercises the cache save path: analysis is stored as typed RepoAnalysis,
+        // and a subsequent cache hit returns the same typed value directly.
         let repo_dir = tempdir().unwrap();
         let head_hash = create_git_repo(repo_dir.path());
 
@@ -766,41 +711,15 @@ mod tests {
         let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
         assert_eq!(outcome.analysis.projects.len(), 1);
 
-        // Verify the analysis was serialized and saved to cache
+        // Verify the analysis was saved to cache
         let saved_cfg = config::paths::load_from(&config_path).unwrap();
         let cached = saved_cfg.cached_analysis.unwrap();
         assert_eq!(cached.head_commit, Some(head_hash));
 
-        // Verify the cached analysis round-trips correctly
-        let deserialized: RepoAnalysis =
-            serde_yaml::from_value(cached.analysis).expect("cached analysis should deserialize");
-        assert_eq!(deserialized.projects.len(), outcome.analysis.projects.len());
-    }
-
-    #[test]
-    fn test_serialize_for_cache_success() {
-        let analysis = valid_analysis();
-        let result = serialize_for_cache(&analysis);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_serialize_for_cache_error_returns_config_error() {
-        /// A type whose `Serialize` implementation always fails.
-        struct AlwaysFail;
-
-        impl serde::Serialize for AlwaysFail {
-            fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("intentional test failure"))
-            }
-        }
-
-        let err = serialize_for_cache(&AlwaysFail).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Failed to serialize analysis for caching"),
-            "expected ConfigError with serialization message, got: {}",
-            err
+        // Verify the cached analysis is the typed RepoAnalysis directly
+        assert_eq!(
+            cached.analysis.projects.len(),
+            outcome.analysis.projects.len()
         );
     }
 
@@ -919,13 +838,12 @@ mod tests {
 
         // Write a cache entry with no config_hash (simulating old format)
         let analysis = valid_analysis();
-        let analysis_value = serde_yaml::to_value(&analysis).unwrap();
         write_config_with_cache(
             &config_path,
             &repo_dir.path().to_string_lossy(),
             Some(&head_hash),
             None, // no config_hash — old-format entry
-            analysis_value,
+            analysis,
         );
 
         // Should be a cache miss: re-runs analysis instead of returning "test-project"
@@ -956,7 +874,6 @@ mod tests {
 
         // Store a cache entry built from the default config
         let analysis = valid_analysis();
-        let analysis_value = serde_yaml::to_value(&analysis).unwrap();
         let default_cfg = config::Config::default();
         let default_hash = compute_config_hash(&default_cfg);
         write_config_with_cache(
@@ -964,7 +881,7 @@ mod tests {
             &repo_dir.path().to_string_lossy(),
             Some(&head_hash),
             Some(&default_hash),
-            analysis_value,
+            analysis,
         );
 
         // Now write a config file with different settings (include_categories changed)
@@ -999,19 +916,80 @@ mod tests {
         );
     }
 
-    // ── 4eo.2: tracing::warn! is emitted when cached analysis fails to deserialize ──
-
-    #[tracing_test::traced_test]
+    /// Backward-compat regression test: old cache files (written when analysis was stored as
+    /// serde_yaml::Value) can still be deserialized correctly because RepoAnalysis serializes
+    /// to the same YAML format. This test constructs the YAML representation directly and
+    /// deserializes it into a Config containing a CachedAnalysis with a typed RepoAnalysis.
     #[test]
-    fn test_corrupted_cache_emits_tracing_warn() {
+    fn test_old_cache_format_deserializes_correctly() {
+        // Construct the YAML that an old-format cache entry would have produced.
+        // The on-disk format is identical: serde_yaml::Value would serialize RepoAnalysis
+        // to the same YAML structure that the typed RepoAnalysis field now deserializes.
+        let yaml = r#"
+cached_analysis:
+  repo_path: /home/user/project
+  head_commit: abc123def456
+  config_hash: deadbeef
+  analysis:
+    is_monorepo: false
+    projects:
+      - path: .
+        name: legacy-project
+        languages:
+          - language: rust
+            loc: 500
+        frameworks: []
+  analyzed_at: "2024-01-01T00:00:00Z"
+"#;
+
+        let cfg: config::Config = serde_yaml::from_str(yaml).expect("should parse old cache YAML");
+        let cached = cfg.cached_analysis.expect("should have cached_analysis");
+        assert_eq!(cached.repo_path, "/home/user/project");
+        assert_eq!(cached.head_commit.as_deref(), Some("abc123def456"));
+        assert!(!cached.analysis.is_monorepo);
+        assert_eq!(cached.analysis.projects.len(), 1);
+        assert_eq!(cached.analysis.projects[0].name, "legacy-project");
+    }
+
+    /// Cache hit round-trip test with a full RepoAnalysis including all fields.
+    #[test]
+    fn test_cache_hit_round_trip_full_repo_analysis() {
+        use crate::analysis::types::{Framework, FrameworkCategory, Language, LanguageStat};
+
         let repo_dir = tempdir().unwrap();
         let head_hash = create_git_repo(repo_dir.path());
 
         let config_dir = tempdir().unwrap();
         let config_path = config_dir.path().join("config.yaml");
 
-        // Write config with matching HEAD but corrupted analysis value.
-        let corrupted_value = serde_yaml::to_value("not a RepoAnalysis").unwrap();
+        // Build a rich RepoAnalysis with all field types exercised
+        let rich_analysis = RepoAnalysis {
+            is_monorepo: true,
+            workspace_type: Some(crate::analysis::types::WorkspaceType::Cargo),
+            projects: vec![crate::analysis::types::Project {
+                path: "crates/core".to_string(),
+                name: "core".to_string(),
+                languages: vec![
+                    LanguageStat {
+                        language: Language::Rust,
+                        loc: 4200,
+                    },
+                    LanguageStat {
+                        language: Language::TypeScript,
+                        loc: 800,
+                    },
+                ],
+                frameworks: vec![Framework {
+                    name: "actix-web".to_string(),
+                    category: FrameworkCategory::WebBackend,
+                }],
+                package_manager: Some("cargo".to_string()),
+                description: Some("Core library".to_string()),
+                dep_count: 15,
+                dev_dep_count: 5,
+            }],
+        };
+
         let default_cfg = config::Config::default();
         let cfg_hash = compute_config_hash(&default_cfg);
         write_config_with_cache(
@@ -1019,14 +997,13 @@ mod tests {
             &repo_dir.path().to_string_lossy(),
             Some(&head_hash),
             Some(&cfg_hash),
-            corrupted_value,
+            rich_analysis.clone(),
         );
 
         let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
-        assert_eq!(outcome.cache_status, CacheStatus::Miss);
-        assert_eq!(outcome.analysis.projects.len(), 1);
 
-        assert!(logs_contain("Failed to deserialize cached analysis"));
+        assert_eq!(outcome.cache_status, CacheStatus::Hit);
+        assert_eq!(outcome.analysis, rich_analysis);
     }
 
     #[test]
