@@ -490,7 +490,9 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
 
             // Signal abort if we detect a pathological loop.
             if repeat_count >= REPETITIVE_LINE_THRESHOLD {
-                *msg_for_stderr.lock().unwrap() = last_line.clone();
+                *msg_for_stderr
+                    .lock()
+                    .expect("repetitive_msg mutex poisoned") = last_line.clone();
                 abort_for_stderr.notify_one();
                 break;
             }
@@ -535,7 +537,9 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                             .unwrap_or("unknown error")
                             .strip_prefix("Claude: ")
                             .unwrap_or(last_summary.as_deref().unwrap_or("unknown error"));
-                        *msg_for_stdout.lock().unwrap() = Some(raw.to_string());
+                        *msg_for_stdout
+                            .lock()
+                            .expect("repetitive_msg mutex poisoned") = Some(raw.to_string());
                         abort_for_stdout.notify_one();
                         return None;
                     }
@@ -565,7 +569,10 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
 
     match result {
         Ok(Some(envelope)) => {
-            let repeated = repetitive_msg.lock().unwrap().clone();
+            let repeated = repetitive_msg
+                .lock()
+                .expect("repetitive_msg mutex poisoned")
+                .clone();
             if envelope.is_error == Some(true)
                 || envelope.subtype.as_deref() == Some("error_max_turns")
             {
@@ -593,7 +600,10 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
         Ok(None) => {
             let stderr_bytes = stderr_task.await.unwrap_or_default();
             let stderr_str = String::from_utf8_lossy(&stderr_bytes).to_string();
-            let repeated = repetitive_msg.lock().unwrap().clone();
+            let repeated = repetitive_msg
+                .lock()
+                .expect("repetitive_msg mutex poisoned")
+                .clone();
             Err(classify_subprocess_error(
                 None,
                 "Claude Code exited without producing a result",
@@ -634,12 +644,16 @@ impl TailoringRunner for CliClaudeRunner {
         args.push("-p".to_string());
         args.push(prompt.to_string());
 
-        let event_tx = self.event_tx.lock().unwrap().clone();
+        let event_tx = self
+            .event_tx
+            .lock()
+            .expect("event_tx mutex poisoned")
+            .clone();
         run_subprocess_streaming(&self.binary_path, self.timeout, &args, event_tx).await
     }
 
     fn set_event_tx(&self, tx: UnboundedSender<String>) {
-        *self.event_tx.lock().unwrap() = Some(tx);
+        *self.event_tx.lock().expect("event_tx mutex poisoned") = Some(tx);
     }
 }
 
