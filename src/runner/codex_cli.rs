@@ -111,7 +111,7 @@ pub fn check_codex_auth(api_key: Option<&str>) -> Result<(), ActualError> {
 }
 
 /// Inner implementation that accepts an explicit auth file path for testability.
-fn check_codex_auth_inner(
+pub(crate) fn check_codex_auth_inner(
     api_key: Option<&str>,
     auth_path: Option<&std::path::Path>,
 ) -> Result<(), ActualError> {
