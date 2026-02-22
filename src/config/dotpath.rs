@@ -77,6 +77,7 @@ define_config_keys! {
     (Runner,                "runner"),
     (AnthropicApiKey,       "anthropic_api_key"),
     (OpenaiApiKey,          "openai_api_key"),
+    (CursorApiKey,          "cursor_api_key"),
     (MaxTurns,              "max_turns"),
 }
 
@@ -157,6 +158,10 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::OpenaiApiKey => config
             .openai_api_key
+            .clone()
+            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
+        ConfigKey::CursorApiKey => config
+            .cursor_api_key
             .clone()
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::MaxTurns => config
@@ -317,6 +322,9 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
         }
         ConfigKey::OpenaiApiKey => {
             config.openai_api_key = Some(value.to_string());
+        }
+        ConfigKey::CursorApiKey => {
+            config.cursor_api_key = Some(value.to_string());
         }
         ConfigKey::MaxTurns => {
             let v = value.parse::<u32>().map_err(|_| {
@@ -898,6 +906,7 @@ mod tests {
             ("runner", "anthropic-api"),
             ("anthropic_api_key", "sk-ant-test"),
             ("openai_api_key", "sk-openai-test"),
+            ("cursor_api_key", "cursor-test-key"),
             ("max_turns", "10"),
         ];
 
@@ -1030,6 +1039,23 @@ mod tests {
     fn test_get_unset_openai_api_key() {
         let config = Config::default();
         let err = get(&config, "openai_api_key").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    // --- cursor_api_key tests ---
+
+    #[test]
+    fn test_set_and_get_cursor_api_key() {
+        let mut config = Config::default();
+        set(&mut config, "cursor_api_key", "cursor-test-key").unwrap();
+        assert_eq!(get(&config, "cursor_api_key").unwrap(), "cursor-test-key");
+    }
+
+    #[test]
+    fn test_get_unset_cursor_api_key() {
+        let config = Config::default();
+        let err = get(&config, "cursor_api_key").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("not set"), "got: {msg}");
     }
