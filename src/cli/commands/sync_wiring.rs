@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn infer_runner_codex_model_via_openai_model() {
         assert_eq!(
-            infer_runner_from_config(None, Some("codex-mini-latest"), None, None).unwrap(),
+            infer_runner_from_config(None, Some("gpt-5.2-codex"), None, None).unwrap(),
             RunnerChoice::CodexCli,
         );
     }
@@ -640,9 +640,9 @@ mod tests {
     #[test]
     fn infer_runner_cfg_model_codex_selects_codex() {
         assert_eq!(
-            infer_runner_from_config(None, None, None, Some("codex-mini-latest")).unwrap(),
+            infer_runner_from_config(None, None, None, Some("gpt-5.2-codex")).unwrap(),
             RunnerChoice::CodexCli,
-            "model: codex-mini-latest should auto-select CodexCli runner"
+            "model: gpt-5.2-codex should auto-select CodexCli runner"
         );
     }
 
@@ -673,16 +673,16 @@ mod tests {
     }
 
     #[test]
-    fn require_api_key_no_key_with_codex_mini_latest_errors() {
-        // Specifically test codex-mini-latest (the model from the bug report).
-        let err = require_api_key_for_model(None, Some("codex-mini-latest")).unwrap_err();
+    fn require_api_key_no_key_with_gpt_codex_model_errors() {
+        // Test with current gpt-*-codex naming pattern.
+        let err = require_api_key_for_model(None, Some("gpt-5.2-codex")).unwrap_err();
         assert!(
-            matches!(err, ActualError::CodexCliModelRequiresApiKey { ref model } if model == "codex-mini-latest"),
-            "expected CodexCliModelRequiresApiKey for codex-mini-latest, got: {err:?}"
+            matches!(err, ActualError::CodexCliModelRequiresApiKey { ref model } if model == "gpt-5.2-codex"),
+            "expected CodexCliModelRequiresApiKey for gpt-5.2-codex, got: {err:?}"
         );
         let msg = err.to_string();
         assert!(
-            msg.contains("codex-mini-latest"),
+            msg.contains("gpt-5.2-codex"),
             "model name must appear in error message: {msg}"
         );
         assert!(

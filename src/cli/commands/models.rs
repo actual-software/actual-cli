@@ -59,11 +59,22 @@ static RUNNER_FAMILIES: &[RunnerFamily] = &[
         ],
     },
     RunnerFamily {
-        name: "OpenAI / Codex",
-        runners: &["openai-api", "codex-cli"],
+        name: "OpenAI",
+        runners: &["openai-api"],
         models: &[
             ModelEntry::default_model("gpt-5.2"),
-            ModelEntry::new("codex-mini-latest"),
+            ModelEntry::new("gpt-5-mini"),
+            ModelEntry::new("gpt-4.1"),
+        ],
+    },
+    RunnerFamily {
+        name: "Codex CLI",
+        runners: &["codex-cli"],
+        models: &[
+            ModelEntry::default_model("gpt-5.2-codex"),
+            ModelEntry::new("gpt-5.1-codex"),
+            ModelEntry::new("gpt-5.1-codex-mini"),
+            ModelEntry::new("gpt-5-codex"),
         ],
     },
     RunnerFamily {
@@ -178,7 +189,7 @@ mod tests {
     fn test_exactly_one_default_per_openai_family() {
         let openai_family = RUNNER_FAMILIES
             .iter()
-            .find(|f| f.name == "OpenAI / Codex")
+            .find(|f| f.name == "OpenAI")
             .expect("should have OpenAI family");
         let defaults: Vec<_> = openai_family
             .models
@@ -193,6 +204,28 @@ mod tests {
         assert_eq!(
             defaults[0].id, "gpt-5.2",
             "default OpenAI model should be gpt-5.2"
+        );
+    }
+
+    #[test]
+    fn test_exactly_one_default_per_codex_family() {
+        let codex_family = RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "Codex CLI")
+            .expect("should have Codex CLI family");
+        let defaults: Vec<_> = codex_family
+            .models
+            .iter()
+            .filter(|m| m.is_default)
+            .collect();
+        assert_eq!(
+            defaults.len(),
+            1,
+            "Codex CLI family should have exactly one default"
+        );
+        assert_eq!(
+            defaults[0].id, "gpt-5.2-codex",
+            "default Codex model should be gpt-5.2-codex"
         );
     }
 
@@ -250,17 +283,37 @@ mod tests {
     }
 
     #[test]
-    fn test_openai_codex_models_present() {
+    fn test_openai_models_present() {
         let openai_family = RUNNER_FAMILIES
             .iter()
-            .find(|f| f.name == "OpenAI / Codex")
+            .find(|f| f.name == "OpenAI")
             .expect("should have OpenAI family");
         let ids: Vec<&str> = openai_family.models.iter().map(|m| m.id).collect();
         assert!(ids.contains(&"gpt-5.2"), "should include gpt-5.2");
+        assert!(ids.contains(&"gpt-5-mini"), "should include gpt-5-mini");
+        assert!(ids.contains(&"gpt-4.1"), "should include gpt-4.1");
+    }
+
+    #[test]
+    fn test_codex_cli_models_present() {
+        let codex_family = RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "Codex CLI")
+            .expect("should have Codex CLI family");
+        let ids: Vec<&str> = codex_family.models.iter().map(|m| m.id).collect();
         assert!(
-            ids.contains(&"codex-mini-latest"),
-            "should include codex-mini-latest"
+            ids.contains(&"gpt-5.2-codex"),
+            "should include gpt-5.2-codex"
         );
+        assert!(
+            ids.contains(&"gpt-5.1-codex"),
+            "should include gpt-5.1-codex"
+        );
+        assert!(
+            ids.contains(&"gpt-5.1-codex-mini"),
+            "should include gpt-5.1-codex-mini"
+        );
+        assert!(ids.contains(&"gpt-5-codex"), "should include gpt-5-codex");
     }
 
     // --- known_model_names() tests ---
@@ -285,7 +338,17 @@ mod tests {
     fn test_known_model_names_includes_openai_models() {
         let names = known_model_names();
         assert!(names.contains(&"gpt-5.2"));
-        assert!(names.contains(&"codex-mini-latest"));
+        assert!(names.contains(&"gpt-5-mini"));
+        assert!(names.contains(&"gpt-4.1"));
+    }
+
+    #[test]
+    fn test_known_model_names_includes_codex_models() {
+        let names = known_model_names();
+        assert!(names.contains(&"gpt-5.2-codex"));
+        assert!(names.contains(&"gpt-5.1-codex"));
+        assert!(names.contains(&"gpt-5.1-codex-mini"));
+        assert!(names.contains(&"gpt-5-codex"));
     }
 
     #[test]
