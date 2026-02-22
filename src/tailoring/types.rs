@@ -81,6 +81,7 @@ pub struct TailoringOutput {
     /// ADRs that were not applicable to this repository
     pub skipped_adrs: Vec<SkippedAdr>,
     /// Summary statistics of the tailoring operation
+    #[serde(default)]
     pub summary: TailoringSummary,
 }
 
@@ -109,7 +110,7 @@ pub struct SkippedAdr {
 }
 
 /// Summary statistics for the tailoring operation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct TailoringSummary {
     /// Total number of ADRs provided as input
     pub total_input: usize,
