@@ -51,6 +51,9 @@ macro_rules! define_config_keys {
                     "rejected_adrs" | "cached_analysis" => Err(ActualError::ConfigError(format!(
                         "complex config key, use config file directly: {path}"
                     ))),
+                    "openai_model" => Err(ActualError::ConfigError(
+                        "openai_model is deprecated; use model instead: actual config set model <value>".to_string()
+                    )),
                     _ => Err(ActualError::ConfigError(format!(
                         "unknown config key: {path}"
                     ))),
@@ -63,7 +66,6 @@ macro_rules! define_config_keys {
 define_config_keys! {
     (ApiUrl,                "api_url"),
     (Model,                 "model"),
-    (OpenaiModel,           "openai_model"),
     (CursorModel,           "cursor_model"),
     (BatchSize,             "batch_size"),
     (Concurrency,           "concurrency"),
@@ -93,10 +95,6 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::Model => config
             .model
-            .clone()
-            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        ConfigKey::OpenaiModel => config
-            .openai_model
             .clone()
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::CursorModel => config
@@ -187,9 +185,6 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
                     "Warning: '{value}' is not a known model name. Run 'actual models' to see known models."
                 );
             }
-        }
-        ConfigKey::OpenaiModel => {
-            config.openai_model = Some(value.to_string());
         }
         ConfigKey::CursorModel => {
             config.cursor_model = Some(value.to_string());
@@ -892,7 +887,6 @@ mod tests {
         let valid_values: &[(&str, &str)] = &[
             ("api_url", "https://example.com"),
             ("model", "claude-3"),
-            ("openai_model", "gpt-5"),
             ("cursor_model", "cursor-small"),
             ("batch_size", "5"),
             ("concurrency", "4"),
@@ -1083,22 +1077,18 @@ mod tests {
         assert_eq!(config.max_turns, Some(1));
     }
 
-    // --- openai_model tests ---
+    // --- openai_model deprecation tests ---
 
     #[test]
-    fn test_set_and_get_openai_model() {
+    fn test_set_openai_model_returns_deprecation_error() {
         let mut config = Config::default();
-        set(&mut config, "openai_model", "gpt-5.2").unwrap();
-        assert_eq!(get(&config, "openai_model").unwrap(), "gpt-5.2");
-        assert_eq!(config.openai_model, Some("gpt-5.2".to_string()));
-    }
-
-    #[test]
-    fn test_get_unset_openai_model() {
-        let config = Config::default();
-        let err = get(&config, "openai_model").unwrap_err();
+        let err = set(&mut config, "openai_model", "gpt-5.2").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("not set"), "got: {msg}");
+        assert!(msg.contains("openai_model is deprecated"), "got: {msg}");
+        assert!(
+            msg.contains("model"),
+            "deprecation error should mention 'model': {msg}"
+        );
     }
 
     // --- cursor_model tests ---
