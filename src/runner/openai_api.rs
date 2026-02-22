@@ -199,7 +199,7 @@ impl TailoringRunner for OpenAiApiRunner {
         // Ignore `_model_override` — it comes from `ConcurrentTailoringConfig`
         // which resolves from `config.model` (a Claude Code alias like "haiku").
         // The OpenAI runner's `self.model` was already correctly resolved in
-        // `sync_wiring` from `--model` flag > `config.openai_model` > default.
+        // `sync_wiring` from `--model` flag > `config.model` > default.
         let model = self.model.clone();
         let mut schema_value: Value = serde_json::from_str(schema)?;
         inject_additional_properties_false(&mut schema_value);

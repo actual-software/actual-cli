@@ -212,8 +212,6 @@ When determining which runner to use, the CLI checks in this priority order:
 4. **`--runner` CLI flag or `runner` config key**: explicit runner choice
 5. **Default**: claude-cli
 
-> **Note:** `openai_model` config key was removed. Use `model` instead. Existing config files with `openai_model:` are automatically migrated; writing `actual config set openai_model` returns a deprecation error.
-
 The `--runner` flag always takes precedence when explicitly set alongside `--model`. But when only `--model` is provided, the runner is inferred from the model name.
 
 ## Model-to-Runner Inference

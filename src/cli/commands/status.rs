@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_format_config_section_verbose_shows_gpt_model_in_model_row() {
-        // Now that openai_model is removed, a gpt model set via `model` shows in the Model row.
+        // A gpt model set via config.model shows in the Model row.
         let cfg = Config {
             model: Some("gpt-5".to_string()),
             ..Config::default()
@@ -598,18 +598,6 @@ mod tests {
         assert!(
             !p.contains("OpenAI model"),
             "should NOT show a separate OpenAI model row: {p}"
-        );
-    }
-
-    #[test]
-    fn test_format_config_section_verbose_no_openai_model_row() {
-        let cfg = Config::default();
-        let path = PathBuf::from("/tmp/test/config.yaml");
-        let output = format_config_section(&cfg, &path, true, true, 80);
-        let p = plain(&output);
-        assert!(
-            !p.contains("OpenAI model"),
-            "OpenAI model row should never appear after deprecation: {p}"
         );
     }
 
