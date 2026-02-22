@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::analysis::types::{Framework, FrameworkCategory};
 
-use super::manifests::DependencyInfo;
+use super::manifests::{DependencyInfo, ManifestSource};
 use super::registry;
 
 /// Detect frameworks from parsed dependency information.
@@ -23,7 +23,7 @@ pub fn detect_frameworks(deps: &DependencyInfo, project_dir: &Path) -> Vec<Frame
                 frameworks.push(Framework {
                     name: sig.framework_name.to_string(),
                     category: FrameworkCategory::from_str_insensitive(sig.category),
-                    source: None,
+                    source: deps.sources.get(dep).cloned(),
                 });
             }
         }
@@ -93,7 +93,7 @@ pub fn detect_config_frameworks(project_dir: &Path) -> Vec<Framework> {
             frameworks.push(Framework {
                 name: name.to_string(),
                 category: FrameworkCategory::from_str_insensitive(category),
-                source: None,
+                source: Some(ManifestSource::ConfigFile),
             });
         }
     }
@@ -107,7 +107,7 @@ pub fn detect_config_frameworks(project_dir: &Path) -> Vec<Framework> {
             frameworks.push(Framework {
                 name: "terraform".to_string(),
                 category: FrameworkCategory::from_str_insensitive("devops"),
-                source: None,
+                source: Some(ManifestSource::ConfigFile),
             });
         }
     }
@@ -117,7 +117,7 @@ pub fn detect_config_frameworks(project_dir: &Path) -> Vec<Framework> {
         frameworks.push(Framework {
             name: "github-actions".to_string(),
             category: FrameworkCategory::from_str_insensitive("devops"),
-            source: None,
+            source: Some(ManifestSource::ConfigFile),
         });
     }
 
@@ -153,6 +153,7 @@ pub fn detect_package_manager(project_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::fs;
     use tempfile::tempdir;
 
@@ -393,5 +394,91 @@ mod tests {
 
         let frameworks = detect_frameworks(&deps, dir.path());
         assert!(frameworks.is_empty());
+    }
+
+    #[test]
+    fn test_source_propagated_from_dependency_info() {
+        let dir = tempdir().unwrap();
+        let mut sources = HashMap::new();
+        sources.insert("tokio".to_string(), ManifestSource::CargoToml);
+        let deps = DependencyInfo {
+            dependencies: vec!["tokio".to_string()],
+            dev_dependencies: vec![],
+            sources,
+        };
+
+        let frameworks = detect_frameworks(&deps, dir.path());
+        let tokio_fw = frameworks.iter().find(|f| f.name == "tokio").unwrap();
+        assert_eq!(tokio_fw.source, Some(ManifestSource::CargoToml));
+    }
+
+    #[test]
+    fn test_source_none_when_not_in_sources_map() {
+        let dir = tempdir().unwrap();
+        // "react" is in the registry but not in the sources map
+        let deps = DependencyInfo {
+            dependencies: vec!["react".to_string()],
+            dev_dependencies: vec![],
+            sources: HashMap::new(),
+        };
+
+        let frameworks = detect_frameworks(&deps, dir.path());
+        let react_fw = frameworks.iter().find(|f| f.name == "react").unwrap();
+        assert_eq!(react_fw.source, None);
+    }
+
+    #[test]
+    fn test_config_framework_source_is_config_file() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Dockerfile"), "FROM node:18").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let docker = frameworks.iter().find(|f| f.name == "docker").unwrap();
+        assert_eq!(docker.source, Some(ManifestSource::ConfigFile));
+    }
+
+    #[test]
+    fn test_terraform_source_is_config_file() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("main.tf"), "resource {}").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let tf = frameworks.iter().find(|f| f.name == "terraform").unwrap();
+        assert_eq!(tf.source, Some(ManifestSource::ConfigFile));
+    }
+
+    #[test]
+    fn test_github_actions_source_is_config_file() {
+        let dir = tempdir().unwrap();
+        let workflows = dir.path().join(".github/workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        fs::write(workflows.join("ci.yml"), "name: CI").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let gha = frameworks
+            .iter()
+            .find(|f| f.name == "github-actions")
+            .unwrap();
+        assert_eq!(gha.source, Some(ManifestSource::ConfigFile));
+    }
+
+    #[test]
+    fn test_mixed_sources_registry_and_config() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Dockerfile"), "FROM node:18").unwrap();
+
+        let mut sources = HashMap::new();
+        sources.insert("express".to_string(), ManifestSource::PackageJson);
+        let deps = DependencyInfo {
+            dependencies: vec!["express".to_string()],
+            dev_dependencies: vec![],
+            sources,
+        };
+
+        let frameworks = detect_frameworks(&deps, dir.path());
+        let express = frameworks.iter().find(|f| f.name == "express").unwrap();
+        assert_eq!(express.source, Some(ManifestSource::PackageJson));
+        let docker = frameworks.iter().find(|f| f.name == "docker").unwrap();
+        assert_eq!(docker.source, Some(ManifestSource::ConfigFile));
     }
 }
