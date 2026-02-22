@@ -6520,4 +6520,54 @@ mod tests {
             "run_sync with --force should auto-select and succeed: {result:?}"
         );
     }
+
+    /// Verify that telemetry fires correctly when git remote is configured.
+    ///
+    /// Sets up a real git repo with a remote origin URL so that
+    /// `git remote get-url origin` succeeds and returns a non-empty string,
+    /// exercising the `Some(s)` branch in the repo_url extraction block.
+    #[test]
+    fn test_run_sync_telemetry_fires_with_git_remote() {
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::testutil::EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(EMPTY_MATCH_RESPONSE)
+            .create();
+        let tel_mock = server
+            .mock("POST", "/counter/record")
+            .with_status(200)
+            .expect(1)
+            .create();
+
+        let dir = tempfile::tempdir().unwrap();
+        // Initialize a git repo with a remote so get-url origin returns a
+        // non-empty string, covering the Some(s) branch in repo_url extraction.
+        init_git_repo(dir.path());
+        std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let cfg_path = dir.path().join("config.yaml");
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+
+        let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None, None);
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        tel_mock.assert();
+    }
 }
