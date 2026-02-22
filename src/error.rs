@@ -19,6 +19,9 @@ pub enum ActualError {
     #[error("Codex CLI is not authenticated. Set OPENAI_API_KEY or run: codex login")]
     CodexNotAuthenticated,
 
+    #[error("Cursor CLI is not authenticated. Set CURSOR_API_KEY or run: cursor-agent login")]
+    CursorNotAuthenticated,
+
     #[error("API key not set. Set {env_var} or configure the api key in your config")]
     ApiKeyMissing { env_var: String },
 
@@ -80,6 +83,7 @@ impl ActualError {
             | Self::CodexNotFound
             | Self::CodexNotAuthenticated
             | Self::CursorNotFound
+            | Self::CursorNotAuthenticated
             | Self::ApiKeyMissing { .. }
             | Self::CodexCliModelRequiresApiKey { .. } => 2,
             Self::CreditBalanceTooLow { .. } => 3,
@@ -98,6 +102,9 @@ impl ActualError {
             Self::ClaudeNotAuthenticated => Some("claude auth login"),
             Self::CodexNotAuthenticated => {
                 Some("Set OPENAI_API_KEY or run: codex login")
+            }
+            Self::CursorNotAuthenticated => {
+                Some("Set CURSOR_API_KEY or run: cursor-agent login")
             }
             Self::ApiKeyMissing { env_var } => {
                 // We can't return a string containing env_var dynamically from a &str hint,
