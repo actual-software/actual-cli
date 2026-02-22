@@ -185,6 +185,13 @@ mod tests {
     }
 
     #[test]
+    fn confirm_defaults_to_false_for_unrecognised_input() {
+        // Exercises the `_ => Ok(false)` fallback arm in `TerminalIO::confirm`.
+        let term = MockTerminal::new(vec!["maybe"]);
+        assert!(!term.confirm("proceed?").unwrap());
+    }
+
+    #[test]
     fn confirm_with_cancel_default_wraps_confirm_result_in_some() {
         // The default `confirm_with_cancel` delegates to `confirm` and wraps in `Some`.
         // MockTerminal uses the default implementation (does not override it).
