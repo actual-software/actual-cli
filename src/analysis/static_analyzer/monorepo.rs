@@ -96,7 +96,7 @@ fn detect_pnpm(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Error> {
         packages: Option<Vec<String>>,
     }
 
-    let workspace: PnpmWorkspace = serde_yaml::from_str(&content).map_err(|e| {
+    let workspace: PnpmWorkspace = serde_yml::from_str(&content).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("invalid pnpm-workspace.yaml: {e}"),

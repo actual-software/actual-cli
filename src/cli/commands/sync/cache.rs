@@ -69,7 +69,7 @@ pub(crate) fn compute_repo_key_with_timeout(
     format!("{:x}", hasher.finalize())
 }
 
-/// Serialize a value to `serde_yaml::Value`, logging a warning and returning
+/// Serialize a value to `serde_yml::Value`, logging a warning and returning
 /// `None` if serialization fails.
 ///
 /// In practice `TailoringOutput` contains only string/number/vec fields and
@@ -77,8 +77,8 @@ pub(crate) fn compute_repo_key_with_timeout(
 /// type change that adds a non-YAML-representable field (e.g. `f64::NAN`).
 pub(crate) fn serialize_tailoring_output<T: serde::Serialize>(
     output: &T,
-) -> Option<serde_yaml::Value> {
-    match serde_yaml::to_value(output) {
+) -> Option<serde_yml::Value> {
+    match serde_yml::to_value(output) {
         Ok(v) => Some(v),
         Err(e) => {
             // Gap 5: route through tracing so the warning is visible in the log

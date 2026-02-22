@@ -917,13 +917,13 @@ mod tests {
     }
 
     /// Backward-compat regression test: old cache files (written when analysis was stored as
-    /// serde_yaml::Value) can still be deserialized correctly because RepoAnalysis serializes
+    /// serde_yml::Value) can still be deserialized correctly because RepoAnalysis serializes
     /// to the same YAML format. This test constructs the YAML representation directly and
     /// deserializes it into a Config containing a CachedAnalysis with a typed RepoAnalysis.
     #[test]
     fn test_old_cache_format_deserializes_correctly() {
         // Construct the YAML that an old-format cache entry would have produced.
-        // The on-disk format is identical: serde_yaml::Value would serialize RepoAnalysis
+        // The on-disk format is identical: serde_yml::Value would serialize RepoAnalysis
         // to the same YAML structure that the typed RepoAnalysis field now deserializes.
         let yaml = r#"
 cached_analysis:
@@ -942,7 +942,7 @@ cached_analysis:
   analyzed_at: "2024-01-01T00:00:00Z"
 "#;
 
-        let cfg: config::Config = serde_yaml::from_str(yaml).expect("should parse old cache YAML");
+        let cfg: config::Config = serde_yml::from_str(yaml).expect("should parse old cache YAML");
         let cached = cfg.cached_analysis.expect("should have cached_analysis");
         assert_eq!(cached.repo_path, "/home/user/project");
         assert_eq!(cached.head_commit.as_deref(), Some("abc123def456"));

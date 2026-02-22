@@ -82,7 +82,7 @@ pub fn load_from(path: &Path) -> Result<Config, ActualError> {
         _ => {}
     }
     match std::fs::read_to_string(path) {
-        Ok(contents) => serde_yaml::from_str(&contents)
+        Ok(contents) => serde_yml::from_str(&contents)
             .map_err(|e| config_error(format!("Failed to parse config YAML: {e}"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let default = Config::default();
@@ -111,7 +111,7 @@ pub fn save_to(config: &Config, path: &Path) -> Result<(), ActualError> {
             .map_err(|e| config_error(format!("Failed to create config directory: {e}")))?;
     }
 
-    let yaml = serde_yaml::to_string(config)
+    let yaml = serde_yml::to_string(config)
         .map_err(|e| config_error(format!("Failed to serialize config to YAML: {e}")))?;
     write_config_secure(path, &yaml)?;
 
@@ -539,27 +539,27 @@ mod tests {
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");
 
-        // Construct a CachedTailoring with a serde_yaml::Value that cannot be
-        // serialized by serde_yaml 0.9 to YAML: a Mapping whose key is itself a
-        // Mapping. serde_yaml cannot emit mapping keys that are themselves
+        // Construct a CachedTailoring with a serde_yml::Value that cannot be
+        // serialized by serde_yml 0.9 to YAML: a Mapping whose key is itself a
+        // Mapping. serde_yml cannot emit mapping keys that are themselves
         // mappings (not valid YAML) and returns an error.
-        let mut inner_key = serde_yaml::Mapping::new();
+        let mut inner_key = serde_yml::Mapping::new();
         inner_key.insert(
-            serde_yaml::Value::String("k".to_string()),
-            serde_yaml::Value::String("v".to_string()),
+            serde_yml::Value::String("k".to_string()),
+            serde_yml::Value::String("v".to_string()),
         );
-        let mut outer = serde_yaml::Mapping::new();
+        let mut outer = serde_yml::Mapping::new();
         outer.insert(
-            serde_yaml::Value::Mapping(inner_key),
-            serde_yaml::Value::String("value".to_string()),
+            serde_yml::Value::Mapping(inner_key),
+            serde_yml::Value::String("value".to_string()),
         );
-        let bad_value = serde_yaml::Value::Mapping(outer);
+        let bad_value = serde_yml::Value::Mapping(outer);
 
         // Verify the value is actually unserializable (guards against library
         // version changes that may start accepting this).
         assert!(
-            serde_yaml::to_string(&bad_value).is_err(),
-            "serde_yaml must reject a mapping with mapping keys for this test to be valid"
+            serde_yml::to_string(&bad_value).is_err(),
+            "serde_yml must reject a mapping with mapping keys for this test to be valid"
         );
 
         let config = Config {
