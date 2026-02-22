@@ -5,6 +5,24 @@ use std::fmt::Write;
 use super::theme;
 use console;
 
+/// Per-ADR change detail within a file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdrDiff {
+    pub adr_id: String,
+    pub change: AdrChange,
+    pub old_content: Option<String>,
+    pub new_content: Option<String>,
+}
+
+/// Type of change for a single ADR section.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AdrChange {
+    Added,
+    Updated,
+    Unchanged,
+    Removed,
+}
+
 /// Per-file change summary for display formatting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileDiff {
@@ -14,6 +32,8 @@ pub struct FileDiff {
     pub old_content: Option<String>,
     /// New managed content from the tailoring output.
     pub new_content: String,
+    /// Per-ADR change details (empty for backward compat with `from_change_detection`).
+    pub adr_diffs: Vec<AdrDiff>,
 }
 
 /// Categorized change type for a file.
@@ -68,6 +88,99 @@ impl FileDiff {
             change,
             old_content,
             new_content,
+            adr_diffs: vec![],
+        }
+    }
+
+    /// Construct a [`FileDiff`] from old/new per-ADR sections, producing
+    /// per-ADR change details (`AdrDiff`) alongside the file-level summary.
+    ///
+    /// * `detection` – the `ChangeDetection` from `markers::detect_changes`.
+    /// * `is_new_file` – set when the old content was `None` (first sync).
+    /// * `old_sections` – per-ADR sections extracted from the existing managed content.
+    /// * `new_sections` – per-ADR sections from the new tailoring output.
+    /// * `old_content` – old managed content stripped of metadata (for text diffing).
+    /// * `new_content` – new managed content from the tailoring output.
+    pub fn from_sections(
+        path: &str,
+        detection: &ChangeDetection,
+        is_new_file: bool,
+        old_sections: &[crate::generation::markers::AdrSection],
+        new_sections: &[crate::tailoring::types::AdrSection],
+        old_content: Option<String>,
+        new_content: String,
+    ) -> Self {
+        let change = if is_new_file {
+            FileChange::NewFile {
+                rule_count: detection.new_ids.len(),
+            }
+        } else if detection.new_ids.is_empty() && detection.removed_ids.is_empty() {
+            FileChange::NoChanges
+        } else {
+            FileChange::Update {
+                added: detection.new_ids.len(),
+                updated: detection.updated_ids.len(),
+                removed: detection.removed_ids.len(),
+            }
+        };
+
+        // Build a lookup from old sections by ID
+        let old_by_id: std::collections::HashMap<&str, &str> = old_sections
+            .iter()
+            .map(|s| (s.id.as_str(), s.content.as_str()))
+            .collect();
+
+        let new_by_id: std::collections::HashSet<&str> =
+            new_sections.iter().map(|s| s.adr_id.as_str()).collect();
+
+        let mut adr_diffs = Vec::new();
+
+        // Process new sections: Added, Updated, or Unchanged
+        for new_sec in new_sections {
+            if let Some(&old_content_str) = old_by_id.get(new_sec.adr_id.as_str()) {
+                if old_content_str == new_sec.content {
+                    adr_diffs.push(AdrDiff {
+                        adr_id: new_sec.adr_id.clone(),
+                        change: AdrChange::Unchanged,
+                        old_content: Some(old_content_str.to_string()),
+                        new_content: Some(new_sec.content.clone()),
+                    });
+                } else {
+                    adr_diffs.push(AdrDiff {
+                        adr_id: new_sec.adr_id.clone(),
+                        change: AdrChange::Updated,
+                        old_content: Some(old_content_str.to_string()),
+                        new_content: Some(new_sec.content.clone()),
+                    });
+                }
+            } else {
+                adr_diffs.push(AdrDiff {
+                    adr_id: new_sec.adr_id.clone(),
+                    change: AdrChange::Added,
+                    old_content: None,
+                    new_content: Some(new_sec.content.clone()),
+                });
+            }
+        }
+
+        // Process removed sections: old sections not in new set
+        for old_sec in old_sections {
+            if !new_by_id.contains(old_sec.id.as_str()) {
+                adr_diffs.push(AdrDiff {
+                    adr_id: old_sec.id.clone(),
+                    change: AdrChange::Removed,
+                    old_content: Some(old_sec.content.clone()),
+                    new_content: None,
+                });
+            }
+        }
+
+        Self {
+            path: path.to_string(),
+            change,
+            old_content,
+            new_content,
+            adr_diffs,
         }
     }
 }
@@ -133,11 +246,82 @@ pub fn format_content_diff(old_content: &str, new_content: &str) -> Option<Vec<S
     Some(lines)
 }
 
+/// Format per-ADR change details as styled lines.
+///
+/// - Added: green `+ [adr-id] added` with content additions
+/// - Updated: yellow `~ [adr-id] updated` with content diff
+/// - Removed: red `- [adr-id] removed`
+/// - Unchanged: skipped (no output)
+///
+/// ADR IDs are abbreviated to the first 8 characters for compact display.
+pub fn format_adr_diffs(adr_diffs: &[AdrDiff]) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    for adr_diff in adr_diffs {
+        let short_id = if adr_diff.adr_id.len() > 8 {
+            &adr_diff.adr_id[..8]
+        } else {
+            &adr_diff.adr_id
+        };
+
+        match &adr_diff.change {
+            AdrChange::Added => {
+                lines.push(format!(
+                    "{}",
+                    theme::success(format!("+ [{short_id}] added"))
+                ));
+                // Show content additions if available
+                if let Some(content) = &adr_diff.new_content {
+                    for line in content.lines().take(3) {
+                        let safe = console::strip_ansi_codes(line);
+                        lines.push(format!("  {}", theme::success(format!("+ {safe}"))));
+                    }
+                    let total_lines = content.lines().count();
+                    if total_lines > 3 {
+                        lines.push(format!("  ... and {} more lines", total_lines - 3));
+                    }
+                }
+            }
+            AdrChange::Updated => {
+                lines.push(format!(
+                    "{}",
+                    theme::warning(format!("~ [{short_id}] updated"))
+                ));
+                // Show content diff if both old and new are available
+                if let (Some(old), Some(new)) = (&adr_diff.old_content, &adr_diff.new_content) {
+                    if let Some(diff_lines) = format_content_diff(old, new) {
+                        for dl in diff_lines.iter().take(5) {
+                            lines.push(format!("  {dl}"));
+                        }
+                        if diff_lines.len() > 5 {
+                            lines.push(format!("  ... and {} more changes", diff_lines.len() - 5));
+                        }
+                    }
+                }
+            }
+            AdrChange::Removed => {
+                lines.push(format!(
+                    "{}",
+                    theme::error(format!("- [{short_id}] removed"))
+                ));
+            }
+            AdrChange::Unchanged => {
+                // Skip unchanged sections
+            }
+        }
+    }
+
+    lines
+}
+
 /// Format a single file's change summary.
 ///
 /// Returns a styled, human-readable string suitable for terminal output.
 /// The header line has the path left-aligned and compact counts right-aligned.
 /// Content-level diffs use tree-drawing prefixes (`├─` / `└─`).
+///
+/// When `adr_diffs` is non-empty, per-ADR display is used instead of the
+/// whole-file diff for `Update` and `NewFile` variants.
 pub fn format_file_diff(diff: &FileDiff) -> String {
     let mut output = String::new();
     let safe_path = console::strip_ansi_codes(&diff.path);
@@ -146,7 +330,12 @@ pub fn format_file_diff(diff: &FileDiff) -> String {
         FileChange::NewFile { rule_count } => {
             let noun = if *rule_count == 1 { "rule" } else { "rules" };
             let _ = writeln!(output, "{safe_path}  (new file) + {rule_count} {noun}");
-            if let Some(diff_lines) = format_content_diff("", &diff.new_content) {
+            if !diff.adr_diffs.is_empty() {
+                let adr_lines = format_adr_diffs(&diff.adr_diffs);
+                if !adr_lines.is_empty() {
+                    append_tree_lines(&mut output, &adr_lines);
+                }
+            } else if let Some(diff_lines) = format_content_diff("", &diff.new_content) {
                 append_tree_lines(&mut output, &diff_lines);
             }
         }
@@ -159,7 +348,12 @@ pub fn format_file_diff(diff: &FileDiff) -> String {
                 output,
                 "{safe_path}  + {added} new  ~ {updated} upd  - {removed} rm",
             );
-            if let Some(old) = &diff.old_content {
+            if !diff.adr_diffs.is_empty() {
+                let adr_lines = format_adr_diffs(&diff.adr_diffs);
+                if !adr_lines.is_empty() {
+                    append_tree_lines(&mut output, &adr_lines);
+                }
+            } else if let Some(old) = &diff.old_content {
                 if let Some(diff_lines) = format_content_diff(old, &diff.new_content) {
                     append_tree_lines(&mut output, &diff_lines);
                 }
@@ -290,6 +484,7 @@ mod tests {
             change: FileChange::NewFile { rule_count: 8 },
             old_content: None,
             new_content: "some rules".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -311,6 +506,7 @@ mod tests {
             change: FileChange::NewFile { rule_count: 1 },
             old_content: None,
             new_content: "brand new rule\n".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -331,6 +527,7 @@ mod tests {
             },
             old_content: Some("old content\n".to_string()),
             new_content: "new content\n".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -350,6 +547,7 @@ mod tests {
             },
             old_content: Some("old line\n".to_string()),
             new_content: "new line\n".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -379,6 +577,7 @@ mod tests {
             },
             old_content: None,
             new_content: "new content\n".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -408,6 +607,7 @@ mod tests {
             },
             old_content: Some("same content\n".to_string()),
             new_content: "same content\n".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -433,6 +633,7 @@ mod tests {
             change: FileChange::NoChanges,
             old_content: Some("same".to_string()),
             new_content: "same".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         assert!(
@@ -448,6 +649,7 @@ mod tests {
             change: FileChange::NewFile { rule_count: 1 },
             old_content: None,
             new_content: String::new(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         assert!(
@@ -541,6 +743,7 @@ mod tests {
                 },
                 old_content: Some(String::new()),
                 new_content: String::new(),
+                adr_diffs: vec![],
             },
             FileDiff {
                 path: "apps/web/CLAUDE.md".to_string(),
@@ -551,12 +754,14 @@ mod tests {
                 },
                 old_content: Some(String::new()),
                 new_content: String::new(),
+                adr_diffs: vec![],
             },
             FileDiff {
                 path: "apps/api/CLAUDE.md".to_string(),
                 change: FileChange::NewFile { rule_count: 8 },
                 old_content: None,
                 new_content: String::new(),
+                adr_diffs: vec![],
             },
         ];
         let output = format_diff_summary(&diffs);
@@ -593,6 +798,7 @@ mod tests {
             },
             old_content: Some(String::new()),
             new_content: String::new(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -613,6 +819,7 @@ mod tests {
             },
             old_content: Some(String::new()),
             new_content: "only line\n".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -638,6 +845,7 @@ mod tests {
             },
             old_content: Some("old line\n".to_string()),
             new_content: "new line\n".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -659,6 +867,7 @@ mod tests {
             change: FileChange::NoChanges,
             old_content: Some("same".to_string()),
             new_content: "same".to_string(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         // Should NOT start with 2-space indent
@@ -675,6 +884,7 @@ mod tests {
             change: FileChange::NewFile { rule_count: 8 },
             old_content: None,
             new_content: String::new(),
+            adr_diffs: vec![],
         };
         let output = format_file_diff(&diff);
         let plain = console::strip_ansi_codes(&output);
@@ -685,6 +895,331 @@ mod tests {
         assert!(
             plain.contains("(new file) + 8 rules"),
             "expected '(new file) + 8 rules' in: {plain}"
+        );
+    }
+
+    // ── from_sections tests ──
+
+    #[test]
+    fn test_from_sections_new_file_all_added() {
+        use crate::generation::markers::AdrSection as MarkerSection;
+        use crate::tailoring::types::AdrSection as TypeSection;
+
+        let detection = ChangeDetection {
+            new_ids: vec!["adr-1".into(), "adr-2".into()],
+            updated_ids: vec![],
+            removed_ids: vec![],
+        };
+        let new_sections = vec![
+            TypeSection {
+                adr_id: "adr-1".to_string(),
+                content: "Rule one".to_string(),
+            },
+            TypeSection {
+                adr_id: "adr-2".to_string(),
+                content: "Rule two".to_string(),
+            },
+        ];
+        let old_sections: Vec<MarkerSection> = vec![];
+
+        let diff = FileDiff::from_sections(
+            "CLAUDE.md",
+            &detection,
+            true,
+            &old_sections,
+            &new_sections,
+            None,
+            "Rule one\n\nRule two".to_string(),
+        );
+
+        assert_eq!(diff.change, FileChange::NewFile { rule_count: 2 });
+        assert_eq!(diff.adr_diffs.len(), 2);
+        assert_eq!(diff.adr_diffs[0].change, AdrChange::Added);
+        assert_eq!(diff.adr_diffs[0].adr_id, "adr-1");
+        assert_eq!(diff.adr_diffs[1].change, AdrChange::Added);
+        assert_eq!(diff.adr_diffs[1].adr_id, "adr-2");
+    }
+
+    #[test]
+    fn test_from_sections_update_mixed_changes() {
+        use crate::generation::markers::AdrSection as MarkerSection;
+        use crate::tailoring::types::AdrSection as TypeSection;
+
+        let detection = ChangeDetection {
+            new_ids: vec!["adr-3".into()],
+            updated_ids: vec!["adr-1".into()],
+            removed_ids: vec!["adr-2".into()],
+        };
+        let old_sections = vec![
+            MarkerSection {
+                id: "adr-1".to_string(),
+                content: "Old rule one".to_string(),
+            },
+            MarkerSection {
+                id: "adr-2".to_string(),
+                content: "Old rule two".to_string(),
+            },
+        ];
+        let new_sections = vec![
+            TypeSection {
+                adr_id: "adr-1".to_string(),
+                content: "Updated rule one".to_string(),
+            },
+            TypeSection {
+                adr_id: "adr-3".to_string(),
+                content: "New rule three".to_string(),
+            },
+        ];
+
+        let diff = FileDiff::from_sections(
+            "CLAUDE.md",
+            &detection,
+            false,
+            &old_sections,
+            &new_sections,
+            Some("Old rule one\n\nOld rule two".to_string()),
+            "Updated rule one\n\nNew rule three".to_string(),
+        );
+
+        assert_eq!(
+            diff.change,
+            FileChange::Update {
+                added: 1,
+                updated: 1,
+                removed: 1,
+            }
+        );
+        assert_eq!(diff.adr_diffs.len(), 3);
+
+        // adr-1: Updated (content differs)
+        assert_eq!(diff.adr_diffs[0].adr_id, "adr-1");
+        assert_eq!(diff.adr_diffs[0].change, AdrChange::Updated);
+
+        // adr-3: Added
+        assert_eq!(diff.adr_diffs[1].adr_id, "adr-3");
+        assert_eq!(diff.adr_diffs[1].change, AdrChange::Added);
+
+        // adr-2: Removed
+        assert_eq!(diff.adr_diffs[2].adr_id, "adr-2");
+        assert_eq!(diff.adr_diffs[2].change, AdrChange::Removed);
+    }
+
+    #[test]
+    fn test_from_sections_content_identical_marks_unchanged() {
+        use crate::generation::markers::AdrSection as MarkerSection;
+        use crate::tailoring::types::AdrSection as TypeSection;
+
+        let detection = ChangeDetection {
+            new_ids: vec![],
+            updated_ids: vec!["adr-1".into()],
+            removed_ids: vec![],
+        };
+        let old_sections = vec![MarkerSection {
+            id: "adr-1".to_string(),
+            content: "Same content".to_string(),
+        }];
+        let new_sections = vec![TypeSection {
+            adr_id: "adr-1".to_string(),
+            content: "Same content".to_string(),
+        }];
+
+        let diff = FileDiff::from_sections(
+            "CLAUDE.md",
+            &detection,
+            false,
+            &old_sections,
+            &new_sections,
+            Some("Same content".to_string()),
+            "Same content".to_string(),
+        );
+
+        assert_eq!(diff.adr_diffs.len(), 1);
+        assert_eq!(diff.adr_diffs[0].change, AdrChange::Unchanged);
+    }
+
+    #[test]
+    fn test_from_sections_removed_adr() {
+        use crate::generation::markers::AdrSection as MarkerSection;
+        use crate::tailoring::types::AdrSection as TypeSection;
+
+        let detection = ChangeDetection {
+            new_ids: vec![],
+            updated_ids: vec![],
+            removed_ids: vec!["adr-old".into()],
+        };
+        let old_sections = vec![MarkerSection {
+            id: "adr-old".to_string(),
+            content: "Old content".to_string(),
+        }];
+        let new_sections: Vec<TypeSection> = vec![];
+
+        let diff = FileDiff::from_sections(
+            "CLAUDE.md",
+            &detection,
+            false,
+            &old_sections,
+            &new_sections,
+            Some("Old content".to_string()),
+            String::new(),
+        );
+
+        assert_eq!(diff.adr_diffs.len(), 1);
+        assert_eq!(diff.adr_diffs[0].adr_id, "adr-old");
+        assert_eq!(diff.adr_diffs[0].change, AdrChange::Removed);
+        assert!(diff.adr_diffs[0].old_content.is_some());
+        assert!(diff.adr_diffs[0].new_content.is_none());
+    }
+
+    // ── format_adr_diffs tests ──
+
+    #[test]
+    fn test_format_adr_diffs_added() {
+        let diffs = vec![AdrDiff {
+            adr_id: "abcdef12-3456-7890".to_string(),
+            change: AdrChange::Added,
+            old_content: None,
+            new_content: Some("New rule content".to_string()),
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
+        assert!(
+            plain.contains("+ [abcdef12] added"),
+            "expected '+ [abcdef12] added' in: {plain}"
+        );
+    }
+
+    #[test]
+    fn test_format_adr_diffs_updated() {
+        let diffs = vec![AdrDiff {
+            adr_id: "abcdef12-3456-7890".to_string(),
+            change: AdrChange::Updated,
+            old_content: Some("Old text".to_string()),
+            new_content: Some("New text".to_string()),
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
+        assert!(
+            plain.contains("~ [abcdef12] updated"),
+            "expected '~ [abcdef12] updated' in: {plain}"
+        );
+        // Should show content diff
+        assert!(
+            plain.contains("- Old text") || plain.contains("+ New text"),
+            "expected content diff in: {plain}"
+        );
+    }
+
+    #[test]
+    fn test_format_adr_diffs_removed() {
+        let diffs = vec![AdrDiff {
+            adr_id: "deadbeef-1234".to_string(),
+            change: AdrChange::Removed,
+            old_content: Some("Removed content".to_string()),
+            new_content: None,
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
+        assert!(
+            plain.contains("- [deadbeef] removed"),
+            "expected '- [deadbeef] removed' in: {plain}"
+        );
+    }
+
+    #[test]
+    fn test_format_adr_diffs_unchanged_hidden() {
+        let diffs = vec![AdrDiff {
+            adr_id: "unchanged-id".to_string(),
+            change: AdrChange::Unchanged,
+            old_content: Some("Same".to_string()),
+            new_content: Some("Same".to_string()),
+        }];
+        let lines = format_adr_diffs(&diffs);
+        assert!(
+            lines.is_empty(),
+            "unchanged ADR should produce no output, got: {:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn test_format_file_diff_uses_adr_diffs_when_present() {
+        let diff = FileDiff {
+            path: "CLAUDE.md".to_string(),
+            change: FileChange::Update {
+                added: 1,
+                updated: 0,
+                removed: 0,
+            },
+            old_content: Some("old content\n".to_string()),
+            new_content: "new content\n".to_string(),
+            adr_diffs: vec![AdrDiff {
+                adr_id: "adr-new-1".to_string(),
+                change: AdrChange::Added,
+                old_content: None,
+                new_content: Some("new content".to_string()),
+            }],
+        };
+        let output = format_file_diff(&diff);
+        let plain = console::strip_ansi_codes(&output);
+        // Should use per-ADR display
+        assert!(
+            plain.contains("[adr-new-"),
+            "expected per-ADR display in: {plain}"
+        );
+        assert!(
+            plain.contains("added"),
+            "expected 'added' in per-ADR display: {plain}"
+        );
+    }
+
+    #[test]
+    fn test_format_file_diff_falls_back_without_adr_diffs() {
+        let diff = FileDiff {
+            path: "CLAUDE.md".to_string(),
+            change: FileChange::Update {
+                added: 1,
+                updated: 0,
+                removed: 1,
+            },
+            old_content: Some("old line\n".to_string()),
+            new_content: "new line\n".to_string(),
+            adr_diffs: vec![],
+        };
+        let output = format_file_diff(&diff);
+        let plain = console::strip_ansi_codes(&output);
+        // Should fall back to whole-file diff
+        assert!(
+            plain.contains("- old line"),
+            "expected whole-file deletion in: {plain}"
+        );
+        assert!(
+            plain.contains("+ new line"),
+            "expected whole-file addition in: {plain}"
+        );
+    }
+
+    // ── from_change_detection backward compat test ──
+
+    #[test]
+    fn from_change_detection_sets_empty_adr_diffs() {
+        let detection = ChangeDetection {
+            new_ids: vec!["a".into()],
+            updated_ids: vec![],
+            removed_ids: vec![],
+        };
+        let diff = FileDiff::from_change_detection(
+            "CLAUDE.md",
+            &detection,
+            true,
+            None,
+            "content".to_string(),
+        );
+        assert!(
+            diff.adr_diffs.is_empty(),
+            "from_change_detection should set empty adr_diffs"
         );
     }
 }
