@@ -1,5 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::analysis::types::Language;
 
 /// Maximum manifest file size to read into memory (10 MB).
 const MAX_MANIFEST_SIZE: u64 = 10 * 1024 * 1024;
@@ -18,6 +22,53 @@ fn read_manifest_file(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// Which manifest file produced a dependency.
+///
+/// Used to filter frameworks by the language(s) selected for a project:
+/// e.g. if the user picks TypeScript, only deps from `PackageJson` are relevant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManifestSource {
+    PackageJson,
+    CargoToml,
+    PyprojectToml,
+    RequirementsTxt,
+    Pipfile,
+    GoMod,
+    Gemfile,
+    PomXml,
+    BuildGradle,
+    GradleVersionCatalog,
+    PackageSwift,
+    ConfigFile,
+}
+
+impl ManifestSource {
+    /// Languages that are compatible with dependencies from this manifest type.
+    ///
+    /// An empty vec means "compatible with all languages" (used for `ConfigFile`
+    /// where the language is indeterminate and filtering is deferred).
+    pub fn compatible_languages(&self) -> Vec<Language> {
+        match self {
+            ManifestSource::PackageJson => {
+                vec![Language::TypeScript, Language::JavaScript]
+            }
+            ManifestSource::CargoToml => vec![Language::Rust],
+            ManifestSource::PyprojectToml
+            | ManifestSource::RequirementsTxt
+            | ManifestSource::Pipfile => vec![Language::Python],
+            ManifestSource::GoMod => vec![Language::Go],
+            ManifestSource::Gemfile => vec![Language::Ruby],
+            ManifestSource::PomXml => vec![Language::Java],
+            ManifestSource::BuildGradle | ManifestSource::GradleVersionCatalog => {
+                vec![Language::Java, Language::Kotlin]
+            }
+            ManifestSource::PackageSwift => vec![Language::Swift],
+            ManifestSource::ConfigFile => vec![],
+        }
+    }
+}
+
 /// Dependency information extracted from manifest files.
 #[derive(Debug, Default)]
 pub struct DependencyInfo {
@@ -25,6 +76,8 @@ pub struct DependencyInfo {
     pub dependencies: Vec<String>,
     /// Development-only dependency names.
     pub dev_dependencies: Vec<String>,
+    /// Which manifest file each dependency came from (first source wins).
+    pub sources: HashMap<String, ManifestSource>,
 }
 
 /// Parse dependencies from all recognized manifest files in `project_dir`.
@@ -36,18 +89,19 @@ pub struct DependencyInfo {
 pub fn parse_dependencies(project_dir: &Path) -> DependencyInfo {
     let mut deps = HashSet::new();
     let mut dev_deps = HashSet::new();
+    let mut sources = HashMap::new();
 
-    parse_package_json(project_dir, &mut deps, &mut dev_deps);
-    parse_cargo_toml(project_dir, &mut deps, &mut dev_deps);
-    parse_pyproject_toml(project_dir, &mut deps, &mut dev_deps);
-    parse_requirements_txt(project_dir, &mut deps);
-    parse_pipfile(project_dir, &mut deps, &mut dev_deps);
-    parse_go_mod(project_dir, &mut deps);
-    parse_gemfile(project_dir, &mut deps);
-    parse_pom_xml(project_dir, &mut deps);
-    parse_build_gradle(project_dir, &mut deps);
-    parse_gradle_version_catalog(project_dir, &mut deps);
-    parse_package_swift(project_dir, &mut deps);
+    parse_package_json(project_dir, &mut deps, &mut dev_deps, &mut sources);
+    parse_cargo_toml(project_dir, &mut deps, &mut dev_deps, &mut sources);
+    parse_pyproject_toml(project_dir, &mut deps, &mut dev_deps, &mut sources);
+    parse_requirements_txt(project_dir, &mut deps, &mut sources);
+    parse_pipfile(project_dir, &mut deps, &mut dev_deps, &mut sources);
+    parse_go_mod(project_dir, &mut deps, &mut sources);
+    parse_gemfile(project_dir, &mut deps, &mut sources);
+    parse_pom_xml(project_dir, &mut deps, &mut sources);
+    parse_build_gradle(project_dir, &mut deps, &mut sources);
+    parse_gradle_version_catalog(project_dir, &mut deps, &mut sources);
+    parse_package_swift(project_dir, &mut deps, &mut sources);
 
     let mut dependencies: Vec<String> = deps.into_iter().collect();
     dependencies.sort();
@@ -57,6 +111,7 @@ pub fn parse_dependencies(project_dir: &Path) -> DependencyInfo {
     DependencyInfo {
         dependencies,
         dev_dependencies,
+        sources,
     }
 }
 
@@ -66,6 +121,7 @@ fn parse_package_json(
     project_dir: &Path,
     deps: &mut HashSet<String>,
     dev_deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
 ) {
     let path = project_dir.join("package.json");
     let content = match read_manifest_file(&path) {
@@ -83,11 +139,17 @@ fn parse_package_json(
     if let Some(obj) = parsed.get("dependencies").and_then(|v| v.as_object()) {
         for key in obj.keys() {
             deps.insert(key.clone());
+            sources
+                .entry(key.clone())
+                .or_insert(ManifestSource::PackageJson);
         }
     }
     if let Some(obj) = parsed.get("devDependencies").and_then(|v| v.as_object()) {
         for key in obj.keys() {
             dev_deps.insert(key.clone());
+            sources
+                .entry(key.clone())
+                .or_insert(ManifestSource::PackageJson);
         }
     }
 }
@@ -98,6 +160,7 @@ fn parse_cargo_toml(
     project_dir: &Path,
     deps: &mut HashSet<String>,
     dev_deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
 ) {
     let path = project_dir.join("Cargo.toml");
     let content = match read_manifest_file(&path) {
@@ -115,11 +178,17 @@ fn parse_cargo_toml(
     if let Some(table) = parsed.get("dependencies").and_then(|v| v.as_table()) {
         for key in table.keys() {
             deps.insert(key.clone());
+            sources
+                .entry(key.clone())
+                .or_insert(ManifestSource::CargoToml);
         }
     }
     if let Some(table) = parsed.get("dev-dependencies").and_then(|v| v.as_table()) {
         for key in table.keys() {
             dev_deps.insert(key.clone());
+            sources
+                .entry(key.clone())
+                .or_insert(ManifestSource::CargoToml);
         }
     }
 }
@@ -153,6 +222,7 @@ fn parse_pyproject_toml(
     project_dir: &Path,
     deps: &mut HashSet<String>,
     dev_deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
 ) {
     let path = project_dir.join("pyproject.toml");
     let content = match read_manifest_file(&path) {
@@ -176,7 +246,8 @@ fn parse_pyproject_toml(
         for item in arr {
             if let Some(s) = item.as_str() {
                 if let Some(name) = strip_python_version_specifier(s) {
-                    deps.insert(name);
+                    deps.insert(name.clone());
+                    sources.entry(name).or_insert(ManifestSource::PyprojectToml);
                 }
             }
         }
@@ -198,7 +269,8 @@ fn parse_pyproject_toml(
                 for item in arr {
                     if let Some(s) = item.as_str() {
                         if let Some(name) = strip_python_version_specifier(s) {
-                            target.insert(name);
+                            target.insert(name.clone());
+                            sources.entry(name).or_insert(ManifestSource::PyprojectToml);
                         }
                     }
                 }
@@ -216,6 +288,9 @@ fn parse_pyproject_toml(
         for key in table.keys() {
             if key != "python" {
                 deps.insert(key.clone());
+                sources
+                    .entry(key.clone())
+                    .or_insert(ManifestSource::PyprojectToml);
             }
         }
     }
@@ -229,6 +304,9 @@ fn parse_pyproject_toml(
     {
         for key in table.keys() {
             dev_deps.insert(key.clone());
+            sources
+                .entry(key.clone())
+                .or_insert(ManifestSource::PyprojectToml);
         }
     }
 }
@@ -261,7 +339,11 @@ fn strip_python_version_specifier(s: &str) -> Option<String> {
 
 // ── requirements.txt ─────────────────────────────────────────────────
 
-fn parse_requirements_txt(project_dir: &Path, deps: &mut HashSet<String>) {
+fn parse_requirements_txt(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
     let path = project_dir.join("requirements.txt");
     let content = match read_manifest_file(&path) {
         Some(c) => c,
@@ -275,14 +357,22 @@ fn parse_requirements_txt(project_dir: &Path, deps: &mut HashSet<String>) {
             continue;
         }
         if let Some(name) = strip_python_version_specifier(line) {
-            deps.insert(name);
+            deps.insert(name.clone());
+            sources
+                .entry(name)
+                .or_insert(ManifestSource::RequirementsTxt);
         }
     }
 }
 
 // ── Pipfile ──────────────────────────────────────────────────────────
 
-fn parse_pipfile(project_dir: &Path, deps: &mut HashSet<String>, dev_deps: &mut HashSet<String>) {
+fn parse_pipfile(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    dev_deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
     let path = project_dir.join("Pipfile");
     let content = match read_manifest_file(&path) {
         Some(c) => c,
@@ -299,18 +389,28 @@ fn parse_pipfile(project_dir: &Path, deps: &mut HashSet<String>, dev_deps: &mut 
     if let Some(table) = parsed.get("packages").and_then(|v| v.as_table()) {
         for key in table.keys() {
             deps.insert(key.clone());
+            sources
+                .entry(key.clone())
+                .or_insert(ManifestSource::Pipfile);
         }
     }
     if let Some(table) = parsed.get("dev-packages").and_then(|v| v.as_table()) {
         for key in table.keys() {
             dev_deps.insert(key.clone());
+            sources
+                .entry(key.clone())
+                .or_insert(ManifestSource::Pipfile);
         }
     }
 }
 
 // ── go.mod ───────────────────────────────────────────────────────────
 
-fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
+fn parse_go_mod(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
     let path = project_dir.join("go.mod");
     let content = match read_manifest_file(&path) {
         Some(c) => c,
@@ -342,7 +442,9 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
                     remainder_no_comment
                 };
                 for module in remainder.split_whitespace().take(1) {
-                    deps.insert(module.to_string());
+                    let name = module.to_string();
+                    deps.insert(name.clone());
+                    sources.entry(name).or_insert(ManifestSource::GoMod);
                 }
             }
             continue;
@@ -360,7 +462,9 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
             // Lines like: github.com/gin-gonic/gin v1.9.1
             if let Some(module) = line.split_whitespace().next() {
                 if !module.starts_with("//") {
-                    deps.insert(module.to_string());
+                    let name = module.to_string();
+                    deps.insert(name.clone());
+                    sources.entry(name).or_insert(ManifestSource::GoMod);
                 }
             }
             continue;
@@ -374,7 +478,9 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
             }
             let rest = rest.trim();
             if let Some(module) = rest.split_whitespace().next() {
-                deps.insert(module.to_string());
+                let name = module.to_string();
+                deps.insert(name.clone());
+                sources.entry(name).or_insert(ManifestSource::GoMod);
             }
         }
     }
@@ -382,7 +488,11 @@ fn parse_go_mod(project_dir: &Path, deps: &mut HashSet<String>) {
 
 // ── Gemfile ──────────────────────────────────────────────────────────
 
-fn parse_gemfile(project_dir: &Path, deps: &mut HashSet<String>) {
+fn parse_gemfile(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
     let path = project_dir.join("Gemfile");
     let content = match read_manifest_file(&path) {
         Some(c) => c,
@@ -398,7 +508,8 @@ fn parse_gemfile(project_dir: &Path, deps: &mut HashSet<String>) {
             .or_else(|| cap.get(2))
             .map(|m| m.as_str().to_string());
         if let Some(name) = name {
-            deps.insert(name);
+            deps.insert(name.clone());
+            sources.entry(name).or_insert(ManifestSource::Gemfile);
         }
     }
 }
@@ -414,7 +525,11 @@ fn regex_gem_name() -> &'static regex::Regex {
 
 // ── pom.xml ──────────────────────────────────────────────────────────
 
-fn parse_pom_xml(project_dir: &Path, deps: &mut HashSet<String>) {
+fn parse_pom_xml(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
     let path = project_dir.join("pom.xml");
     let content = match read_manifest_file(&path) {
         Some(c) => c,
@@ -438,12 +553,18 @@ fn parse_pom_xml(project_dir: &Path, deps: &mut HashSet<String>) {
             .map(|m| m.as_str());
 
         if let Some(group) = group_id {
-            deps.insert(group.to_string()); // Keep for framework detection
+            let group_name = group.to_string();
+            deps.insert(group_name.clone());
+            sources.entry(group_name).or_insert(ManifestSource::PomXml);
             if let Some(artifact) = artifact_id {
-                deps.insert(format!("{group}:{artifact}")); // Combined coordinate
+                let coord = format!("{group}:{artifact}");
+                deps.insert(coord.clone());
+                sources.entry(coord).or_insert(ManifestSource::PomXml);
             }
         } else if let Some(artifact) = artifact_id {
-            deps.insert(artifact.to_string()); // Fallback: artifact-only when no group
+            let name = artifact.to_string();
+            deps.insert(name.clone());
+            sources.entry(name).or_insert(ManifestSource::PomXml);
         }
     }
 }
@@ -474,7 +595,11 @@ fn regex_pom_artifact_id() -> &'static regex::Regex {
 
 // ── build.gradle / build.gradle.kts ──────────────────────────────────
 
-fn parse_build_gradle(project_dir: &Path, deps: &mut HashSet<String>) {
+fn parse_build_gradle(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
     for filename in &["build.gradle", "build.gradle.kts"] {
         let path = project_dir.join(filename);
         let content = match read_manifest_file(&path) {
@@ -491,7 +616,7 @@ fn parse_build_gradle(project_dir: &Path, deps: &mut HashSet<String>) {
                 .or_else(|| cap.get(3))
                 .expect("regex guarantees at least one group matches")
                 .as_str();
-            insert_gradle_coord(coord, deps);
+            insert_gradle_coord(coord, deps, sources, ManifestSource::BuildGradle);
         }
     }
 }
@@ -518,7 +643,11 @@ fn regex_gradle_dependency() -> &'static regex::Regex {
 /// 3. `group`+`name`: `alias = { group = "com.example", name = "lib", ... }`
 ///
 /// Missing file or parse errors are silently skipped.
-pub(crate) fn parse_gradle_version_catalog(project_dir: &Path, deps: &mut HashSet<String>) {
+pub(crate) fn parse_gradle_version_catalog(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
     let path = project_dir.join("gradle/libs.versions.toml");
     let content = match read_manifest_file(&path) {
         Some(c) => c,
@@ -538,16 +667,26 @@ pub(crate) fn parse_gradle_version_catalog(project_dir: &Path, deps: &mut HashSe
     for (_alias, value) in libraries {
         match value {
             toml::Value::String(s) => {
-                insert_gradle_coord(s, deps);
+                insert_gradle_coord(s, deps, sources, ManifestSource::GradleVersionCatalog);
             }
             toml::Value::Table(t) => {
                 if let Some(toml::Value::String(module)) = t.get("module") {
-                    insert_gradle_coord(module, deps);
+                    insert_gradle_coord(
+                        module,
+                        deps,
+                        sources,
+                        ManifestSource::GradleVersionCatalog,
+                    );
                 } else if let (Some(toml::Value::String(group)), Some(toml::Value::String(name))) =
                     (t.get("group"), t.get("name"))
                 {
                     let coord = format!("{group}:{name}");
-                    insert_gradle_coord(&coord, deps);
+                    insert_gradle_coord(
+                        &coord,
+                        deps,
+                        sources,
+                        ManifestSource::GradleVersionCatalog,
+                    );
                 }
             }
             _ => {}
@@ -557,17 +696,32 @@ pub(crate) fn parse_gradle_version_catalog(project_dir: &Path, deps: &mut HashSe
 
 /// Insert a `group:artifact[:version]` coordinate into `deps`, emitting both
 /// the bare groupId and the combined `group:artifact` coordinate.
-fn insert_gradle_coord(coord: &str, deps: &mut HashSet<String>) {
+fn insert_gradle_coord(
+    coord: &str,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+    manifest_source: ManifestSource,
+) {
     let parts: Vec<&str> = coord.split(':').collect();
     if parts.len() >= 2 {
-        deps.insert(parts[0].to_string());
-        deps.insert(format!("{}:{}", parts[0], parts[1]));
+        let group = parts[0].to_string();
+        let combined = format!("{}:{}", parts[0], parts[1]);
+        deps.insert(group.clone());
+        sources
+            .entry(group)
+            .or_insert_with(|| manifest_source.clone());
+        deps.insert(combined.clone());
+        sources.entry(combined).or_insert(manifest_source);
     }
 }
 
 // ── Package.swift ────────────────────────────────────────────────────
 
-fn parse_package_swift(project_dir: &Path, deps: &mut HashSet<String>) {
+fn parse_package_swift(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
     let path = project_dir.join("Package.swift");
     let content = match read_manifest_file(&path) {
         Some(c) => c,
@@ -578,7 +732,11 @@ fn parse_package_swift(project_dir: &Path, deps: &mut HashSet<String>) {
     let name_re = regex_swift_package_name();
     for cap in name_re.captures_iter(&content) {
         if let Some(name) = cap.get(1) {
-            deps.insert(name.as_str().to_string());
+            let dep_name = name.as_str().to_string();
+            deps.insert(dep_name.clone());
+            sources
+                .entry(dep_name)
+                .or_insert(ManifestSource::PackageSwift);
         }
     }
 
@@ -594,7 +752,11 @@ fn parse_package_swift(project_dir: &Path, deps: &mut HashSet<String>) {
             .next()
             .map(|s| s.strip_suffix(".git").unwrap_or(s));
         if let Some(name) = name {
-            deps.insert(name.to_string());
+            let dep_name = name.to_string();
+            deps.insert(dep_name.clone());
+            sources
+                .entry(dep_name)
+                .or_insert(ManifestSource::PackageSwift);
         }
     }
 }
@@ -620,6 +782,332 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // ── ManifestSource tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_manifest_source_compatible_languages_package_json() {
+        let langs = ManifestSource::PackageJson.compatible_languages();
+        assert_eq!(langs, vec![Language::TypeScript, Language::JavaScript]);
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_cargo_toml() {
+        let langs = ManifestSource::CargoToml.compatible_languages();
+        assert_eq!(langs, vec![Language::Rust]);
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_python_manifests() {
+        for src in &[
+            ManifestSource::PyprojectToml,
+            ManifestSource::RequirementsTxt,
+            ManifestSource::Pipfile,
+        ] {
+            let langs = src.compatible_languages();
+            assert_eq!(langs, vec![Language::Python], "failed for {src:?}");
+        }
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_go_mod() {
+        let langs = ManifestSource::GoMod.compatible_languages();
+        assert_eq!(langs, vec![Language::Go]);
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_gemfile() {
+        let langs = ManifestSource::Gemfile.compatible_languages();
+        assert_eq!(langs, vec![Language::Ruby]);
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_pom_xml() {
+        let langs = ManifestSource::PomXml.compatible_languages();
+        assert_eq!(langs, vec![Language::Java]);
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_gradle() {
+        for src in &[
+            ManifestSource::BuildGradle,
+            ManifestSource::GradleVersionCatalog,
+        ] {
+            let langs = src.compatible_languages();
+            assert_eq!(
+                langs,
+                vec![Language::Java, Language::Kotlin],
+                "failed for {src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_package_swift() {
+        let langs = ManifestSource::PackageSwift.compatible_languages();
+        assert_eq!(langs, vec![Language::Swift]);
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_config_file() {
+        let langs = ManifestSource::ConfigFile.compatible_languages();
+        assert!(langs.is_empty(), "ConfigFile should return empty vec");
+    }
+
+    #[test]
+    fn test_manifest_source_serde_round_trip() {
+        let all_sources = vec![
+            ManifestSource::PackageJson,
+            ManifestSource::CargoToml,
+            ManifestSource::PyprojectToml,
+            ManifestSource::RequirementsTxt,
+            ManifestSource::Pipfile,
+            ManifestSource::GoMod,
+            ManifestSource::Gemfile,
+            ManifestSource::PomXml,
+            ManifestSource::BuildGradle,
+            ManifestSource::GradleVersionCatalog,
+            ManifestSource::PackageSwift,
+            ManifestSource::ConfigFile,
+        ];
+        for src in &all_sources {
+            let json = serde_json::to_string(src).unwrap();
+            let deserialized: ManifestSource = serde_json::from_str(&json).unwrap();
+            assert_eq!(&deserialized, src, "Round-trip failed for {json}");
+        }
+    }
+
+    #[test]
+    fn test_manifest_source_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ManifestSource::PackageJson).unwrap(),
+            "\"package_json\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ManifestSource::CargoToml).unwrap(),
+            "\"cargo_toml\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ManifestSource::GradleVersionCatalog).unwrap(),
+            "\"gradle_version_catalog\""
+        );
+    }
+
+    // ── Sources HashMap population tests ─────────────────────────────
+
+    #[test]
+    fn test_sources_populated_for_package_json() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"dependencies": {"react": "^18.0.0"}, "devDependencies": {"jest": "^29.0.0"}}"#,
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(
+            info.sources.get("react"),
+            Some(&ManifestSource::PackageJson)
+        );
+        assert_eq!(info.sources.get("jest"), Some(&ManifestSource::PackageJson));
+    }
+
+    #[test]
+    fn test_sources_populated_for_cargo_toml() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1\"\n\n[dev-dependencies]\ntempfile = \"3\"\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(info.sources.get("serde"), Some(&ManifestSource::CargoToml));
+        assert_eq!(
+            info.sources.get("tempfile"),
+            Some(&ManifestSource::CargoToml)
+        );
+    }
+
+    #[test]
+    fn test_sources_first_source_wins() {
+        // If a dep appears in multiple manifests, the first parser's source wins.
+        // parse_package_json runs before parse_requirements_txt, so PackageJson wins.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"dependencies": {"flask": "^2.0.0"}}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("requirements.txt"), "flask>=2.0\n").unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(
+            info.sources.get("flask"),
+            Some(&ManifestSource::PackageJson),
+            "First source should win"
+        );
+    }
+
+    #[test]
+    fn test_sources_populated_for_go_mod() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/foo\n\ngo 1.21\n\nrequire github.com/gin-gonic/gin v1.9.1\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(
+            info.sources.get("github.com/gin-gonic/gin"),
+            Some(&ManifestSource::GoMod)
+        );
+    }
+
+    #[test]
+    fn test_sources_populated_for_gemfile() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Gemfile"), "gem \"rails\", \"~> 7.0\"\n").unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(info.sources.get("rails"), Some(&ManifestSource::Gemfile));
+    }
+
+    #[test]
+    fn test_sources_populated_for_pom_xml() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pom.xml"),
+            "<project><dependencies><dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(
+            info.sources.get("org.springframework.boot"),
+            Some(&ManifestSource::PomXml)
+        );
+        assert_eq!(
+            info.sources
+                .get("org.springframework.boot:spring-boot-starter-web"),
+            Some(&ManifestSource::PomXml)
+        );
+    }
+
+    #[test]
+    fn test_sources_populated_for_build_gradle() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("build.gradle"),
+            "dependencies {\n    implementation 'io.ktor:ktor-server-core:2.3.0'\n}\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(
+            info.sources.get("io.ktor"),
+            Some(&ManifestSource::BuildGradle)
+        );
+        assert_eq!(
+            info.sources.get("io.ktor:ktor-server-core"),
+            Some(&ManifestSource::BuildGradle)
+        );
+    }
+
+    #[test]
+    fn test_sources_populated_for_gradle_version_catalog() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("gradle")).unwrap();
+        fs::write(
+            dir.path().join("gradle/libs.versions.toml"),
+            "[libraries]\nguava = \"com.google.guava:guava:31.1-jre\"\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(
+            info.sources.get("com.google.guava"),
+            Some(&ManifestSource::GradleVersionCatalog)
+        );
+        assert_eq!(
+            info.sources.get("com.google.guava:guava"),
+            Some(&ManifestSource::GradleVersionCatalog)
+        );
+    }
+
+    #[test]
+    fn test_sources_populated_for_package_swift() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Package.swift"),
+            ".package(url: \"https://github.com/vapor/vapor.git\", from: \"4.0.0\")\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(
+            info.sources.get("vapor"),
+            Some(&ManifestSource::PackageSwift)
+        );
+    }
+
+    #[test]
+    fn test_sources_populated_for_pyproject_toml() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pyproject.toml"),
+            "[project]\nname = \"x\"\ndependencies = [\"django>=4.0\"]\n\n[project.optional-dependencies]\ndev = [\"pytest\"]\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(
+            info.sources.get("django"),
+            Some(&ManifestSource::PyprojectToml)
+        );
+        assert_eq!(
+            info.sources.get("pytest"),
+            Some(&ManifestSource::PyprojectToml)
+        );
+    }
+
+    #[test]
+    fn test_sources_populated_for_requirements_txt() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("requirements.txt"), "flask>=2.0\nnumpy\n").unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(
+            info.sources.get("flask"),
+            Some(&ManifestSource::RequirementsTxt)
+        );
+        assert_eq!(
+            info.sources.get("numpy"),
+            Some(&ManifestSource::RequirementsTxt)
+        );
+    }
+
+    #[test]
+    fn test_sources_populated_for_pipfile() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Pipfile"),
+            "[packages]\ndjango = \"*\"\n\n[dev-packages]\npytest = \"*\"\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+        assert_eq!(info.sources.get("django"), Some(&ManifestSource::Pipfile));
+        assert_eq!(info.sources.get("pytest"), Some(&ManifestSource::Pipfile));
+    }
+
+    #[test]
+    fn test_sources_empty_for_no_manifests() {
+        let dir = tempdir().unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info.sources.is_empty());
+    }
 
     #[test]
     fn test_package_json() {
@@ -1702,7 +2190,8 @@ require github.com/another/indirect v4.0.0 // indirect
         )
         .unwrap();
         let mut deps = std::collections::HashSet::new();
-        parse_gradle_version_catalog(dir.path(), &mut deps);
+        let mut sources = std::collections::HashMap::new();
+        parse_gradle_version_catalog(dir.path(), &mut deps, &mut sources);
         assert!(deps.is_empty());
     }
 

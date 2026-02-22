@@ -158,6 +158,7 @@ mod tests {
         let deps = DependencyInfo {
             dependencies: vec!["react".to_string(), "express".to_string()],
             dev_dependencies: vec!["jest".to_string()],
+            ..Default::default()
         };
 
         let frameworks = detect_frameworks(&deps, dir.path());
@@ -173,6 +174,7 @@ mod tests {
         let deps = DependencyInfo {
             dependencies: vec!["react".to_string(), "django".to_string()],
             dev_dependencies: vec![],
+            ..Default::default()
         };
 
         let frameworks = detect_frameworks(&deps, dir.path());
@@ -248,6 +250,7 @@ mod tests {
         let deps = DependencyInfo {
             dependencies: vec!["next".to_string()],
             dev_dependencies: vec![],
+            ..Default::default()
         };
 
         let frameworks = detect_frameworks(&deps, dir.path());
@@ -265,6 +268,7 @@ mod tests {
                 "express".to_string(),
             ],
             dev_dependencies: vec![],
+            ..Default::default()
         };
 
         let frameworks = detect_frameworks(&deps, dir.path());
@@ -280,6 +284,7 @@ mod tests {
         let deps = DependencyInfo {
             dependencies: vec![],
             dev_dependencies: vec![],
+            ..Default::default()
         };
         let frameworks = detect_frameworks(&deps, dir.path());
         assert!(frameworks.is_empty());
@@ -357,6 +362,7 @@ mod tests {
         let deps = DependencyInfo {
             dependencies: vec![],
             dev_dependencies: vec![],
+            ..Default::default()
         };
 
         let frameworks = detect_frameworks(&deps, dir.path());
@@ -378,6 +384,7 @@ mod tests {
         let deps = DependencyInfo {
             dependencies: vec!["some-unknown-package".to_string()],
             dev_dependencies: vec![],
+            ..Default::default()
         };
 
         let frameworks = detect_frameworks(&deps, dir.path());
