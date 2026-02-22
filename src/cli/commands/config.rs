@@ -43,7 +43,7 @@ fn run_with_resolver(
 }
 
 fn serialize_config_for_display(cfg: &config::Config) -> Result<String, ActualError> {
-    serde_yaml::to_string(cfg)
+    serde_yml::to_string(cfg)
         .map_err(|e| ActualError::ConfigError(format!("Failed to serialize config to YAML: {e}")))
 }
 
@@ -310,31 +310,31 @@ mod tests {
 
     // --- Tests for config set redaction via run_with_path ---
 
-    /// Exercise the `serde_yaml::to_string` error branch in `serialize_config_for_display`.
+    /// Exercise the `serde_yml::to_string` error branch in `serialize_config_for_display`.
     ///
-    /// A config with an unserializable `serde_yaml::Value` field (mapping-as-key)
+    /// A config with an unserializable `serde_yml::Value` field (mapping-as-key)
     /// must return a `ConfigError` rather than panicking.
     #[test]
     fn test_serialize_config_for_display_error_is_wrapped_as_config_error() {
         use crate::config::types::CachedTailoring;
 
-        // Construct a mapping-as-key value that serde_yaml cannot serialize.
-        let mut inner_key = serde_yaml::Mapping::new();
+        // Construct a mapping-as-key value that serde_yml cannot serialize.
+        let mut inner_key = serde_yml::Mapping::new();
         inner_key.insert(
-            serde_yaml::Value::String("k".to_string()),
-            serde_yaml::Value::String("v".to_string()),
+            serde_yml::Value::String("k".to_string()),
+            serde_yml::Value::String("v".to_string()),
         );
-        let mut outer = serde_yaml::Mapping::new();
+        let mut outer = serde_yml::Mapping::new();
         outer.insert(
-            serde_yaml::Value::Mapping(inner_key),
-            serde_yaml::Value::String("value".to_string()),
+            serde_yml::Value::Mapping(inner_key),
+            serde_yml::Value::String("value".to_string()),
         );
-        let bad_value = serde_yaml::Value::Mapping(outer);
+        let bad_value = serde_yml::Value::Mapping(outer);
 
         // Verify this value is actually unserializable.
         assert!(
-            serde_yaml::to_string(&bad_value).is_err(),
-            "serde_yaml must reject a mapping with mapping keys for this test to be valid"
+            serde_yml::to_string(&bad_value).is_err(),
+            "serde_yml must reject a mapping with mapping keys for this test to be valid"
         );
 
         let cfg = config::Config {
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn test_show_after_setting_api_key_redacts_in_yaml() {
         // Verify that the redact_yaml function correctly handles the YAML that
-        // serde_yaml would produce for a set API key.
+        // serde_yml would produce for a set API key.
         let yaml_with_key = "anthropic_api_key: sk-ant-actual-key\nmodel: ~\n";
         let redacted = redact_yaml(yaml_with_key);
         assert!(
