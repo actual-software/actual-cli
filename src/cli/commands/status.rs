@@ -255,6 +255,7 @@ fn format_verbose_section(cfg: &Config, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::types::RepoAnalysis;
     use crate::cli::commands::handle_result;
     use crate::config::types::{CachedAnalysis, TelemetryConfig};
     use crate::testutil::{EnvGuard, ENV_MUTEX};
@@ -939,7 +940,11 @@ mod tests {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: Some("abc123def456789".to_string()),
                 config_hash: None,
-                analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                analysis: RepoAnalysis {
+                    is_monorepo: false,
+                    workspace_type: None,
+                    projects: vec![],
+                },
                 analyzed_at: chrono::Utc::now(),
             }),
             ..Config::default()
@@ -968,7 +973,11 @@ mod tests {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: Some("abc".to_string()),
                 config_hash: None,
-                analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                analysis: RepoAnalysis {
+                    is_monorepo: false,
+                    workspace_type: None,
+                    projects: vec![],
+                },
                 analyzed_at: chrono::Utc::now(),
             }),
             ..Config::default()
@@ -985,7 +994,11 @@ mod tests {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: None,
                 config_hash: None,
-                analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                analysis: RepoAnalysis {
+                    is_monorepo: false,
+                    workspace_type: None,
+                    projects: vec![],
+                },
                 analyzed_at: chrono::Utc::now(),
             }),
             ..Config::default()
@@ -1009,7 +1022,11 @@ mod tests {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: Some("abcdefg".to_string()),
                 config_hash: None,
-                analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                analysis: RepoAnalysis {
+                    is_monorepo: false,
+                    workspace_type: None,
+                    projects: vec![],
+                },
                 analyzed_at: chrono::Utc::now(),
             }),
             ..Config::default()

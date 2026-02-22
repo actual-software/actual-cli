@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::analysis::types::RepoAnalysis;
 use crate::generation::OutputFormat;
 
 /// Default batch size for ADR tailoring.
@@ -175,8 +176,8 @@ pub struct CachedAnalysis {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_hash: Option<String>,
 
-    /// The analysis data (stored as opaque YAML value until analysis types are implemented).
-    pub analysis: serde_yaml::Value,
+    /// The typed repository analysis result.
+    pub analysis: RepoAnalysis,
 
     /// When the analysis was performed.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
@@ -250,7 +251,11 @@ mod tests {
                 repo_path: "/home/user/project".to_string(),
                 head_commit: Some("abc123".to_string()),
                 config_hash: Some("deadbeef".to_string()),
-                analysis: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                analysis: RepoAnalysis {
+                    is_monorepo: false,
+                    workspace_type: None,
+                    projects: vec![],
+                },
                 analyzed_at: chrono::Utc::now(),
             }),
             ..Config::default()
