@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn test_format_config_section_normal_shows_configured_model() {
         let cfg = Config {
-            model: Some("claude-haiku-3-5".to_string()),
+            model: Some("claude-opus-4-5".to_string()),
             ..Config::default()
         };
         let path = PathBuf::from("/tmp/test/config.yaml");
@@ -493,7 +493,7 @@ mod tests {
         let p = plain(&output);
         assert!(p.contains("Model"), "should show Model row: {p}");
         assert!(
-            p.contains("claude-haiku-3-5"),
+            p.contains("claude-opus-4-5"),
             "should show configured model name: {p}"
         );
         // Model row must not show "(default)" since model is explicitly set
