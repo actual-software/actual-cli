@@ -3,6 +3,20 @@ use std::collections::HashSet;
 pub const START_MARKER: &str = "<!-- managed:actual-start -->";
 pub const END_MARKER: &str = "<!-- managed:actual-end -->";
 
+pub const ADR_SECTION_START_PREFIX: &str = "<!-- adr:";
+pub const ADR_SECTION_START_SUFFIX: &str = " start -->";
+pub const ADR_SECTION_END_PREFIX: &str = "<!-- adr:";
+pub const ADR_SECTION_END_SUFFIX: &str = " end -->";
+
+/// A single ADR's content section within a managed block.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdrSection {
+    /// The ADR UUID
+    pub id: String,
+    /// The content between the start and end markers (trimmed of surrounding newlines)
+    pub content: String,
+}
+
 /// Wraps content with managed section markers, including an ISO 8601 timestamp, version comment,
 /// and optional ADR IDs metadata.
 pub fn wrap_in_markers(content: &str, version: u32, adr_ids: &[String]) -> String {
@@ -17,9 +31,98 @@ pub fn wrap_in_markers(content: &str, version: u32, adr_ids: &[String]) -> Strin
     )
 }
 
+/// Wrap a single ADR's content with per-ADR section markers.
+pub fn wrap_adr_section(adr_id: &str, content: &str) -> String {
+    format!(
+        "{ADR_SECTION_START_PREFIX}{adr_id}{ADR_SECTION_START_SUFFIX}\n{content}\n{ADR_SECTION_END_PREFIX}{adr_id}{ADR_SECTION_END_SUFFIX}"
+    )
+}
+
+/// Extract all per-ADR sections from content (inside or outside managed markers).
+/// Returns sections in document order.
+pub fn extract_adr_sections(content: &str) -> Vec<AdrSection> {
+    let mut sections = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if let Some(id) = parse_adr_section_start(trimmed) {
+            let end_marker = format!("{ADR_SECTION_END_PREFIX}{id}{ADR_SECTION_END_SUFFIX}");
+            // Search for the matching end marker
+            let mut found_end = false;
+            let mut content_lines = Vec::new();
+            let start_line = i;
+            i += 1;
+            while i < lines.len() {
+                if lines[i].trim() == end_marker {
+                    found_end = true;
+                    break;
+                }
+                content_lines.push(lines[i]);
+                i += 1;
+            }
+            if found_end {
+                let inner = content_lines.join("\n");
+                // Trim one leading and one trailing newline if present
+                let inner = inner.strip_prefix('\n').unwrap_or(&inner);
+                let inner = inner.strip_suffix('\n').unwrap_or(inner);
+                sections.push(AdrSection {
+                    id,
+                    content: inner.to_string(),
+                });
+            } else {
+                // No matching end marker found — skip this start marker
+                // Reset to just after the start line so we don't skip other sections
+                i = start_line;
+            }
+        }
+        i += 1;
+    }
+    sections
+}
+
+/// Strip per-ADR section markers from content, keeping the content between them.
+pub fn strip_adr_section_markers(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !is_adr_section_marker(trimmed)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Check if a trimmed line is an ADR section start or end marker.
+fn is_adr_section_marker(trimmed: &str) -> bool {
+    trimmed.starts_with(ADR_SECTION_START_PREFIX)
+        && (trimmed.ends_with(ADR_SECTION_START_SUFFIX)
+            || trimmed.ends_with(ADR_SECTION_END_SUFFIX))
+}
+
+/// Parse an ADR section start marker and return the ADR ID if valid.
+fn parse_adr_section_start(trimmed: &str) -> Option<String> {
+    let rest = trimmed.strip_prefix(ADR_SECTION_START_PREFIX)?;
+    let id = rest.strip_suffix(ADR_SECTION_START_SUFFIX)?;
+    if id.is_empty() {
+        return None;
+    }
+    // Make sure it's not an end marker
+    if trimmed.ends_with(ADR_SECTION_END_SUFFIX) && !trimmed.ends_with(ADR_SECTION_START_SUFFIX) {
+        return None;
+    }
+    Some(id.to_string())
+}
+
 /// Parse `<!-- adr-ids: ... -->` from the given content string and return the IDs as a Vec.
 /// Returns empty vec if no adr-ids comment is found. Trims whitespace from each ID.
 pub fn extract_adr_ids(content: &str) -> Vec<String> {
+    // First try per-ADR section markers
+    let sections = extract_adr_sections(content);
+    if !sections.is_empty() {
+        return sections.into_iter().map(|s| s.id).collect();
+    }
+    // Fall back to flat adr-ids comment (backward compat)
     let prefix = "<!-- adr-ids: ";
     let suffix = " -->";
     for line in content.lines() {
@@ -155,7 +258,8 @@ pub fn strip_managed_metadata(content: &str) -> String {
                 || trimmed.starts_with("<!-- last-synced:")
                 || trimmed.starts_with("<!-- version:")
                 || trimmed == START_MARKER
-                || trimmed == END_MARKER)
+                || trimmed == END_MARKER
+                || is_adr_section_marker(trimmed))
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -802,6 +906,162 @@ mod tests {
         assert_eq!(
             extract_last_synced("<!-- last-synced: 2025-06-01T00:00:00Z -->"),
             Some("2025-06-01T00:00:00Z")
+        );
+    }
+
+    // --- per-ADR section marker tests ---
+
+    #[test]
+    fn test_adr_section_constants() {
+        assert_eq!(ADR_SECTION_START_PREFIX, "<!-- adr:");
+        assert_eq!(ADR_SECTION_START_SUFFIX, " start -->");
+        assert_eq!(ADR_SECTION_END_PREFIX, "<!-- adr:");
+        assert_eq!(ADR_SECTION_END_SUFFIX, " end -->");
+    }
+
+    #[test]
+    fn test_wrap_adr_section_basic() {
+        let result = wrap_adr_section("abc-123", "Some content");
+        assert!(result.contains("<!-- adr:abc-123 start -->"));
+        assert!(result.contains("<!-- adr:abc-123 end -->"));
+        assert!(result.contains("Some content"));
+    }
+
+    #[test]
+    fn test_wrap_adr_section_multiline() {
+        let content = "Line 1\nLine 2\nLine 3";
+        let result = wrap_adr_section("multi", content);
+        assert_eq!(
+            result,
+            "<!-- adr:multi start -->\nLine 1\nLine 2\nLine 3\n<!-- adr:multi end -->"
+        );
+    }
+
+    #[test]
+    fn test_wrap_adr_section_empty_content() {
+        let result = wrap_adr_section("empty", "");
+        assert_eq!(result, "<!-- adr:empty start -->\n\n<!-- adr:empty end -->");
+    }
+
+    #[test]
+    fn test_extract_adr_sections_multiple() {
+        let content = format!(
+            "{}\n{}\n{}",
+            wrap_adr_section("adr-1", "Content one"),
+            wrap_adr_section("adr-2", "Content two"),
+            wrap_adr_section("adr-3", "Content three"),
+        );
+        let sections = extract_adr_sections(&content);
+        assert_eq!(sections.len(), 3);
+        assert_eq!(sections[0].id, "adr-1");
+        assert_eq!(sections[0].content, "Content one");
+        assert_eq!(sections[1].id, "adr-2");
+        assert_eq!(sections[1].content, "Content two");
+        assert_eq!(sections[2].id, "adr-3");
+        assert_eq!(sections[2].content, "Content three");
+    }
+
+    #[test]
+    fn test_extract_adr_sections_single() {
+        let content = wrap_adr_section("only-one", "The content");
+        let sections = extract_adr_sections(&content);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].id, "only-one");
+        assert_eq!(sections[0].content, "The content");
+    }
+
+    #[test]
+    fn test_extract_adr_sections_empty() {
+        let sections = extract_adr_sections("no sections here");
+        assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn test_extract_adr_sections_malformed_no_end() {
+        let content = "<!-- adr:orphan start -->\nSome content\nNo end marker";
+        let sections = extract_adr_sections(content);
+        assert!(
+            sections.is_empty(),
+            "should skip sections without matching end marker"
+        );
+    }
+
+    #[test]
+    fn test_extract_adr_sections_roundtrip() {
+        let original_content = "Hello world\nSecond line";
+        let wrapped = wrap_adr_section("roundtrip-id", original_content);
+        let sections = extract_adr_sections(&wrapped);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].id, "roundtrip-id");
+        assert_eq!(sections[0].content, original_content);
+    }
+
+    #[test]
+    fn test_extract_adr_ids_from_section_markers() {
+        let content = format!(
+            "{}\n{}",
+            wrap_adr_section("id-alpha", "Alpha content"),
+            wrap_adr_section("id-beta", "Beta content"),
+        );
+        let ids = extract_adr_ids(&content);
+        assert_eq!(ids, vec!["id-alpha", "id-beta"]);
+    }
+
+    #[test]
+    fn test_extract_adr_ids_fallback_flat() {
+        // No section markers, only flat adr-ids comment
+        let content = "<!-- adr-ids: flat-1,flat-2 -->";
+        let ids = extract_adr_ids(content);
+        assert_eq!(ids, vec!["flat-1", "flat-2"]);
+    }
+
+    #[test]
+    fn test_strip_adr_section_markers_basic() {
+        let content = "<!-- adr:abc start -->\nContent here\n<!-- adr:abc end -->";
+        let result = strip_adr_section_markers(content);
+        assert_eq!(result, "Content here");
+        assert!(!result.contains("<!-- adr:"));
+    }
+
+    #[test]
+    fn test_strip_adr_section_markers_multiple() {
+        let content = format!(
+            "{}\n{}\n{}",
+            wrap_adr_section("a", "Content A"),
+            wrap_adr_section("b", "Content B"),
+            wrap_adr_section("c", "Content C"),
+        );
+        let result = strip_adr_section_markers(&content);
+        assert!(result.contains("Content A"));
+        assert!(result.contains("Content B"));
+        assert!(result.contains("Content C"));
+        assert!(!result.contains("<!-- adr:"));
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_strips_adr_section_markers() {
+        let inner = format!(
+            "<!-- adr-ids: x,y -->\n{}\n{}",
+            wrap_adr_section("x", "X content"),
+            wrap_adr_section("y", "Y content"),
+        );
+        let content = wrap_in_markers(&inner, 1, &["x".into(), "y".into()]);
+        let result = strip_managed_metadata(&content);
+        assert!(
+            !result.contains("<!-- adr:"),
+            "should strip adr section markers: {result}"
+        );
+        assert!(
+            !result.contains("adr-ids"),
+            "should strip adr-ids: {result}"
+        );
+        assert!(
+            result.contains("X content"),
+            "should preserve content: {result}"
+        );
+        assert!(
+            result.contains("Y content"),
+            "should preserve content: {result}"
         );
     }
 }
