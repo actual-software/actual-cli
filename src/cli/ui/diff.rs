@@ -1289,6 +1289,81 @@ mod tests {
         );
     }
 
+    // ── coverage: Added ADR with new_content = None (line 283) ──
+
+    #[test]
+    fn test_format_adr_diffs_added_no_content() {
+        let diffs = vec![AdrDiff {
+            adr_id: "abcdef12-3456-7890".to_string(),
+            change: AdrChange::Added,
+            old_content: None,
+            new_content: None,
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
+        assert!(
+            plain.contains("+ [abcdef12] added"),
+            "expected '+ [abcdef12] added' in: {plain}"
+        );
+        // No content lines should follow
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected only the header line, got: {lines:?}"
+        );
+    }
+
+    // ── coverage: Updated ADR with identical old/new content (line 299) ──
+
+    #[test]
+    fn test_format_adr_diffs_updated_identical_content() {
+        let diffs = vec![AdrDiff {
+            adr_id: "abcdef12-3456-7890".to_string(),
+            change: AdrChange::Updated,
+            old_content: Some("same text".to_string()),
+            new_content: Some("same text".to_string()),
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
+        assert!(
+            plain.contains("~ [abcdef12] updated"),
+            "expected '~ [abcdef12] updated' in: {plain}"
+        );
+        // No diff lines should follow since content is identical
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected only the header line, got: {lines:?}"
+        );
+    }
+
+    // ── coverage: Updated ADR with missing old/new content (line 300) ──
+
+    #[test]
+    fn test_format_adr_diffs_updated_missing_content() {
+        let diffs = vec![AdrDiff {
+            adr_id: "abcdef12-3456-7890".to_string(),
+            change: AdrChange::Updated,
+            old_content: None,
+            new_content: Some("new text".to_string()),
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
+        assert!(
+            plain.contains("~ [abcdef12] updated"),
+            "expected '~ [abcdef12] updated' in: {plain}"
+        );
+        // No diff lines since old_content is None
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected only the header line, got: {lines:?}"
+        );
+    }
+
     // ── from_change_detection backward compat test ──
 
     #[test]
