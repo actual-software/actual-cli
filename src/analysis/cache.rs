@@ -982,11 +982,13 @@ cached_analysis:
                 frameworks: vec![Framework {
                     name: "actix-web".to_string(),
                     category: FrameworkCategory::WebBackend,
+                    source: None,
                 }],
                 package_manager: Some("cargo".to_string()),
                 description: Some("Core library".to_string()),
                 dep_count: 15,
                 dev_dep_count: 5,
+                selection: None,
             }],
         };
 
