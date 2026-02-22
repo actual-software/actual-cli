@@ -16,6 +16,8 @@ on:
       - src/cli/commands/sync.rs
       - src/cli/commands/sync_wiring.rs
 
+permissions: {}
+
 jobs:
   remind:
     name: Skill Update Reminder
