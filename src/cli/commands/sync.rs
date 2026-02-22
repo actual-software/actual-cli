@@ -1184,34 +1184,37 @@ fn raw_adrs_to_output(adrs: &[crate::api::types::Adr], format: &OutputFormat) ->
     let mut files: Vec<FileOutput> = project_adrs
         .into_iter()
         .map(|(path, adrs_for_file)| {
-            let mut content_parts = Vec::new();
-            let mut adr_ids = Vec::new();
+            use crate::tailoring::types::AdrSection;
 
-            for adr in &adrs_for_file {
-                adr_ids.push(adr.id.clone());
-                let safe_title = strip_control_chars(&adr.title);
-                let mut section = format!("## {safe_title}\n");
-                for policy in &adr.policies {
-                    let safe_policy = strip_control_chars(policy);
-                    section.push_str(&format!("- {safe_policy}\n"));
-                }
-                if let Some(instructions) = &adr.instructions {
-                    if !instructions.is_empty() {
-                        section.push('\n');
-                        for instruction in instructions {
-                            let safe_instruction = strip_control_chars(instruction);
-                            section.push_str(&format!("- {safe_instruction}\n"));
+            let sections: Vec<AdrSection> = adrs_for_file
+                .iter()
+                .map(|adr| {
+                    let safe_title = strip_control_chars(&adr.title);
+                    let mut content = format!("## {safe_title}\n");
+                    for policy in &adr.policies {
+                        let safe_policy = strip_control_chars(policy);
+                        content.push_str(&format!("- {safe_policy}\n"));
+                    }
+                    if let Some(instructions) = &adr.instructions {
+                        if !instructions.is_empty() {
+                            content.push('\n');
+                            for instruction in instructions {
+                                let safe_instruction = strip_control_chars(instruction);
+                                content.push_str(&format!("- {safe_instruction}\n"));
+                            }
                         }
                     }
-                }
-                content_parts.push(section);
-            }
+                    AdrSection {
+                        adr_id: adr.id.clone(),
+                        content,
+                    }
+                })
+                .collect();
 
             FileOutput {
                 path,
-                content: content_parts.join("\n"),
+                sections,
                 reasoning: "Raw ADR output (--no-tailor mode)".to_string(),
-                adr_ids,
             }
         })
         .collect();
@@ -1287,7 +1290,7 @@ pub fn confirm_and_write(
             let full_path = root_dir.join(&file.path);
             let existing_content = std::fs::read_to_string(&full_path).ok();
             let is_new_file = existing_content.is_none();
-            let detection = markers::detect_changes(existing_content.as_deref(), &file.adr_ids);
+            let detection = markers::detect_changes(existing_content.as_deref(), &file.adr_ids());
 
             // Extract old managed content stripped of metadata for text diffing.
             let old_managed = existing_content
@@ -1300,7 +1303,7 @@ pub fn confirm_and_write(
                 &detection,
                 is_new_file,
                 old_managed,
-                file.content.clone(),
+                file.content(),
             )
         })
         .collect();
@@ -1323,7 +1326,8 @@ pub fn confirm_and_write(
         if full {
             for file in &output.files {
                 let safe_path = console::strip_ansi_codes(&file.path);
-                let safe_content = console::strip_ansi_codes(&file.content);
+                let content = file.content();
+                let safe_content = console::strip_ansi_codes(&content);
                 pipeline.println(&format!("── {safe_path} ──"));
                 for line in safe_content.lines() {
                     pipeline.println(line);
@@ -1494,7 +1498,7 @@ mod tests {
     use crate::cli::ui::tui::renderer::TuiRenderer;
     use crate::error::ActualError;
     use crate::generation::markers;
-    use crate::tailoring::types::{FileOutput, TailoringSummary};
+    use crate::tailoring::types::{AdrSection, FileOutput, TailoringSummary};
 
     /// Valid fixture JSON matching the RepoAnalysis schema.
     const VALID_ANALYSIS_JSON: &str = r#"{
@@ -1552,9 +1556,14 @@ mod tests {
     fn make_file(path: &str, content: &str, adr_ids: Vec<&str>) -> FileOutput {
         FileOutput {
             path: path.to_string(),
-            content: content.to_string(),
+            sections: adr_ids
+                .into_iter()
+                .map(|id| AdrSection {
+                    adr_id: id.to_string(),
+                    content: content.to_string(),
+                })
+                .collect(),
             reasoning: format!("reason for {path}"),
-            adr_ids: adr_ids.into_iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -3157,10 +3166,12 @@ mod tests {
         let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "CLAUDE.md");
-        assert!(output.files[0].content.contains("Test ADR"));
-        assert!(output.files[0].content.contains("Policy for Test ADR"));
-        assert!(output.files[0].content.contains("Instruction for Test ADR"));
-        assert_eq!(output.files[0].adr_ids, vec!["adr-001"]);
+        assert!(output.files[0].content().contains("Test ADR"));
+        assert!(output.files[0].content().contains("Policy for Test ADR"));
+        assert!(output.files[0]
+            .content()
+            .contains("Instruction for Test ADR"));
+        assert_eq!(output.files[0].adr_ids(), vec!["adr-001"]);
         assert_eq!(output.summary.total_input, 1);
         assert_eq!(output.summary.files_generated, 1);
     }
@@ -3204,9 +3215,9 @@ mod tests {
         adr.instructions = None;
         let output = raw_adrs_to_output(&[adr], &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 1);
-        assert!(output.files[0].content.contains("Policy for Test ADR"));
+        assert!(output.files[0].content().contains("Policy for Test ADR"));
         // With instructions=None, the instruction line should not appear
-        let content = &output.files[0].content;
+        let content = output.files[0].content();
         assert!(
             !content.contains("Instruction for"),
             "expected no instruction lines"
@@ -3219,9 +3230,9 @@ mod tests {
         adr.instructions = Some(vec![]);
         let output = raw_adrs_to_output(&[adr], &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 1);
-        assert!(output.files[0].content.contains("Policy for Test ADR"));
+        assert!(output.files[0].content().contains("Policy for Test ADR"));
         // With empty instructions vec, no instruction lines should appear
-        let content = &output.files[0].content;
+        let content = output.files[0].content();
         assert!(
             !content.contains("Instruction for"),
             "expected no instruction lines"
@@ -3382,7 +3393,7 @@ mod tests {
         adr.instructions = Some(vec!["Instruction\x03normal".to_string()]);
         let output = raw_adrs_to_output(&[adr], &OutputFormat::ClaudeMd);
         assert_eq!(output.files.len(), 1);
-        let content = &output.files[0].content;
+        let content = output.files[0].content();
         assert!(
             !content.contains('\x07'),
             "BEL should be stripped from title"
@@ -3829,7 +3840,7 @@ mod tests {
     // ── mock runner success path coverage ──
 
     /// Valid `TailoringOutput` JSON that the mock runner can return successfully.
-    const VALID_TAILORING_JSON: &str = "{\"files\":[{\"path\":\"CLAUDE.md\",\"content\":\"Rules.\",\"reasoning\":\"Root rules\",\"adr_ids\":[\"adr-001\"]}],\"skipped_adrs\":[],\"summary\":{\"total_input\":1,\"applicable\":1,\"not_applicable\":0,\"files_generated\":1}}";
+    const VALID_TAILORING_JSON: &str = "{\"files\":[{\"path\":\"CLAUDE.md\",\"sections\":[{\"adr_id\":\"adr-001\",\"content\":\"Rules.\"}],\"reasoning\":\"Root rules\"}],\"skipped_adrs\":[],\"summary\":{\"total_input\":1,\"applicable\":1,\"not_applicable\":0,\"files_generated\":1}}";
 
     #[test]
     fn test_mock_runner_run_tailoring_success_path() {
@@ -4268,9 +4279,17 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: "# Rules\n\nDo things.".to_string(),
+                sections: vec![
+                    AdrSection {
+                        adr_id: "adr-001".to_string(),
+                        content: "# Rules\n\nDo things.".to_string(),
+                    },
+                    AdrSection {
+                        adr_id: "adr-002".to_string(),
+                        content: "# Rules\n\nDo things.".to_string(),
+                    },
+                ],
                 reasoning: "Root rules".to_string(),
-                adr_ids: vec!["adr-001".to_string(), "adr-002".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {

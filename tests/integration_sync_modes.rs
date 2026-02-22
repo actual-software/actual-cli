@@ -39,9 +39,8 @@ mod tests {
         let tailoring_json = serde_json::json!({
             "files": [{
                 "path": "CLAUDE.md",
-                "content": "# Tailored Rules",
-                "reasoning": "Applied",
-                "adr_ids": ["adr-001"]
+                "sections": [{"adr_id": "adr-001", "content": "# Tailored Rules"}],
+                "reasoning": "Applied"
             }],
             "skipped_adrs": [],
             "summary": {
@@ -705,8 +704,9 @@ User footer";
         // Tailoring response with ANSI escape sequences in content
         let ansi_content = "\x1b[31mINJECTED\x1b[0m safe content";
         let tailoring_json = serde_json::json!({
-            "files": [{"path": "CLAUDE.md", "content": ansi_content,
-                       "reasoning": "test", "adr_ids": ["adr-001"]}],
+            "files": [{"path": "CLAUDE.md",
+                       "sections": [{"adr_id": "adr-001", "content": ansi_content}],
+                       "reasoning": "test"}],
             "skipped_adrs": [],
             "summary": {"total_input": 1, "applicable": 1, "not_applicable": 0, "files_generated": 1}
         })

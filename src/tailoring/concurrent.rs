@@ -256,7 +256,7 @@ async fn tailor_single_project<R: TailoringRunner>(
                             applied_count: output
                                 .files
                                 .iter()
-                                .flat_map(|f| &f.adr_ids)
+                                .flat_map(|f| f.sections.iter().map(|s| s.adr_id.as_str()))
                                 .collect::<std::collections::HashSet<_>>()
                                 .len(),
                             skipped_count: output.skipped_adrs.len(),
@@ -326,7 +326,7 @@ mod tests {
     use crate::analysis::types::{Framework, FrameworkCategory, Language, LanguageStat};
     use crate::api::types::{AdrCategory, AppliesTo};
     use crate::generation::OutputFormat;
-    use crate::tailoring::types::{FileOutput, SkippedAdr, TailoringSummary};
+    use crate::tailoring::types::{AdrSection, FileOutput, SkippedAdr, TailoringSummary};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -502,9 +502,14 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: path.to_string(),
-                content: content.to_string(),
+                sections: adr_ids
+                    .iter()
+                    .map(|id| AdrSection {
+                        adr_id: id.to_string(),
+                        content: content.to_string(),
+                    })
+                    .collect(),
                 reasoning: format!("Rules for {path}"),
-                adr_ids: adr_ids.iter().map(|s| s.to_string()).collect(),
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -525,9 +530,14 @@ mod tests {
             .iter()
             .map(|(path, content, adr_ids)| FileOutput {
                 path: path.to_string(),
-                content: content.to_string(),
+                sections: adr_ids
+                    .iter()
+                    .map(|id| AdrSection {
+                        adr_id: id.to_string(),
+                        content: content.to_string(),
+                    })
+                    .collect(),
                 reasoning: format!("Rules for {path}"),
-                adr_ids: adr_ids.iter().map(|s| s.to_string()).collect(),
             })
             .collect();
         let skipped_adrs: Vec<SkippedAdr> = skipped
@@ -537,7 +547,7 @@ mod tests {
                 reason: reason.to_string(),
             })
             .collect();
-        let applicable = file_outputs.iter().map(|f| f.adr_ids.len()).sum::<usize>();
+        let applicable = file_outputs.iter().map(|f| f.sections.len()).sum::<usize>();
         let output = TailoringOutput {
             summary: TailoringSummary {
                 total_input: applicable + skipped_adrs.len(),
@@ -628,7 +638,7 @@ mod tests {
         let output = result.unwrap();
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "apps/solo/CLAUDE.md");
-        assert_eq!(output.files[0].content, "Solo rules");
+        assert_eq!(output.files[0].content(), "Solo rules");
         assert_eq!(runner.call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -726,7 +736,7 @@ mod tests {
         assert_eq!(output.files[0].path, "CLAUDE.md");
 
         // Content from all three projects should be concatenated with "\n\n"
-        let content = &output.files[0].content;
+        let content = &output.files[0].content();
         assert!(
             content.contains("Rules from project A"),
             "missing content from project A in: {content}"
