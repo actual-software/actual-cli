@@ -46,12 +46,23 @@ If `--project PATH` flags are specified, filters analysis results to only the sp
 
 If no `--project` flag is given, uses the full analysis.
 
+### Step 3b: Language & Framework Selection
+
+After filtering, sync automatically selects the primary language and framework for each project:
+
+- **Language**: The language with the most lines of code is auto-selected.
+- **Framework**: The first detected framework compatible with the selected language is auto-selected. Compatibility is determined by manifest source (e.g., Cargo.toml frameworks are compatible with Rust, package.json frameworks with JavaScript/TypeScript).
+- If no languages are detected, no selection is made.
+- If no compatible frameworks exist, only the language is selected.
+
 ### Step 4: Confirmation
 
-Presents the analysis summary and asks the user to confirm before proceeding.
+Presents the analysis summary (including auto-selected language and framework per project) and asks the user to confirm before proceeding.
 
-- **`--force` flag**: Skips this confirmation prompt.
-- If the user declines, sync exits.
+- **Accept**: Proceeds with the current selection.
+- **Change**: Opens interactive single-select prompts for language and framework (if multiple options exist), then loops back to show the updated summary.
+- **Reject**: Exits sync.
+- **`--force` flag**: Skips this confirmation prompt entirely, using auto-selected values.
 
 ### Step 5: Config Reload
 
