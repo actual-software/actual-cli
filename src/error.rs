@@ -10,7 +10,7 @@ pub enum ActualError {
     CodexNotFound,
 
     /// The Cursor agent CLI binary was not found.
-    #[error("Cursor agent CLI not found. Install from: https://cursor.com/install")]
+    #[error("Cursor agent CLI (cursor-agent) not found. Install from: https://cursor.com/install")]
     CursorNotFound,
 
     #[error("Claude Code is not authenticated")]
