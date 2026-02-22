@@ -77,6 +77,19 @@ static RUNNER_FAMILIES: &[RunnerFamily] = &[
     },
 ];
 
+/// Returns the list of known model name strings from all runner families,
+/// excluding placeholder entries like `"(any model)"`.
+///
+/// Used by `config set model` to warn when an unrecognised name is provided.
+pub fn known_model_names() -> Vec<&'static str> {
+    RUNNER_FAMILIES
+        .iter()
+        .flat_map(|f| f.models.iter())
+        .map(|m| m.id)
+        .filter(|id| !id.starts_with('('))
+        .collect()
+}
+
 pub fn exec() -> Result<(), ActualError> {
     run_models();
     Ok(())
@@ -253,5 +266,44 @@ mod tests {
             ids.contains(&"codex-mini-latest"),
             "should include codex-mini-latest"
         );
+    }
+
+    // --- known_model_names() tests ---
+
+    #[test]
+    fn test_known_model_names_nonempty() {
+        let names = known_model_names();
+        assert!(!names.is_empty(), "known_model_names() should not be empty");
+    }
+
+    #[test]
+    fn test_known_model_names_includes_claude_models() {
+        let names = known_model_names();
+        assert!(names.contains(&"claude-sonnet-4-6"));
+        assert!(names.contains(&"claude-opus-4-5"));
+        assert!(names.contains(&"claude-haiku-3-5"));
+        assert!(names.contains(&"sonnet"));
+        assert!(names.contains(&"opus"));
+        assert!(names.contains(&"haiku"));
+    }
+
+    #[test]
+    fn test_known_model_names_includes_openai_models() {
+        let names = known_model_names();
+        assert!(names.contains(&"gpt-5.2"));
+        assert!(names.contains(&"codex-mini-latest"));
+    }
+
+    #[test]
+    fn test_known_model_names_excludes_cursor_placeholder() {
+        let names = known_model_names();
+        // The Cursor entry is "(any model)" — must be filtered out
+        for name in &names {
+            assert!(
+                !name.starts_with('('),
+                "placeholder '{}' should not appear in known_model_names()",
+                name
+            );
+        }
     }
 }
