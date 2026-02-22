@@ -57,7 +57,29 @@ fn format_metadata_lines(project: &Project) -> Vec<String> {
     let mut lines = Vec::new();
 
     if !project.languages.is_empty() {
-        let langs: Vec<String> = project.languages.iter().map(format_language_stat).collect();
+        let langs: Vec<String> = project
+            .languages
+            .iter()
+            .map(|ls| {
+                let base = format_language_stat(ls);
+                if let Some(ref sel) = project.selection {
+                    if sel.language.language == ls.language {
+                        // Selected: bold + accent + checkmark
+                        let badge = if sel.auto_selected {
+                            format!(" {} {}", theme::SUCCESS, theme::hint("(auto)"))
+                        } else {
+                            format!(" {}", theme::SUCCESS)
+                        };
+                        format!("{}{}", theme::accent(&theme::heading(&base)), badge)
+                    } else {
+                        // Not selected: dim
+                        format!("{}", theme::muted(&base))
+                    }
+                } else {
+                    base // No selection: render as-is (backward compat)
+                }
+            })
+            .collect();
         lines.push(format!(
             "    {}  {}",
             theme::muted("Languages:"),
@@ -69,7 +91,24 @@ fn format_metadata_lines(project: &Project) -> Vec<String> {
         let frameworks: Vec<String> = project
             .frameworks
             .iter()
-            .map(|f| console::strip_ansi_codes(f.name.as_str()).into_owned())
+            .map(|f| {
+                let name = console::strip_ansi_codes(f.name.as_str()).into_owned();
+                if let Some(ref sel) = project.selection {
+                    if let Some(ref sel_fw) = sel.framework {
+                        if sel_fw.name == f.name {
+                            let badge = if sel.auto_selected {
+                                format!(" {} {}", theme::SUCCESS, theme::hint("(auto)"))
+                            } else {
+                                format!(" {}", theme::SUCCESS)
+                            };
+                            return format!("{}{}", theme::accent(&theme::heading(&name)), badge);
+                        }
+                    }
+                    format!("{}", theme::muted(&name))
+                } else {
+                    name
+                }
+            })
             .collect();
         lines.push(format!(
             "    {} {}",
@@ -144,7 +183,26 @@ fn format_metadata_lines_plain(project: &Project) -> Vec<String> {
     let mut lines = Vec::new();
 
     if !project.languages.is_empty() {
-        let langs: Vec<String> = project.languages.iter().map(format_language_stat).collect();
+        let langs: Vec<String> = project
+            .languages
+            .iter()
+            .map(|ls| {
+                let base = format_language_stat(ls);
+                if let Some(ref sel) = project.selection {
+                    if sel.language.language == ls.language {
+                        if sel.auto_selected {
+                            format!("{base} [auto]")
+                        } else {
+                            format!("{base} [selected]")
+                        }
+                    } else {
+                        base
+                    }
+                } else {
+                    base
+                }
+            })
+            .collect();
         lines.push(format!(
             "    {:>width$}  {}",
             "Languages:",
@@ -157,7 +215,23 @@ fn format_metadata_lines_plain(project: &Project) -> Vec<String> {
         let frameworks: Vec<String> = project
             .frameworks
             .iter()
-            .map(|f| console::strip_ansi_codes(f.name.as_str()).into_owned())
+            .map(|f| {
+                let name = console::strip_ansi_codes(f.name.as_str()).into_owned();
+                if let Some(ref sel) = project.selection {
+                    if let Some(ref sel_fw) = sel.framework {
+                        if sel_fw.name == f.name {
+                            return if sel.auto_selected {
+                                format!("{name} [auto]")
+                            } else {
+                                format!("{name} [selected]")
+                            };
+                        }
+                    }
+                    name
+                } else {
+                    name
+                }
+            })
             .collect();
         lines.push(format!(
             "    {:>width$}  {}",
@@ -258,7 +332,9 @@ pub fn prompt_project_confirmation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::types::{Framework, FrameworkCategory, Language, LanguageStat, Project};
+    use crate::analysis::types::{
+        Framework, FrameworkCategory, Language, LanguageStat, Project, ProjectSelection,
+    };
     use crate::cli::ui::test_utils::MockTerminal;
 
     fn make_monorepo_analysis() -> RepoAnalysis {
@@ -1398,5 +1474,315 @@ mod tests {
         let term = MockTerminal::new(vec![]).with_selection(None);
         let result = term.select_files("prompt", &["a".to_string()], &[true]);
         assert_eq!(result.unwrap(), None);
+    }
+
+    // ── Selection visual distinction tests ──
+
+    fn make_project_with_selection(auto_selected: bool) -> Project {
+        Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![
+                LanguageStat {
+                    language: Language::Rust,
+                    loc: 8100,
+                },
+                LanguageStat {
+                    language: Language::TypeScript,
+                    loc: 2340,
+                },
+            ],
+            frameworks: vec![
+                Framework {
+                    name: "actix-web".to_string(),
+                    category: FrameworkCategory::WebBackend,
+                    source: None,
+                },
+                Framework {
+                    name: "diesel".to_string(),
+                    category: FrameworkCategory::Data,
+                    source: None,
+                },
+            ],
+            package_manager: Some("cargo".to_string()),
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+            selection: Some(ProjectSelection {
+                language: LanguageStat {
+                    language: Language::Rust,
+                    loc: 8100,
+                },
+                framework: Some(Framework {
+                    name: "actix-web".to_string(),
+                    category: FrameworkCategory::WebBackend,
+                    source: None,
+                }),
+                auto_selected,
+            }),
+        }
+    }
+
+    #[test]
+    fn format_metadata_themed_auto_selected_shows_checkmark_and_auto() {
+        let project = make_project_with_selection(true);
+        let lines = format_metadata_lines(&project);
+        let joined = lines.join("\n");
+        let plain = strip(&joined);
+        // Selected language should have checkmark indicator and (auto)
+        assert!(
+            plain.contains("(auto)"),
+            "expected '(auto)' for auto-selected language in: {plain}"
+        );
+        // Non-selected language should still appear
+        assert!(
+            plain.contains("ts"),
+            "expected non-selected language 'ts' in: {plain}"
+        );
+        // Selected framework should have checkmark and (auto)
+        assert!(
+            plain.contains("actix-web"),
+            "expected selected framework 'actix-web' in: {plain}"
+        );
+        assert!(
+            plain.contains("diesel"),
+            "expected non-selected framework 'diesel' in: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_themed_user_selected_shows_checkmark_no_auto() {
+        let project = make_project_with_selection(false);
+        let lines = format_metadata_lines(&project);
+        let joined = lines.join("\n");
+        let plain = strip(&joined);
+        // Should NOT contain (auto) when user-selected
+        assert!(
+            !plain.contains("(auto)"),
+            "should not contain '(auto)' for user-selected in: {plain}"
+        );
+        // Both languages should still appear
+        assert!(
+            plain.contains("rust"),
+            "expected selected language 'rust' in: {plain}"
+        );
+        assert!(
+            plain.contains("ts"),
+            "expected non-selected language 'ts' in: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_themed_no_selection_unchanged() {
+        // Verify backward compat: selection=None renders the same as before
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![
+                LanguageStat {
+                    language: Language::Rust,
+                    loc: 8100,
+                },
+                LanguageStat {
+                    language: Language::TypeScript,
+                    loc: 2340,
+                },
+            ],
+            frameworks: vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+                source: None,
+            }],
+            package_manager: None,
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+            selection: None,
+        };
+        let lines = format_metadata_lines(&project);
+        let joined = lines.join("\n");
+        let plain = strip(&joined);
+        // No selection markers
+        assert!(
+            !plain.contains("(auto)"),
+            "should not contain '(auto)' with no selection in: {plain}"
+        );
+        // Languages should appear without any special markers
+        assert!(
+            plain.contains("rust (8,100 loc)"),
+            "expected 'rust (8,100 loc)' in: {plain}"
+        );
+        assert!(
+            plain.contains("ts (2,340 loc)"),
+            "expected 'ts (2,340 loc)' in: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_plain_auto_selected_shows_auto_tag() {
+        let project = make_project_with_selection(true);
+        let lines = format_metadata_lines_plain(&project);
+        let joined = lines.join("\n");
+        // Selected language should have [auto] tag
+        assert!(
+            joined.contains("rust (8,100 loc) [auto]"),
+            "expected 'rust (8,100 loc) [auto]' in: {joined}"
+        );
+        // Non-selected language should NOT have a tag
+        assert!(
+            !joined.contains("ts (2,340 loc) [auto]"),
+            "non-selected language should not have [auto] in: {joined}"
+        );
+        assert!(
+            !joined.contains("ts (2,340 loc) [selected]"),
+            "non-selected language should not have [selected] in: {joined}"
+        );
+        // Selected framework should have [auto] tag
+        assert!(
+            joined.contains("actix-web [auto]"),
+            "expected 'actix-web [auto]' in: {joined}"
+        );
+        // Non-selected framework should NOT have a tag
+        assert!(
+            !joined.contains("diesel [auto]"),
+            "non-selected framework should not have [auto] in: {joined}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_plain_user_selected_shows_selected_tag() {
+        let project = make_project_with_selection(false);
+        let lines = format_metadata_lines_plain(&project);
+        let joined = lines.join("\n");
+        // Selected language should have [selected] tag
+        assert!(
+            joined.contains("rust (8,100 loc) [selected]"),
+            "expected 'rust (8,100 loc) [selected]' in: {joined}"
+        );
+        // Selected framework should have [selected] tag
+        assert!(
+            joined.contains("actix-web [selected]"),
+            "expected 'actix-web [selected]' in: {joined}"
+        );
+        // Should NOT contain [auto]
+        assert!(
+            !joined.contains("[auto]"),
+            "should not contain [auto] for user-selected in: {joined}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_plain_no_selection_no_tags() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 8100,
+            }],
+            frameworks: vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+                source: None,
+            }],
+            package_manager: None,
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+            selection: None,
+        };
+        let lines = format_metadata_lines_plain(&project);
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("[auto]"),
+            "should not contain [auto] with no selection in: {joined}"
+        );
+        assert!(
+            !joined.contains("[selected]"),
+            "should not contain [selected] with no selection in: {joined}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_themed_selection_without_framework() {
+        // When selection has no framework, all frameworks should render as muted
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 1500,
+            }],
+            frameworks: vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+                source: None,
+            }],
+            package_manager: None,
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+            selection: Some(ProjectSelection {
+                language: LanguageStat {
+                    language: Language::Rust,
+                    loc: 1500,
+                },
+                framework: None,
+                auto_selected: true,
+            }),
+        };
+        let lines = format_metadata_lines(&project);
+        let joined = lines.join("\n");
+        let plain = strip(&joined);
+        // Framework should appear but not with checkmark/auto badge
+        assert!(
+            plain.contains("actix-web"),
+            "expected framework name in: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_metadata_plain_selection_without_framework() {
+        let project = Project {
+            path: ".".to_string(),
+            name: "test".to_string(),
+            languages: vec![LanguageStat {
+                language: Language::Rust,
+                loc: 1500,
+            }],
+            frameworks: vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+                source: None,
+            }],
+            package_manager: None,
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+            selection: Some(ProjectSelection {
+                language: LanguageStat {
+                    language: Language::Rust,
+                    loc: 1500,
+                },
+                framework: None,
+                auto_selected: true,
+            }),
+        };
+        let lines = format_metadata_lines_plain(&project);
+        let joined = lines.join("\n");
+        // Language should have [auto] tag
+        assert!(
+            joined.contains("[auto]"),
+            "expected [auto] for language in: {joined}"
+        );
+        // Framework should NOT have any selection tag (no framework selected)
+        assert!(
+            !joined.contains("actix-web [auto]"),
+            "framework should not have [auto] when not selected in: {joined}"
+        );
+        assert!(
+            !joined.contains("actix-web [selected]"),
+            "framework should not have [selected] when not selected in: {joined}"
+        );
     }
 }
