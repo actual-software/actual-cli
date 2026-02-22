@@ -480,9 +480,9 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             tokio::sync::mpsc::unbounded_channel::<TailoringEvent>();
 
         // Set up a streaming event channel so the runner can forward real-time
-        // tool-call summaries and stderr lines from the Claude Code subprocess.
+        // tool-call summaries and stderr lines from the AI subprocess.
         // This channel is used to reset the hang-detection timer on every event
-        // and to show progress in the TUI while Claude is working.
+        // and to show progress in the TUI while the AI is working.
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         runner.set_event_tx(event_tx);
 
@@ -773,11 +773,11 @@ where
                     hang_warned = true;
                     pipeline.println(&format!(
                         "  \u{26a0} No output received in {HANG_WARN_SECS}s \u{2014} \
-        Claude Code subprocess is unresponsive"
+        AI subprocess is unresponsive"
                     ));
                     tracing::warn!(
                         "no tailoring events for {HANG_WARN_SECS}s — \
-        Claude Code subprocess is unresponsive"
+        AI subprocess is unresponsive"
                     );
                 }
             }
