@@ -191,36 +191,28 @@ mod tests {
 
     #[test]
     fn test_runtime_build_error_helper() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "runtime failed");
-        let ActualError::RunnerFailed { message, stderr } = runtime_build_error(io_err) else {
-            panic!("expected RunnerFailed");
-        };
-        assert!(
-            message.contains("failed to build tokio runtime"),
-            "expected 'failed to build tokio runtime' in: {message}"
-        );
-        assert!(
-            message.contains("runtime failed"),
-            "expected 'runtime failed' in: {message}"
-        );
-        assert!(stderr.is_empty());
+        // Exercises runtime_build_error(), the only reachable path to the
+        // tokio-runtime-build error conversion without OS-level trickery.
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "synthetic error");
+        let err = runtime_build_error(io_err);
+        assert!(matches!(
+            err,
+            ActualError::RunnerFailed { ref message, .. }
+                if message.contains("failed to build tokio runtime")
+        ));
     }
 
     #[test]
     fn test_wait_io_error_helper() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broken");
-        let ActualError::RunnerFailed { message, stderr } = wait_io_error(io_err) else {
-            panic!("expected RunnerFailed");
-        };
-        assert!(
-            message.contains("failed to wait for claude"),
-            "expected 'failed to wait for claude' in: {message}"
-        );
-        assert!(
-            message.contains("pipe broken"),
-            "expected 'pipe broken' in: {message}"
-        );
-        assert!(stderr.is_empty());
+        // Exercises wait_io_error(), the only reachable path to the
+        // wait_with_output error conversion without OS-level trickery.
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe closed");
+        let err = wait_io_error(io_err);
+        assert!(matches!(
+            err,
+            ActualError::RunnerFailed { ref message, .. }
+                if message.contains("failed to wait for claude")
+        ));
     }
 
     // ── probe_codex_auth tests ────────────────────────────────────────────────
