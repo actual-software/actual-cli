@@ -120,9 +120,6 @@ jobs:
     needs: sync-beads
     if: always() && needs.sync-beads.result != 'cancelled'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -176,8 +173,6 @@ jobs:
       - name: Upload tui-test captures
         if: always()
         uses: ./.github/actions/tui-test-report
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   # === Test fix-bead jobs ===
   create-test-fix-bead:
