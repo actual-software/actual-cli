@@ -347,6 +347,43 @@ fn test_config_show_after_openai_api_key_set_redacts() {
 }
 
 #[test]
+fn test_config_set_cursor_api_key_redacts_in_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+    cmd()
+        .args(["config", "set", "cursor_api_key", "cursor-test-key-99999"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cursor_api_key"))
+        .stdout(predicate::str::contains("[redacted]"))
+        .stdout(predicate::str::contains("cursor-test-key-99999").not());
+}
+
+#[test]
+fn test_config_show_after_cursor_api_key_set_redacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+
+    // First: set the key
+    cmd()
+        .args(["config", "set", "cursor_api_key", "cursor-test-key-99999"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success();
+
+    // Then: show should redact
+    cmd()
+        .args(["config", "show"])
+        .env("ACTUAL_CONFIG", &config_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cursor_api_key"))
+        .stdout(predicate::str::contains("[redacted]"))
+        .stdout(predicate::str::contains("cursor-test-key-99999").not());
+}
+
+#[test]
 fn test_config_show_redacts_both_keys_simultaneously() {
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");

@@ -4,7 +4,7 @@ use crate::cli::args::{ConfigAction, ConfigArgs};
 use crate::config;
 use crate::error::ActualError;
 
-const SECRET_KEYS: &[&str] = &["anthropic_api_key", "openai_api_key"];
+const SECRET_KEYS: &[&str] = &["anthropic_api_key", "openai_api_key", "cursor_api_key"];
 
 fn redact_yaml(yaml: &str) -> String {
     yaml.lines()
@@ -282,6 +282,15 @@ mod tests {
     }
 
     #[test]
+    fn test_redact_yaml_redacts_cursor_api_key() {
+        let yaml = "cursor_api_key: cursor-secret789\nbatch_size: 10\n";
+        let redacted = redact_yaml(yaml);
+        assert!(redacted.contains("cursor_api_key:"));
+        assert!(!redacted.contains("cursor-secret789"));
+        assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
     fn test_redact_yaml_redacts_openai_api_key() {
         let yaml = "openai_api_key: sk-openai-secret456\nbatch_size: 10\n";
         let redacted = redact_yaml(yaml);
@@ -367,6 +376,20 @@ mod tests {
             action: ConfigAction::Set(ConfigSetArgs {
                 key: "anthropic_api_key".to_string(),
                 value: "sk-test-should-not-appear".to_string(),
+            }),
+        };
+        let result = run_with_path(&args, &config_file);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_set_cursor_api_key_does_not_echo_raw_value() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        let args = ConfigArgs {
+            action: ConfigAction::Set(ConfigSetArgs {
+                key: "cursor_api_key".to_string(),
+                value: "cursor-test-should-not-appear".to_string(),
             }),
         };
         let result = run_with_path(&args, &config_file);
