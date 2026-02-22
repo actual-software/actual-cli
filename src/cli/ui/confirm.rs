@@ -64,13 +64,8 @@ fn format_metadata_lines(project: &Project) -> Vec<String> {
                 let base = format_language_stat(ls);
                 if let Some(ref sel) = project.selection {
                     if sel.language.language == ls.language {
-                        // Selected: bold + accent + checkmark
-                        let badge = if sel.auto_selected {
-                            format!(" {} {}", theme::SUCCESS, theme::hint("(auto)"))
-                        } else {
-                            format!(" {}", theme::SUCCESS)
-                        };
-                        format!("{}{}", theme::accent(&theme::heading(&base)), badge)
+                        // Selected: bold + accent (no text badge)
+                        format!("{}", theme::accent(&theme::heading(&base)))
                     } else {
                         // Not selected: dim
                         format!("{}", theme::muted(&base))
@@ -96,12 +91,8 @@ fn format_metadata_lines(project: &Project) -> Vec<String> {
                 if let Some(ref sel) = project.selection {
                     if let Some(ref sel_fw) = sel.framework {
                         if sel_fw.name == f.name {
-                            let badge = if sel.auto_selected {
-                                format!(" {} {}", theme::SUCCESS, theme::hint("(auto)"))
-                            } else {
-                                format!(" {}", theme::SUCCESS)
-                            };
-                            return format!("{}{}", theme::accent(&theme::heading(&name)), badge);
+                            // Selected: bold + accent (no text badge)
+                            return format!("{}", theme::accent(&theme::heading(&name)));
                         }
                     }
                     format!("{}", theme::muted(&name))
@@ -190,11 +181,7 @@ fn format_metadata_lines_plain(project: &Project) -> Vec<String> {
                 let base = format_language_stat(ls);
                 if let Some(ref sel) = project.selection {
                     if sel.language.language == ls.language {
-                        if sel.auto_selected {
-                            format!("{base} [auto]")
-                        } else {
-                            format!("{base} [selected]")
-                        }
+                        format!("> {base}")
                     } else {
                         base
                     }
@@ -220,11 +207,7 @@ fn format_metadata_lines_plain(project: &Project) -> Vec<String> {
                 if let Some(ref sel) = project.selection {
                     if let Some(ref sel_fw) = sel.framework {
                         if sel_fw.name == f.name {
-                            return if sel.auto_selected {
-                                format!("{name} [auto]")
-                            } else {
-                                format!("{name} [selected]")
-                            };
+                            return format!("> {name}");
                         }
                     }
                     name
@@ -311,8 +294,8 @@ pub fn format_project_summary(analysis: &RepoAnalysis, _width: usize) -> String 
 
 /// Display detected projects and prompt for confirmation using the given terminal.
 ///
-/// Writes the project summary via `term.write_line`, then uses `term.confirm`
-/// (backed by `dialoguer::Confirm` in production) for a yes/no prompt.
+/// Writes the project summary via `term.write_line`, then uses `term.select_one`
+/// to present three options: Accept, Change, and Reject.
 /// Terminal width is detected automatically.
 pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
@@ -322,10 +305,15 @@ pub fn prompt_project_confirmation(
     let summary = format_project_summary(analysis, width);
     term.write_line(&summary);
 
-    match term.confirm("Accept project configuration?") {
-        Ok(true) => Ok(ConfirmAction::Accept),
-        Ok(false) => Ok(ConfirmAction::Reject),
-        Err(e) => Err(e),
+    let options = vec![
+        "Accept \u{2014} proceed with sync".to_string(),
+        "Change \u{2014} re-select language/framework".to_string(),
+        "Reject \u{2014} abort".to_string(),
+    ];
+    match term.select_one("Proceed with sync?", &options, Some(0))? {
+        0 => Ok(ConfirmAction::Accept),
+        1 => Ok(ConfirmAction::Change),
+        _ => Ok(ConfirmAction::Reject),
     }
 }
 
@@ -885,66 +873,59 @@ mod tests {
 
     // ── prompt_project_confirmation tests ──
     //
-    // MockTerminal uses the default `confirm()` impl which reads from
-    // `read_line` and parses y/yes → true, anything else → false.
+    // prompt_project_confirmation uses `term.select_one()` to present 3 options:
+    //   0 = Accept, 1 = Change, 2 = Reject.
+    // MockTerminal's `with_select_one()` feeds scripted indices.
 
     #[test]
     fn prompt_accept() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["y"]);
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
         let result = prompt_project_confirmation(&analysis, &term).unwrap();
         assert_eq!(result, ConfirmAction::Accept);
     }
 
     #[test]
-    fn prompt_accept_yes() {
+    fn prompt_change() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["yes"]);
+        let term = MockTerminal::new(vec![]).with_select_one(vec![1]);
         let result = prompt_project_confirmation(&analysis, &term).unwrap();
-        assert_eq!(result, ConfirmAction::Accept);
+        assert_eq!(result, ConfirmAction::Change);
     }
 
     #[test]
     fn prompt_reject() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["n"]);
+        let term = MockTerminal::new(vec![]).with_select_one(vec![2]);
         let result = prompt_project_confirmation(&analysis, &term).unwrap();
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
-    fn prompt_reject_no() {
+    fn prompt_out_of_range_defaults_to_reject() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["no"]);
+        // Any index >= 2 maps to Reject via the `_ =>` arm
+        let term = MockTerminal::new(vec![]).with_select_one(vec![99]);
         let result = prompt_project_confirmation(&analysis, &term).unwrap();
         assert_eq!(result, ConfirmAction::Reject);
     }
 
     #[test]
-    fn prompt_invalid_defaults_to_reject() {
+    fn prompt_cancelled_propagates_error() {
         let analysis = make_single_project_analysis();
-        // Unrecognized input defaults to false → Reject
-        let term = MockTerminal::new(vec!["x"]);
-        let result = prompt_project_confirmation(&analysis, &term).unwrap();
-        assert_eq!(result, ConfirmAction::Reject);
-    }
-
-    #[test]
-    fn prompt_io_error_propagates_error() {
-        let analysis = make_single_project_analysis();
-        // Empty inputs causes read_line to return Err → propagated as Err
-        let term = MockTerminal::new(vec![]);
+        // Empty select_one results causes select_one to return Err(UserCancelled)
+        let term = MockTerminal::new(vec![]).with_select_one(vec![]);
         let result = prompt_project_confirmation(&analysis, &term);
         assert!(
             result.is_err(),
-            "expected Err when terminal confirm fails, got: {result:?}"
+            "expected Err when terminal select_one is cancelled, got: {result:?}"
         );
     }
 
     #[test]
     fn prompt_writes_summary_to_output() {
         let analysis = make_single_project_analysis();
-        let term = MockTerminal::new(vec!["y"]);
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
         prompt_project_confirmation(&analysis, &term).unwrap();
         let output = term.output_text();
         assert!(
@@ -1524,22 +1505,31 @@ mod tests {
     }
 
     #[test]
-    fn format_metadata_themed_auto_selected_shows_checkmark_and_auto() {
+    fn format_metadata_themed_auto_selected_no_text_badge() {
         let project = make_project_with_selection(true);
         let lines = format_metadata_lines(&project);
         let joined = lines.join("\n");
         let plain = strip(&joined);
-        // Selected language should have checkmark indicator and (auto)
+        // No text badges — styling alone distinguishes selected items
         assert!(
-            plain.contains("(auto)"),
-            "expected '(auto)' for auto-selected language in: {plain}"
+            !plain.contains("(auto)"),
+            "should not contain '(auto)' text badge in: {plain}"
+        );
+        assert!(
+            !plain.contains("[auto]"),
+            "should not contain '[auto]' text badge in: {plain}"
+        );
+        // Selected language should still appear
+        assert!(
+            plain.contains("rust"),
+            "expected selected language 'rust' in: {plain}"
         );
         // Non-selected language should still appear
         assert!(
             plain.contains("ts"),
             "expected non-selected language 'ts' in: {plain}"
         );
-        // Selected framework should have checkmark and (auto)
+        // Selected framework should appear
         assert!(
             plain.contains("actix-web"),
             "expected selected framework 'actix-web' in: {plain}"
@@ -1551,15 +1541,19 @@ mod tests {
     }
 
     #[test]
-    fn format_metadata_themed_user_selected_shows_checkmark_no_auto() {
+    fn format_metadata_themed_user_selected_no_text_badge() {
         let project = make_project_with_selection(false);
         let lines = format_metadata_lines(&project);
         let joined = lines.join("\n");
         let plain = strip(&joined);
-        // Should NOT contain (auto) when user-selected
+        // No text badges for user-selected either
         assert!(
             !plain.contains("(auto)"),
             "should not contain '(auto)' for user-selected in: {plain}"
+        );
+        assert!(
+            !plain.contains("[selected]"),
+            "should not contain '[selected]' for user-selected in: {plain}"
         );
         // Both languages should still appear
         assert!(
@@ -1619,55 +1613,59 @@ mod tests {
     }
 
     #[test]
-    fn format_metadata_plain_auto_selected_shows_auto_tag() {
+    fn format_metadata_plain_auto_selected_uses_arrow_prefix() {
         let project = make_project_with_selection(true);
         let lines = format_metadata_lines_plain(&project);
         let joined = lines.join("\n");
-        // Selected language should have [auto] tag
+        // Selected language should have > prefix (no [auto] tag)
         assert!(
-            joined.contains("rust (8,100 loc) [auto]"),
-            "expected 'rust (8,100 loc) [auto]' in: {joined}"
-        );
-        // Non-selected language should NOT have a tag
-        assert!(
-            !joined.contains("ts (2,340 loc) [auto]"),
-            "non-selected language should not have [auto] in: {joined}"
+            joined.contains("> rust (8,100 loc)"),
+            "expected '> rust (8,100 loc)' in: {joined}"
         );
         assert!(
-            !joined.contains("ts (2,340 loc) [selected]"),
-            "non-selected language should not have [selected] in: {joined}"
+            !joined.contains("[auto]"),
+            "should not contain [auto] tag in: {joined}"
         );
-        // Selected framework should have [auto] tag
+        // Non-selected language should NOT have > prefix
         assert!(
-            joined.contains("actix-web [auto]"),
-            "expected 'actix-web [auto]' in: {joined}"
+            !joined.contains("> ts"),
+            "non-selected language should not have > prefix in: {joined}"
         );
-        // Non-selected framework should NOT have a tag
+        // Selected framework should have > prefix
         assert!(
-            !joined.contains("diesel [auto]"),
-            "non-selected framework should not have [auto] in: {joined}"
+            joined.contains("> actix-web"),
+            "expected '> actix-web' in: {joined}"
+        );
+        // Non-selected framework should NOT have > prefix
+        assert!(
+            !joined.contains("> diesel"),
+            "non-selected framework should not have > prefix in: {joined}"
         );
     }
 
     #[test]
-    fn format_metadata_plain_user_selected_shows_selected_tag() {
+    fn format_metadata_plain_user_selected_uses_arrow_prefix() {
         let project = make_project_with_selection(false);
         let lines = format_metadata_lines_plain(&project);
         let joined = lines.join("\n");
-        // Selected language should have [selected] tag
+        // Selected language should have > prefix (no [selected] tag)
         assert!(
-            joined.contains("rust (8,100 loc) [selected]"),
-            "expected 'rust (8,100 loc) [selected]' in: {joined}"
+            joined.contains("> rust (8,100 loc)"),
+            "expected '> rust (8,100 loc)' in: {joined}"
         );
-        // Selected framework should have [selected] tag
+        // Selected framework should have > prefix
         assert!(
-            joined.contains("actix-web [selected]"),
-            "expected 'actix-web [selected]' in: {joined}"
+            joined.contains("> actix-web"),
+            "expected '> actix-web' in: {joined}"
         );
-        // Should NOT contain [auto]
+        // Should NOT contain [auto] or [selected]
         assert!(
             !joined.contains("[auto]"),
             "should not contain [auto] for user-selected in: {joined}"
+        );
+        assert!(
+            !joined.contains("[selected]"),
+            "should not contain [selected] for user-selected in: {joined}"
         );
     }
 
@@ -1770,19 +1768,24 @@ mod tests {
         };
         let lines = format_metadata_lines_plain(&project);
         let joined = lines.join("\n");
-        // Language should have [auto] tag
+        // Language should have > prefix
         assert!(
-            joined.contains("[auto]"),
-            "expected [auto] for language in: {joined}"
+            joined.contains("> rust"),
+            "expected '> rust' for selected language in: {joined}"
         );
-        // Framework should NOT have any selection tag (no framework selected)
+        // No [auto] or [selected] tags anywhere
         assert!(
-            !joined.contains("actix-web [auto]"),
-            "framework should not have [auto] when not selected in: {joined}"
+            !joined.contains("[auto]"),
+            "should not contain [auto] in: {joined}"
         );
         assert!(
-            !joined.contains("actix-web [selected]"),
-            "framework should not have [selected] when not selected in: {joined}"
+            !joined.contains("[selected]"),
+            "should not contain [selected] in: {joined}"
+        );
+        // Framework should NOT have > prefix (no framework selected)
+        assert!(
+            !joined.contains("> actix-web"),
+            "framework should not have > prefix when not selected in: {joined}"
         );
     }
 }
