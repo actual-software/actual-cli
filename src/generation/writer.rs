@@ -37,7 +37,7 @@ pub struct WriteResult {
 ///    `"AGENTS.md"`, or `".cursor/rules/actual-policies.mdc"`)
 /// 2. Read existing content from `root_dir.join(path)`, if file exists
 /// 3. Compute next version via `markers::next_version(existing)`
-/// 4. Merge via `merge::merge_content(existing, content, version, is_root, adr_ids, root_header)`
+/// 4. Merge via `merge::merge_content(existing, sections, version, is_root, root_header)`
 /// 5. Create parent directories with `std::fs::create_dir_all`
 /// 6. Write the file with `std::fs::write`
 /// 7. Collect `WriteResult`
@@ -136,10 +136,9 @@ pub fn write_files(
             // get the correct preamble (e.g. "# Project Guidelines" vs YAML frontmatter).
             let result = merge::merge_content(
                 existing_ref,
-                &file.content(),
+                &file.sections,
                 version,
                 is_root,
-                &file.adr_ids(),
                 format.root_header(),
             );
 
