@@ -223,10 +223,10 @@ jobs:
     needs: [sync-beads, test, build]
     if: >-
       always()
+      && github.event_name == 'merge_group'
       && needs.sync-beads.result != 'cancelled'
       && needs.test.result == 'success'
       && needs.build.result == 'success'
-      && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
