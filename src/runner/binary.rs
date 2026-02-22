@@ -12,22 +12,32 @@ const CLAUDE_BINARY_ENV: &str = "CLAUDE_BINARY";
 /// Locate the Claude Code binary on the system.
 ///
 /// Resolution order:
-/// 1. If `CLAUDE_BINARY` env var is set, use that path directly (must exist).
+/// 1. If `CLAUDE_BINARY` env var is set, use that path (must exist and be executable).
 /// 2. Otherwise, search PATH for `claude` using `which::which`.
 ///
 /// Returns the absolute path to the binary on success, or
-/// `ActualError::ClaudeNotFound` if the binary cannot be located.
+/// `ActualError::ClaudeNotFound` if the binary cannot be located or is invalid.
 pub fn find_claude_binary() -> Result<PathBuf, ActualError> {
-    // 1. Check env var override
-    if let Ok(path) = std::env::var(CLAUDE_BINARY_ENV) {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Ok(path);
+    if let Ok(path_str) = std::env::var(CLAUDE_BINARY_ENV) {
+        let path = PathBuf::from(&path_str);
+        if !path.exists() {
+            return Err(ActualError::ClaudeNotFound);
         }
-        return Err(ActualError::ClaudeNotFound);
+        if !path.is_file() {
+            return Err(ActualError::ClaudeNotFound);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .map(|m| m.permissions().mode())
+                .unwrap_or(0);
+            if mode & 0o111 == 0 {
+                return Err(ActualError::ClaudeNotFound);
+            }
+        }
+        return Ok(path);
     }
-
-    // 2. Search PATH
     which::which(CLAUDE_BINARY_NAME).map_err(|_| ActualError::ClaudeNotFound)
 }
 
@@ -57,11 +67,15 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_env_var_override_with_valid_path() {
+        use std::os::unix::fs::PermissionsExt;
+
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake_binary = dir.path().join("fake-claude");
-        std::fs::File::create(&fake_binary).unwrap();
+        std::fs::write(&fake_binary, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&fake_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let _guard = EnvGuard::set("CLAUDE_BINARY", fake_binary.to_str().unwrap());
         let result = find_claude_binary();
@@ -89,6 +103,36 @@ mod tests {
         let _g2 = EnvGuard::set("PATH", "");
         let result = find_claude_binary();
 
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::ClaudeNotFound));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_env_var_override_with_non_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let non_exec = dir.path().join("claude-not-executable");
+        // Create the file but do NOT set executable bit
+        std::fs::write(&non_exec, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let _guard = EnvGuard::set("CLAUDE_BINARY", non_exec.to_str().unwrap());
+        let result = find_claude_binary();
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::ClaudeNotFound));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_env_var_override_with_directory_rejected() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+
+        let _guard = EnvGuard::set("CLAUDE_BINARY", dir.path().to_str().unwrap());
+        let result = find_claude_binary();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ActualError::ClaudeNotFound));
     }
