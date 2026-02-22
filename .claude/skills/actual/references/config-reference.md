@@ -55,8 +55,6 @@ actual config path
 
 The `model` key is the **unified model config key** for all runners. The runner is automatically inferred from the model name — setting `model: gpt-5` selects CodexCli, `model: claude-sonnet-4-6` selects AnthropicApi, etc. Setting `cursor_model` always implies cursor-cli.
 
-> **Note:** `openai_model` was removed in a previous version. Existing config files with `openai_model:` are automatically read into the `model` field for backward compatibility, but writing `actual config set openai_model` will return a deprecation error. Use `model` instead.
-
 The runner resolution order is:
 1. `--model` CLI flag (infers runner from model name)
 2. `cursor_model` config (always implies cursor-cli)

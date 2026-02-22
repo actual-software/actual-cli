@@ -382,7 +382,7 @@ impl TailoringRunner for CodexCliRunner {
         // Ignore `_model_override` — it comes from `ConcurrentTailoringConfig`
         // which resolves from `config.model` (a Claude Code alias like "haiku").
         // The Codex runner's `self.model` was already correctly resolved in
-        // `sync_wiring` from `--model` flag > `config.openai_model` > None
+        // `sync_wiring` from `--model` flag > `config.model` > None
         // (Codex CLI default), so we always use it here.
         let model = self.model.as_deref();
 
@@ -626,7 +626,7 @@ echo '{}' > "$OUTPUT_FILE"
     // The Codex runner ignores model_override from ConcurrentTailoringConfig
     // (which may contain Claude aliases like "haiku") and always uses the
     // model set on the runner itself (resolved from --model flag or
-    // config.openai_model in sync_wiring).
+    // config.model in sync_wiring).
 
     #[tokio::test]
     #[cfg(unix)]
