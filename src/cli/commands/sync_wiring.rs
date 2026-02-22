@@ -85,6 +85,75 @@ fn infer_runner_from_config(
     }
 }
 
+/// Handle the CodexCli model-error fallback: if the initial run returned a
+/// model error and an API key is available, retry using the OpenAI API runner.
+///
+/// Extracted so the fallback decision can be tested independently.
+///
+/// Returns `Ok(())` on success (either original run succeeded, or fallback
+/// succeeded), or `Err` from the original run (when fallback isn't attempted)
+/// or from the fallback run itself.
+///
+/// The outer `?` unwrap means callers write `codex_cli_fallback_if_model_error(...)?`
+/// and the function itself returns `Result<Result<(), ActualError>, ActualError>`.
+/// The outer error comes from `AnthropicApiRunner::new` inside the fallback path.
+#[allow(clippy::too_many_arguments)]
+fn codex_cli_fallback_if_model_error(
+    result: Result<(), ActualError>,
+    args: &SyncArgs,
+    model: Option<String>,
+    config_openai_api_key: Option<&str>,
+    subprocess_timeout: Duration,
+    root_dir: &std::path::Path,
+    cfg_path: &std::path::Path,
+    term: &crate::cli::ui::real_terminal::RealTerminal,
+) -> Result<Result<(), ActualError>, ActualError> {
+    match result {
+        Err(ref e) if e.is_model_error() => {
+            // Only attempt fallback if an API key is available.
+            let fallback_key = resolve_api_key("OPENAI_API_KEY", config_openai_api_key);
+            match fallback_key {
+                Ok(key) => {
+                    tracing::warn!(
+                        "Codex CLI failed with a model error, falling back to OpenAI API runner"
+                    );
+                    let fallback_model = model.unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
+                    let fallback_auth = AuthDisplay {
+                        authenticated: true,
+                        email: Some("OpenAI API (fallback)".to_string()),
+                    };
+                    let fallback_display = RunnerDisplay {
+                        runner_name: "openai-api (fallback)".to_string(),
+                        model: fallback_model.clone(),
+                        warning: RunnerChoice::OpenAiApi
+                            .model_compatibility_warning(&fallback_model),
+                    };
+                    let api_runner = OpenAiApiRunner::new(key, fallback_model, subprocess_timeout)?;
+                    // Skip confirmation on fallback — user already accepted
+                    // on the initial CodexCli attempt.
+                    let mut fallback_args = args.clone();
+                    fallback_args.force = true;
+                    Ok(run_sync(
+                        &fallback_args,
+                        root_dir,
+                        cfg_path,
+                        term,
+                        &api_runner,
+                        Some(&fallback_auth),
+                        Some(&fallback_display),
+                    ))
+                }
+                Err(_) => {
+                    // No API key available for fallback — return the
+                    // original Codex CLI error.
+                    Ok(result)
+                }
+            }
+        }
+        other => Ok(other),
+    }
+}
+
 /// Production wiring for `actual sync`.
 ///
 /// Thin shim that calls [`sync_run_inner`] with the real
@@ -326,53 +395,16 @@ where
             // model-level error (e.g. "model is not supported").  This lets
             // users who have a valid OPENAI_API_KEY transparently retry via
             // the direct API without manual --runner overrides.
-            match result {
-                Err(ref e) if e.is_model_error() => {
-                    // Only attempt fallback if an API key is available.
-                    let fallback_key =
-                        resolve_api_key("OPENAI_API_KEY", cfg.openai_api_key.as_deref());
-                    match fallback_key {
-                        Ok(key) => {
-                            tracing::warn!(
-                                "Codex CLI failed with a model error, falling back to OpenAI API runner"
-                            );
-                            let fallback_model =
-                                model.unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
-                            let fallback_auth = AuthDisplay {
-                                authenticated: true,
-                                email: Some("OpenAI API (fallback)".to_string()),
-                            };
-                            let fallback_display = RunnerDisplay {
-                                runner_name: "openai-api (fallback)".to_string(),
-                                model: fallback_model.clone(),
-                                warning: RunnerChoice::OpenAiApi
-                                    .model_compatibility_warning(&fallback_model),
-                            };
-                            let api_runner =
-                                OpenAiApiRunner::new(key, fallback_model, subprocess_timeout)?;
-                            // Skip confirmation on fallback — user already accepted
-                            // on the initial CodexCli attempt.
-                            let mut fallback_args = args.clone();
-                            fallback_args.force = true;
-                            run_sync(
-                                &fallback_args,
-                                &root_dir,
-                                &cfg_path,
-                                &term,
-                                &api_runner,
-                                Some(&fallback_auth),
-                                Some(&fallback_display),
-                            )
-                        }
-                        Err(_) => {
-                            // No API key available for fallback — return the
-                            // original Codex CLI error.
-                            result
-                        }
-                    }
-                }
-                other => other,
-            }
+            codex_cli_fallback_if_model_error(
+                result,
+                args,
+                model,
+                cfg.openai_api_key.as_deref(),
+                subprocess_timeout,
+                &root_dir,
+                &cfg_path,
+                &term,
+            )?
         }
         RunnerChoice::CursorCli => {
             let binary_path = find_cursor_binary()?;
@@ -432,7 +464,8 @@ pub(crate) fn resolve_api_key(
 #[cfg(test)]
 mod tests {
     use super::{
-        infer_runner_from_config, require_api_key_for_model, resolve_api_key, sync_run_inner,
+        codex_cli_fallback_if_model_error, infer_runner_from_config, require_api_key_for_model,
+        resolve_api_key, sync_run_inner,
     };
     use crate::cli::args::{RunnerChoice, SyncArgs};
     use crate::error::ActualError;
@@ -593,15 +626,14 @@ mod tests {
         // Any error here comes from run_sync internals, not from the wiring.
         // We just verify we got past the preamble without a ClaudeNotFound or
         // ClaudeNotAuthenticated error.
-        match &result {
-            Err(ActualError::ClaudeNotFound) => {
-                panic!("should have found the fake binary, got ClaudeNotFound")
-            }
-            Err(ActualError::ClaudeNotAuthenticated) => {
-                panic!("auth_authenticated should prevent this error")
-            }
-            _ => {} // any other result (Ok or downstream error) is acceptable
-        }
+        assert!(
+            !matches!(result, Err(ActualError::ClaudeNotFound)),
+            "should have found the fake binary: {result:?}"
+        );
+        assert!(
+            !matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
+            "auth_authenticated should prevent this: {result:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -622,11 +654,14 @@ mod tests {
         let args = make_sync_args(Some(RunnerChoice::ClaudeCli));
         let result = sync_run_inner(&args, auth_authenticated);
         // Preamble succeeds; run_sync may fail due to missing infrastructure.
-        match &result {
-            Err(ActualError::ClaudeNotFound) => panic!("should have found fake binary"),
-            Err(ActualError::ClaudeNotAuthenticated) => panic!("should be authenticated"),
-            _ => {}
-        }
+        assert!(
+            !matches!(result, Err(ActualError::ClaudeNotFound)),
+            "should have found fake binary: {result:?}"
+        );
+        assert!(
+            !matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
+            "should be authenticated: {result:?}"
+        );
     }
 
     // ── AnthropicApi arm ─────────────────────────────────────────────────────
@@ -1268,5 +1303,148 @@ mod tests {
     fn require_api_key_with_key_no_model_ok() {
         // API key present + no model → OK (API key + Codex default is fine too).
         assert!(require_api_key_for_model(Some("sk-test"), None).is_ok());
+    }
+
+    // ── codex_cli_fallback_if_model_error tests ──────────────────────────────
+
+    /// Build a `RealTerminal` for tests (used as a dummy terminal in fallback
+    /// function calls).
+    fn make_term() -> crate::cli::ui::real_terminal::RealTerminal {
+        crate::cli::ui::real_terminal::RealTerminal::default()
+    }
+
+    /// Build a model-error `ActualError::RunnerFailed`.
+    fn model_error() -> ActualError {
+        ActualError::RunnerFailed {
+            message: "Codex CLI failed: model is not supported".to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_fallback_non_error_result_passes_through() {
+        // Ok(()) should pass through without triggering fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("cfg.yaml");
+        let result = codex_cli_fallback_if_model_error(
+            Ok(()),
+            &make_sync_args(None),
+            None,
+            None,
+            std::time::Duration::from_secs(60),
+            dir.path(),
+            &cfg_path,
+            &make_term(),
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn test_fallback_non_model_error_passes_through() {
+        // A non-model-error Err propagates as-is without fallback.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("cfg.yaml");
+        let original_err = ActualError::CodexNotAuthenticated;
+        let result = codex_cli_fallback_if_model_error(
+            Err(original_err),
+            &make_sync_args(None),
+            None,
+            None,
+            std::time::Duration::from_secs(60),
+            dir.path(),
+            &cfg_path,
+            &make_term(),
+        );
+        assert!(result.is_ok());
+        assert!(matches!(
+            result.unwrap(),
+            Err(ActualError::CodexNotAuthenticated)
+        ));
+    }
+
+    #[test]
+    fn test_fallback_model_error_no_api_key_returns_original() {
+        // Model error + no API key → original error returned, no fallback.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::remove("OPENAI_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("cfg.yaml");
+        let result = codex_cli_fallback_if_model_error(
+            Err(model_error()),
+            &make_sync_args(None),
+            None,
+            None, // no config key either
+            std::time::Duration::from_secs(60),
+            dir.path(),
+            &cfg_path,
+            &make_term(),
+        );
+        // Outer Ok — but inner Err is the original model error.
+        assert!(result.is_ok());
+        let inner = result.unwrap();
+        assert!(
+            matches!(inner, Err(ActualError::RunnerFailed { ref message, .. }) if message.contains("model is not supported")),
+            "expected the original model error, got: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn test_fallback_model_error_with_config_api_key_attempts_fallback() {
+        // Model error + config API key → fallback is attempted (reaches run_sync).
+        // run_sync will fail (no real repo), but we verify it got past key resolution.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::remove("OPENAI_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("cfg.yaml");
+        let result = codex_cli_fallback_if_model_error(
+            Err(model_error()),
+            &make_sync_args(None),
+            None,
+            Some("sk-config-fallback-key"),
+            std::time::Duration::from_secs(60),
+            dir.path(),
+            &cfg_path,
+            &make_term(),
+        );
+        // Outer Ok — fallback was attempted (key resolved, runner created, run_sync called).
+        // Inner may be Err from run_sync internals, but NOT ApiKeyMissing.
+        assert!(result.is_ok(), "outer result should be Ok: {result:?}");
+        let inner = result.unwrap();
+        assert!(
+            !matches!(inner, Err(ActualError::ApiKeyMissing { .. })),
+            "API key was provided — should not get ApiKeyMissing: {inner:?}"
+        );
+        // Also should not be the original model error — we attempted the fallback.
+        assert!(
+            !matches!(inner, Err(ActualError::RunnerFailed { ref message, .. }) if message.contains("model is not supported")),
+            "should not propagate original model error when fallback was attempted: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn test_fallback_model_error_with_env_api_key_attempts_fallback() {
+        // Model error + env API key → fallback is attempted.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::set("OPENAI_API_KEY", "sk-env-test-key");
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("cfg.yaml");
+        let result = codex_cli_fallback_if_model_error(
+            Err(model_error()),
+            &make_sync_args(None),
+            Some("gpt-5".to_string()),
+            None,
+            std::time::Duration::from_secs(60),
+            dir.path(),
+            &cfg_path,
+            &make_term(),
+        );
+        assert!(result.is_ok(), "outer result should be Ok: {result:?}");
+        let inner = result.unwrap();
+        // Fallback was attempted; not ApiKeyMissing, not original model error.
+        assert!(
+            !matches!(inner, Err(ActualError::ApiKeyMissing { .. })),
+            "API key from env should resolve: {inner:?}"
+        );
     }
 }
