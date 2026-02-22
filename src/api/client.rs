@@ -198,22 +198,43 @@ pub fn build_match_request(analysis: &RepoAnalysis, config: &Config) -> MatchReq
     let projects = analysis
         .projects
         .iter()
-        .map(|project| MatchProject {
-            path: project.path.clone(),
-            name: project.name.clone(),
-            languages: project
-                .languages
-                .iter()
-                .map(|ls| serialize_language(&ls.language))
-                .collect(),
-            frameworks: project
-                .frameworks
-                .iter()
-                .map(|fw| MatchFramework {
-                    name: fw.name.clone(),
-                    category: serialize_framework_category(&fw.category),
-                })
-                .collect(),
+        .map(|project| {
+            let (languages, frameworks) = if let Some(ref sel) = project.selection {
+                // Selection exists: send only the selected language + framework
+                let langs = vec![serialize_language(&sel.language.language)];
+                let fws = sel
+                    .framework
+                    .iter()
+                    .map(|fw| MatchFramework {
+                        name: fw.name.clone(),
+                        category: serialize_framework_category(&fw.category),
+                    })
+                    .collect();
+                (langs, fws)
+            } else {
+                // No selection (backward compat): send all
+                let langs = project
+                    .languages
+                    .iter()
+                    .map(|ls| serialize_language(&ls.language))
+                    .collect();
+                let fws = project
+                    .frameworks
+                    .iter()
+                    .map(|fw| MatchFramework {
+                        name: fw.name.clone(),
+                        category: serialize_framework_category(&fw.category),
+                    })
+                    .collect();
+                (langs, fws)
+            };
+
+            MatchProject {
+                path: project.path.clone(),
+                name: project.name.clone(),
+                languages,
+                frameworks,
+            }
         })
         .collect();
 
@@ -239,7 +260,8 @@ pub fn build_match_request(analysis: &RepoAnalysis, config: &Config) -> MatchReq
 mod tests {
     use super::*;
     use crate::analysis::types::{
-        Framework, FrameworkCategory, Language, LanguageStat, Project, RepoAnalysis, WorkspaceType,
+        Framework, FrameworkCategory, Language, LanguageStat, Project, ProjectSelection,
+        RepoAnalysis, WorkspaceType,
     };
 
     /// Helper: create a minimal project with the given languages and frameworks.
@@ -1059,5 +1081,152 @@ mod tests {
             matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("400") && msg.contains("failed to parse error response"))
         );
         mock.assert_async().await;
+    }
+
+    // --- build_match_request with ProjectSelection tests ---
+
+    #[test]
+    fn test_build_match_request_uses_selection() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "test".to_string(),
+                languages: vec![
+                    LanguageStat {
+                        language: Language::Rust,
+                        loc: 5000,
+                    },
+                    LanguageStat {
+                        language: Language::Python,
+                        loc: 200,
+                    },
+                ],
+                frameworks: vec![
+                    Framework {
+                        name: "actix-web".to_string(),
+                        category: FrameworkCategory::WebBackend,
+                        source: None,
+                    },
+                    Framework {
+                        name: "diesel".to_string(),
+                        category: FrameworkCategory::Data,
+                        source: None,
+                    },
+                ],
+                package_manager: None,
+                description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
+                selection: Some(ProjectSelection {
+                    language: LanguageStat {
+                        language: Language::Rust,
+                        loc: 5000,
+                    },
+                    framework: Some(Framework {
+                        name: "actix-web".to_string(),
+                        category: FrameworkCategory::WebBackend,
+                        source: None,
+                    }),
+                    auto_selected: true,
+                }),
+            }],
+        };
+        let request = build_match_request(&analysis, &Config::default());
+        assert_eq!(request.projects.len(), 1);
+        assert_eq!(request.projects[0].languages, vec!["rust".to_string()]);
+        assert_eq!(request.projects[0].frameworks.len(), 1);
+        assert_eq!(request.projects[0].frameworks[0].name, "actix-web");
+    }
+
+    #[test]
+    fn test_build_match_request_no_selection_sends_all() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "test".to_string(),
+                languages: vec![
+                    LanguageStat {
+                        language: Language::Rust,
+                        loc: 5000,
+                    },
+                    LanguageStat {
+                        language: Language::Python,
+                        loc: 200,
+                    },
+                ],
+                frameworks: vec![
+                    Framework {
+                        name: "actix-web".to_string(),
+                        category: FrameworkCategory::WebBackend,
+                        source: None,
+                    },
+                    Framework {
+                        name: "diesel".to_string(),
+                        category: FrameworkCategory::Data,
+                        source: None,
+                    },
+                ],
+                package_manager: None,
+                description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
+                selection: None,
+            }],
+        };
+        let request = build_match_request(&analysis, &Config::default());
+        assert_eq!(request.projects.len(), 1);
+        assert_eq!(request.projects[0].languages.len(), 2);
+        assert!(request.projects[0].languages.contains(&"rust".to_string()));
+        assert!(request.projects[0]
+            .languages
+            .contains(&"python".to_string()));
+        assert_eq!(request.projects[0].frameworks.len(), 2);
+    }
+
+    #[test]
+    fn test_build_match_request_selection_no_framework() {
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "test".to_string(),
+                languages: vec![
+                    LanguageStat {
+                        language: Language::Rust,
+                        loc: 5000,
+                    },
+                    LanguageStat {
+                        language: Language::Python,
+                        loc: 200,
+                    },
+                ],
+                frameworks: vec![Framework {
+                    name: "actix-web".to_string(),
+                    category: FrameworkCategory::WebBackend,
+                    source: None,
+                }],
+                package_manager: None,
+                description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
+                selection: Some(ProjectSelection {
+                    language: LanguageStat {
+                        language: Language::Python,
+                        loc: 200,
+                    },
+                    framework: None,
+                    auto_selected: false,
+                }),
+            }],
+        };
+        let request = build_match_request(&analysis, &Config::default());
+        assert_eq!(request.projects.len(), 1);
+        assert_eq!(request.projects[0].languages, vec!["python".to_string()]);
+        assert!(request.projects[0].frameworks.is_empty());
     }
 }
