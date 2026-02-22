@@ -192,41 +192,35 @@ mod tests {
     #[test]
     fn test_runtime_build_error_helper() {
         let io_err = std::io::Error::new(std::io::ErrorKind::Other, "runtime failed");
-        let err = runtime_build_error(io_err);
-        match err {
-            ActualError::RunnerFailed { message, stderr } => {
-                assert!(
-                    message.contains("failed to build tokio runtime"),
-                    "expected 'failed to build tokio runtime' in: {message}"
-                );
-                assert!(
-                    message.contains("runtime failed"),
-                    "expected 'runtime failed' in: {message}"
-                );
-                assert!(stderr.is_empty());
-            }
-            other => panic!("expected RunnerFailed, got: {other:?}"),
-        }
+        let ActualError::RunnerFailed { message, stderr } = runtime_build_error(io_err) else {
+            panic!("expected RunnerFailed");
+        };
+        assert!(
+            message.contains("failed to build tokio runtime"),
+            "expected 'failed to build tokio runtime' in: {message}"
+        );
+        assert!(
+            message.contains("runtime failed"),
+            "expected 'runtime failed' in: {message}"
+        );
+        assert!(stderr.is_empty());
     }
 
     #[test]
     fn test_wait_io_error_helper() {
         let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broken");
-        let err = wait_io_error(io_err);
-        match err {
-            ActualError::RunnerFailed { message, stderr } => {
-                assert!(
-                    message.contains("failed to wait for claude"),
-                    "expected 'failed to wait for claude' in: {message}"
-                );
-                assert!(
-                    message.contains("pipe broken"),
-                    "expected 'pipe broken' in: {message}"
-                );
-                assert!(stderr.is_empty());
-            }
-            other => panic!("expected RunnerFailed, got: {other:?}"),
-        }
+        let ActualError::RunnerFailed { message, stderr } = wait_io_error(io_err) else {
+            panic!("expected RunnerFailed");
+        };
+        assert!(
+            message.contains("failed to wait for claude"),
+            "expected 'failed to wait for claude' in: {message}"
+        );
+        assert!(
+            message.contains("pipe broken"),
+            "expected 'pipe broken' in: {message}"
+        );
+        assert!(stderr.is_empty());
     }
 
     // ── probe_codex_auth tests ────────────────────────────────────────────────
