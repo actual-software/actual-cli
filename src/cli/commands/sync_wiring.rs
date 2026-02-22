@@ -91,12 +91,8 @@ fn infer_runner_from_config(
 /// Extracted so the fallback decision can be tested independently.
 ///
 /// Returns `Ok(())` on success (either original run succeeded, or fallback
-/// succeeded), or `Err` from the original run (when fallback isn't attempted)
-/// or from the fallback run itself.
-///
-/// The outer `?` unwrap means callers write `codex_cli_fallback_if_model_error(...)?`
-/// and the function itself returns `Result<Result<(), ActualError>, ActualError>`.
-/// The outer error comes from `AnthropicApiRunner::new` inside the fallback path.
+/// succeeded), or `Err` if the original run failed and no fallback was
+/// attempted, or if the fallback run itself failed.
 #[allow(clippy::too_many_arguments)]
 fn codex_cli_fallback_if_model_error(
     result: Result<(), ActualError>,
@@ -107,7 +103,7 @@ fn codex_cli_fallback_if_model_error(
     root_dir: &std::path::Path,
     cfg_path: &std::path::Path,
     term: &crate::cli::ui::real_terminal::RealTerminal,
-) -> Result<Result<(), ActualError>, ActualError> {
+) -> Result<(), ActualError> {
     match result {
         Err(ref e) if e.is_model_error() => {
             // Only attempt fallback if an API key is available.
@@ -133,7 +129,7 @@ fn codex_cli_fallback_if_model_error(
                     // on the initial CodexCli attempt.
                     let mut fallback_args = args.clone();
                     fallback_args.force = true;
-                    Ok(run_sync(
+                    run_sync(
                         &fallback_args,
                         root_dir,
                         cfg_path,
@@ -141,16 +137,16 @@ fn codex_cli_fallback_if_model_error(
                         &api_runner,
                         Some(&fallback_auth),
                         Some(&fallback_display),
-                    ))
+                    )
                 }
                 Err(_) => {
                     // No API key available for fallback — return the
                     // original Codex CLI error.
-                    Ok(result)
+                    result
                 }
             }
         }
-        other => Ok(other),
+        other => other,
     }
 }
 
@@ -404,7 +400,7 @@ where
                 &root_dir,
                 &cfg_path,
                 &term,
-            )?
+            )
         }
         RunnerChoice::CursorCli => {
             let binary_path = find_cursor_binary()?;
@@ -1336,8 +1332,10 @@ mod tests {
             &cfg_path,
             &make_term(),
         );
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_ok());
+        assert!(
+            result.is_ok(),
+            "Ok(()) should pass through as Ok: {result:?}"
+        );
     }
 
     #[test]
@@ -1345,9 +1343,8 @@ mod tests {
         // A non-model-error Err propagates as-is without fallback.
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("cfg.yaml");
-        let original_err = ActualError::CodexNotAuthenticated;
         let result = codex_cli_fallback_if_model_error(
-            Err(original_err),
+            Err(ActualError::CodexNotAuthenticated),
             &make_sync_args(None),
             None,
             None,
@@ -1356,16 +1353,15 @@ mod tests {
             &cfg_path,
             &make_term(),
         );
-        assert!(result.is_ok());
-        assert!(matches!(
-            result.unwrap(),
-            Err(ActualError::CodexNotAuthenticated)
-        ));
+        assert!(
+            matches!(result, Err(ActualError::CodexNotAuthenticated)),
+            "non-model error should propagate unchanged: {result:?}"
+        );
     }
 
     #[test]
     fn test_fallback_model_error_no_api_key_returns_original() {
-        // Model error + no API key → original error returned, no fallback.
+        // Model error + no API key → original model error returned, no fallback attempted.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::remove("OPENAI_API_KEY");
         let dir = tempfile::tempdir().unwrap();
@@ -1380,12 +1376,11 @@ mod tests {
             &cfg_path,
             &make_term(),
         );
-        // Outer Ok — but inner Err is the original model error.
-        assert!(result.is_ok());
-        let inner = result.unwrap();
+        // Should return Err with the original model error message.
+        let err = result.expect_err("expected the original model error to be returned");
         assert!(
-            matches!(inner, Err(ActualError::RunnerFailed { ref message, .. }) if message.contains("model is not supported")),
-            "expected the original model error, got: {inner:?}"
+            matches!(&err, ActualError::RunnerFailed { message, .. } if message.contains("model is not supported")),
+            "expected the original model error, got: {err:?}"
         );
     }
 
@@ -1407,19 +1402,20 @@ mod tests {
             &cfg_path,
             &make_term(),
         );
-        // Outer Ok — fallback was attempted (key resolved, runner created, run_sync called).
-        // Inner may be Err from run_sync internals, but NOT ApiKeyMissing.
-        assert!(result.is_ok(), "outer result should be Ok: {result:?}");
-        let inner = result.unwrap();
+        // Fallback was attempted (key resolved, runner created, run_sync called).
+        // Result may be Err from run_sync internals, but NOT the original model error
+        // and NOT ApiKeyMissing (the key was provided).
         assert!(
-            !matches!(inner, Err(ActualError::ApiKeyMissing { .. })),
-            "API key was provided — should not get ApiKeyMissing: {inner:?}"
+            !matches!(&result, Err(ActualError::ApiKeyMissing { .. })),
+            "API key was provided — should not get ApiKeyMissing: {result:?}"
         );
-        // Also should not be the original model error — we attempted the fallback.
-        assert!(
-            !matches!(inner, Err(ActualError::RunnerFailed { ref message, .. }) if message.contains("model is not supported")),
-            "should not propagate original model error when fallback was attempted: {inner:?}"
-        );
+        // The original model-error message must NOT propagate (we attempted fallback).
+        if let Err(ActualError::RunnerFailed { ref message, .. }) = result {
+            assert!(
+                !message.contains("model is not supported"),
+                "original model error must not propagate when fallback was attempted: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -1439,12 +1435,10 @@ mod tests {
             &cfg_path,
             &make_term(),
         );
-        assert!(result.is_ok(), "outer result should be Ok: {result:?}");
-        let inner = result.unwrap();
-        // Fallback was attempted; not ApiKeyMissing, not original model error.
+        // Fallback was attempted; should not be ApiKeyMissing.
         assert!(
-            !matches!(inner, Err(ActualError::ApiKeyMissing { .. })),
-            "API key from env should resolve: {inner:?}"
+            !matches!(&result, Err(ActualError::ApiKeyMissing { .. })),
+            "API key from env should resolve: {result:?}"
         );
     }
 }
