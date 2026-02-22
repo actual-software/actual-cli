@@ -42,4 +42,13 @@ pub trait TerminalIO: Send + Sync {
         items: &[String],
         defaults: &[bool],
     ) -> Result<Option<Vec<usize>>, ActualError>;
+
+    /// Present a single-select list and return the index of the chosen item.
+    /// Returns `Err(UserCancelled)` if the user presses Escape or Ctrl-C.
+    fn select_one(
+        &self,
+        prompt: &str,
+        items: &[String],
+        default: Option<usize>,
+    ) -> Result<usize, ActualError>;
 }
