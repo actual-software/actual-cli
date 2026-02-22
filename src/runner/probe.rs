@@ -264,6 +264,73 @@ mod tests {
         );
     }
 
+    // ── probe_codex_auth public wrapper ──────────────────────────────────────
+
+    #[test]
+    fn test_probe_codex_auth_public_with_api_key() {
+        // The public wrapper resolves home_dir and delegates to inner.
+        // Passing an API key always succeeds without checking the auth file.
+        assert!(probe_codex_auth(Some("sk-test-key")).is_ok());
+    }
+
+    #[test]
+    fn test_probe_codex_auth_public_without_key() {
+        // Public wrapper without a key — result depends on whether
+        // ~/.codex/auth.json exists on the test machine.  We just verify
+        // the function doesn't panic and returns a valid Result.
+        let _ = probe_codex_auth(None);
+    }
+
+    // ── probe_cursor_auth public wrapper ─────────────────────────────────────
+
+    #[test]
+    fn test_probe_cursor_auth_public_with_api_key() {
+        // The public wrapper resolves home_dir and delegates to inner.
+        // Passing an API key always succeeds without checking the auth file.
+        assert!(probe_cursor_auth(Some("cursor-test-key")).is_ok());
+    }
+
+    #[test]
+    fn test_probe_cursor_auth_public_without_key() {
+        // Public wrapper without a key — result depends on the test machine.
+        // We just verify the function doesn't panic and returns a valid Result.
+        let _ = probe_cursor_auth(None);
+    }
+
+    // ── probe_claude_auth sync wrapper ────────────────────────────────────────
+
+    #[test]
+    #[cfg(unix)]
+    fn test_probe_claude_auth_sync_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = probe_claude_auth(&script, Duration::from_secs(5));
+        assert!(result.is_ok(), "expected Ok, got: {result:?}");
+        assert!(result.unwrap().logged_in);
+    }
+
+    #[test]
+    fn test_probe_claude_auth_sync_spawn_failure() {
+        // Non-existent binary → spawn fails
+        let result = probe_claude_auth(
+            std::path::Path::new("/nonexistent/path/to/claude"),
+            Duration::from_secs(5),
+        );
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed, got: {result:?}"
+        );
+    }
+
     // ── probe_claude_auth_async tests ─────────────────────────────────────────
 
     #[tokio::test]
@@ -302,5 +369,69 @@ mod tests {
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(result.is_ok(), "expected Ok(status), got: {result:?}");
         assert!(!result.unwrap().logged_in);
+    }
+
+    #[tokio::test]
+    async fn test_probe_claude_auth_async_spawn_failure() {
+        let result = probe_claude_auth_async(
+            std::path::Path::new("/nonexistent/path/to/claude"),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed from spawn failure, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_probe_claude_auth_async_subprocess_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, "#!/bin/sh\necho 'error output' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_probe_claude_auth_async_invalid_json() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' 'not json'\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerOutputParse(_))),
+            "expected RunnerOutputParse, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_probe_claude_auth_async_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = probe_claude_auth_async(&script, Duration::from_millis(100)).await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerTimeout { .. })),
+            "expected RunnerTimeout, got: {result:?}"
+        );
     }
 }
