@@ -3,6 +3,8 @@
 pub enum ConfirmAction {
     /// Accept all detected projects and proceed with sync.
     Accept,
+    /// Change the language/framework selection.
+    Change,
     /// Reject the analysis and abort.
     Reject,
 }
@@ -36,6 +38,27 @@ mod tests {
     #[test]
     fn confirm_action_debug() {
         assert_eq!(format!("{:?}", ConfirmAction::Accept), "Accept");
+        assert_eq!(format!("{:?}", ConfirmAction::Change), "Change");
         assert_eq!(format!("{:?}", ConfirmAction::Reject), "Reject");
+    }
+
+    #[test]
+    fn confirm_action_change_clone() {
+        let action = ConfirmAction::Change;
+        let cloned = action.clone();
+        assert_eq!(action, cloned);
+    }
+
+    #[test]
+    fn confirm_action_change_copy() {
+        let action = ConfirmAction::Change;
+        let copied = action;
+        assert_eq!(action, copied);
+    }
+
+    #[test]
+    fn confirm_action_change_ne() {
+        assert_ne!(ConfirmAction::Change, ConfirmAction::Accept);
+        assert_ne!(ConfirmAction::Change, ConfirmAction::Reject);
     }
 }
