@@ -22,6 +22,15 @@ pub enum ActualError {
     #[error("API key not set. Set {env_var} or configure the api key in your config")]
     ApiKeyMissing { env_var: String },
 
+    /// Model '{model}' was explicitly requested with codex-cli but no API key is available.
+    /// ChatGPT OAuth (codex login) only supports the Codex CLI default model.
+    #[error(
+        "Model '{model}' requires an OpenAI API key when used with codex-cli.\n\
+         ChatGPT authentication only supports the default model.\n\
+         Set OPENAI_API_KEY or use --runner openai-api."
+    )]
+    CodexCliModelRequiresApiKey { model: String },
+
     #[error("Runner failed: {message}")]
     RunnerFailed { message: String, stderr: String },
 
@@ -71,7 +80,8 @@ impl ActualError {
             | Self::CodexNotFound
             | Self::CodexNotAuthenticated
             | Self::CursorNotFound
-            | Self::ApiKeyMissing { .. } => 2,
+            | Self::ApiKeyMissing { .. }
+            | Self::CodexCliModelRequiresApiKey { .. } => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
             Self::IoError(_) => 5,
@@ -94,6 +104,9 @@ impl ActualError {
                 // so provide a generic hint pointing users to the config.
                 let _ = env_var;
                 Some("Set the API key environment variable or add it to your config file")
+            }
+            Self::CodexCliModelRequiresApiKey { .. } => {
+                Some("Set OPENAI_API_KEY or switch to --runner openai-api")
             }
             Self::CreditBalanceTooLow { .. } => {
                 Some("Add credits at https://console.anthropic.com/settings/billing")
@@ -195,6 +208,13 @@ mod tests {
             }
             .exit_code(),
             3
+        );
+        assert_eq!(
+            ActualError::CodexCliModelRequiresApiKey {
+                model: "codex-mini-latest".to_string()
+            }
+            .exit_code(),
+            2
         );
     }
 
@@ -333,6 +353,27 @@ mod tests {
             msg.contains("Credit balance is too low"),
             "expected detail message in: {msg}"
         );
+
+        let msg = ActualError::CodexCliModelRequiresApiKey {
+            model: "codex-mini-latest".to_string(),
+        }
+        .to_string();
+        assert!(
+            msg.contains("codex-mini-latest"),
+            "expected model name in: {msg}"
+        );
+        assert!(
+            msg.contains("OPENAI_API_KEY"),
+            "expected 'OPENAI_API_KEY' in: {msg}"
+        );
+        assert!(
+            msg.contains("openai-api"),
+            "expected '--runner openai-api' suggestion in: {msg}"
+        );
+        assert!(
+            msg.contains("ChatGPT"),
+            "expected 'ChatGPT' explanation in: {msg}"
+        );
     }
 
     #[test]
@@ -426,6 +467,23 @@ mod tests {
         assert!(
             hint.unwrap().contains("API key"),
             "expected 'API key' in hint: {:?}",
+            hint
+        );
+    }
+
+    #[test]
+    fn test_hint_codex_cli_model_requires_api_key() {
+        let err = ActualError::CodexCliModelRequiresApiKey {
+            model: "codex-mini-latest".to_string(),
+        };
+        let hint = err.hint();
+        assert!(
+            hint.is_some(),
+            "expected Some hint for CodexCliModelRequiresApiKey"
+        );
+        assert!(
+            hint.unwrap().contains("OPENAI_API_KEY"),
+            "expected 'OPENAI_API_KEY' in hint: {:?}",
             hint
         );
     }

@@ -39,16 +39,19 @@ use crate::runner::subprocess::CliClaudeRunner;
 /// - No explicit model was requested (Codex CLI picks its own safe default,
 ///   which works with ChatGPT OAuth accounts).
 ///
-/// Returns `Err(ActualError::ApiKeyMissing)` when an explicit model is
-/// requested but no API key is available.
+/// Returns `Err(ActualError::CodexCliModelRequiresApiKey)` when an explicit
+/// model is requested but no API key is available, with a message that names
+/// the model and explains the ChatGPT OAuth limitation.
 fn require_api_key_for_model(
     api_key: Option<&str>,
     model: Option<&str>,
 ) -> Result<(), ActualError> {
-    if model.is_some() && api_key.is_none_or(|k| k.is_empty()) {
-        return Err(ActualError::ApiKeyMissing {
-            env_var: "OPENAI_API_KEY".to_string(),
-        });
+    if let Some(m) = model {
+        if api_key.is_none_or(|k| k.is_empty()) {
+            return Err(ActualError::CodexCliModelRequiresApiKey {
+                model: m.to_string(),
+            });
+        }
     }
     Ok(())
 }
@@ -650,8 +653,41 @@ mod tests {
         // No API key + explicit model → error (ChatGPT OAuth can't run arbitrary models).
         let err = require_api_key_for_model(None, Some("gpt-5-mini")).unwrap_err();
         assert!(
-            matches!(err, ActualError::ApiKeyMissing { ref env_var } if env_var == "OPENAI_API_KEY"),
-            "expected ApiKeyMissing, got: {err:?}"
+            matches!(err, ActualError::CodexCliModelRequiresApiKey { ref model } if model == "gpt-5-mini"),
+            "expected CodexCliModelRequiresApiKey, got: {err:?}"
+        );
+        // The error message should name the model and explain what to do.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("gpt-5-mini"),
+            "expected model name in error message: {msg}"
+        );
+        assert!(
+            msg.contains("OPENAI_API_KEY"),
+            "expected OPENAI_API_KEY in error message: {msg}"
+        );
+        assert!(
+            msg.contains("openai-api"),
+            "expected --runner openai-api suggestion in error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn require_api_key_no_key_with_codex_mini_latest_errors() {
+        // Specifically test codex-mini-latest (the model from the bug report).
+        let err = require_api_key_for_model(None, Some("codex-mini-latest")).unwrap_err();
+        assert!(
+            matches!(err, ActualError::CodexCliModelRequiresApiKey { ref model } if model == "codex-mini-latest"),
+            "expected CodexCliModelRequiresApiKey for codex-mini-latest, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("codex-mini-latest"),
+            "model name must appear in error message: {msg}"
+        );
+        assert!(
+            msg.contains("ChatGPT"),
+            "ChatGPT auth explanation must appear in error message: {msg}"
         );
     }
 
@@ -669,9 +705,12 @@ mod tests {
 
     #[test]
     fn require_api_key_empty_key_with_model_errors() {
-        // Empty API key is treated as absent → error.
+        // Empty API key is treated as absent → specific error naming the model.
         let err = require_api_key_for_model(Some(""), Some("gpt-5.2")).unwrap_err();
-        assert!(matches!(err, ActualError::ApiKeyMissing { .. }));
+        assert!(
+            matches!(err, ActualError::CodexCliModelRequiresApiKey { ref model } if model == "gpt-5.2"),
+            "expected CodexCliModelRequiresApiKey, got: {err:?}"
+        );
     }
 
     #[test]
