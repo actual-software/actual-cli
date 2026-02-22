@@ -76,6 +76,10 @@ Organize with headings, bullet points, and inline code references.
 5. **Preserve intent**: Don't change the fundamental decision -- only make it more \
    specific and actionable for this codebase.
 
+6. **One section per ADR**: Return one section per ADR in the sections array. \
+Each section must have exactly one adr_id and its content. Do not combine \
+multiple ADRs into a single section.
+
 Return ONLY a JSON object matching the provided schema. No commentary outside the JSON.";
 
     // --- CursorRules prompt template ---
@@ -126,6 +130,10 @@ automatically). Organize with headings, bullet points, and inline code reference
 5. **Preserve intent**: Don't change the fundamental decision -- only make it more \
    specific and actionable for this codebase.
 
+6. **One section per ADR**: Return one section per ADR in the sections array. \
+Each section must have exactly one adr_id and its content. Do not combine \
+multiple ADRs into a single section.
+
 Return ONLY a JSON object matching the provided schema. No commentary outside the JSON.";
 
     // --- Output schema ---
@@ -141,21 +149,30 @@ Return ONLY a JSON object matching the provided schema. No commentary outside th
             "type": "string",
             "description": "Relative path from repo root (e.g. 'CLAUDE.md', 'apps/web/CLAUDE.md')"
           },
-          "content": {
-            "type": "string",
-            "description": "Terse directive-style markdown for inside managed section markers. 1-2 sentences per policy. Reference actual repo paths. No preamble."
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "adr_id": {
+                  "type": "string",
+                  "description": "UUID of the ADR this section is for. Each ADR MUST have exactly one section."
+                },
+                "content": {
+                  "type": "string",
+                  "description": "Terse directive-style markdown for this ADR. 1-2 sentences per policy. Reference actual repo paths. No preamble."
+                }
+              },
+              "required": ["adr_id", "content"]
+            },
+            "description": "One section per ADR. Do NOT combine multiple ADRs into one section."
           },
           "reasoning": {
             "type": "string",
             "description": "One-sentence label, max 15 words (e.g. 'Cross-cutting Rust style rules for the workspace')"
-          },
-          "adr_ids": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "UUIDs of the ADRs included in this file"
           }
         },
-        "required": ["path", "content", "reasoning", "adr_ids"]
+        "required": ["path", "sections", "reasoning"]
       }
     },
     "skipped_adrs": {

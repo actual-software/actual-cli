@@ -35,7 +35,7 @@ pub fn confirm_files(
     let items: Vec<String> = files
         .iter()
         .map(|file| {
-            let count = file.adr_ids.len();
+            let count = file.sections.len();
             let plural = if count == 1 { "" } else { "s" };
             let safe_path = console::strip_ansi_codes(&file.path);
             format!("{safe_path}  ({count} ADR{plural})")
@@ -67,22 +67,33 @@ pub fn confirm_files(
 mod tests {
     use super::*;
     use crate::cli::ui::test_utils::MockTerminal;
-    use crate::tailoring::types::{SkippedAdr, TailoringSummary};
+    use crate::tailoring::types::{AdrSection, SkippedAdr, TailoringSummary};
 
     fn make_test_output(file_count: usize) -> TailoringOutput {
         let files: Vec<FileOutput> = (1..=file_count)
             .map(|i| {
                 // First file gets 1 ADR (singular), rest get 2 (plural)
-                let adr_ids = if i == 1 {
-                    vec![format!("adr-{i:03}")]
+                let sections = if i == 1 {
+                    vec![AdrSection {
+                        adr_id: format!("adr-{i:03}"),
+                        content: format!("content of file {i}"),
+                    }]
                 } else {
-                    vec![format!("adr-{i:03}"), format!("adr-{i:03}-extra")]
+                    vec![
+                        AdrSection {
+                            adr_id: format!("adr-{i:03}"),
+                            content: format!("content of file {i}"),
+                        },
+                        AdrSection {
+                            adr_id: format!("adr-{i:03}-extra"),
+                            content: format!("content of file {i}"),
+                        },
+                    ]
                 };
                 FileOutput {
                     path: format!("path/file{i}.md"),
-                    content: format!("content of file {i}"),
+                    sections,
                     reasoning: format!("reason for file {i}"),
-                    adr_ids,
                 }
             })
             .collect();

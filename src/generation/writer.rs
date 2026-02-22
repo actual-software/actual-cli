@@ -136,10 +136,10 @@ pub fn write_files(
             // get the correct preamble (e.g. "# Project Guidelines" vs YAML frontmatter).
             let result = merge::merge_content(
                 existing_ref,
-                &file.content,
+                &file.content(),
                 version,
                 is_root,
-                &file.adr_ids,
+                &file.adr_ids(),
                 format.root_header(),
             );
 
@@ -193,16 +193,32 @@ pub fn write_files(
 mod tests {
     use super::*;
     use crate::generation::OutputFormat;
+    use crate::tailoring::types::AdrSection;
+
+    /// Helper to create a FileOutput with a single section.
+    fn make_file(path: &str, content: &str, reasoning: &str, adr_ids: &[&str]) -> FileOutput {
+        FileOutput {
+            path: path.to_string(),
+            sections: adr_ids
+                .iter()
+                .map(|id| AdrSection {
+                    adr_id: id.to_string(),
+                    content: content.to_string(),
+                })
+                .collect(),
+            reasoning: reasoning.to_string(),
+        }
+    }
 
     #[test]
     fn test_write_root_claude_md() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let files = vec![FileOutput {
-            path: "CLAUDE.md".to_string(),
-            content: "Use consistent error handling.".to_string(),
-            reasoning: "Root-level rules".to_string(),
-            adr_ids: vec!["adr-001".to_string()],
-        }];
+        let files = vec![make_file(
+            "CLAUDE.md",
+            "Use consistent error handling.",
+            "Root-level rules",
+            &["adr-001"],
+        )];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -235,12 +251,12 @@ mod tests {
     #[test]
     fn test_write_subdirectory_file() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let files = vec![FileOutput {
-            path: "apps/web/CLAUDE.md".to_string(),
-            content: "Use React Server Components.".to_string(),
-            reasoning: "Web-specific rules".to_string(),
-            adr_ids: vec!["adr-002".to_string()],
-        }];
+        let files = vec![make_file(
+            "apps/web/CLAUDE.md",
+            "Use React Server Components.",
+            "Web-specific rules",
+            &["adr-002"],
+        )];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -287,12 +303,12 @@ mod tests {
         std::fs::write(dir.path().join("CLAUDE.md"), &initial_content)
             .expect("failed to write initial file");
 
-        let files = vec![FileOutput {
-            path: "CLAUDE.md".to_string(),
-            content: "New content replaces old.".to_string(),
-            reasoning: "Updated rules".to_string(),
-            adr_ids: vec!["adr-001".to_string(), "adr-003".to_string()],
-        }];
+        let files = vec![make_file(
+            "CLAUDE.md",
+            "New content replaces old.",
+            "Updated rules",
+            &["adr-001", "adr-003"],
+        )];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -333,24 +349,9 @@ mod tests {
     fn test_write_three_files() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let files = vec![
-            FileOutput {
-                path: "CLAUDE.md".to_string(),
-                content: "Root rules".to_string(),
-                reasoning: "root".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
-            },
-            FileOutput {
-                path: "apps/web/CLAUDE.md".to_string(),
-                content: "Web rules".to_string(),
-                reasoning: "web".to_string(),
-                adr_ids: vec!["adr-002".to_string()],
-            },
-            FileOutput {
-                path: "libs/core/CLAUDE.md".to_string(),
-                content: "Core rules".to_string(),
-                reasoning: "core".to_string(),
-                adr_ids: vec!["adr-003".to_string()],
-            },
+            make_file("CLAUDE.md", "Root rules", "root", &["adr-001"]),
+            make_file("apps/web/CLAUDE.md", "Web rules", "web", &["adr-002"]),
+            make_file("libs/core/CLAUDE.md", "Core rules", "core", &["adr-003"]),
         ];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
@@ -392,12 +393,12 @@ mod tests {
         // Create a regular file where the parent directory needs to be
         std::fs::write(dir.path().join("blocker"), "I am a file").unwrap();
 
-        let files = vec![FileOutput {
-            path: "blocker/nested/CLAUDE.md".to_string(),
-            content: "content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file(
+            "blocker/nested/CLAUDE.md",
+            "content",
+            "test",
+            &[],
+        )];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -429,12 +430,7 @@ mod tests {
         let target = dir.path().join("subdir").join("CLAUDE.md");
         std::fs::create_dir_all(&target).unwrap();
 
-        let files = vec![FileOutput {
-            path: "subdir/CLAUDE.md".to_string(),
-            content: "content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file("subdir/CLAUDE.md", "content", "test", &[])];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -461,12 +457,7 @@ mod tests {
     #[test]
     fn test_write_path_traversal_fails() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let files = vec![FileOutput {
-            path: "../CLAUDE.md".to_string(),
-            content: "malicious content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file("../CLAUDE.md", "malicious content", "test", &[])];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -488,12 +479,7 @@ mod tests {
     #[cfg(unix)]
     fn test_write_absolute_path_fails() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let files = vec![FileOutput {
-            path: "/etc/passwd".to_string(),
-            content: "malicious content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file("/etc/passwd", "malicious content", "test", &[])];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -515,12 +501,12 @@ mod tests {
     #[cfg(unix)]
     fn test_write_absolute_path_arbitrary_fails() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let files = vec![FileOutput {
-            path: "/absolute/path/CLAUDE.md".to_string(),
-            content: "malicious content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file(
+            "/absolute/path/CLAUDE.md",
+            "malicious content",
+            "test",
+            &[],
+        )];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -541,12 +527,7 @@ mod tests {
     #[test]
     fn test_write_fails_when_root_dir_does_not_exist() {
         let nonexistent = Path::new("/tmp/__nonexistent_actual_cli_test_dir__");
-        let files = vec![FileOutput {
-            path: "CLAUDE.md".to_string(),
-            content: "content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file("CLAUDE.md", "content", "test", &[])];
 
         let results = write_files(nonexistent, &files, &OutputFormat::ClaudeMd);
 
@@ -576,12 +557,12 @@ mod tests {
         let symlink_path = inner_dir.path().join("escape");
         symlink(outer_dir.path(), &symlink_path).expect("failed to create symlink");
 
-        let files = vec![FileOutput {
-            path: "escape/CLAUDE.md".to_string(),
-            content: "malicious content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file(
+            "escape/CLAUDE.md",
+            "malicious content",
+            "test",
+            &[],
+        )];
 
         let results = write_files(inner_dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -637,12 +618,12 @@ mod tests {
     #[test]
     fn test_write_cursor_rules_creates_mdc_with_frontmatter() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let files = vec![FileOutput {
-            path: ".cursor/rules/actual-policies.mdc".to_string(),
-            content: "Use Tailwind for all styling.".to_string(),
-            reasoning: "Cursor rules".to_string(),
-            adr_ids: vec!["adr-001".to_string()],
-        }];
+        let files = vec![make_file(
+            ".cursor/rules/actual-policies.mdc",
+            "Use Tailwind for all styling.",
+            "Cursor rules",
+            &["adr-001"],
+        )];
 
         let results = write_files(dir.path(), &files, &OutputFormat::CursorRules);
 
@@ -687,12 +668,12 @@ mod tests {
     #[test]
     fn test_write_agents_md_root_has_project_guidelines_header() {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
-        let files = vec![FileOutput {
-            path: "AGENTS.md".to_string(),
-            content: "Follow Python conventions.".to_string(),
-            reasoning: "Root rules".to_string(),
-            adr_ids: vec!["adr-001".to_string()],
-        }];
+        let files = vec![make_file(
+            "AGENTS.md",
+            "Follow Python conventions.",
+            "Root rules",
+            &["adr-001"],
+        )];
 
         let results = write_files(dir.path(), &files, &OutputFormat::AgentsMd);
 
@@ -721,12 +702,7 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))
             .expect("failed to set permissions");
 
-        let files = vec![FileOutput {
-            path: "newsubdir/CLAUDE.md".to_string(),
-            content: "content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file("newsubdir/CLAUDE.md", "content", "test", &[])];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -763,12 +739,7 @@ mod tests {
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444))
             .expect("failed to set permissions");
 
-        let files = vec![FileOutput {
-            path: "CLAUDE.md".to_string(),
-            content: "new content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file("CLAUDE.md", "new content", "test", &[])];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -805,12 +776,7 @@ mod tests {
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000))
             .expect("failed to set permissions");
 
-        let files = vec![FileOutput {
-            path: "CLAUDE.md".to_string(),
-            content: "new content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file("CLAUDE.md", "new content", "test", &[])];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -840,12 +806,7 @@ mod tests {
         let target = dir.path().join("CLAUDE.md");
         std::fs::create_dir(&target).expect("failed to create directory");
 
-        let files = vec![FileOutput {
-            path: "CLAUDE.md".to_string(),
-            content: "content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file("CLAUDE.md", "content", "test", &[])];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
@@ -879,12 +840,7 @@ mod tests {
         let symlink_path = inner_dir.path().join("escape");
         symlink(outer_dir.path(), &symlink_path).expect("failed to create symlink");
 
-        let files = vec![FileOutput {
-            path: "escape/CLAUDE.md".to_string(),
-            content: "content".to_string(),
-            reasoning: "test".to_string(),
-            adr_ids: vec![],
-        }];
+        let files = vec![make_file("escape/CLAUDE.md", "content", "test", &[])];
 
         let results = write_files(inner_dir.path(), &files, &OutputFormat::ClaudeMd);
 

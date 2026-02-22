@@ -275,9 +275,13 @@ mod tests {
             "files": [
                 {
                     "path": "CLAUDE.md",
-                    "content": "# Rules",
-                    "reasoning": "General rules",
-                    "adr_ids": ["adr-001"]
+                    "sections": [
+                        {
+                            "adr_id": "adr-001",
+                            "content": "# Rules"
+                        }
+                    ],
+                    "reasoning": "General rules"
                 }
             ],
             "skipped_adrs": [],

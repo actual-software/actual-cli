@@ -154,7 +154,7 @@ pub(crate) fn validate_and_filter_output(
 ) -> Result<TailoringOutput, ActualError> {
     let expected_filename = format.filename();
     for file in &mut output.files {
-        if file.content.is_empty() {
+        if file.sections.is_empty() || file.sections.iter().all(|s| s.content.is_empty()) {
             return Err(ActualError::TailoringValidationError(format!(
                 "file '{}' has empty content",
                 file.path
@@ -188,11 +188,12 @@ pub(crate) fn validate_and_filter_output(
         }
         // Sanitize LLM-generated path to prevent ANSI injection in terminal output
         file.path = console::strip_ansi_codes(&file.path).into_owned();
+        // Filter out sections with hallucinated ADR IDs
         let invalid_ids: Vec<String> = file
-            .adr_ids
+            .sections
             .iter()
-            .filter(|id| !valid_ids.contains(id.as_str()))
-            .cloned()
+            .filter(|s| !valid_ids.contains(s.adr_id.as_str()))
+            .map(|s| s.adr_id.clone())
             .collect();
         if !invalid_ids.is_empty() {
             tracing::warn!(
@@ -205,8 +206,19 @@ pub(crate) fn validate_and_filter_output(
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            file.adr_ids.retain(|id| valid_ids.contains(id.as_str()));
+            file.sections
+                .retain(|s| valid_ids.contains(s.adr_id.as_str()));
         }
+        // Deduplicate sections by adr_id (last wins)
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped = Vec::new();
+        for section in file.sections.drain(..).rev() {
+            if seen.insert(section.adr_id.clone()) {
+                deduped.push(section);
+            }
+        }
+        deduped.reverse();
+        file.sections = deduped;
     }
     Ok(output)
 }
@@ -216,7 +228,7 @@ mod tests {
     use super::*;
     use crate::api::types::{AdrCategory, AppliesTo};
     use crate::generation::OutputFormat;
-    use crate::tailoring::types::{FileOutput, TailoringSummary};
+    use crate::tailoring::types::{AdrSection, FileOutput, TailoringSummary};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
 
@@ -297,9 +309,14 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: "# Rules\n\nFollow standards.".to_string(),
+                sections: adr_ids
+                    .iter()
+                    .map(|id| AdrSection {
+                        adr_id: id.to_string(),
+                        content: "# Rules\n\nFollow standards.".to_string(),
+                    })
+                    .collect(),
                 reasoning: "Root level rules".to_string(),
-                adr_ids: adr_ids.iter().map(|s| s.to_string()).collect(),
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -333,7 +350,7 @@ mod tests {
         let output = result.unwrap();
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "CLAUDE.md");
-        assert_eq!(output.files[0].adr_ids, vec!["adr-001", "adr-002"]);
+        assert_eq!(output.files[0].adr_ids(), vec!["adr-001", "adr-002"]);
         assert_eq!(output.summary.total_input, 2);
         assert_eq!(output.summary.files_generated, 1);
     }
@@ -344,9 +361,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: String::new(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: String::new(),
+                }],
                 reasoning: "Root level rules".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -386,9 +405,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "README.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules".to_string(),
+                }],
                 reasoning: "Root level rules".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -425,9 +446,17 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![
+                    AdrSection {
+                        adr_id: "adr-001".to_string(),
+                        content: "# Rules".to_string(),
+                    },
+                    AdrSection {
+                        adr_id: "adr-999".to_string(),
+                        content: "# Rules".to_string(),
+                    },
+                ],
                 reasoning: "Root level rules".to_string(),
-                adr_ids: vec!["adr-001".to_string(), "adr-999".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -454,7 +483,7 @@ mod tests {
 
         let output = result.unwrap();
         // The invalid ID should be filtered out, leaving only the valid one
-        assert_eq!(output.files[0].adr_ids, vec!["adr-001"]);
+        assert_eq!(output.files[0].adr_ids(), vec!["adr-001"]);
     }
 
     #[tokio::test]
@@ -463,9 +492,17 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![
+                    AdrSection {
+                        adr_id: "adr-999".to_string(),
+                        content: "# Rules".to_string(),
+                    },
+                    AdrSection {
+                        adr_id: "adr-888".to_string(),
+                        content: "# Rules".to_string(),
+                    },
+                ],
                 reasoning: "Root level rules".to_string(),
-                adr_ids: vec!["adr-999".to_string(), "adr-888".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -491,7 +528,7 @@ mod tests {
         .await;
 
         let output = result.unwrap();
-        assert!(output.files[0].adr_ids.is_empty());
+        assert!(output.files[0].sections.is_empty());
     }
 
     #[tokio::test]
@@ -572,9 +609,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "../CLAUDE.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules".to_string(),
+                }],
                 reasoning: "Root level rules".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -614,9 +653,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "/etc/CLAUDE.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules".to_string(),
+                }],
                 reasoning: "Root level rules".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -684,9 +725,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "AGENTS.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules".to_string(),
+                }],
                 reasoning: "Root level rules".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -722,9 +765,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "subdir/AGENTS.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules".to_string(),
+                }],
                 reasoning: "Subdir rules".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -760,9 +805,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules".to_string(),
+                }],
                 reasoning: "Root level rules".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -804,9 +851,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: ".cursor/rules/actual-policies.mdc".to_string(),
-                content: "# Rules\n\nUse Tailwind.".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules\n\nUse Tailwind.".to_string(),
+                }],
                 reasoning: "Cursor rules".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -842,9 +891,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "apps/web/.cursor/rules/actual-policies.mdc".to_string(),
-                content: "# Rules\n\nUse React.".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules\n\nUse React.".to_string(),
+                }],
                 reasoning: "Web cursor rules".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -883,9 +934,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules".to_string(),
+                }],
                 reasoning: "Wrong format".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
@@ -925,9 +978,11 @@ mod tests {
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "AGENTS.md".to_string(),
-                content: "# Rules".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules".to_string(),
+                }],
                 reasoning: "Wrong format".to_string(),
-                adr_ids: vec!["adr-001".to_string()],
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
