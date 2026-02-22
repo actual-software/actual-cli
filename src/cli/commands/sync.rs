@@ -283,23 +283,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
             pipeline.println(line);
         }
     } else {
-        loop {
-            let action = pipeline.confirm_project(&analysis, term)?;
-            match action {
-                ConfirmAction::Accept => break,
-                ConfirmAction::Reject => {
-                    pipeline.finish_remaining();
-                    return Err(ActualError::UserCancelled);
-                }
-                ConfirmAction::Change => {
-                    // User wants to re-select language/framework
-                    for project in &mut analysis.projects {
-                        user_select_for_project(project, &mut pipeline, term)?;
-                    }
-                    // Loop back to show updated summary and re-confirm
-                }
-            }
-        }
+        confirm_or_change_loop(&mut analysis, &mut pipeline, term)?;
     }
 
     // ── Phase 2: fetch + tailor ──
@@ -799,6 +783,55 @@ where
                     );
                 }
             }
+        }
+    }
+}
+
+/// Run the confirmation loop: show project summary, then Accept/Change/Reject.
+///
+/// - **Accept** breaks out of the loop and proceeds.
+/// - **Reject** finishes remaining pipeline steps and returns `UserCancelled`.
+/// - **Change** triggers interactive re-selection for every project, then loops
+///   back to show the updated summary and re-confirm.
+fn confirm_or_change_loop(
+    analysis: &mut RepoAnalysis,
+    pipeline: &mut TuiRenderer,
+    term: &dyn TerminalIO,
+) -> Result<(), ActualError> {
+    loop {
+        let action = pipeline.confirm_project(analysis, term)?;
+        // true ⇒ Accept (break), false ⇒ Change (loop back)
+        if handle_confirm_action(action, analysis, pipeline, term)? {
+            return Ok(());
+        }
+    }
+}
+
+/// Process a single [`ConfirmAction`] from the confirmation prompt.
+///
+/// Returns `Ok(true)` to break the loop (Accept), `Ok(false)` to continue
+/// looping (Change), or `Err(UserCancelled)` to abort (Reject).
+///
+/// Extracted so both the `run_sync` integration flow and unit tests can
+/// exercise the Change → re-select path without requiring TUI-mode keyboard
+/// events.
+fn handle_confirm_action(
+    action: ConfirmAction,
+    analysis: &mut RepoAnalysis,
+    pipeline: &mut TuiRenderer,
+    term: &dyn TerminalIO,
+) -> Result<bool, ActualError> {
+    match action {
+        ConfirmAction::Accept => Ok(true),
+        ConfirmAction::Reject => {
+            pipeline.finish_remaining();
+            Err(ActualError::UserCancelled)
+        }
+        ConfirmAction::Change => {
+            for project in &mut analysis.projects {
+                user_select_for_project(project, pipeline, term)?;
+            }
+            Ok(false)
         }
     }
 }
@@ -6072,7 +6105,138 @@ mod tests {
         assert!(!sel.auto_selected);
     }
 
-    // ── sync flow integration: Change loop ──
+    // ── handle_confirm_action tests ──
+
+    #[test]
+    fn test_handle_confirm_action_accept_returns_true() {
+        let mut analysis = make_monorepo_analysis();
+        let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        let result =
+            handle_confirm_action(ConfirmAction::Accept, &mut analysis, &mut pipeline, &term);
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[test]
+    fn test_handle_confirm_action_reject_returns_cancelled() {
+        let mut analysis = make_monorepo_analysis();
+        let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        let result =
+            handle_confirm_action(ConfirmAction::Reject, &mut analysis, &mut pipeline, &term);
+        assert!(matches!(result, Err(ActualError::UserCancelled)));
+    }
+
+    #[test]
+    fn test_handle_confirm_action_change_triggers_reselection() {
+        // Create a project with 2 languages and auto-selected
+        let mut analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "test".to_string(),
+                languages: vec![
+                    LanguageStat {
+                        language: Language::TypeScript,
+                        loc: 5000,
+                    },
+                    LanguageStat {
+                        language: Language::Rust,
+                        loc: 2000,
+                    },
+                ],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
+                selection: Some(ProjectSelection {
+                    language: LanguageStat {
+                        language: Language::TypeScript,
+                        loc: 5000,
+                    },
+                    framework: None,
+                    auto_selected: true,
+                }),
+            }],
+        };
+
+        // select_one: user picks language index 1 (Rust)
+        let term = MockTerminal::new(vec![]).with_select_one(vec![1]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        let result =
+            handle_confirm_action(ConfirmAction::Change, &mut analysis, &mut pipeline, &term);
+        // Change returns Ok(false) to continue the loop
+        assert_eq!(result.unwrap(), false);
+
+        // Verify selection was updated to Rust
+        let sel = analysis.projects[0].selection.as_ref().unwrap();
+        assert_eq!(sel.language.language, Language::Rust);
+        assert!(!sel.auto_selected, "should be user-selected, not auto");
+    }
+
+    #[test]
+    fn test_user_select_for_project_no_compatible_frameworks() {
+        // TypeScript is selected but only Cargo.toml framework (incompatible)
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::TypeScript,
+                loc: 3000,
+            }],
+            vec![Framework {
+                name: "actix-web".to_string(),
+                category: FrameworkCategory::WebBackend,
+                source: Some(
+                    crate::analysis::static_analyzer::manifests::ManifestSource::CargoToml,
+                ),
+            }],
+        );
+
+        // select_one: pick language index 0 (TypeScript)
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        user_select_for_project(&mut project, &mut pipeline, &term).unwrap();
+
+        let sel = project.selection.unwrap();
+        assert_eq!(sel.language.language, Language::TypeScript);
+        assert!(
+            sel.framework.is_none(),
+            "no compatible frameworks for TypeScript from Cargo.toml"
+        );
+        assert!(!sel.auto_selected);
+    }
+
+    // ── confirm_or_change_loop tests ──
+
+    #[test]
+    fn test_confirm_or_change_loop_accept() {
+        let mut analysis = make_monorepo_analysis();
+        let term = MockTerminal::new(vec!["y"]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        let result = confirm_or_change_loop(&mut analysis, &mut pipeline, &term);
+        assert!(result.is_ok(), "Accept should succeed: {result:?}");
+    }
+
+    #[test]
+    fn test_confirm_or_change_loop_reject() {
+        let mut analysis = make_monorepo_analysis();
+        let term = MockTerminal::new(vec!["n"]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        let result = confirm_or_change_loop(&mut analysis, &mut pipeline, &term);
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "Reject should return UserCancelled: {result:?}"
+        );
+    }
+
+    // ── sync flow integration ──
 
     #[test]
     fn test_run_sync_accept_works_with_auto_selection() {
