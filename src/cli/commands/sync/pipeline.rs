@@ -410,7 +410,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
                     .as_ref()
                     .filter(|c| c.cache_key == key)
             })
-            .and_then(|c| serde_yaml::from_value::<TailoringOutput>(c.tailoring.clone()).ok())
+            .and_then(|c| serde_yml::from_value::<TailoringOutput>(c.tailoring.clone()).ok())
     } else {
         None
     };
@@ -3723,7 +3723,7 @@ mod tests {
         assert_eq!(cached.repo_path, dir.path().to_string_lossy().as_ref());
 
         // Verify the stored value round-trips
-        let restored: TailoringOutput = serde_yaml::from_value(cached.tailoring.clone()).unwrap();
+        let restored: TailoringOutput = serde_yml::from_value(cached.tailoring.clone()).unwrap();
         assert_eq!(restored, output);
     }
 
@@ -3875,16 +3875,16 @@ mod tests {
             },
         };
 
-        let value = serde_yaml::to_value(&output).unwrap();
-        let restored: TailoringOutput = serde_yaml::from_value(value).unwrap();
+        let value = serde_yml::to_value(&output).unwrap();
+        let restored: TailoringOutput = serde_yml::from_value(value).unwrap();
         assert_eq!(output, restored);
     }
 
     #[test]
     fn test_corrupted_tailoring_cache_falls_through() {
         // Simulates a corrupted cache that cannot be deserialized as TailoringOutput
-        let corrupted = serde_yaml::to_value("this is not a TailoringOutput").unwrap();
-        let result = serde_yaml::from_value::<TailoringOutput>(corrupted);
+        let corrupted = serde_yml::to_value("this is not a TailoringOutput").unwrap();
+        let result = serde_yml::from_value::<TailoringOutput>(corrupted);
         assert!(
             result.is_err(),
             "corrupted value should fail deserialization"
@@ -4140,7 +4140,7 @@ mod tests {
         let loaded = load_from(&cfg_path).unwrap();
         let cached_tailoring = loaded.cached_tailoring.as_ref().unwrap();
         let cached_output: TailoringOutput =
-            serde_yaml::from_value(cached_tailoring.tailoring.clone()).unwrap();
+            serde_yml::from_value(cached_tailoring.tailoring.clone()).unwrap();
         assert_eq!(
             cached_output.summary.applicable, 0,
             "expected 0 applicable ADRs in cache after empty-ADR run"
@@ -4230,7 +4230,7 @@ mod tests {
         let loaded = load_from(&cfg_path).unwrap();
         let cached_tailoring = loaded.cached_tailoring.as_ref().unwrap();
         let cached_output: TailoringOutput =
-            serde_yaml::from_value(cached_tailoring.tailoring.clone()).unwrap();
+            serde_yml::from_value(cached_tailoring.tailoring.clone()).unwrap();
         assert!(
             cached_output.summary.applicable > 0,
             "expected >0 applicable ADRs in cache"

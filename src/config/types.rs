@@ -147,7 +147,7 @@ pub struct CachedTailoring {
     /// Repo path (for display/debugging).
     pub repo_path: String,
     /// The tailoring output (stored as opaque YAML value).
-    pub tailoring: serde_yaml::Value,
+    pub tailoring: serde_yml::Value,
     /// When the tailoring was performed.
     pub tailored_at: chrono::DateTime<chrono::Utc>,
 }
@@ -215,8 +215,8 @@ mod tests {
             max_turns: Some(10),
         };
 
-        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
-        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -224,14 +224,14 @@ mod tests {
     #[test]
     fn test_default_config_serializes_to_valid_yaml() {
         let config = Config::default();
-        let yaml = serde_yaml::to_string(&config).expect("serialize default to YAML");
-        let _parsed: Config = serde_yaml::from_str(&yaml).expect("deserialize default YAML");
+        let yaml = serde_yml::to_string(&config).expect("serialize default to YAML");
+        let _parsed: Config = serde_yml::from_str(&yaml).expect("deserialize default YAML");
     }
 
     /// Empty YAML `{}` deserializes to default Config.
     #[test]
     fn test_empty_yaml_deserializes_to_default() {
-        let config: Config = serde_yaml::from_str("{}").expect("deserialize empty YAML");
+        let config: Config = serde_yml::from_str("{}").expect("deserialize empty YAML");
         assert_eq!(config, Config::default());
     }
 
@@ -253,8 +253,8 @@ mod tests {
             ..Config::default()
         };
 
-        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
-        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn test_partial_yaml_deserializes_with_defaults() {
         let yaml = "model: opus\nbatch_size: 10\n";
-        let config: Config = serde_yaml::from_str(yaml).expect("deserialize partial YAML");
+        let config: Config = serde_yml::from_str(yaml).expect("deserialize partial YAML");
         assert_eq!(config.model, Some("opus".to_string()));
         assert_eq!(config.batch_size, Some(10));
         assert_eq!(config.api_url, None);
@@ -277,12 +277,12 @@ mod tests {
             output_format: Some(OutputFormat::ClaudeMd),
             ..Config::default()
         };
-        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("claude-md"),
             "YAML must contain 'claude-md': {yaml}"
         );
-        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -293,12 +293,12 @@ mod tests {
             output_format: Some(OutputFormat::AgentsMd),
             ..Config::default()
         };
-        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("agents-md"),
             "YAML must contain 'agents-md': {yaml}"
         );
-        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -309,12 +309,12 @@ mod tests {
             output_format: Some(OutputFormat::CursorRules),
             ..Config::default()
         };
-        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("cursor-rules"),
             "YAML must contain 'cursor-rules': {yaml}"
         );
-        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn test_partial_yaml_with_output_format() {
         let yaml = "output_format: agents-md\n";
-        let config: Config = serde_yaml::from_str(yaml).expect("deserialize partial YAML");
+        let config: Config = serde_yml::from_str(yaml).expect("deserialize partial YAML");
         assert_eq!(config.output_format, Some(OutputFormat::AgentsMd));
     }
 
@@ -333,12 +333,12 @@ mod tests {
             runner: Some("anthropic-api".to_string()),
             ..Config::default()
         };
-        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("anthropic-api"),
             "YAML must contain 'anthropic-api': {yaml}"
         );
-        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -350,7 +350,7 @@ mod tests {
             openai_api_key: Some("sk-openai-test456".to_string()),
             ..Config::default()
         };
-        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
+        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
         assert!(
             yaml.contains("sk-ant-test123"),
             "YAML must contain anthropic key: {yaml}"
@@ -359,7 +359,7 @@ mod tests {
             yaml.contains("sk-openai-test456"),
             "YAML must contain openai key: {yaml}"
         );
-        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 
@@ -370,14 +370,14 @@ mod tests {
             cached_tailoring: Some(CachedTailoring {
                 cache_key: "abc123def456".to_string(),
                 repo_path: "/home/user/project".to_string(),
-                tailoring: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                tailoring: serde_yml::Value::Mapping(serde_yml::Mapping::new()),
                 tailored_at: chrono::Utc::now(),
             }),
             ..Config::default()
         };
 
-        let yaml = serde_yaml::to_string(&config).expect("serialize to YAML");
-        let deserialized: Config = serde_yaml::from_str(&yaml).expect("deserialize from YAML");
+        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
     }
 }
