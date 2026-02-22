@@ -6413,6 +6413,65 @@ mod tests {
         assert!(!sel.auto_selected);
     }
 
+    #[test]
+    fn test_user_select_for_project_language_selection_cancelled() {
+        // Covers the ? error path on select_one_in_tui for language selection
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::Rust,
+                loc: 100,
+            }],
+            vec![],
+        );
+
+        // Empty select_one results → UserCancelled on first call
+        let term = MockTerminal::new(vec![]).with_select_one(vec![]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        let result = user_select_for_project(&mut project, &mut pipeline, &term);
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "Should return UserCancelled when language selection is cancelled: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_user_select_for_project_framework_selection_cancelled() {
+        // Covers the ? error path on select_one_in_tui for framework selection
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::TypeScript,
+                loc: 3000,
+            }],
+            vec![
+                Framework {
+                    name: "react".to_string(),
+                    category: FrameworkCategory::WebFrontend,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::PackageJson,
+                    ),
+                },
+                Framework {
+                    name: "nextjs".to_string(),
+                    category: FrameworkCategory::WebFrontend,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::PackageJson,
+                    ),
+                },
+            ],
+        );
+
+        // First select_one succeeds (language = 0), second runs out → UserCancelled
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        let result = user_select_for_project(&mut project, &mut pipeline, &term);
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "Should return UserCancelled when framework selection is cancelled: {result:?}"
+        );
+    }
+
     // ── sync flow integration ──
 
     #[test]
