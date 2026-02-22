@@ -80,24 +80,43 @@ static RUNNER_FAMILIES: &[RunnerFamily] = &[
     RunnerFamily {
         name: "Cursor",
         runners: &["cursor-cli"],
-        models: &[ModelEntry::with_note(
-            "(any model)",
-            "Cursor proxies all providers — no fixed model list",
-        )],
+        models: &[
+            ModelEntry::with_note("auto", "Cursor routes to best model for your tier"),
+            ModelEntry::new("composer-1.5"),
+            ModelEntry::default_model("opus-4.6-thinking"),
+            ModelEntry::new("opus-4.6"),
+            ModelEntry::new("sonnet-4.6"),
+            ModelEntry::new("sonnet-4.6-thinking"),
+            ModelEntry::new("gpt-5.2"),
+            ModelEntry::new("gemini-3.1-pro"),
+            ModelEntry::new("grok"),
+            ModelEntry::with_note("kimi-k2.5", "run cursor-agent models for full list"),
+        ],
     },
 ];
 
-/// Returns the list of known model name strings from all runner families,
-/// excluding placeholder entries like `"(any model)"`.
+/// Returns the list of known model name strings from all runner families.
 ///
-/// Used by `config set model` to warn when an unrecognised name is provided.
+/// Used by `config set model` to warn when an unrecognised name is provided,
+/// and by `model_compatibility_warning()` to check cursor model names.
 pub fn known_model_names() -> Vec<&'static str> {
     RUNNER_FAMILIES
         .iter()
         .flat_map(|f| f.models.iter())
         .map(|m| m.id)
-        .filter(|id| !id.starts_with('('))
         .collect()
+}
+
+/// Returns the list of known Cursor model name strings.
+///
+/// Used by `model_compatibility_warning()` to issue a soft warning when a
+/// configured cursor model is not in the known list.
+pub fn known_cursor_model_names() -> Vec<&'static str> {
+    RUNNER_FAMILIES
+        .iter()
+        .find(|f| f.runners.contains(&"cursor-cli"))
+        .map(|f| f.models.iter().map(|m| m.id).collect())
+        .unwrap_or_default()
 }
 
 pub fn exec() -> Result<(), ActualError> {
@@ -352,15 +371,56 @@ mod tests {
     }
 
     #[test]
-    fn test_known_model_names_excludes_cursor_placeholder() {
+    fn test_known_model_names_includes_cursor_models() {
         let names = known_model_names();
-        // The Cursor entry is "(any model)" — must be filtered out
-        for name in &names {
-            assert!(
-                !name.starts_with('('),
-                "placeholder '{}' should not appear in known_model_names()",
-                name
-            );
-        }
+        assert!(names.contains(&"auto"), "should include 'auto'");
+        assert!(names.contains(&"opus-4.6"), "should include 'opus-4.6'");
+        assert!(names.contains(&"sonnet-4.6"), "should include 'sonnet-4.6'");
+        assert!(names.contains(&"gpt-5.2"), "should include 'gpt-5.2'");
+        assert!(names.contains(&"grok"), "should include 'grok'");
+    }
+
+    #[test]
+    fn test_known_cursor_model_names_nonempty() {
+        let names = known_cursor_model_names();
+        assert!(
+            !names.is_empty(),
+            "known_cursor_model_names() should not be empty"
+        );
+    }
+
+    #[test]
+    fn test_known_cursor_model_names_contains_expected() {
+        let names = known_cursor_model_names();
+        assert!(names.contains(&"auto"), "should include 'auto'");
+        assert!(
+            names.contains(&"opus-4.6-thinking"),
+            "should include 'opus-4.6-thinking'"
+        );
+        assert!(names.contains(&"sonnet-4.6"), "should include 'sonnet-4.6'");
+        assert!(names.contains(&"grok"), "should include 'grok'");
+        assert!(names.contains(&"kimi-k2.5"), "should include 'kimi-k2.5'");
+    }
+
+    #[test]
+    fn test_cursor_family_has_default_model() {
+        let cursor_family = RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "Cursor")
+            .expect("should have Cursor family");
+        let defaults: Vec<_> = cursor_family
+            .models
+            .iter()
+            .filter(|m| m.is_default)
+            .collect();
+        assert_eq!(
+            defaults.len(),
+            1,
+            "Cursor family should have exactly one default"
+        );
+        assert_eq!(
+            defaults[0].id, "opus-4.6-thinking",
+            "default Cursor model should be opus-4.6-thinking"
+        );
     }
 }
