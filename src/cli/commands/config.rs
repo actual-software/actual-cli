@@ -50,9 +50,9 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
         }
         ConfigAction::Show => {
             let cfg = config::paths::load_from(path)?;
-            // Config contains only Option<String>, Option<bool>, Option<usize>, etc.
-            // serde_yaml serialization is infallible for these types, so unwrap is safe.
-            let yaml = serde_yaml::to_string(&cfg).unwrap();
+            let yaml = serde_yaml::to_string(&cfg).map_err(|e| {
+                ActualError::ConfigError(format!("Failed to serialize config to YAML: {e}"))
+            })?;
             print!("{}", redact_yaml(&yaml));
             Ok(())
         }
