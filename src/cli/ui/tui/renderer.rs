@@ -2102,11 +2102,13 @@ mod tests {
                 frameworks: vec![Framework {
                     name: "actix".to_string(),
                     category: FrameworkCategory::WebBackend,
+                    source: None,
                 }],
                 package_manager: Some("cargo".to_string()),
                 description: None,
                 dep_count: 0,
                 dev_dep_count: 0,
+                selection: None,
             }],
         };
 

@@ -1582,11 +1582,13 @@ mod tests {
                     frameworks: vec![Framework {
                         name: "nextjs".to_string(),
                         category: FrameworkCategory::WebFrontend,
+                        source: None,
                     }],
                     package_manager: Some("npm".to_string()),
                     description: None,
                     dep_count: 0,
                     dev_dep_count: 0,
+                    selection: None,
                 },
                 Project {
                     path: "services/api".to_string(),
@@ -1600,6 +1602,7 @@ mod tests {
                     description: None,
                     dep_count: 0,
                     dev_dep_count: 0,
+                    selection: None,
                 },
             ],
         }
