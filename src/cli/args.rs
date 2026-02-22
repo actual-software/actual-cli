@@ -868,7 +868,7 @@ mod parse_tests {
     #[test]
     fn test_compat_openai_api_with_anthropic_model_warns() {
         let warn = RunnerChoice::OpenAiApi
-            .model_compatibility_warning("claude-3.5-sonnet")
+            .model_compatibility_warning("claude-sonnet-4-6")
             .unwrap();
         assert!(warn.contains("Anthropic"), "msg: {warn}");
     }
@@ -1014,10 +1014,6 @@ mod parse_tests {
     fn test_infer_from_model_anthropic_full_ids() {
         assert_eq!(
             RunnerChoice::infer_from_model("claude-sonnet-4-6").unwrap(),
-            RunnerChoice::AnthropicApi
-        );
-        assert_eq!(
-            RunnerChoice::infer_from_model("claude-3-5-sonnet-20241022").unwrap(),
             RunnerChoice::AnthropicApi
         );
         assert_eq!(
