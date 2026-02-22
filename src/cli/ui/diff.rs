@@ -1201,6 +1201,94 @@ mod tests {
         );
     }
 
+    // ── coverage: Added ADR with >3 lines triggers truncation ──
+
+    #[test]
+    fn test_format_adr_diffs_added_truncates_long_content() {
+        let diffs = vec![AdrDiff {
+            adr_id: "abcdef12-3456-7890".to_string(),
+            change: AdrChange::Added,
+            old_content: None,
+            new_content: Some("line1\nline2\nline3\nline4\nline5".to_string()),
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
+        assert!(
+            plain.contains("... and 2 more lines"),
+            "expected truncation message in: {plain}"
+        );
+    }
+
+    // ── coverage: Updated ADR with >5 diff lines triggers truncation ──
+
+    #[test]
+    fn test_format_adr_diffs_updated_truncates_long_diff() {
+        // Build old/new with enough differing lines to produce >5 diff lines.
+        let old = "a\nb\nc\nd\ne\nf\ng\nh";
+        let new = "1\n2\n3\n4\n5\n6\n7\n8";
+        let diffs = vec![AdrDiff {
+            adr_id: "abcdef12-3456-7890".to_string(),
+            change: AdrChange::Updated,
+            old_content: Some(old.to_string()),
+            new_content: Some(new.to_string()),
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
+        assert!(
+            plain.contains("... and ") && plain.contains(" more changes"),
+            "expected truncation message in: {plain}"
+        );
+    }
+
+    // ── coverage: ADR ID with ≤8 chars uses full ID (else branch) ──
+
+    #[test]
+    fn test_format_adr_diffs_short_adr_id() {
+        let diffs = vec![AdrDiff {
+            adr_id: "short".to_string(),
+            change: AdrChange::Added,
+            old_content: None,
+            new_content: Some("content".to_string()),
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let joined = lines.join("\n");
+        let plain = console::strip_ansi_codes(&joined);
+        assert!(
+            plain.contains("[short]"),
+            "expected full short ID '[short]' in: {plain}"
+        );
+    }
+
+    // ── coverage: format_file_diff with NewFile + adr_diffs ──
+
+    #[test]
+    fn test_format_file_diff_new_file_with_adr_diffs() {
+        let diff = FileDiff {
+            path: "AGENTS.md".to_string(),
+            change: FileChange::NewFile { rule_count: 2 },
+            old_content: None,
+            new_content: "new content\n".to_string(),
+            adr_diffs: vec![AdrDiff {
+                adr_id: "newfile-adr-id-1234".to_string(),
+                change: AdrChange::Added,
+                old_content: None,
+                new_content: Some("new rule".to_string()),
+            }],
+        };
+        let output = format_file_diff(&diff);
+        let plain = console::strip_ansi_codes(&output);
+        assert!(
+            plain.contains("(new file)"),
+            "expected '(new file)' header in: {plain}"
+        );
+        assert!(
+            plain.contains("[newfile-") && plain.contains("added"),
+            "expected per-ADR display in NewFile: {plain}"
+        );
+    }
+
     // ── from_change_detection backward compat test ──
 
     #[test]
