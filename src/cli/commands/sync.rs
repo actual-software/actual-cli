@@ -153,7 +153,7 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         }
         Some(_) => {
             pipeline.println(&format!(
-                "  {:<9} {} Not authenticated — run `actual login`",
+                "  {:<9} {} Not authenticated — check your runner credentials",
                 "Auth",
                 theme::ERROR
             ));

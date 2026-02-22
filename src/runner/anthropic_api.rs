@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::sleep;
 
 use crate::error::ActualError;
@@ -30,6 +31,8 @@ pub struct AnthropicApiRunner {
     /// Base duration for exponential back-off on 429 responses.
     /// Defaults to 1 second; tests override this to zero for speed.
     retry_base: Duration,
+    /// Optional channel for streaming progress events to the TUI.
+    event_tx: std::sync::Mutex<Option<UnboundedSender<String>>>,
 }
 
 /// Map a reqwest client build error into an [`ActualError`].
@@ -68,6 +71,7 @@ impl AnthropicApiRunner {
             timeout,
             base_url,
             retry_base: Duration::from_secs(1),
+            event_tx: std::sync::Mutex::new(None),
         })
     }
 
@@ -76,7 +80,11 @@ impl AnthropicApiRunner {
     /// On HTTP 429 rate-limit responses, retries up to [`MAX_RATE_LIMIT_RETRIES`] times
     /// with exponential backoff (1 s, 2 s, 4 s), respecting the `Retry-After` header
     /// when present.
-    async fn post_messages(&self, body: Value) -> Result<Value, ActualError> {
+    async fn post_messages(
+        &self,
+        body: Value,
+        event_tx: Option<&UnboundedSender<String>>,
+    ) -> Result<Value, ActualError> {
         let url = format!("{}/v1/messages", self.base_url);
 
         let mut attempt = 0u32;
@@ -131,6 +139,11 @@ impl AnthropicApiRunner {
                     attempt,
                     MAX_RATE_LIMIT_RETRIES
                 );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(format!(
+                        "Rate limited — retrying in {wait_secs}s ({attempt}/{MAX_RATE_LIMIT_RETRIES})..."
+                    ));
+                }
                 sleep(self.retry_base * wait_secs as u32).await;
                 continue;
             }
@@ -181,6 +194,10 @@ struct ContentBlock {
 }
 
 impl TailoringRunner for AnthropicApiRunner {
+    fn set_event_tx(&self, tx: UnboundedSender<String>) {
+        *self.event_tx.lock().unwrap() = Some(tx);
+    }
+
     async fn run_tailoring(
         &self,
         prompt: &str,
@@ -188,8 +205,15 @@ impl TailoringRunner for AnthropicApiRunner {
         model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError> {
+        let event_tx = self.event_tx.lock().unwrap().clone();
         let model = model_override.unwrap_or(&self.model);
         let schema_value: Value = serde_json::from_str(schema)?;
+
+        if let Some(ref tx) = event_tx {
+            let _ = tx.send(format!(
+                "Sending request to Anthropic API (model: {model})..."
+            ));
+        }
 
         let system_prompt = "You are an expert software architect. Your task is to analyze \
             Architecture Decision Records (ADRs) and generate tailored CLAUDE.md files for a \
@@ -219,7 +243,11 @@ impl TailoringRunner for AnthropicApiRunner {
             }
         });
 
-        let response = self.post_messages(request_body).await?;
+        let response = self.post_messages(request_body, event_tx.as_ref()).await?;
+
+        if let Some(ref tx) = event_tx {
+            let _ = tx.send("Response received from Anthropic API".to_string());
+        }
 
         // Find the tool_use block named "return_result" in the content array.
         // Propagate deserialization failures so API schema drift produces a
@@ -850,5 +878,104 @@ mod tests {
                 other
             ),
         }
+    }
+
+    // Test N: set_event_tx stores the sender and events are forwarded during run_tailoring
+    #[tokio::test]
+    async fn test_set_event_tx_stores_sender_and_forwards_events() {
+        let mut server = Server::new_async().await;
+        let response_body = anthropic_tool_use_response(tailoring_output_json());
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        assert!(
+            runner.event_tx.lock().unwrap().is_none(),
+            "event_tx should be None before set_event_tx"
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        runner.set_event_tx(tx);
+        assert!(
+            runner.event_tx.lock().unwrap().is_some(),
+            "event_tx should be Some after set_event_tx"
+        );
+
+        let result = runner
+            .run_tailoring("Test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+
+        // Collect all events emitted during run_tailoring.
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            events.push(msg);
+        }
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("Sending request") && e.contains("Anthropic API")),
+            "expected a 'Sending request' event, got: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("Response received from Anthropic API")),
+            "expected a 'Response received' event, got: {events:?}"
+        );
+    }
+
+    // Test N+1: set_event_tx emits retry event on 429 then success
+    #[tokio::test]
+    async fn test_event_tx_emits_retry_event_on_429() {
+        let mut server = Server::new_async().await;
+
+        let mock_429 = server
+            .mock("POST", "/v1/messages")
+            .with_status(429)
+            .with_body(r#"{"error": {"type": "rate_limit_error"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let response_body = anthropic_tool_use_response(tailoring_output_json());
+        let mock_200 = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        runner.set_event_tx(tx);
+
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock_429.assert_async().await;
+        mock_200.assert_async().await;
+        assert!(result.is_ok(), "expected Ok after retry, got: {:?}", result);
+
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            events.push(msg);
+        }
+
+        assert!(
+            events.iter().any(|e| e.contains("Rate limited")),
+            "expected a 'Rate limited' retry event, got: {events:?}"
+        );
     }
 }
