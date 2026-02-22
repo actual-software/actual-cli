@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::error::ActualError;
 use crate::tailoring::types::TailoringOutput;
@@ -76,6 +77,8 @@ pub struct OpenAiApiRunner {
     /// Base duration for exponential back-off on 429 responses.
     /// Defaults to 1 second; tests override this to zero for speed.
     retry_base: Duration,
+    /// Optional channel for streaming progress events to the TUI.
+    event_tx: std::sync::Mutex<Option<UnboundedSender<String>>>,
 }
 
 // ── Request / response shapes ────────────────────────────────────────────────
@@ -153,6 +156,7 @@ impl OpenAiApiRunner {
             timeout,
             base_url: "https://api.openai.com".to_string(),
             retry_base: Duration::from_secs(1),
+            event_tx: std::sync::Mutex::new(None),
         })
     }
 
@@ -180,6 +184,10 @@ impl OpenAiApiRunner {
 // ── TailoringRunner impl ──────────────────────────────────────────────────────
 
 impl TailoringRunner for OpenAiApiRunner {
+    fn set_event_tx(&self, tx: UnboundedSender<String>) {
+        *self.event_tx.lock().unwrap() = Some(tx);
+    }
+
     async fn run_tailoring(
         &self,
         prompt: &str,
@@ -187,6 +195,8 @@ impl TailoringRunner for OpenAiApiRunner {
         _model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError> {
+        let event_tx = self.event_tx.lock().unwrap().clone();
+
         // Ignore `_model_override` — it comes from `ConcurrentTailoringConfig`
         // which resolves from `config.model` (a Claude Code alias like "haiku").
         // The OpenAI runner's `self.model` was already correctly resolved in
@@ -194,6 +204,10 @@ impl TailoringRunner for OpenAiApiRunner {
         let model = self.model.clone();
         let mut schema_value: Value = serde_json::from_str(schema)?;
         inject_additional_properties_false(&mut schema_value);
+
+        if let Some(ref tx) = event_tx {
+            let _ = tx.send(format!("Sending request to OpenAI API (model: {model})..."));
+        }
 
         let body = RequestBody {
             model,
@@ -261,6 +275,11 @@ impl TailoringRunner for OpenAiApiRunner {
                     attempt,
                     MAX_RATE_LIMIT_RETRIES
                 );
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.send(format!(
+                        "Rate limited — retrying in {wait_secs}s ({attempt}/{MAX_RATE_LIMIT_RETRIES})..."
+                    ));
+                }
                 tokio::time::sleep(self.retry_base * wait_secs as u32).await;
                 continue;
             }
@@ -336,6 +355,11 @@ impl TailoringRunner for OpenAiApiRunner {
         };
 
         let output: TailoringOutput = serde_json::from_str(&text)?;
+
+        if let Some(ref tx) = event_tx {
+            let _ = tx.send("Response received from OpenAI API".to_string());
+        }
+
         Ok(output)
     }
 }
@@ -1523,5 +1547,103 @@ mod tests {
             }
         }
         check(&schema);
+    }
+
+    // Test N: set_event_tx stores the sender and events are forwarded during run_tailoring
+    #[tokio::test]
+    async fn test_set_event_tx_stores_sender_and_forwards_events() {
+        let mut server = Server::new_async().await;
+        let body = responses_body(&minimal_tailoring_output_json());
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        assert!(
+            runner.event_tx.lock().unwrap().is_none(),
+            "event_tx should be None before set_event_tx"
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        runner.set_event_tx(tx);
+        assert!(
+            runner.event_tx.lock().unwrap().is_some(),
+            "event_tx should be Some after set_event_tx"
+        );
+
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            events.push(msg);
+        }
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("Sending request") && e.contains("OpenAI API")),
+            "expected a 'Sending request' event, got: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("Response received from OpenAI API")),
+            "expected a 'Response received' event, got: {events:?}"
+        );
+    }
+
+    // Test N+1: set_event_tx emits retry event on 429 then success
+    #[tokio::test]
+    async fn test_event_tx_emits_retry_event_on_429() {
+        let mut server = Server::new_async().await;
+
+        let mock_429 = server
+            .mock("POST", "/v1/responses")
+            .with_status(429)
+            .with_body(r#"{"error": "rate limited"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let body = responses_body(&minimal_tailoring_output_json());
+        let mock_200 = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        runner.set_event_tx(tx);
+
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock_429.assert_async().await;
+        mock_200.assert_async().await;
+        assert!(result.is_ok(), "expected Ok after retry, got: {:?}", result);
+
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            events.push(msg);
+        }
+
+        assert!(
+            events.iter().any(|e| e.contains("Rate limited")),
+            "expected a 'Rate limited' retry event, got: {events:?}"
+        );
     }
 }
