@@ -185,20 +185,24 @@ If any gate fails, fix the issue before committing. Do NOT push broken code.
    ```
    - If checks FAIL: read the failure logs, fix the issue, push again, and re-check
    - Repeat until ALL checks pass
-8. After CI passes, read Claude code review comments (from Anthropic's Claude GitHub App) and address feedback:
+8. After CI passes, read all PR comments and reviews (from any reviewer, bot, or CI workflow) and address actionable feedback:
    ```bash
-   gh pr view <pr-number> --json comments --jq '.comments[].body'
-   gh pr view <pr-number> --json reviews --jq '.reviews[] | select(.body != "") | .body'
+   # Inline review comments (on specific lines of code)
+   gh api repos/actual-software/actual-cli/pulls/<pr-number>/comments --jq '.[] | {user: .user.login, body: .body, path: .path, line: .line}'
+   # General PR comments (not tied to a specific line)
+   gh api repos/actual-software/actual-cli/issues/<pr-number>/comments --jq '.[] | {user: .user.login, body: .body}'
+   # Review summaries
+   gh pr view <pr-number> --json reviews --jq '.reviews[] | select(.body != "") | {user: .author.login, body: .body}'
    ```
-   - If Claude has actionable feedback: fix the issues, push, re-verify CI
-    - After pushing fixes, resolve any outdated review comments that your changes addressed:
-      ```bash
-      # Find outdated comment IDs (comments on lines you've changed)
-      gh api repos/actual-software/actual-cli/pulls/<pr-number>/comments --jq '.[] | select(.position == null or .outdated == true) | .node_id'
-      # Resolve each with GraphQL
-      gh api graphql -f query='mutation { minimizeComment(input: {subjectId: "<node_id>", classifier: OUTDATED}) { minimizedComment { isMinimized } } }'
-      ```
-   - **Recursive review**: after each push, re-read Claude's comments. Repeat until all checks pass AND all actionable feedback is addressed. Do NOT report back after a single pass.
+   - If any commenter (Claude, a CI bot, a human reviewer, etc.) has actionable feedback: fix the issues, push, re-verify CI
+   - After pushing fixes, resolve any outdated inline review comments that your changes addressed:
+     ```bash
+     # Find outdated comment node IDs (comments on lines you've changed)
+     gh api repos/actual-software/actual-cli/pulls/<pr-number>/comments --jq '.[] | select(.position == null or .outdated == true) | .node_id'
+     # Resolve each with GraphQL
+     gh api graphql -f query='mutation { minimizeComment(input: {subjectId: "<node_id>", classifier: OUTDATED}) { minimizedComment { isMinimized } } }'
+     ```
+   - **Recursive review**: after each push, re-read all comments. Repeat until all checks pass AND all actionable feedback is addressed. Do NOT report back after a single pass.
    - **Recursion limit**: if after 10 review-fix cycles there are still unresolved comments, stop and report back to the orchestrator with the PR URL, a summary of what was addressed, and the remaining unresolved feedback. The orchestrator will decide how to proceed.
 9. Report back to orchestrator: PR URL + confirmation that all CI checks are green AND all review feedback addressed
 10. DO NOT close the beads issue — orchestrator closes after PR lands in `main`
@@ -260,20 +264,21 @@ Once the ticket is fleshed out, create a git worktree and spawn a **general** ag
    ```bash
    # Verify CI is actually green
    gh pr checks <pr-number> --watch
-   # Read Claude review comments yourself
-   gh pr view <pr-number> --json comments --jq '.comments[].body'
-   gh pr view <pr-number> --json reviews --jq '.reviews[] | select(.body != "") | .body'
+   # Read all PR comments yourself (inline, general, and review summaries)
+   gh api repos/actual-software/actual-cli/pulls/<pr-number>/comments --jq '.[] | {user: .user.login, body: .body, path: .path, line: .line}'
+   gh api repos/actual-software/actual-cli/issues/<pr-number>/comments --jq '.[] | {user: .user.login, body: .body}'
+   gh pr view <pr-number> --json reviews --jq '.reviews[] | select(.body != "") | {user: .author.login, body: .body}'
    ```
-   - **Success criteria**: All checks green AND (no Claude review comments OR all actionable comments addressed)
-   - If CI is not green or Claude has unaddressed actionable feedback, resume the sub-agent to fix
-   - **Resolve addressed comments**: after fixes are pushed and CI is green, resolve any outdated review comments that were addressed:
+   - **Success criteria**: All checks green AND (no actionable comments from any reviewer/bot OR all actionable comments addressed)
+   - If CI is not green or there is unaddressed actionable feedback from any commenter, resume the sub-agent to fix
+   - **Resolve addressed comments**: after fixes are pushed and CI is green, resolve any outdated inline review comments that were addressed:
      ```bash
      # Find outdated/addressed comment node IDs
      gh api repos/actual-software/actual-cli/pulls/<pr-number>/comments --jq '.[] | select(.position == null or .outdated == true) | .node_id'
      # Resolve each with GraphQL
      gh api graphql -f query='mutation { minimizeComment(input: {subjectId: "<node_id>", classifier: OUTDATED}) { minimizedComment { isMinimized } } }'
      ```
-   - **Recursive verification**: after the sub-agent pushes fixes, re-verify CI AND re-read Claude comments. Repeat until clean. Each push may trigger new review comments.
+   - **Recursive verification**: after the sub-agent pushes fixes, re-verify CI AND re-read all comments. Repeat until clean. Each push may trigger new review comments.
    - **Recursion limit**: if after 10 verify-fix cycles the review is still not clean, declare a stalemate and surface the unresolved feedback to the user with the PR URL and a summary of what remains.
    - NEVER report a PR to the user based solely on the sub-agent's claim
 7. Orchestrator cleans up worktree and reports PR to user
@@ -302,17 +307,18 @@ When given an epic, **automatically parallelize independent children using workt
    ```bash
    # For each PR in the batch:
    gh pr checks <pr-number> --watch
-   gh pr view <pr-number> --json comments --jq '.comments[].body'
-   gh pr view <pr-number> --json reviews --jq '.reviews[] | select(.body != "") | .body'
+   gh api repos/actual-software/actual-cli/pulls/<pr-number>/comments --jq '.[] | {user: .user.login, body: .body, path: .path, line: .line}'
+   gh api repos/actual-software/actual-cli/issues/<pr-number>/comments --jq '.[] | {user: .user.login, body: .body}'
+   gh pr view <pr-number> --json reviews --jq '.reviews[] | select(.body != "") | {user: .author.login, body: .body}'
    ```
-   - **Success criteria**: All checks green AND (no Claude review comments OR all actionable comments addressed)
-   - If CI is not green or Claude has unaddressed actionable feedback, resume the sub-agent to fix
-   - **Resolve addressed comments**: after fixes are pushed and CI is green, resolve any outdated review comments that were addressed:
+   - **Success criteria**: All checks green AND (no actionable comments from any reviewer/bot OR all actionable comments addressed)
+   - If CI is not green or there is unaddressed actionable feedback from any commenter, resume the sub-agent to fix
+   - **Resolve addressed comments**: after fixes are pushed and CI is green, resolve any outdated inline review comments that were addressed:
      ```bash
      gh api repos/actual-software/actual-cli/pulls/<pr-number>/comments --jq '.[] | select(.position == null or .outdated == true) | .node_id'
      gh api graphql -f query='mutation { minimizeComment(input: {subjectId: "<node_id>", classifier: OUTDATED}) { minimizedComment { isMinimized } } }'
      ```
-   - **Recursive verification**: after the sub-agent pushes fixes, re-verify CI AND re-read Claude comments. Repeat until clean.
+   - **Recursive verification**: after the sub-agent pushes fixes, re-verify CI AND re-read all comments. Repeat until clean.
    - **Recursion limit**: if after 10 verify-fix cycles a PR is still not clean, declare a stalemate and surface the unresolved feedback to the user with the PR URL and a summary of what remains.
    - NEVER report a PR to the user based solely on the sub-agent's claim
 8. **Wait for PRs to land in `main`** through the merge queue — do NOT proceed to the next batch or close beads until the merge queue finishes
