@@ -421,7 +421,7 @@ mod tests {
             "opus",
             "haiku",
             "gpt-5.2",
-            "codex-mini-latest",
+            "gpt-5.2-codex",
         ] {
             let mut config = Config::default();
             set(&mut config, "model", name).unwrap();

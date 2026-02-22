@@ -37,17 +37,24 @@ fn is_anthropic_model(model: &str) -> bool {
 }
 
 /// Returns `true` for OpenAI model IDs (GPT, o-series, ChatGPT).
+///
+/// Codex models (e.g. `gpt-5.2-codex`, `gpt-5.1-codex-mini`) are excluded
+/// because they belong to the `codex-cli` runner, not `openai-api`.
 fn is_openai_model(model: &str) -> bool {
-    model.starts_with("gpt-")
-        || model.starts_with("o1")
-        || model.starts_with("o3")
-        || model.starts_with("o4")
-        || model.starts_with("chatgpt-")
+    !is_codex_model(model)
+        && (model.starts_with("gpt-")
+            || model.starts_with("o1")
+            || model.starts_with("o3")
+            || model.starts_with("o4")
+            || model.starts_with("chatgpt-"))
 }
 
 /// Returns `true` for Codex-specific model IDs.
+///
+/// Matches both legacy `codex-*` names and the current `gpt-*-codex*` naming
+/// pattern used by the Codex CLI (e.g. `gpt-5.2-codex`, `gpt-5.1-codex-mini`).
 fn is_codex_model(model: &str) -> bool {
-    model.starts_with("codex-")
+    model.starts_with("codex-") || model.ends_with("-codex") || model.contains("-codex-")
 }
 
 /// Returns `true` if the model name matches any known provider pattern.
@@ -99,7 +106,7 @@ impl RunnerChoice {
         }
 
         Err(format!(
-            "Unrecognized model '{model}'. Known patterns: sonnet, opus, haiku, claude-*, gpt-*, o1*, o3*, o4*, chatgpt-*, codex-*. \
+            "Unrecognized model '{model}'. Known patterns: sonnet, opus, haiku, claude-*, gpt-*, o1*, o3*, o4*, chatgpt-*, codex-*, gpt-*-codex*. \
              Use --runner to explicitly select a runner for custom models."
         ))
     }
@@ -567,7 +574,8 @@ mod parse_tests {
             "claude-sonnet-4-6",
             "openai/gpt-5",
             "provider/model-name_v2",
-            "codex-mini-latest",
+            "gpt-5.2-codex",
+            "gpt-5.1-codex-mini",
         ];
         for m in &valid {
             assert!(parse_model(m).is_ok());
@@ -820,7 +828,7 @@ mod parse_tests {
     #[test]
     fn test_compat_claude_cli_with_codex_model_warns() {
         let warn = RunnerChoice::ClaudeCli
-            .model_compatibility_warning("codex-mini-latest")
+            .model_compatibility_warning("gpt-5.2-codex")
             .unwrap();
         assert!(warn.contains("Codex"), "msg: {warn}");
         assert!(warn.contains("codex-cli"), "msg: {warn}");
@@ -853,7 +861,7 @@ mod parse_tests {
     #[test]
     fn test_compat_anthropic_api_with_codex_model_warns() {
         let warn = RunnerChoice::AnthropicApi
-            .model_compatibility_warning("codex-mini-latest")
+            .model_compatibility_warning("gpt-5.2-codex")
             .unwrap();
         assert!(warn.contains("Codex"), "msg: {warn}");
     }
@@ -884,7 +892,7 @@ mod parse_tests {
     #[test]
     fn test_compat_openai_api_with_codex_model_warns() {
         let warn = RunnerChoice::OpenAiApi
-            .model_compatibility_warning("codex-mini-latest")
+            .model_compatibility_warning("gpt-5.2-codex")
             .unwrap();
         assert!(warn.contains("Codex"), "msg: {warn}");
     }
@@ -892,7 +900,7 @@ mod parse_tests {
     #[test]
     fn test_compat_codex_cli_with_codex_model_ok() {
         assert!(RunnerChoice::CodexCli
-            .model_compatibility_warning("codex-mini-latest")
+            .model_compatibility_warning("gpt-5.2-codex")
             .is_none());
     }
 
@@ -922,7 +930,7 @@ mod parse_tests {
             .model_compatibility_warning("gpt-4o")
             .is_none());
         assert!(RunnerChoice::CursorCli
-            .model_compatibility_warning("codex-mini-latest")
+            .model_compatibility_warning("gpt-5.2-codex")
             .is_none());
         assert!(RunnerChoice::CursorCli
             .model_compatibility_warning("haiku")
@@ -1059,12 +1067,26 @@ mod parse_tests {
 
     #[test]
     fn test_infer_from_model_codex() {
+        // Legacy codex-* prefix
         assert_eq!(
-            RunnerChoice::infer_from_model("codex-mini-latest").unwrap(),
+            RunnerChoice::infer_from_model("codex-mini").unwrap(),
+            RunnerChoice::CodexCli
+        );
+        // Current gpt-*-codex naming pattern
+        assert_eq!(
+            RunnerChoice::infer_from_model("gpt-5.2-codex").unwrap(),
             RunnerChoice::CodexCli
         );
         assert_eq!(
-            RunnerChoice::infer_from_model("codex-mini").unwrap(),
+            RunnerChoice::infer_from_model("gpt-5.1-codex-mini").unwrap(),
+            RunnerChoice::CodexCli
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("gpt-5.1-codex-max").unwrap(),
+            RunnerChoice::CodexCli
+        );
+        assert_eq!(
+            RunnerChoice::infer_from_model("gpt-5-codex").unwrap(),
             RunnerChoice::CodexCli
         );
     }
@@ -1111,13 +1133,24 @@ mod parse_tests {
         assert!(is_openai_model("chatgpt-4o-latest"));
         assert!(!is_openai_model("claude-sonnet-4-6"));
         assert!(!is_openai_model("codex-mini"));
+        // Codex models must NOT be classified as openai-api models
+        assert!(!is_openai_model("gpt-5.2-codex"));
+        assert!(!is_openai_model("gpt-5.1-codex-mini"));
+        assert!(!is_openai_model("gpt-5.1-codex-max"));
     }
 
     #[test]
     fn test_is_codex_model() {
+        // Legacy codex-* prefix
         assert!(is_codex_model("codex-mini"));
-        assert!(is_codex_model("codex-mini-latest"));
+        // Current gpt-*-codex naming pattern
+        assert!(is_codex_model("gpt-5.2-codex"));
+        assert!(is_codex_model("gpt-5.1-codex-mini"));
+        assert!(is_codex_model("gpt-5.1-codex-max"));
+        assert!(is_codex_model("gpt-5-codex"));
+        // Non-codex models
         assert!(!is_codex_model("gpt-4o"));
+        assert!(!is_codex_model("gpt-5.2"));
         assert!(!is_codex_model("claude-sonnet-4-6"));
     }
 }

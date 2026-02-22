@@ -211,7 +211,7 @@ mod tests {
         );
         assert_eq!(
             ActualError::CodexCliModelRequiresApiKey {
-                model: "codex-mini-latest".to_string()
+                model: "gpt-5.2-codex".to_string()
             }
             .exit_code(),
             2
@@ -355,11 +355,11 @@ mod tests {
         );
 
         let msg = ActualError::CodexCliModelRequiresApiKey {
-            model: "codex-mini-latest".to_string(),
+            model: "gpt-5.2-codex".to_string(),
         }
         .to_string();
         assert!(
-            msg.contains("codex-mini-latest"),
+            msg.contains("gpt-5.2-codex"),
             "expected model name in: {msg}"
         );
         assert!(
@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn test_hint_codex_cli_model_requires_api_key() {
         let err = ActualError::CodexCliModelRequiresApiKey {
-            model: "codex-mini-latest".to_string(),
+            model: "gpt-5.2-codex".to_string(),
         };
         let hint = err.hint();
         assert!(

@@ -482,7 +482,7 @@ echo '{}' > "$OUTPUT_FILE"
 
         let runner = CodexCliRunner::new(
             script,
-            Some("codex-mini-latest".to_string()),
+            Some("gpt-5.2-codex".to_string()),
             Duration::from_secs(10),
         );
         let result = runner
@@ -512,7 +512,7 @@ echo '{}' > "$OUTPUT_FILE"
 
         let runner = CodexCliRunner::new(
             script,
-            Some("codex-mini-latest".to_string()),
+            Some("gpt-5.2-codex".to_string()),
             Duration::from_secs(10),
         );
         let result = runner
@@ -538,7 +538,7 @@ echo '{}' > "$OUTPUT_FILE"
 
         let runner = CodexCliRunner::new(
             script,
-            Some("codex-mini-latest".to_string()),
+            Some("gpt-5.2-codex".to_string()),
             Duration::from_millis(100),
         );
         let result = runner
@@ -842,7 +842,8 @@ echo '{json}' > "$OUTPUT_FILE"
         let p = Path::new("/tmp/out.txt");
         let valid_models = [
             "gpt-5",
-            "codex-mini-latest",
+            "gpt-5.2-codex",
+            "gpt-5.1-codex-mini",
             "gpt-5.2",
             "claude-sonnet-4-6",
             "openai/gpt-5",
@@ -888,7 +889,7 @@ echo '{json}' > "$OUTPUT_FILE"
     async fn test_spawn_failure() {
         let runner = CodexCliRunner::new(
             PathBuf::from("/nonexistent/codex/binary"),
-            Some("codex-mini-latest".to_string()),
+            Some("gpt-5.2-codex".to_string()),
             Duration::from_secs(10),
         );
         let result = runner
