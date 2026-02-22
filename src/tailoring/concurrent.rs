@@ -253,8 +253,13 @@ async fn tailor_single_project<R: TailoringRunner>(
                             batch_index: batch_idx + 1,
                             batch_count,
                             adr_count,
-                            applied_count: output.summary.applicable,
-                            skipped_count: output.summary.not_applicable,
+                            applied_count: output
+                                .files
+                                .iter()
+                                .flat_map(|f| &f.adr_ids)
+                                .collect::<std::collections::HashSet<_>>()
+                                .len(),
+                            skipped_count: output.skipped_adrs.len(),
                             skipped_adrs,
                             file_paths,
                             elapsed_secs,

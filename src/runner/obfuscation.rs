@@ -147,7 +147,7 @@ mod tests {
         let fields: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
         assert!(fields.contains(&"files"));
         assert!(fields.contains(&"skipped_adrs"));
-        assert!(fields.contains(&"summary"));
+        // summary is intentionally optional (computed in Rust from files/skipped_adrs)
     }
 
     #[test]
@@ -187,12 +187,12 @@ mod tests {
         let prompt =
             tailoring_prompt_decoded("", "", "[]", "CLAUDE.md", "").expect("decode must succeed");
         assert!(
-            prompt.contains("pre-bundled repository context"),
-            "prompt must instruct Claude to use pre-bundled context first"
+            prompt.contains("pre-bundled"),
+            "prompt must reference pre-bundled context"
         );
         assert!(
-            prompt.contains("targeted lookups"),
-            "prompt must restrict tool use to targeted lookups"
+            prompt.contains("NOT included here"),
+            "prompt must restrict tool use to files not already bundled"
         );
     }
 
@@ -202,8 +202,8 @@ mod tests {
         let prompt =
             cursor_rules_prompt_decoded("", "", "[]", path, "").expect("decode must succeed");
         assert!(
-            prompt.contains("pre-bundled repository context"),
-            "cursor prompt must instruct Claude to use pre-bundled context first"
+            prompt.contains("pre-bundled"),
+            "cursor prompt must reference pre-bundled context"
         );
     }
 
