@@ -798,8 +798,29 @@ fn confirm_or_change_loop(
     pipeline: &mut TuiRenderer,
     term: &dyn TerminalIO,
 ) -> Result<(), ActualError> {
+    confirm_or_change_loop_with(analysis, pipeline, term, |a, p, t| p.confirm_project(a, t))
+}
+
+/// Inner implementation that accepts a confirm function for testability.
+///
+/// In production the confirm function is `pipeline.confirm_project(...)`.
+/// In tests it can be replaced to return `Change` (which plain-mode confirm
+/// never produces).
+fn confirm_or_change_loop_with<F>(
+    analysis: &mut RepoAnalysis,
+    pipeline: &mut TuiRenderer,
+    term: &dyn TerminalIO,
+    mut confirm_fn: F,
+) -> Result<(), ActualError>
+where
+    F: FnMut(
+        &RepoAnalysis,
+        &mut TuiRenderer,
+        &dyn TerminalIO,
+    ) -> Result<ConfirmAction, ActualError>,
+{
     loop {
-        let action = pipeline.confirm_project(analysis, term)?;
+        let action = confirm_fn(analysis, pipeline, term)?;
         // true ⇒ Accept (break), false ⇒ Change (loop back)
         if handle_confirm_action(action, analysis, pipeline, term)? {
             return Ok(());
@@ -6243,6 +6264,153 @@ mod tests {
             matches!(result, Err(ActualError::UserCancelled)),
             "Reject should return UserCancelled: {result:?}"
         );
+    }
+
+    #[test]
+    fn test_confirm_or_change_loop_change_then_accept() {
+        // Use confirm_or_change_loop_with to inject Change → Accept sequence,
+        // since plain-mode confirm can never produce Change.
+        let mut analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![Project {
+                path: ".".to_string(),
+                name: "test".to_string(),
+                languages: vec![
+                    LanguageStat {
+                        language: Language::TypeScript,
+                        loc: 5000,
+                    },
+                    LanguageStat {
+                        language: Language::Rust,
+                        loc: 2000,
+                    },
+                ],
+                frameworks: vec![],
+                package_manager: None,
+                description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
+                selection: Some(ProjectSelection {
+                    language: LanguageStat {
+                        language: Language::TypeScript,
+                        loc: 5000,
+                    },
+                    framework: None,
+                    auto_selected: true,
+                }),
+            }],
+        };
+
+        // select_one: user picks language index 1 (Rust) during the Change cycle
+        let term = MockTerminal::new(vec![]).with_select_one(vec![1]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        let mut call_count = 0;
+        let result = confirm_or_change_loop_with(
+            &mut analysis,
+            &mut pipeline,
+            &term,
+            |_analysis, _pipeline, _term| {
+                call_count += 1;
+                if call_count == 1 {
+                    Ok(ConfirmAction::Change)
+                } else {
+                    Ok(ConfirmAction::Accept)
+                }
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "Should succeed after Change then Accept: {result:?}"
+        );
+        assert_eq!(
+            call_count, 2,
+            "Should have been called twice (Change + Accept)"
+        );
+
+        // Verify selection was updated to Rust
+        let sel = analysis.projects[0].selection.as_ref().unwrap();
+        assert_eq!(sel.language.language, Language::Rust);
+        assert!(!sel.auto_selected, "should be user-selected after Change");
+    }
+
+    #[test]
+    fn test_user_select_for_project_zero_loc_language() {
+        // Covers the else branch at line 887 where loc == 0 → just name
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::Python,
+                loc: 0,
+            }],
+            vec![],
+        );
+
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        user_select_for_project(&mut project, &mut pipeline, &term).unwrap();
+
+        let sel = project.selection.unwrap();
+        assert_eq!(sel.language.language, Language::Python);
+        assert_eq!(sel.language.loc, 0);
+        assert!(sel.framework.is_none());
+    }
+
+    #[test]
+    fn test_user_select_for_project_with_existing_framework_selection() {
+        // Covers lines 937-941: the and_then chain that looks up the current
+        // framework selection in the filtered compatible frameworks list.
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::TypeScript,
+                loc: 3000,
+            }],
+            vec![
+                Framework {
+                    name: "react".to_string(),
+                    category: FrameworkCategory::WebFrontend,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::PackageJson,
+                    ),
+                },
+                Framework {
+                    name: "nextjs".to_string(),
+                    category: FrameworkCategory::WebFrontend,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::PackageJson,
+                    ),
+                },
+            ],
+        );
+
+        // Pre-set a selection with nextjs as framework
+        project.selection = Some(ProjectSelection {
+            language: LanguageStat {
+                language: Language::TypeScript,
+                loc: 3000,
+            },
+            framework: Some(Framework {
+                name: "nextjs".to_string(),
+                category: FrameworkCategory::WebFrontend,
+                source: Some(
+                    crate::analysis::static_analyzer::manifests::ManifestSource::PackageJson,
+                ),
+            }),
+            auto_selected: true,
+        });
+
+        // select_one called twice: language (0 = TypeScript), framework (0 = react)
+        let term = MockTerminal::new(vec![]).with_select_one(vec![0, 0]);
+        let mut pipeline = TuiRenderer::new(false, true);
+
+        user_select_for_project(&mut project, &mut pipeline, &term).unwrap();
+
+        let sel = project.selection.unwrap();
+        assert_eq!(sel.language.language, Language::TypeScript);
+        assert_eq!(sel.framework.unwrap().name, "react");
+        assert!(!sel.auto_selected);
     }
 
     // ── sync flow integration ──
