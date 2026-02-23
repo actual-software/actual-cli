@@ -43,9 +43,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Terminal UI
-dialoguer = "0.11"
+dialoguer = "0.12"
 indicatif = "0.17"
-console = "0.15"
+console = "0.16"
 similar = "2"
 ratatui = "0.30"
 crossterm = "0.29"
