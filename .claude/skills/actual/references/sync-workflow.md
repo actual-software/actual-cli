@@ -136,7 +136,7 @@ The environment check in step 1 displays:
 |------|--------|
 | Runner | Config `runner` field or CLI `--runner` flag |
 | Auth status | Checks binary availability + auth state for the active runner |
-| Model | Config `model`/`cursor_model` or CLI `--model` flag |
+| Model | Config `model` or CLI `--model` flag |
 | API URL | Config `api_url` or CLI `--api-url` flag |
 | Config path | `~/.actualai/actual/config.yaml` or `ACTUAL_CONFIG`/`ACTUAL_CONFIG_DIR` override |
 | Working directory | Current directory |

@@ -33,7 +33,13 @@ pub struct Config {
     /// OpenAI-based runners (`openai-api`, `codex-cli`) alike.
     /// The `--model` CLI flag overrides this value.
     ///
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The `cursor_model` YAML key is accepted as an alias for backward compatibility
+    /// with configs written before `cursor_model` was removed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "cursor_model"
+    )]
     pub model: Option<String>,
 
     /// Categories to always include.
@@ -116,10 +122,6 @@ pub struct Config {
     /// Fallback OpenAI API key (used when runner = "openai-api" and OPENAI_API_KEY not set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_api_key: Option<String>,
-
-    /// Default model for the Cursor CLI runner (`cursor-cli`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor_model: Option<String>,
 
     /// Fallback Cursor API key (used when runner = "cursor-cli" and CURSOR_API_KEY not set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -210,7 +212,6 @@ mod tests {
             runner: None,
             anthropic_api_key: None,
             openai_api_key: None,
-            cursor_model: None,
             cursor_api_key: None,
             max_turns: Some(10),
         };
@@ -361,6 +362,18 @@ mod tests {
         );
         let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
+    }
+
+    /// `cursor_model` YAML key must deserialize into the `model` field via serde alias.
+    #[test]
+    fn test_cursor_model_yaml_alias_loads_into_model() {
+        let yaml = "cursor_model: cursor-fast\n";
+        let config: Config = serde_yml::from_str(yaml).expect("deserialize cursor_model alias");
+        assert_eq!(
+            config.model,
+            Some("cursor-fast".to_string()),
+            "cursor_model YAML key must deserialize into model field"
+        );
     }
 
     /// Round-trip test with CachedTailoring included.
