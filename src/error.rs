@@ -22,6 +22,10 @@ pub enum ActualError {
     #[error("Cursor CLI is not authenticated. Set CURSOR_API_KEY or run: cursor-agent login")]
     CursorNotAuthenticated,
 
+    /// No runner was available for the given model after probing all candidates.
+    #[error("No runner available for model '{model}'.\nTried:\n{tried}")]
+    NoRunnerAvailable { model: String, tried: String },
+
     #[error("API key not set. Set {env_var} or configure the api key in your config")]
     ApiKeyMissing { env_var: String },
 
@@ -85,7 +89,8 @@ impl ActualError {
             | Self::CursorNotFound
             | Self::CursorNotAuthenticated
             | Self::ApiKeyMissing { .. }
-            | Self::CodexCliModelRequiresApiKey { .. } => 2,
+            | Self::CodexCliModelRequiresApiKey { .. }
+            | Self::NoRunnerAvailable { .. } => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
             Self::IoError(_) => 5,
@@ -115,6 +120,9 @@ impl ActualError {
             Self::CodexCliModelRequiresApiKey { .. } => {
                 Some("Set OPENAI_API_KEY or switch to --runner openai-api")
             }
+            Self::NoRunnerAvailable { .. } => Some(
+                "Install a runner (e.g. `npm install -g @anthropic-ai/claude-code`) or set an API key",
+            ),
             Self::CreditBalanceTooLow { .. } => {
                 Some("Add credits at https://console.anthropic.com/settings/billing")
             }
@@ -220,6 +228,14 @@ mod tests {
         assert_eq!(
             ActualError::CodexCliModelRequiresApiKey {
                 model: "gpt-5.2-codex".to_string()
+            }
+            .exit_code(),
+            2
+        );
+        assert_eq!(
+            ActualError::NoRunnerAvailable {
+                model: "sonnet".to_string(),
+                tried: "  - claude-cli: binary not found".to_string(),
             }
             .exit_code(),
             2
@@ -392,6 +408,19 @@ mod tests {
             msg.contains("ChatGPT"),
             "expected 'ChatGPT' explanation in: {msg}"
         );
+
+        let msg = ActualError::NoRunnerAvailable {
+            model: "sonnet".to_string(),
+            tried: "  - claude-cli: binary not found\n  - anthropic-api: ANTHROPIC_API_KEY not set"
+                .to_string(),
+        }
+        .to_string();
+        assert!(
+            msg.contains("No runner available"),
+            "expected 'No runner available' in: {msg}"
+        );
+        assert!(msg.contains("sonnet"), "expected model name in: {msg}");
+        assert!(msg.contains("claude-cli"), "expected tried list in: {msg}");
     }
 
     #[test]
@@ -510,6 +539,21 @@ mod tests {
         assert!(
             hint.unwrap().contains("OPENAI_API_KEY"),
             "expected 'OPENAI_API_KEY' in hint: {:?}",
+            hint
+        );
+    }
+
+    #[test]
+    fn test_hint_no_runner_available() {
+        let err = ActualError::NoRunnerAvailable {
+            model: "sonnet".to_string(),
+            tried: "  - claude-cli: binary not found".to_string(),
+        };
+        let hint = err.hint();
+        assert!(hint.is_some(), "expected Some hint for NoRunnerAvailable");
+        assert!(
+            hint.unwrap().contains("Install a runner"),
+            "expected install hint in: {:?}",
             hint
         );
     }

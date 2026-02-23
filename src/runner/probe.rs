@@ -180,6 +180,64 @@ pub(crate) fn resolve_api_key(
         })
 }
 
+// ── Runner availability checks ────────────────────────────────────────────────
+
+/// Check whether the Claude CLI runner is available and authenticated.
+pub fn is_claude_available() -> Result<(), String> {
+    let binary = find_claude_binary().map_err(|_| {
+        "claude-cli: binary not found (install: npm install -g @anthropic-ai/claude-code)"
+            .to_string()
+    })?;
+    let status = probe_claude_auth(&binary, Duration::from_secs(10))
+        .map_err(|e| format!("claude-cli: auth probe failed: {e}"))?;
+    if status.is_usable() {
+        Ok(())
+    } else {
+        Err("claude-cli: not authenticated (run: claude auth login)".to_string())
+    }
+}
+
+/// Check whether the Anthropic API runner is available (API key present).
+pub fn is_anthropic_available(config_key: Option<&str>) -> Result<(), String> {
+    resolve_api_key("ANTHROPIC_API_KEY", config_key)
+        .map(|_| ())
+        .map_err(|_| "anthropic-api: ANTHROPIC_API_KEY not set".to_string())
+}
+
+/// Check whether the OpenAI API runner is available (API key present).
+pub fn is_openai_available(config_key: Option<&str>) -> Result<(), String> {
+    resolve_api_key("OPENAI_API_KEY", config_key)
+        .map(|_| ())
+        .map_err(|_| "openai-api: OPENAI_API_KEY not set".to_string())
+}
+
+/// Check whether the Codex CLI runner is available and authenticated.
+pub fn is_codex_available(config_key: Option<&str>) -> Result<(), String> {
+    find_codex_binary().map_err(|_| {
+        "codex-cli: binary not found (install: npm install -g @openai/codex)".to_string()
+    })?;
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .or_else(|| config_key.map(|s| s.to_string()));
+    probe_codex_auth(api_key.as_deref()).map_err(|_| {
+        "codex-cli: not authenticated (set OPENAI_API_KEY or run: codex login)".to_string()
+    })
+}
+
+/// Check whether the Cursor CLI runner is available and authenticated.
+pub fn is_cursor_available(config_key: Option<&str>) -> Result<(), String> {
+    find_cursor_binary().map_err(|_| {
+        "cursor-cli: binary not found (install: curl https://cursor.com/install -fsS | bash)"
+            .to_string()
+    })?;
+    let api_key = std::env::var("CURSOR_API_KEY")
+        .ok()
+        .or_else(|| config_key.map(|s| s.to_string()));
+    probe_cursor_auth(api_key.as_deref()).map_err(|_| {
+        "cursor-cli: not authenticated (set CURSOR_API_KEY or run: cursor-agent login)".to_string()
+    })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -333,6 +391,209 @@ mod tests {
         // Public wrapper without a key — result depends on the test machine.
         // We just verify the function doesn't panic and returns a valid Result.
         let _ = probe_cursor_auth(None);
+    }
+
+    // ── is_*_available tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_anthropic_available_with_env_key() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
+        assert!(is_anthropic_available(None).is_ok());
+    }
+
+    #[test]
+    fn test_is_anthropic_available_with_config_key() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ANTHROPIC_API_KEY");
+        assert!(is_anthropic_available(Some("sk-ant-from-config")).is_ok());
+    }
+
+    #[test]
+    fn test_is_anthropic_available_no_key() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ANTHROPIC_API_KEY");
+        let result = is_anthropic_available(None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("ANTHROPIC_API_KEY"),
+            "error must name the env var"
+        );
+    }
+
+    #[test]
+    fn test_is_openai_available_with_env_key() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("OPENAI_API_KEY", "sk-openai-test");
+        assert!(is_openai_available(None).is_ok());
+    }
+
+    #[test]
+    fn test_is_openai_available_with_config_key() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("OPENAI_API_KEY");
+        assert!(is_openai_available(Some("sk-openai-from-config")).is_ok());
+    }
+
+    #[test]
+    fn test_is_openai_available_no_key() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("OPENAI_API_KEY");
+        let result = is_openai_available(None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("OPENAI_API_KEY"),
+            "error must name the env var"
+        );
+    }
+
+    #[test]
+    fn test_is_codex_available_binary_not_found() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("CODEX_BINARY", "/nonexistent/codex");
+        let result = is_codex_available(None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("codex-cli"),
+            "error must mention codex-cli"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_codex_available_with_api_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-codex");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CODEX_BINARY", fake.to_str().unwrap());
+        let _key_guard = EnvGuard::set("OPENAI_API_KEY", "sk-openai-test");
+        assert!(is_codex_available(None).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_codex_available_config_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-codex");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CODEX_BINARY", fake.to_str().unwrap());
+        let _key_guard = EnvGuard::remove("OPENAI_API_KEY");
+        assert!(is_codex_available(Some("sk-openai-from-config")).is_ok());
+    }
+
+    #[test]
+    fn test_is_cursor_available_binary_not_found() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("CURSOR_BINARY", "/nonexistent/cursor-agent");
+        let result = is_cursor_available(None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("cursor-cli"),
+            "error must mention cursor-cli"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_cursor_available_with_api_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-cursor");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CURSOR_BINARY", fake.to_str().unwrap());
+        let _key_guard = EnvGuard::set("CURSOR_API_KEY", "cursor-test-key");
+        assert!(is_cursor_available(None).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_cursor_available_config_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-cursor");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CURSOR_BINARY", fake.to_str().unwrap());
+        let _key_guard = EnvGuard::remove("CURSOR_API_KEY");
+        assert!(is_cursor_available(Some("cursor-config-key")).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_cursor_available_no_auth() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-cursor");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CURSOR_BINARY", fake.to_str().unwrap());
+        let _key_guard = EnvGuard::remove("CURSOR_API_KEY");
+        // Point HOME to temp dir so ~/.cursor/auth.json doesn't exist
+        let home_dir = tempfile::tempdir().unwrap();
+        let _home_guard = EnvGuard::set("HOME", home_dir.path().to_str().unwrap());
+        let result = is_cursor_available(None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("cursor-cli"),
+            "error must mention cursor-cli"
+        );
+    }
+
+    #[test]
+    fn test_is_claude_available_binary_not_found() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let result = is_claude_available();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("claude-cli"),
+            "error must mention claude-cli"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_claude_available_not_logged_in() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-claude.sh");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":false}'\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CLAUDE_BINARY", fake.to_str().unwrap());
+        let result = is_claude_available();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("not authenticated"),
+            "error must say not authenticated"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_claude_available_logged_in() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-claude.sh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CLAUDE_BINARY", fake.to_str().unwrap());
+        assert!(is_claude_available().is_ok());
     }
 
     // ── probe_claude_auth sync wrapper ────────────────────────────────────────
