@@ -161,6 +161,9 @@ fn test_no_args_shows_error() {
 #[test]
 fn test_sync_with_flags_without_claude() {
     // Sync with flags but without Claude binary — exits with code 2.
+    // Use an empty temp config so the user's global config (which may set
+    // `runner: claude-cli`) doesn't bypass auto_detect_runner.
+    let config_file = tempfile::NamedTempFile::new().unwrap();
     cmd()
         .args([
             "sync",
@@ -180,9 +183,13 @@ fn test_sync_with_flags_without_claude() {
             "1.50",
         ])
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
+        .env("ACTUAL_CONFIG", config_file.path())
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .env_remove("CURSOR_API_KEY")
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("Claude Code is not installed"));
+        .stderr(predicate::str::contains("No runner available for model"));
 }
 
 #[test]
