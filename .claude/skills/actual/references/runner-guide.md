@@ -193,13 +193,13 @@ export CURSOR_API_KEY="..."
 ### Model Compatibility
 
 - Uses cursor's default model
-- Config key `cursor_model` sets the model (auto-infers cursor-cli runner)
+- Config key `model` sets the model when cursor-cli runner is active
 
 ### Config
 
 ```bash
 actual config set runner cursor-cli
-actual config set cursor_model <model-name>
+actual config set model <model-name>
 ```
 
 ## Runner Resolution Order
@@ -217,9 +217,8 @@ When `--runner` or `runner` config is set, the runner is used unconditionally â€
 When no explicit runner is specified, `auto_detect_runner` selects a runner by probing the environment in candidate order. The probe order is determined by the model:
 
 1. **`--model` CLI flag** (if provided): use `runner_candidates(model)` to get an ordered list
-2. **`cursor_model` config key** (if set): always produces `[CursorCli]`
-3. **`model` config key** (if set): use `runner_candidates(model)` to get an ordered list
-4. **No model**: default candidate list `[ClaudeCli, AnthropicApi]`
+2. **`model` config key** (if set): use `runner_candidates(model)` to get an ordered list
+3. **No model**: default candidate list `[ClaudeCli, AnthropicApi]`
 
 Each candidate is probed in order:
 - **ClaudeCli**: checks that the binary exists and auth is valid

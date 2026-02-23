@@ -51,6 +51,9 @@ macro_rules! define_config_keys {
                     "rejected_adrs" | "cached_analysis" => Err(ActualError::ConfigError(format!(
                         "complex config key, use config file directly: {path}"
                     ))),
+                    "cursor_model" => Err(ActualError::ConfigError(
+                        "'cursor_model' has been removed. Use 'model' instead: actual config set model <value>".to_string()
+                    )),
                     _ => Err(ActualError::ConfigError(format!(
                         "unknown config key: {path}"
                     ))),
@@ -63,7 +66,6 @@ macro_rules! define_config_keys {
 define_config_keys! {
     (ApiUrl,                "api_url"),
     (Model,                 "model"),
-    (CursorModel,           "cursor_model"),
     (BatchSize,             "batch_size"),
     (Concurrency,           "concurrency"),
     (InvocationTimeoutSecs, "invocation_timeout_secs"),
@@ -93,10 +95,6 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::Model => config
             .model
-            .clone()
-            .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
-        ConfigKey::CursorModel => config
-            .cursor_model
             .clone()
             .ok_or_else(|| ActualError::ConfigError(format!("config key not set: {path}"))),
         ConfigKey::BatchSize => config
@@ -187,9 +185,6 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
                     "Warning: '{value}' is not a known model name. Run 'actual models' to see known models."
                 );
             }
-        }
-        ConfigKey::CursorModel => {
-            config.cursor_model = Some(value.to_string());
         }
         ConfigKey::BatchSize => {
             let v = value.parse::<usize>().map_err(|_| {
@@ -892,7 +887,6 @@ mod tests {
         let valid_values: &[(&str, &str)] = &[
             ("api_url", "https://example.com"),
             ("model", "claude-3"),
-            ("cursor_model", "cursor-small"),
             ("batch_size", "5"),
             ("concurrency", "4"),
             ("invocation_timeout_secs", "120"),
@@ -1100,21 +1094,27 @@ mod tests {
         assert_eq!(config.max_turns, Some(1));
     }
 
-    // --- cursor_model tests ---
+    // --- cursor_model deprecation tests ---
 
     #[test]
-    fn test_set_and_get_cursor_model() {
+    fn test_set_cursor_model_returns_deprecation_error() {
         let mut config = Config::default();
-        set(&mut config, "cursor_model", "cursor-small").unwrap();
-        assert_eq!(get(&config, "cursor_model").unwrap(), "cursor-small");
-        assert_eq!(config.cursor_model, Some("cursor-small".to_string()));
+        let err = set(&mut config, "cursor_model", "cursor-small").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cursor_model") && msg.contains("removed"),
+            "expected deprecation error mentioning 'cursor_model' and 'removed', got: {msg}"
+        );
     }
 
     #[test]
-    fn test_get_unset_cursor_model() {
+    fn test_get_cursor_model_returns_deprecation_error() {
         let config = Config::default();
         let err = get(&config, "cursor_model").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("not set"), "got: {msg}");
+        assert!(
+            msg.contains("cursor_model") && msg.contains("removed"),
+            "expected deprecation error mentioning 'cursor_model' and 'removed', got: {msg}"
+        );
     }
 }
