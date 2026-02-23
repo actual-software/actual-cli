@@ -162,15 +162,7 @@ pub fn get_git_branch(repo_path: &Path) -> Option<String> {
 fn is_analysis_cache_oversized(cached: &CachedAnalysis) -> bool {
     use crate::config::types::CACHE_MAX_SIZE_BYTES;
     let serialized_size = serde_yml::to_string(cached).map(|s| s.len()).unwrap_or(0);
-    if serialized_size > CACHE_MAX_SIZE_BYTES {
-        tracing::warn!(
-            "analysis cache size ({} bytes) exceeds limit ({} bytes); skipping cache",
-            serialized_size,
-            CACHE_MAX_SIZE_BYTES
-        );
-        return true;
-    }
-    false
+    serialized_size > CACHE_MAX_SIZE_BYTES
 }
 
 /// Run repository analysis with caching based on git HEAD.
@@ -226,7 +218,7 @@ pub fn run_analysis_cached(
     // Cache miss: run fresh analysis
     let analysis = run_static_analysis(repo_path)?;
 
-    // Cache the result
+    // Cache the result (skips write if analysis is too large).
     let cached_analysis = CachedAnalysis {
         repo_path: repo_path.to_string_lossy().to_string(),
         head_commit: Some(head_hash),
@@ -234,22 +226,29 @@ pub fn run_analysis_cached(
         analysis: analysis.clone(),
         analyzed_at: chrono::Utc::now(),
     };
-
-    // Size guard: skip caching if the analysis data exceeds the limit.
-    if is_analysis_cache_oversized(&cached_analysis) {
-        return Ok(AnalysisOutcome {
-            analysis,
-            cache_status,
-        });
-    }
-
-    cfg.cached_analysis = Some(cached_analysis);
-    config::paths::save_to(&cfg, config_path)?;
+    try_save_analysis_cache(&mut cfg, config_path, cached_analysis)?;
 
     Ok(AnalysisOutcome {
         analysis,
         cache_status,
     })
+}
+
+/// Persist `cached` to disk unless it exceeds the size limit.
+///
+/// This is extracted so it can be unit-tested independently of `run_analysis_cached`
+/// (which cannot easily produce an oversized analysis in tests).
+fn try_save_analysis_cache(
+    cfg: &mut config::types::Config,
+    config_path: &Path,
+    cached: CachedAnalysis,
+) -> Result<(), ActualError> {
+    if is_analysis_cache_oversized(&cached) {
+        tracing::warn!("analysis cache exceeds size limit; skipping cache write");
+        return Ok(());
+    }
+    cfg.cached_analysis = Some(cached);
+    config::paths::save_to(cfg, config_path)
 }
 
 #[cfg(test)]
@@ -1041,6 +1040,65 @@ cached_analysis:
         assert_eq!(CacheStatus::Miss.label(), "(fresh)");
         assert_eq!(CacheStatus::ForcedMiss.label(), "(forced refresh)");
         assert_eq!(CacheStatus::Uncacheable.label(), "(no cache)");
+    }
+
+    #[test]
+    fn test_try_save_analysis_cache_skips_oversized_result() {
+        use crate::analysis::types::Project;
+        use crate::config::types::CACHE_MAX_SIZE_BYTES;
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Build an oversized CachedAnalysis (12 MiB > 10 MiB limit).
+        let big_description = "x".repeat(1024);
+        let projects: Vec<Project> = (0..12_000)
+            .map(|i| Project {
+                path: format!("proj-{i}"),
+                name: format!("project-{i}"),
+                languages: vec![],
+                frameworks: vec![],
+                package_manager: None,
+                description: Some(big_description.clone()),
+                dep_count: 0,
+                dev_dep_count: 0,
+                selection: None,
+            })
+            .collect();
+        let big_cached = CachedAnalysis {
+            repo_path: "/fake/repo".to_string(),
+            head_commit: Some("abc123".to_string()),
+            config_hash: Some("cfghash".to_string()),
+            analysis: RepoAnalysis {
+                is_monorepo: true,
+                workspace_type: None,
+                projects,
+            },
+            analyzed_at: chrono::Utc::now(),
+        };
+
+        // Sanity-check the fixture.
+        let size = serde_yml::to_string(&big_cached)
+            .map(|s| s.len())
+            .unwrap_or(0);
+        assert!(size > CACHE_MAX_SIZE_BYTES, "fixture must exceed limit");
+
+        let mut cfg = config::Config::default();
+        let result = try_save_analysis_cache(&mut cfg, &config_path, big_cached);
+
+        // Should succeed (not an error) but the cache should NOT have been written.
+        assert!(
+            result.is_ok(),
+            "oversized cache skipping must not be an error"
+        );
+        assert!(
+            cfg.cached_analysis.is_none(),
+            "oversized cache must not be stored in cfg"
+        );
+        assert!(
+            !config_path.exists(),
+            "oversized cache must not be written to disk"
+        );
     }
 
     #[test]
