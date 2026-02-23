@@ -51,7 +51,7 @@ ratatui = "0.30"
 crossterm = "0.29"
 
 # File system
-dirs = "5"
+dirs = "6"
 glob = "0.3"
 
 # Crypto
