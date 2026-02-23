@@ -63,7 +63,7 @@ futures = "0.3"
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-which = "7"
+which = "8"
 tempfile = "3"
 
 # Static analysis
