@@ -408,9 +408,9 @@ pub(crate) fn run_sync<R: TailoringRunner>(
                 config
                     .cached_tailoring
                     .as_ref()
-                    .filter(|c| c.cache_key == key)
+                    .filter(|c| c.cache_key == key && !c.is_expired())
             })
-            .and_then(|c| serde_yml::from_value::<TailoringOutput>(c.tailoring.clone()).ok())
+            .map(|c| c.tailoring.clone())
     } else {
         None
     };
@@ -1063,8 +1063,7 @@ mod tests {
         validate_project_path, zero_adr_context_lines,
     };
     use super::super::cache::{
-        compute_repo_key, compute_repo_key_with_timeout, serialize_tailoring_output,
-        tailoring_cache_skip_msg,
+        compute_repo_key, compute_repo_key_with_timeout, tailoring_cache_skip_msg,
     };
     use super::super::write::{report_write_results, SyncResult};
 
@@ -3723,7 +3722,7 @@ mod tests {
         assert_eq!(cached.repo_path, dir.path().to_string_lossy().as_ref());
 
         // Verify the stored value round-trips
-        let restored: TailoringOutput = serde_yml::from_value(cached.tailoring.clone()).unwrap();
+        let restored: TailoringOutput = cached.tailoring.clone();
         assert_eq!(restored, output);
     }
 
@@ -3765,27 +3764,6 @@ mod tests {
         assert_eq!(cached.cache_key, "disk-test-key");
     }
 
-    /// A test-only newtype that always fails to serialize, used to exercise the
-    /// `serialize_tailoring_output` error path without changing production types.
-    struct AlwaysFailsSerialize;
-
-    impl serde::Serialize for AlwaysFailsSerialize {
-        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
-            Err(serde::ser::Error::custom("intentional test failure"))
-        }
-    }
-
-    #[test]
-    fn test_serialize_tailoring_output_warns_on_error() {
-        // AlwaysFailsSerialize always returns Err from serde, exercising the
-        // tracing::warn! branch inside serialize_tailoring_output.
-        let result = serialize_tailoring_output(&AlwaysFailsSerialize);
-        assert!(
-            result.is_none(),
-            "serialize_tailoring_output should return None on error"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn test_store_tailoring_cache_warns_on_disk_write_failure() {
@@ -3823,72 +3801,125 @@ mod tests {
     }
 
     #[test]
-    fn test_store_tailoring_cache_skips_on_serialization_error() {
-        // When serialize_tailoring_output returns None (e.g. a non-YAML-
-        // representable future field), store_tailoring_cache must return early
-        // without populating the in-memory cache or writing to disk.
-        //
-        // store_tailoring_cache is generic over T: Serialize, so we can pass
-        // AlwaysFailsSerialize to exercise the serialize error branch.
+    fn test_store_tailoring_cache_skips_oversized_output() {
+        // Build a TailoringOutput that, when serialized, exceeds CACHE_MAX_SIZE_BYTES.
+        use crate::config::types::CACHE_MAX_SIZE_BYTES;
+
+        // Create a large content string that will make the serialized size exceed 10 MiB
+        let large_content = "x".repeat(CACHE_MAX_SIZE_BYTES + 1024);
+        let output = make_output(vec![make_file(
+            "CLAUDE.md",
+            &large_content,
+            vec!["adr-001"],
+        )]);
+
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("config.yaml");
         let mut config = crate::config::Config::default();
+
         store_tailoring_cache(
             &mut config,
             &cfg_path,
-            Some("will-not-be-stored"),
+            Some("size-test-key"),
             dir.path(),
-            &AlwaysFailsSerialize,
+            &output,
         );
-        // Serialization failed → no cache should be stored
+
+        // Cache should NOT be stored because it exceeds the size limit
         assert!(
             config.cached_tailoring.is_none(),
-            "cache should not be set when serialization fails"
+            "oversized output should not be cached"
         );
     }
 
     // ── Tailoring cache round-trip test ──
 
     #[test]
-    fn test_tailoring_output_round_trip_through_yaml_value() {
+    fn test_tailoring_output_round_trip_through_cached_tailoring() {
+        use crate::config::types::CachedTailoring;
         let output = TailoringOutput {
             files: vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
-                sections: vec![
-                    AdrSection {
-                        adr_id: "adr-001".to_string(),
-                        content: "# Rules\n\nDo things.".to_string(),
-                    },
-                    AdrSection {
-                        adr_id: "adr-002".to_string(),
-                        content: "# Rules\n\nDo things.".to_string(),
-                    },
-                ],
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules\n\nDo things.".to_string(),
+                }],
                 reasoning: "Root rules".to_string(),
             }],
             skipped_adrs: vec![],
             summary: TailoringSummary {
-                total_input: 2,
-                applicable: 2,
+                total_input: 1,
+                applicable: 1,
                 not_applicable: 0,
                 files_generated: 1,
             },
         };
 
-        let value = serde_yml::to_value(&output).unwrap();
-        let restored: TailoringOutput = serde_yml::from_value(value).unwrap();
-        assert_eq!(output, restored);
+        let cached = CachedTailoring {
+            cache_key: "test-key".to_string(),
+            repo_path: "/repo".to_string(),
+            tailoring: output.clone(),
+            tailored_at: chrono::Utc::now(),
+        };
+
+        // Serialize to YAML and back
+        let yaml = serde_yml::to_string(&cached).unwrap();
+        let restored: CachedTailoring = serde_yml::from_str(&yaml).unwrap();
+        assert_eq!(cached.cache_key, restored.cache_key);
+        assert_eq!(cached.tailoring, restored.tailoring);
     }
 
     #[test]
-    fn test_corrupted_tailoring_cache_falls_through() {
-        // Simulates a corrupted cache that cannot be deserialized as TailoringOutput
-        let corrupted = serde_yml::to_value("this is not a TailoringOutput").unwrap();
-        let result = serde_yml::from_value::<TailoringOutput>(corrupted);
+    fn test_corrupted_tailoring_cache_falls_through_in_config() {
+        // A corrupted cached_tailoring block is silently dropped (treated as cache
+        // miss) rather than failing to parse the entire Config.
+        use crate::config::Config;
+        let yaml = "cached_tailoring:\n  garbage_field: some_value\n";
+        let cfg: Config = serde_yml::from_str(yaml).expect("config must parse despite bad cache");
         assert!(
-            result.is_err(),
-            "corrupted value should fail deserialization"
+            cfg.cached_tailoring.is_none(),
+            "corrupt cached_tailoring should be treated as absent"
         );
+    }
+
+    #[test]
+    fn test_tailoring_cache_expired_entry_treated_as_miss() {
+        // An expired tailoring cache entry should be ignored (treated as a cache miss)
+        // even if the cache key matches.
+        use crate::config::paths::save_to;
+        use crate::config::types::CachedTailoring;
+        use crate::config::Config;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+
+        let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
+        let cache_key = "some-key";
+
+        let config = Config {
+            cached_tailoring: Some(CachedTailoring {
+                cache_key: cache_key.to_string(),
+                repo_path: dir.path().to_string_lossy().to_string(),
+                tailoring: output,
+                // 8 days old — expired
+                tailored_at: chrono::Utc::now() - chrono::Duration::days(8),
+            }),
+            ..Config::default()
+        };
+        save_to(&config, &cfg_path).unwrap();
+
+        let loaded = load_from(&cfg_path).unwrap();
+        // is_expired() should return true
+        assert!(
+            loaded.cached_tailoring.as_ref().unwrap().is_expired(),
+            "8-day-old cache should be expired"
+        );
+        // The cache key matches but is_expired() is true — should not be used as a hit
+        let hit = loaded
+            .cached_tailoring
+            .as_ref()
+            .filter(|c| c.cache_key == cache_key && !c.is_expired());
+        assert!(hit.is_none(), "expired cache should not be used as a hit");
     }
 
     // ── Integration: tailoring cache hit in run_sync ──
@@ -4139,8 +4170,7 @@ mod tests {
         // Verify that cache was stored and applicable == 0
         let loaded = load_from(&cfg_path).unwrap();
         let cached_tailoring = loaded.cached_tailoring.as_ref().unwrap();
-        let cached_output: TailoringOutput =
-            serde_yml::from_value(cached_tailoring.tailoring.clone()).unwrap();
+        let cached_output: TailoringOutput = cached_tailoring.tailoring.clone();
         assert_eq!(
             cached_output.summary.applicable, 0,
             "expected 0 applicable ADRs in cache after empty-ADR run"
@@ -4229,8 +4259,7 @@ mod tests {
         // Verify that cache was stored and applicable > 0
         let loaded = load_from(&cfg_path).unwrap();
         let cached_tailoring = loaded.cached_tailoring.as_ref().unwrap();
-        let cached_output: TailoringOutput =
-            serde_yml::from_value(cached_tailoring.tailoring.clone()).unwrap();
+        let cached_output: TailoringOutput = cached_tailoring.tailoring.clone();
         assert!(
             cached_output.summary.applicable > 0,
             "expected >0 applicable ADRs in cache"

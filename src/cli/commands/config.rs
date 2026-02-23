@@ -319,48 +319,34 @@ mod tests {
 
     // --- Tests for config set redaction via run_with_path ---
 
-    /// Exercise the `serde_yml::to_string` error branch in `serialize_config_for_display`.
-    ///
-    /// A config with an unserializable `serde_yml::Value` field (mapping-as-key)
-    /// must return a `ConfigError` rather than panicking.
     #[test]
-    fn test_serialize_config_for_display_error_is_wrapped_as_config_error() {
+    fn test_serialize_config_for_display_with_cached_tailoring_succeeds() {
         use crate::config::types::CachedTailoring;
-
-        // Construct a mapping-as-key value that serde_yml cannot serialize.
-        let mut inner_key = serde_yml::Mapping::new();
-        inner_key.insert(
-            serde_yml::Value::String("k".to_string()),
-            serde_yml::Value::String("v".to_string()),
-        );
-        let mut outer = serde_yml::Mapping::new();
-        outer.insert(
-            serde_yml::Value::Mapping(inner_key),
-            serde_yml::Value::String("value".to_string()),
-        );
-        let bad_value = serde_yml::Value::Mapping(outer);
-
-        // Verify this value is actually unserializable.
-        assert!(
-            serde_yml::to_string(&bad_value).is_err(),
-            "serde_yml must reject a mapping with mapping keys for this test to be valid"
-        );
+        use crate::tailoring::types::{TailoringOutput, TailoringSummary};
 
         let cfg = config::Config {
             cached_tailoring: Some(CachedTailoring {
                 cache_key: "key".to_string(),
                 repo_path: "/tmp/repo".to_string(),
-                tailoring: bad_value,
+                tailoring: TailoringOutput {
+                    files: vec![],
+                    skipped_adrs: vec![],
+                    summary: TailoringSummary::default(),
+                },
                 tailored_at: chrono::Utc::now(),
             }),
             ..config::Config::default()
         };
 
-        let err = serialize_config_for_display(&cfg).unwrap_err();
+        let result = serialize_config_for_display(&cfg);
         assert!(
-            err.to_string()
-                .contains("Failed to serialize config to YAML"),
-            "error must be wrapped as ConfigError, got: {err}"
+            result.is_ok(),
+            "display serialization must succeed with typed TailoringOutput"
+        );
+        let yaml = result.unwrap();
+        assert!(
+            yaml.contains("cached_tailoring"),
+            "yaml must contain cached_tailoring key"
         );
     }
 
