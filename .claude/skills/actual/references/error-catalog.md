@@ -24,6 +24,7 @@ Complete catalog of all error types in the actual CLI. Load this when troublesho
  | CursorNotAuthenticated | 2 | Auth/Setup | Set `CURSOR_API_KEY` or run `cursor-agent login` |
  | ApiKeyMissing | 2 | Auth/Setup | Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` |
 | CodexCliModelRequiresApiKey | 2 | Auth/Setup | Set `OPENAI_API_KEY` (ChatGPT OAuth only supports default model) |
+| NoRunnerAvailable | 2 | Auth/Setup | Install a runner or set an API key — none of the candidates for the given model were usable |
 | CreditBalanceTooLow | 3 | Billing/API | Add credits to your account |
 | ApiError | 3 | Billing/API | Check API URL, network, credentials |
 | ApiResponseError | 3 | Billing/API | Check API status page, retry later |
@@ -185,6 +186,43 @@ echo $OPENAI_API_KEY | head -c 7  # check if key is set
 actual config set model ""
 # Option 2: Set API key for explicit model support
 export OPENAI_API_KEY="sk-..."
+```
+
+### NoRunnerAvailable
+
+**Cause**: `actual sync` was called without `--runner` or a `runner` config value, and none of the candidate runners for the given model passed their environment probe. The error message lists each candidate and the reason it was skipped.
+
+**Hint**: Install a runner (e.g. `npm install -g @anthropic-ai/claude-code`) or set an API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
+
+**Diagnosis**:
+```bash
+# See exactly which runners were tried and why each failed:
+actual sync 2>&1          # stderr shows the "Tried:" list
+
+# Check which binaries are installed:
+which claude
+which codex
+which cursor-agent
+
+# Check which API keys are set:
+[ -n "$ANTHROPIC_API_KEY" ] && echo "ANTHROPIC set" || echo "ANTHROPIC not set"
+[ -n "$OPENAI_API_KEY" ]    && echo "OPENAI set"    || echo "OPENAI not set"
+```
+
+**Fix**: Install at least one runner for the model you are targeting, then re-run:
+```bash
+# For claude/sonnet models — install Claude Code CLI:
+npm install -g @anthropic-ai/claude-code
+claude auth login
+
+# Or set the Anthropic API key directly:
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# For gpt/o-series models — set the OpenAI API key:
+export OPENAI_API_KEY="sk-..."
+
+# Alternatively, pin a specific runner with --runner to skip auto-detection:
+actual sync --runner anthropic-api
 ```
 
 ## Exit Code 3: Billing and API Errors
