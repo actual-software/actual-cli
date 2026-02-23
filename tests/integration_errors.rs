@@ -193,17 +193,22 @@ mod tests {
 
     #[test]
     fn auth_not_authenticated_exits_2() {
+        // With auto_detect_runner: ClaudeCli probe fails (not authenticated),
+        // then AnthropicApi fails (no key set) → NoRunnerAvailable (exit code 2).
         let server = mockito::Server::new();
         let env = TestEnv::new(&server, AUTH_FAIL, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .env_remove("ANTHROPIC_API_KEY")
             .assert()
             .code(2)
-            .stderr(predicate::str::contains("not authenticated"));
+            .stderr(predicate::str::contains("No runner available"));
     }
 
     #[test]
-    fn auth_binary_crash_exits_1() {
+    fn auth_binary_crash_exits_2() {
+        // With auto_detect_runner: ClaudeCli probe fails (auth crash),
+        // then AnthropicApi fails (no key set) → NoRunnerAvailable (exit code 2).
         let server = mockito::Server::new();
         let dir = tempfile::tempdir().unwrap();
         let binary_path = create_auth_crash_binary(dir.path());
@@ -217,9 +222,10 @@ mod tests {
 
         env.cmd()
             .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .env_remove("ANTHROPIC_API_KEY")
             .assert()
-            .code(1)
-            .stderr(predicate::str::contains("Runner failed"));
+            .code(2)
+            .stderr(predicate::str::contains("No runner available"));
     }
 
     // ── Analysis error tests ────────────────────────────────────────────

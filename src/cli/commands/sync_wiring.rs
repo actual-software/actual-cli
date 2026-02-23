@@ -26,7 +26,10 @@ use crate::runner::binary::find_claude_binary;
 use crate::runner::codex_cli::{check_codex_auth, find_codex_binary, CodexCliRunner};
 use crate::runner::cursor_cli::{find_cursor_binary, CursorCliRunner};
 use crate::runner::openai_api::OpenAiApiRunner;
-use crate::runner::probe::resolve_api_key;
+use crate::runner::probe::{
+    is_anthropic_available, is_claude_available, is_codex_available, is_cursor_available,
+    is_openai_available, resolve_api_key,
+};
 use crate::runner::subprocess::CliClaudeRunner;
 
 /// Enforce that an explicit Codex CLI model override is only used with an API key.
@@ -58,28 +61,72 @@ fn require_api_key_for_model(
     Ok(())
 }
 
-/// Infer the runner from available model configuration when neither `--runner`
-/// CLI flag nor `runner` config field is set.
+/// Detect which runner is available by probing the environment.
 ///
 /// Priority order:
 ///   1. `args_model` (--model CLI flag overrides everything)
-///   2. `cursor_model` (dedicated Cursor config field signals intent)
+///   2. `cursor_model` (dedicated Cursor config field forces CursorCli)
 ///   3. `model` (the unified model config field)
-///   4. Default: `ClaudeCli`
-fn infer_runner_from_config(
+///   4. Default: probe ClaudeCli first, then AnthropicApi
+///
+/// For each model, determines the list of candidate runners in priority order,
+/// then probes each in turn.  Returns the first available runner, or
+/// `Err(ActualError::NoRunnerAvailable)` if none are available.
+fn auto_detect_runner(
     args_model: Option<&str>,
     cursor_model: Option<&str>,
     model: Option<&str>,
-) -> Result<RunnerChoice, String> {
-    if let Some(m) = args_model {
-        RunnerChoice::infer_from_model(m)
-    } else if cursor_model.is_some() {
-        Ok(RunnerChoice::CursorCli)
-    } else if let Some(m) = model {
-        RunnerChoice::infer_from_model(m)
-    } else {
-        Ok(RunnerChoice::ClaudeCli)
+    cfg: &crate::config::types::Config,
+) -> Result<RunnerChoice, ActualError> {
+    use crate::cli::args::runner_candidates;
+
+    // Resolve candidates in priority order:
+    // 1. --model flag overrides everything
+    // 2. cursor_model in Config forces CursorCli (removed in next task)
+    // 3. model config field
+    // 4. No model → default to claude-cli / anthropic-api candidates
+    let (effective_model_display, candidates): (String, Vec<RunnerChoice>) =
+        if let Some(m) = args_model {
+            let lower = m.to_ascii_lowercase();
+            let c = runner_candidates(&lower);
+            (m.to_string(), c)
+        } else if cursor_model.is_some() {
+            // cursor_model: Some(_) forces CursorCli (special-cased until b2j.2 removes it)
+            let display = cursor_model.unwrap_or("").to_string();
+            (display, vec![RunnerChoice::CursorCli])
+        } else if let Some(m) = model {
+            let lower = m.to_ascii_lowercase();
+            let c = runner_candidates(&lower);
+            (m.to_string(), c)
+        } else {
+            // No model set → default candidates: ClaudeCli first, AnthropicApi fallback
+            (
+                "(default)".to_string(),
+                vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi],
+            )
+        };
+
+    let mut tried: Vec<String> = Vec::new();
+
+    for candidate in &candidates {
+        let probe_result = match candidate {
+            RunnerChoice::ClaudeCli => is_claude_available(),
+            RunnerChoice::AnthropicApi => is_anthropic_available(cfg.anthropic_api_key.as_deref()),
+            RunnerChoice::OpenAiApi => is_openai_available(cfg.openai_api_key.as_deref()),
+            RunnerChoice::CodexCli => is_codex_available(cfg.openai_api_key.as_deref()),
+            RunnerChoice::CursorCli => is_cursor_available(cfg.cursor_api_key.as_deref()),
+        };
+
+        match probe_result {
+            Ok(()) => return Ok(candidate.clone()),
+            Err(reason) => tried.push(format!("  - {reason}")),
+        }
     }
+
+    Err(ActualError::NoRunnerAvailable {
+        model: effective_model_display,
+        tried: tried.join("\n"),
+    })
 }
 
 /// Handle the CodexCli model-error fallback: if the initial run returned a
@@ -205,14 +252,14 @@ where
         })?
     } else {
         // Auto-select runner from model when neither --runner flag nor
-        // config runner is set.  See `infer_runner_from_config` doc comment
+        // config runner is set.  See `auto_detect_runner` doc comment
         // for the full priority order.
-        infer_runner_from_config(
+        auto_detect_runner(
             args.model.as_deref(),
             cfg.cursor_model.as_deref(),
             cfg.model.as_deref(),
-        )
-        .map_err(ActualError::ConfigError)?
+            &cfg,
+        )?
     };
 
     // Resolve the per-subprocess timeout: config value takes precedence over the
@@ -435,7 +482,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_cli_fallback_if_model_error, infer_runner_from_config, require_api_key_for_model,
+        auto_detect_runner, codex_cli_fallback_if_model_error, require_api_key_for_model,
         sync_run_inner,
     };
     use crate::cli::args::{RunnerChoice, SyncArgs};
@@ -921,34 +968,39 @@ mod tests {
 
     #[test]
     fn test_preamble_inferred_from_model() {
-        // When model is set in config and no --runner flag, runner is inferred.
+        // When model is set in config and no --runner flag, runner is auto-detected.
+        // With gpt-5 + no binary + no API key, all candidates fail → NoRunnerAvailable.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("CODEX_BINARY", "/nonexistent/codex");
         let _g2 = EnvGuard::remove("OPENAI_API_KEY");
+        let _g3 = EnvGuard::set("CURSOR_BINARY", "/nonexistent/cursor-agent");
         let dir = tempfile::tempdir().unwrap();
-        let _g3 = with_temp_config(&dir, "model: gpt-5\n");
+        let _g4 = with_temp_config(&dir, "model: gpt-5\n");
         let args = make_sync_args(None);
         let result = sync_run_inner(&args, auth_not_authenticated);
-        // Inferred runner = CodexCli; binary not found → CodexNotFound
+        // auto_detect_runner tries CodexCli (not found), OpenAiApi (no key), CursorCli (not found)
         assert!(
-            matches!(result, Err(ActualError::CodexNotFound)),
-            "expected CodexNotFound when model set + binary absent, got: {result:?}"
+            matches!(result, Err(ActualError::NoRunnerAvailable { .. })),
+            "expected NoRunnerAvailable when model set + all runners absent, got: {result:?}"
         );
     }
 
     #[test]
     fn test_preamble_malformed_config_uses_defaults() {
         // A malformed config file should fall back to defaults (eprintln warning).
+        // auto_detect_runner is called with (none, none, none) and default config.
+        // It tries ClaudeCli (not found), then AnthropicApi (no key) → NoRunnerAvailable.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::remove("ANTHROPIC_API_KEY");
         let dir = tempfile::tempdir().unwrap();
-        let _g2 = with_temp_config(&dir, ": this is not valid yaml [\n");
-        let args = make_sync_args(None); // no runner → defaults to ClaudeCli
+        let _g3 = with_temp_config(&dir, ": this is not valid yaml [\n");
+        let args = make_sync_args(None); // no runner → falls through to auto_detect_runner
         let result = sync_run_inner(&args, auth_not_authenticated);
-        // Falls back to defaults → ClaudeCli → binary not found
+        // Falls back to defaults → auto_detect_runner → both candidates fail
         assert!(
-            matches!(result, Err(ActualError::ClaudeNotFound)),
-            "expected ClaudeNotFound with defaults after malformed config, got: {result:?}"
+            matches!(result, Err(ActualError::NoRunnerAvailable { .. })),
+            "expected NoRunnerAvailable with defaults after malformed config, got: {result:?}"
         );
     }
 
@@ -1035,165 +1087,224 @@ mod tests {
         );
     }
 
-    // ---- infer_runner_from_config tests ----
+    // ---- auto_detect_runner tests ----
+
+    fn default_cfg() -> crate::config::types::Config {
+        crate::config::types::Config::default()
+    }
+
+    #[cfg(unix)]
+    fn make_fake_claude_logged_in(dir: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = dir.join("fake-claude.sh");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fake
+    }
+
+    #[cfg(unix)]
+    fn make_fake_binary(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = dir.join(name);
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fake
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_detect_no_model_claude_available_returns_claude_cli() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake_claude = make_fake_claude_logged_in(bin_dir.path());
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", fake_claude.to_str().unwrap());
+        let result = auto_detect_runner(None, None, None, &default_cfg());
+        assert_eq!(result.unwrap(), RunnerChoice::ClaudeCli);
+    }
 
     #[test]
-    fn infer_runner_nothing_set_defaults_to_claude_cli() {
-        assert_eq!(
-            infer_runner_from_config(None, None, None).unwrap(),
-            RunnerChoice::ClaudeCli,
+    fn auto_detect_no_model_claude_unavailable_anthropic_key_set_returns_anthropic_api() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
+        let result = auto_detect_runner(None, None, None, &default_cfg());
+        assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
+    }
+
+    #[test]
+    fn auto_detect_no_model_no_runner_available_returns_error() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::remove("ANTHROPIC_API_KEY");
+        let result = auto_detect_runner(None, None, None, &default_cfg());
+        assert!(
+            matches!(result, Err(ActualError::NoRunnerAvailable { .. })),
+            "expected NoRunnerAvailable, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_detect_cursor_model_forces_cursor_cli_when_available() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake_cursor = make_fake_binary(bin_dir.path(), "fake-cursor");
+        let _g1 = EnvGuard::set("CURSOR_BINARY", fake_cursor.to_str().unwrap());
+        let _g2 = EnvGuard::set("CURSOR_API_KEY", "cursor-test-key");
+        let result = auto_detect_runner(None, Some("auto"), None, &default_cfg());
+        assert_eq!(result.unwrap(), RunnerChoice::CursorCli);
+    }
+
+    #[test]
+    fn auto_detect_cursor_model_cursor_unavailable_returns_error() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("CURSOR_BINARY", "/nonexistent/cursor-agent");
+        let _g2 = EnvGuard::remove("CURSOR_API_KEY");
+        let result = auto_detect_runner(None, Some("auto"), None, &default_cfg());
+        assert!(
+            matches!(result, Err(ActualError::NoRunnerAvailable { .. })),
+            "expected NoRunnerAvailable, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_detect_args_model_gpt_selects_codex_when_binary_available() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake_codex = make_fake_binary(bin_dir.path(), "fake-codex");
+        let _g1 = EnvGuard::set("CODEX_BINARY", fake_codex.to_str().unwrap());
+        let _g2 = EnvGuard::set("OPENAI_API_KEY", "sk-openai");
+        let result = auto_detect_runner(Some("gpt-5"), None, None, &default_cfg());
+        assert_eq!(result.unwrap(), RunnerChoice::CodexCli);
+    }
+
+    #[test]
+    fn auto_detect_args_model_gpt_falls_back_to_openai_api_when_codex_missing() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("CODEX_BINARY", "/nonexistent/codex");
+        let _g2 = EnvGuard::set("OPENAI_API_KEY", "sk-openai");
+        let result = auto_detect_runner(Some("gpt-5"), None, None, &default_cfg());
+        assert_eq!(result.unwrap(), RunnerChoice::OpenAiApi);
+    }
+
+    #[test]
+    fn auto_detect_args_model_anthropic_full_returns_anthropic_api() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
+        let result = auto_detect_runner(Some("claude-sonnet-4-6"), None, None, &default_cfg());
+        assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_detect_args_model_short_alias_prefers_claude_cli() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake_claude = make_fake_claude_logged_in(bin_dir.path());
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", fake_claude.to_str().unwrap());
+        let result = auto_detect_runner(Some("sonnet"), None, None, &default_cfg());
+        assert_eq!(result.unwrap(), RunnerChoice::ClaudeCli);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_detect_cfg_model_gpt_selects_codex_when_available() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake_codex = make_fake_binary(bin_dir.path(), "fake-codex");
+        let _g1 = EnvGuard::set("CODEX_BINARY", fake_codex.to_str().unwrap());
+        let _g2 = EnvGuard::set("OPENAI_API_KEY", "sk-openai");
+        let result = auto_detect_runner(None, None, Some("gpt-5-mini"), &default_cfg());
+        assert_eq!(result.unwrap(), RunnerChoice::CodexCli);
+    }
+
+    #[test]
+    fn auto_detect_cfg_model_anthropic_returns_anthropic_api() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant");
+        let result = auto_detect_runner(None, None, Some("claude-sonnet-4-6"), &default_cfg());
+        assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
+    }
+
+    #[test]
+    fn auto_detect_args_model_overrides_cursor_model() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant");
+        let result = auto_detect_runner(
+            Some("claude-sonnet-4-6"),
+            Some("auto"),
+            None,
+            &default_cfg(),
+        );
+        // args_model wins → AnthropicApi (not CursorCli)
+        assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
+    }
+
+    #[test]
+    fn auto_detect_unrecognized_model_tries_cursor_only_unavailable_returns_error() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("CURSOR_BINARY", "/nonexistent/cursor-agent");
+        let _g2 = EnvGuard::remove("CURSOR_API_KEY");
+        let result = auto_detect_runner(Some("my-custom-model"), None, None, &default_cfg());
+        assert!(
+            matches!(
+                result,
+                Err(ActualError::NoRunnerAvailable { ref model, .. }) if model == "my-custom-model"
+            ),
+            "expected NoRunnerAvailable with model name, got: {result:?}"
         );
     }
 
     #[test]
-    fn infer_runner_args_model_overrides_all() {
-        assert_eq!(
-            infer_runner_from_config(Some("gpt-5"), Some("cursor-model"), Some("haiku"),).unwrap(),
-            RunnerChoice::CodexCli,
+    fn auto_detect_tried_string_lists_all_failures() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::remove("ANTHROPIC_API_KEY");
+        let result = auto_detect_runner(Some("sonnet"), None, None, &default_cfg());
+        let err = result.expect_err("expected NoRunnerAvailable");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("claude-cli"),
+            "tried string must mention claude-cli: {msg}"
+        );
+        assert!(
+            msg.contains("anthropic-api"),
+            "tried string must mention anthropic-api: {msg}"
         );
     }
 
     #[test]
-    fn infer_runner_args_model_claude_alias() {
-        assert_eq!(
-            infer_runner_from_config(Some("sonnet"), None, None).unwrap(),
-            RunnerChoice::ClaudeCli,
-        );
+    fn auto_detect_config_anthropic_key_used_when_env_absent() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::remove("ANTHROPIC_API_KEY");
+        let cfg = crate::config::types::Config {
+            anthropic_api_key: Some("sk-ant-from-config".to_string()),
+            ..Default::default()
+        };
+        let result = auto_detect_runner(None, None, None, &cfg);
+        assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn infer_runner_args_model_anthropic_full() {
-        assert_eq!(
-            infer_runner_from_config(Some("claude-sonnet-4-6"), None, None).unwrap(),
-            RunnerChoice::AnthropicApi,
-        );
-    }
-
-    #[test]
-    fn infer_runner_model_config_gpt_selects_codex() {
-        // model: gpt-5-mini should auto-select CodexCli
-        assert_eq!(
-            infer_runner_from_config(None, None, Some("gpt-5-mini")).unwrap(),
-            RunnerChoice::CodexCli,
-        );
-    }
-
-    #[test]
-    fn infer_runner_model_gpt_overrides_cursor_model() {
-        // args_model (gpt-5) takes priority over cursor_model
-        assert_eq!(
-            infer_runner_from_config(Some("gpt-5"), Some("auto"), None).unwrap(),
-            RunnerChoice::CodexCli,
-        );
-    }
-
-    #[test]
-    fn infer_runner_cursor_model_config() {
-        assert_eq!(
-            infer_runner_from_config(None, Some("auto"), None).unwrap(),
-            RunnerChoice::CursorCli,
-        );
-    }
-
-    #[test]
-    fn infer_runner_cursor_model_overrides_cfg_model() {
-        assert_eq!(
-            infer_runner_from_config(None, Some("gpt-4o"), Some("haiku")).unwrap(),
-            RunnerChoice::CursorCli,
-        );
-    }
-
-    #[test]
-    fn infer_runner_cursor_model_with_anthropic_name() {
-        // cursor_model is always routed to CursorCli regardless of the model name value
-        assert_eq!(
-            infer_runner_from_config(None, Some("claude-sonnet-4-6"), None).unwrap(),
-            RunnerChoice::CursorCli,
-        );
-    }
-
-    #[test]
-    fn infer_runner_cfg_model_anthropic() {
-        assert_eq!(
-            infer_runner_from_config(None, None, Some("claude-sonnet-4-6")).unwrap(),
-            RunnerChoice::AnthropicApi,
-        );
-    }
-
-    #[test]
-    fn infer_runner_cfg_model_short_alias() {
-        assert_eq!(
-            infer_runner_from_config(None, None, Some("sonnet")).unwrap(),
-            RunnerChoice::ClaudeCli,
-        );
-    }
-
-    #[test]
-    fn infer_runner_cfg_model_openai() {
-        assert_eq!(
-            infer_runner_from_config(None, None, Some("gpt-4o")).unwrap(),
-            RunnerChoice::CodexCli,
-        );
-    }
-
-    #[test]
-    fn infer_runner_codex_model_via_model_field() {
-        // Codex model name is correctly resolved via the unified model field.
-        assert_eq!(
-            infer_runner_from_config(None, None, Some("gpt-5.2-codex")).unwrap(),
-            RunnerChoice::CodexCli,
-        );
-    }
-
-    #[test]
-    fn infer_runner_gpt5_mini_model_not_claude() {
-        // model: "gpt-5-mini" should NOT default to ClaudeCli
-        assert_eq!(
-            infer_runner_from_config(None, None, Some("gpt-5-mini")).unwrap(),
-            RunnerChoice::CodexCli,
-            "model: gpt-5-mini should auto-select CodexCli runner"
-        );
-    }
-
-    #[test]
-    fn infer_runner_cursor_model_not_claude() {
-        // cursor_model: "gpt-4o" should NOT default to ClaudeCli
-        assert_eq!(
-            infer_runner_from_config(None, Some("gpt-4o"), None).unwrap(),
-            RunnerChoice::CursorCli,
-            "cursor_model should be considered for runner auto-detection"
-        );
-    }
-
-    #[test]
-    fn infer_runner_unrecognized_model_returns_error() {
-        // Unrecognized models in args_model or model position should return an error
-        assert!(infer_runner_from_config(Some("gemini-pro"), None, None).is_err());
-        assert!(infer_runner_from_config(None, None, Some("my-custom-model")).is_err());
-        // cursor_model always returns CursorCli regardless of model name
-        assert_eq!(
-            infer_runner_from_config(None, Some("gemini-pro"), None).unwrap(),
-            RunnerChoice::CursorCli,
-        );
-    }
-
-    #[test]
-    fn infer_runner_cfg_model_gpt5_mini_selects_codex() {
-        // model: gpt-5-mini should auto-select CodexCli runner
-        assert_eq!(
-            infer_runner_from_config(None, None, Some("gpt-5-mini")).unwrap(),
-            RunnerChoice::CodexCli,
-            "model: gpt-5-mini should auto-select CodexCli runner"
-        );
-    }
-
-    #[test]
-    fn infer_runner_cfg_model_codex_selects_codex() {
-        assert_eq!(
-            infer_runner_from_config(None, None, Some("gpt-5.2-codex")).unwrap(),
-            RunnerChoice::CodexCli,
-            "model: gpt-5.2-codex should auto-select CodexCli runner"
-        );
+    fn auto_detect_config_openai_key_used_for_codex() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake_codex = make_fake_binary(bin_dir.path(), "fake-codex");
+        let _g1 = EnvGuard::set("CODEX_BINARY", fake_codex.to_str().unwrap());
+        let _g2 = EnvGuard::remove("OPENAI_API_KEY");
+        let cfg = crate::config::types::Config {
+            openai_api_key: Some("sk-openai-from-config".to_string()),
+            ..Default::default()
+        };
+        let result = auto_detect_runner(Some("gpt-5"), None, None, &cfg);
+        assert_eq!(result.unwrap(), RunnerChoice::CodexCli);
     }
 
     // ---- require_api_key_for_model tests ----
