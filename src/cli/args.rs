@@ -301,7 +301,7 @@ fn parse_model(s: &str) -> Result<String, String> {
     Ok(s.to_string())
 }
 
-/// ADR-powered CLAUDE.md generator
+/// ADR-powered AI context file generator
 #[derive(Parser, Debug)]
 #[command(name = "actual", version, about)]
 pub struct Cli {
@@ -311,9 +311,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Analyze repo, fetch ADRs, tailor and write CLAUDE.md
+    /// Analyze repo, fetch ADRs, tailor and write AI context files
     Sync(SyncArgs),
-    /// Check CLAUDE.md state
+    /// Check output file state
     Status(StatusArgs),
     /// Check Claude Code authentication status
     Auth,
@@ -332,7 +332,7 @@ pub struct SyncArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// With --dry-run, output the full rendered CLAUDE.md to stdout
+    /// With --dry-run, output the full rendered file to stdout
     #[arg(long, requires = "dry_run")]
     pub full: bool,
 
