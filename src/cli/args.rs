@@ -323,6 +323,8 @@ pub enum Command {
     Runners,
     /// List known model names grouped by runner
     Models,
+    /// Clear local cache (analysis and tailoring results)
+    Cache(CacheArgs),
 }
 
 /// Arguments for the `sync` command
@@ -443,6 +445,19 @@ pub struct ConfigSetArgs {
     pub key: String,
     /// Configuration value
     pub value: String,
+}
+
+/// Arguments for the `cache` command
+#[derive(Parser, Debug)]
+pub struct CacheArgs {
+    #[command(subcommand)]
+    pub action: CacheAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CacheAction {
+    /// Clear all cached data (analysis and tailoring results)
+    Clear,
 }
 
 #[cfg(test)]

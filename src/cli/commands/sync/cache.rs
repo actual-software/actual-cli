@@ -3,7 +3,8 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::config::paths::{load_from, save_to};
-use crate::config::types::CachedTailoring;
+use crate::config::types::{CachedTailoring, CACHE_MAX_SIZE_BYTES};
+use crate::tailoring::types::TailoringOutput;
 
 /// Return the pipeline skip message for a tailoring cache hit.
 pub(crate) fn tailoring_cache_skip_msg(applicable: usize) -> &'static str {
@@ -69,58 +70,48 @@ pub(crate) fn compute_repo_key_with_timeout(
     format!("{:x}", hasher.finalize())
 }
 
-/// Serialize a value to `serde_yml::Value`, logging a warning and returning
-/// `None` if serialization fails.
-///
-/// In practice `TailoringOutput` contains only string/number/vec fields and
-/// serialization never fails.  The `Option` return defends against a future
-/// type change that adds a non-YAML-representable field (e.g. `f64::NAN`).
-pub(crate) fn serialize_tailoring_output<T: serde::Serialize>(
-    output: &T,
-) -> Option<serde_yml::Value> {
-    match serde_yml::to_value(output) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            // Gap 5: route through tracing so the warning is visible in the log
-            // file (TUI mode) or stderr (plain mode) rather than being lost when
-            // the TUI alternate screen is active.
-            tracing::warn!("failed to serialize tailoring cache: {e}");
-            None
-        }
-    }
-}
-
 /// Store a tailoring result in the config cache (best-effort).
 ///
 /// Skips caching when `cache_key` is `None`.
+/// Rejects outputs larger than `CACHE_MAX_SIZE_BYTES` (10 MiB) when serialized.
 /// Disk persistence failures are silently ignored because the cache
 /// is an optimisation — a write failure should never abort a sync.
-///
-/// The output is generic over any `serde::Serialize` type so that tests can
-/// inject a type that always fails serialization to exercise the warning path.
-/// In production the concrete type is always `TailoringOutput`.
-pub(crate) fn store_tailoring_cache<T: serde::Serialize>(
+pub(crate) fn store_tailoring_cache(
     config: &mut crate::config::types::Config,
     cfg_path: &Path,
     cache_key: Option<&str>,
     root_dir: &Path,
-    output: &T,
+    output: &TailoringOutput,
 ) {
     let Some(key) = cache_key else {
         return;
     };
-    let Some(tailoring_value) = serialize_tailoring_output(output) else {
-        return;
-    };
+
+    // Size guard: skip caching if the serialized output exceeds the limit.
+    match serde_yml::to_string(output) {
+        Err(e) => {
+            tracing::warn!("failed to serialize tailoring output for size check: {e}");
+            return;
+        }
+        Ok(serialized) if serialized.len() > CACHE_MAX_SIZE_BYTES => {
+            tracing::warn!(
+                "tailoring output size ({} bytes) exceeds cache limit ({} bytes); skipping cache",
+                serialized.len(),
+                CACHE_MAX_SIZE_BYTES
+            );
+            return;
+        }
+        Ok(_) => {}
+    }
+
     config.cached_tailoring = Some(CachedTailoring {
         cache_key: key.to_string(),
         repo_path: root_dir.to_string_lossy().to_string(),
-        tailoring: tailoring_value,
+        tailoring: output.clone(),
         tailored_at: chrono::Utc::now(),
     });
     // Best-effort persist: if disk write fails, the in-memory cache is
     // still populated for subsequent operations in this process.
-    // Gap 5: use tracing so the warning reaches the log file in TUI mode.
     if let Err(e) = save_to(config, cfg_path) {
         tracing::warn!("failed to save tailoring cache: {e}");
     }
