@@ -193,6 +193,7 @@ pub fn run_analysis_cached(
             if cached.repo_path == repo_path.to_string_lossy().as_ref()
                 && cached.head_commit.as_deref() == Some(&head_hash)
                 && cached.config_hash.as_deref() == Some(cfg_hash.as_str())
+                && !cached.is_expired()
             {
                 return Ok(AnalysisOutcome {
                     analysis: cached.analysis.clone(),
@@ -216,6 +217,24 @@ pub fn run_analysis_cached(
         analysis: analysis.clone(),
         analyzed_at: chrono::Utc::now(),
     };
+
+    // Size guard: skip caching if the analysis data exceeds the limit.
+    use crate::config::types::CACHE_MAX_SIZE_BYTES;
+    let serialized_size = serde_yml::to_string(&cached_analysis)
+        .map(|s| s.len())
+        .unwrap_or(0);
+    if serialized_size > CACHE_MAX_SIZE_BYTES {
+        tracing::warn!(
+            "analysis cache size ({} bytes) exceeds limit ({} bytes); skipping cache",
+            serialized_size,
+            CACHE_MAX_SIZE_BYTES
+        );
+        return Ok(AnalysisOutcome {
+            analysis,
+            cache_status,
+        });
+    }
+
     cfg.cached_analysis = Some(cached_analysis);
     config::paths::save_to(&cfg, config_path)?;
 
@@ -1014,5 +1033,43 @@ cached_analysis:
         assert_eq!(CacheStatus::Miss.label(), "(fresh)");
         assert_eq!(CacheStatus::ForcedMiss.label(), "(forced refresh)");
         assert_eq!(CacheStatus::Uncacheable.label(), "(no cache)");
+    }
+
+    #[test]
+    fn test_analysis_cache_expired_is_treated_as_miss() {
+        let repo_dir = tempdir().unwrap();
+        let head_hash = create_git_repo(repo_dir.path());
+
+        let config_dir = tempdir().unwrap();
+        let config_path = config_dir.path().join("config.yaml");
+
+        // Write config with a 8-day-old cached analysis (expired TTL)
+        let analysis = valid_analysis();
+        let base_cfg = config::Config::default();
+        let cfg_hash = compute_config_hash(&base_cfg);
+        let cfg = config::Config {
+            cached_analysis: Some(CachedAnalysis {
+                repo_path: repo_dir.path().to_string_lossy().to_string(),
+                head_commit: Some(head_hash.clone()),
+                config_hash: Some(cfg_hash),
+                analysis,
+                analyzed_at: chrono::Utc::now() - chrono::Duration::days(8),
+            }),
+            ..config::Config::default()
+        };
+        config::paths::save_to(&cfg, &config_path).unwrap();
+
+        // Even though head commit and config hash match, TTL expired → cache miss
+        let outcome = run_analysis_cached(repo_dir.path(), &config_path, false).unwrap();
+        assert_eq!(
+            outcome.cache_status,
+            CacheStatus::Miss,
+            "expired cache must be treated as a miss"
+        );
+        // The fresh analysis returns the repo project (not our planted "test-project")
+        assert_ne!(
+            outcome.analysis.projects[0].name, "test-project",
+            "expired cache should not return stale data"
+        );
     }
 }

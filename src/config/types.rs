@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 use crate::analysis::types::RepoAnalysis;
 use crate::generation::OutputFormat;
+use crate::tailoring::types::TailoringOutput;
 
 /// Default batch size for ADR tailoring.
 pub const DEFAULT_BATCH_SIZE: usize = 15;
@@ -15,6 +16,12 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 
 /// Default model for Claude/Anthropic-based runners.
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+
+/// Maximum age of a cached value before it is considered stale (7 days).
+pub const CACHE_TTL_DAYS: i64 = 7;
+
+/// Maximum serialized size of a cached value in bytes (10 MiB).
+pub const CACHE_MAX_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Top-level configuration for the actual CLI.
 ///
@@ -106,7 +113,11 @@ pub struct Config {
     pub cached_analysis: Option<CachedAnalysis>,
 
     /// Cached tailoring result (keyed to composite input hash).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_cached_tailoring"
+    )]
     pub cached_tailoring: Option<CachedTailoring>,
 
     /// AI backend runner for tailoring (default: "claude-cli").
@@ -148,10 +159,18 @@ pub struct CachedTailoring {
     pub cache_key: String,
     /// Repo path (for display/debugging).
     pub repo_path: String,
-    /// The tailoring output (stored as opaque YAML value).
-    pub tailoring: serde_yml::Value,
+    /// The tailoring output (typed).
+    pub tailoring: TailoringOutput,
     /// When the tailoring was performed.
     pub tailored_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl CachedTailoring {
+    /// Returns `true` if the cached entry has exceeded the 7-day TTL.
+    pub fn is_expired(&self) -> bool {
+        let age = chrono::Utc::now() - self.tailored_at;
+        age.num_days() >= CACHE_TTL_DAYS
+    }
 }
 
 /// Cached repository analysis result.
@@ -176,6 +195,30 @@ pub struct CachedAnalysis {
 
     /// When the analysis was performed.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl CachedAnalysis {
+    /// Returns `true` if the cached entry has exceeded the 7-day TTL.
+    pub fn is_expired(&self) -> bool {
+        let age = chrono::Utc::now() - self.analyzed_at;
+        age.num_days() >= CACHE_TTL_DAYS
+    }
+}
+
+/// Deserializes `Option<CachedTailoring>`, returning `None` if the YAML
+/// structure is present but cannot be deserialized as a valid `CachedTailoring`.
+///
+/// This provides graceful degradation for corrupt or schema-mismatched cache
+/// entries: instead of failing to parse the entire `Config`, a bad
+/// `cached_tailoring` block is silently dropped (treated as a cache miss).
+fn deserialize_optional_cached_tailoring<'de, D>(
+    deserializer: D,
+) -> Result<Option<CachedTailoring>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<serde_yml::Value> = Option::deserialize(deserializer)?;
+    Ok(opt.and_then(|v| serde_yml::from_value(v).ok()))
 }
 
 #[cfg(test)]
@@ -379,11 +422,16 @@ mod tests {
     /// Round-trip test with CachedTailoring included.
     #[test]
     fn test_round_trip_with_cached_tailoring() {
+        use crate::tailoring::types::{TailoringOutput, TailoringSummary};
         let config = Config {
             cached_tailoring: Some(CachedTailoring {
                 cache_key: "abc123def456".to_string(),
                 repo_path: "/home/user/project".to_string(),
-                tailoring: serde_yml::Value::Mapping(serde_yml::Mapping::new()),
+                tailoring: TailoringOutput {
+                    files: vec![],
+                    skipped_adrs: vec![],
+                    summary: TailoringSummary::default(),
+                },
                 tailored_at: chrono::Utc::now(),
             }),
             ..Config::default()
@@ -392,5 +440,83 @@ mod tests {
         let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
         let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
         assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_cached_tailoring_is_expired_false_for_recent() {
+        use crate::tailoring::types::{TailoringOutput, TailoringSummary};
+        let cached = CachedTailoring {
+            cache_key: "key".to_string(),
+            repo_path: "/repo".to_string(),
+            tailoring: TailoringOutput {
+                files: vec![],
+                skipped_adrs: vec![],
+                summary: TailoringSummary::default(),
+            },
+            tailored_at: chrono::Utc::now(),
+        };
+        assert!(
+            !cached.is_expired(),
+            "freshly created cache should not be expired"
+        );
+    }
+
+    #[test]
+    fn test_cached_tailoring_is_expired_true_for_old() {
+        use crate::tailoring::types::{TailoringOutput, TailoringSummary};
+        let cached = CachedTailoring {
+            cache_key: "key".to_string(),
+            repo_path: "/repo".to_string(),
+            tailoring: TailoringOutput {
+                files: vec![],
+                skipped_adrs: vec![],
+                summary: TailoringSummary::default(),
+            },
+            tailored_at: chrono::Utc::now() - chrono::Duration::days(8),
+        };
+        assert!(cached.is_expired(), "8-day-old cache should be expired");
+    }
+
+    #[test]
+    fn test_cached_analysis_is_expired_false_for_recent() {
+        let cached = CachedAnalysis {
+            repo_path: "/repo".to_string(),
+            head_commit: Some("abc123".to_string()),
+            config_hash: Some("hash".to_string()),
+            analysis: RepoAnalysis {
+                is_monorepo: false,
+                workspace_type: None,
+                projects: vec![],
+            },
+            analyzed_at: chrono::Utc::now(),
+        };
+        assert!(!cached.is_expired());
+    }
+
+    #[test]
+    fn test_cached_analysis_is_expired_true_for_old() {
+        let cached = CachedAnalysis {
+            repo_path: "/repo".to_string(),
+            head_commit: Some("abc123".to_string()),
+            config_hash: Some("hash".to_string()),
+            analysis: RepoAnalysis {
+                is_monorepo: false,
+                workspace_type: None,
+                projects: vec![],
+            },
+            analyzed_at: chrono::Utc::now() - chrono::Duration::days(8),
+        };
+        assert!(cached.is_expired());
+    }
+
+    #[test]
+    fn test_corrupted_cached_tailoring_yaml_deserializes_as_none() {
+        // Corrupt cached_tailoring → graceful degradation: treat as absent (None)
+        let yaml = "cached_tailoring:\n  not_a_valid_field: oops\n";
+        let cfg: Config = serde_yml::from_str(yaml).expect("config should still parse");
+        assert!(
+            cfg.cached_tailoring.is_none(),
+            "corrupt cached_tailoring must degrade to None, not fail config parsing"
+        );
     }
 }

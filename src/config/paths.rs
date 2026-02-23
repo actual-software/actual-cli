@@ -533,51 +533,31 @@ mod tests {
     }
 
     #[test]
-    fn test_save_to_returns_error_on_serialization_failure() {
+    fn test_save_to_with_cached_tailoring_succeeds() {
         use crate::config::types::CachedTailoring;
+        use crate::tailoring::types::{TailoringOutput, TailoringSummary};
 
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");
-
-        // Construct a CachedTailoring with a serde_yml::Value that cannot be
-        // serialized by serde_yml 0.9 to YAML: a Mapping whose key is itself a
-        // Mapping. serde_yml cannot emit mapping keys that are themselves
-        // mappings (not valid YAML) and returns an error.
-        let mut inner_key = serde_yml::Mapping::new();
-        inner_key.insert(
-            serde_yml::Value::String("k".to_string()),
-            serde_yml::Value::String("v".to_string()),
-        );
-        let mut outer = serde_yml::Mapping::new();
-        outer.insert(
-            serde_yml::Value::Mapping(inner_key),
-            serde_yml::Value::String("value".to_string()),
-        );
-        let bad_value = serde_yml::Value::Mapping(outer);
-
-        // Verify the value is actually unserializable (guards against library
-        // version changes that may start accepting this).
-        assert!(
-            serde_yml::to_string(&bad_value).is_err(),
-            "serde_yml must reject a mapping with mapping keys for this test to be valid"
-        );
 
         let config = Config {
             cached_tailoring: Some(CachedTailoring {
                 cache_key: "key".to_string(),
                 repo_path: "/tmp/repo".to_string(),
-                tailoring: bad_value,
+                tailoring: TailoringOutput {
+                    files: vec![],
+                    skipped_adrs: vec![],
+                    summary: TailoringSummary::default(),
+                },
                 tailored_at: chrono::Utc::now(),
             }),
             ..Config::default()
         };
 
-        let err = save_to(&config, &config_file).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Failed to serialize config to YAML"),
-            "Expected serialization error, got: {err}"
-        );
+        save_to(&config, &config_file).unwrap();
+        let loaded = load_from(&config_file).unwrap();
+        assert!(loaded.cached_tailoring.is_some());
+        assert_eq!(loaded.cached_tailoring.unwrap().cache_key, "key");
     }
 
     // Tests for g5j.20: config file size limit
