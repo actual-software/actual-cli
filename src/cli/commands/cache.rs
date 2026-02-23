@@ -3,10 +3,6 @@ use crate::config;
 use crate::error::ActualError;
 
 pub fn exec(args: &CacheArgs) -> Result<(), ActualError> {
-    run(args)
-}
-
-fn run(args: &CacheArgs) -> Result<(), ActualError> {
     run_with_resolver(args, config::paths::config_path)
 }
 
@@ -192,5 +188,20 @@ mod tests {
         let args = make_args_clear();
         let result = run_with_path(&args, &config_file);
         assert_eq!(handle_result(result), 0);
+    }
+
+    #[test]
+    fn test_exec_uses_config_path_via_env_var() {
+        // Redirect the real config path to a temp file via ACTUAL_CONFIG.
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        config::paths::save_to(&config::Config::default(), &config_file).unwrap();
+
+        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let args = make_args_clear();
+        let result = exec(&args);
+        std::env::remove_var("ACTUAL_CONFIG");
+
+        assert!(result.is_ok());
     }
 }
