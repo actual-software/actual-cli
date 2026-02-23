@@ -461,6 +461,29 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn test_is_codex_available_no_auth() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-codex");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CODEX_BINARY", fake.to_str().unwrap());
+        let _key_guard = EnvGuard::remove("OPENAI_API_KEY");
+        // Point HOME to a temp dir so ~/.codex/auth.json doesn't exist
+        let home_dir = tempfile::tempdir().unwrap();
+        let _home_guard = EnvGuard::set("HOME", home_dir.path().to_str().unwrap());
+        // No config key, no env key, no auth file — probe_codex_auth should fail
+        let result = is_codex_available(None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("codex-cli"),
+            "error must mention codex-cli"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn test_is_codex_available_with_api_key() {
         use std::os::unix::fs::PermissionsExt;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -553,6 +576,25 @@ mod tests {
     fn test_is_claude_available_binary_not_found() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let result = is_claude_available();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("claude-cli"),
+            "error must mention claude-cli"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_is_claude_available_auth_probe_error() {
+        use std::os::unix::fs::PermissionsExt;
+        // Binary exists but exits with non-zero + no JSON → probe_claude_auth returns Err
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-claude-crash.sh");
+        std::fs::write(&fake, "#!/bin/sh\necho 'crash'; exit 1\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CLAUDE_BINARY", fake.to_str().unwrap());
         let result = is_claude_available();
         assert!(result.is_err());
         assert!(
