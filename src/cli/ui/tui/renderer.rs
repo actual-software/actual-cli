@@ -243,265 +243,269 @@ const HORIZ_PAD: usize = 2;
 /// [`ratatui::backend::TestBackend`] without requiring a real TTY or
 /// `CrosstermBackend`.
 pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>) -> io::Result<()> {
-    let size = terminal.size()?;
+    let size = terminal
+        .size()
+        .map_err(|e| io::Error::other(e.to_string()))?;
     let cols = size.width;
     let use_color = console::colors_enabled_stderr();
-    terminal.draw(|frame| {
-        let area = frame.area();
-        let frame_area = area;
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let frame_area = area;
 
-        // ── Outer vertical split: content area on top, footer hint row on bottom ──
-        let has_hint = ctx.hint
-            || ctx.confirm.is_some()
-            || ctx.file_select.is_some()
-            || ctx.single_select.is_some();
-        // In wide mode, hints go into the Output pane's bottom border — no separate footer row.
-        // In narrow mode, keep the footer row since there's no bordered panel.
-        let needs_footer_row = has_hint && cols < 80;
-        let outer_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(if needs_footer_row {
-                vec![Constraint::Fill(1), Constraint::Length(1)]
-            } else {
-                vec![Constraint::Fill(1), Constraint::Length(0)]
-            })
-            .split(area);
-        let content_area = outer_chunks[0];
-        let footer_area = outer_chunks[1];
-
-        // ── Footer hint row (narrow mode only) ──
-        if needs_footer_row {
-            let approx_log_height = content_area.height.saturating_sub(2) as usize;
-            let hint_text = if ctx.confirm.is_some() {
-                "  \u{2190} \u{2192} select  Enter confirm".to_string()
-            } else if ctx.file_select.is_some() {
-                "  \u{2191}/\u{2193} move  Space toggle  Enter confirm  Esc cancel".to_string()
-            } else if ctx.single_select.is_some() {
-                "  \u{2191}/\u{2193} navigate  Enter select  Esc cancel".to_string()
-            } else {
-                let approx_log_width = content_area.width.saturating_sub(2) as usize;
-                let max = ctx
-                    .log
-                    .max_scroll_wrapped(approx_log_height, approx_log_width);
-                if max > 0 {
-                    format!(
-                        "  ↑/↓ steps  u/d scroll  g/G top/bottom  q quit  [{}/{}]",
-                        ctx.scroll_offset.min(max),
-                        max
-                    )
+            // ── Outer vertical split: content area on top, footer hint row on bottom ──
+            let has_hint = ctx.hint
+                || ctx.confirm.is_some()
+                || ctx.file_select.is_some()
+                || ctx.single_select.is_some();
+            // In wide mode, hints go into the Output pane's bottom border — no separate footer row.
+            // In narrow mode, keep the footer row since there's no bordered panel.
+            let needs_footer_row = has_hint && cols < 80;
+            let outer_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(if needs_footer_row {
+                    vec![Constraint::Fill(1), Constraint::Length(1)]
                 } else {
-                    "  ↑/↓ steps  q quit".to_string()
-                }
-            };
-            frame.render_widget(Clear, footer_area);
-            frame.render_widget(Paragraph::new(hint_text), footer_area);
-        }
+                    vec![Constraint::Fill(1), Constraint::Length(0)]
+                })
+                .split(area);
+            let content_area = outer_chunks[0];
+            let footer_area = outer_chunks[1];
 
-        if cols >= 80 {
-            // ── Horizontal split: left (banner + steps) | right (output) ──
-            let h_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(LEFT_COL_WIDTH), Constraint::Fill(1)])
-                .split(content_area);
-
-            // ── Left column: vertical split — banner box on top, steps below ──
-            let left_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(BANNER_BOX_HEIGHT), Constraint::Fill(1)])
-                .split(h_chunks[0]);
-
-            // Banner box (top-left)
-            let inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2); // 42
-            let banner_lines: Vec<&str> = BANNER.lines().collect();
-            // Uniform pad: center the widest line; apply the same pad to every line.
-            // This preserves the relative indentation baked into the art.
-            let max_art_width = banner_lines
-                .iter()
-                .map(|l| l.chars().count())
-                .max()
-                .unwrap_or(0);
-            let uniform_pad = inner_width.saturating_sub(max_art_width) / 2;
-            let pad_str = " ".repeat(uniform_pad);
-
-            // Build padded strings (blank + art lines + blank)
-            let mut padded_banner: Vec<String> = Vec::with_capacity(banner_lines.len() + 2);
-            padded_banner.push(String::new()); // blank line above art
-            for l in &banner_lines {
-                padded_banner.push(format!("{pad_str}{l}"));
+            // ── Footer hint row (narrow mode only) ──
+            if needs_footer_row {
+                let approx_log_height = content_area.height.saturating_sub(2) as usize;
+                let hint_text = if ctx.confirm.is_some() {
+                    "  \u{2190} \u{2192} select  Enter confirm".to_string()
+                } else if ctx.file_select.is_some() {
+                    "  \u{2191}/\u{2193} move  Space toggle  Enter confirm  Esc cancel".to_string()
+                } else if ctx.single_select.is_some() {
+                    "  \u{2191}/\u{2193} navigate  Enter select  Esc cancel".to_string()
+                } else {
+                    let approx_log_width = content_area.width.saturating_sub(2) as usize;
+                    let max = ctx
+                        .log
+                        .max_scroll_wrapped(approx_log_height, approx_log_width);
+                    if max > 0 {
+                        format!(
+                            "  ↑/↓ steps  u/d scroll  g/G top/bottom  q quit  [{}/{}]",
+                            ctx.scroll_offset.min(max),
+                            max
+                        )
+                    } else {
+                        "  ↑/↓ steps  q quit".to_string()
+                    }
+                };
+                frame.render_widget(Clear, footer_area);
+                frame.render_widget(Paragraph::new(hint_text), footer_area);
             }
-            padded_banner.push(String::new()); // blank line below art
 
-            let version_title = format!(" actual v{} ", ctx.version);
+            if cols >= 80 {
+                // ── Horizontal split: left (banner + steps) | right (output) ──
+                let h_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(LEFT_COL_WIDTH), Constraint::Fill(1)])
+                    .split(content_area);
 
-            // Right-aligned URL title for the logo box top border.
-            // Only add it when the box is wide enough to fit both titles
-            // without overlapping (version ~16 chars + URL 19 chars + 2 borders = ~37).
-            let url = "https://app.actual.ai";
-            let url_display = format!(" {url} ");
-            let url_display_len = url_display.len() as u16;
-            let version_title_len = version_title.len() as u16;
-            let min_width_for_url = version_title_len + url_display_len + 2 + 2; // borders + gap
-            let box_width = left_chunks[0].width;
-            let url_title: Option<Line<'_>> = if box_width >= min_width_for_url {
-                Some(Line::from(url_display.clone()).right_aligned())
-            } else {
-                None
-            };
+                // ── Left column: vertical split — banner box on top, steps below ──
+                let left_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(BANNER_BOX_HEIGHT), Constraint::Fill(1)])
+                    .split(h_chunks[0]);
 
-            let banner_widget = if use_color {
-                // Build colored Lines — each line's color is determined by its absolute y in the frame.
-                // Content starts at left_chunks[0].y + 1 (inside the top border).
-                let content_y_start = left_chunks[0].y + 1;
-                let colored_lines: Vec<Line<'_>> = padded_banner
+                // Banner box (top-left)
+                let inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2); // 42
+                let banner_lines: Vec<&str> = BANNER.lines().collect();
+                // Uniform pad: center the widest line; apply the same pad to every line.
+                // This preserves the relative indentation baked into the art.
+                let max_art_width = banner_lines
                     .iter()
-                    .enumerate()
-                    .map(|(i, text)| {
-                        let abs_y = content_y_start + i as u16;
-                        let color = color_for_y(abs_y, frame_area);
-                        Line::from(Span::styled(text.clone(), Style::default().fg(color)))
-                    })
-                    .collect();
-                let mut block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(version_title.as_str());
-                if let Some(ref title) = url_title {
-                    block = block.title_top(title.clone());
+                    .map(|l| l.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                let uniform_pad = inner_width.saturating_sub(max_art_width) / 2;
+                let pad_str = " ".repeat(uniform_pad);
+
+                // Build padded strings (blank + art lines + blank)
+                let mut padded_banner: Vec<String> = Vec::with_capacity(banner_lines.len() + 2);
+                padded_banner.push(String::new()); // blank line above art
+                for l in &banner_lines {
+                    padded_banner.push(format!("{pad_str}{l}"));
                 }
-                Paragraph::new(colored_lines).block(block)
-            } else {
-                let banner_text = padded_banner.join("\n");
-                let mut block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(version_title.as_str());
-                if let Some(ref title) = url_title {
-                    block = block.title_top(title.clone());
+                padded_banner.push(String::new()); // blank line below art
+
+                let version_title = format!(" actual v{} ", ctx.version);
+
+                // Right-aligned URL title for the logo box top border.
+                // Only add it when the box is wide enough to fit both titles
+                // without overlapping (version ~16 chars + URL 19 chars + 2 borders = ~37).
+                let url = "https://app.actual.ai";
+                let url_display = format!(" {url} ");
+                let url_display_len = url_display.len() as u16;
+                let version_title_len = version_title.len() as u16;
+                let min_width_for_url = version_title_len + url_display_len + 2 + 2; // borders + gap
+                let box_width = left_chunks[0].width;
+                let url_title: Option<Line<'_>> = if box_width >= min_width_for_url {
+                    Some(Line::from(url_display.clone()).right_aligned())
+                } else {
+                    None
+                };
+
+                let banner_widget = if use_color {
+                    // Build colored Lines — each line's color is determined by its absolute y in the frame.
+                    // Content starts at left_chunks[0].y + 1 (inside the top border).
+                    let content_y_start = left_chunks[0].y + 1;
+                    let colored_lines: Vec<Line<'_>> = padded_banner
+                        .iter()
+                        .enumerate()
+                        .map(|(i, text)| {
+                            let abs_y = content_y_start + i as u16;
+                            let color = color_for_y(abs_y, frame_area);
+                            Line::from(Span::styled(text.clone(), Style::default().fg(color)))
+                        })
+                        .collect();
+                    let mut block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(version_title.as_str());
+                    if let Some(ref title) = url_title {
+                        block = block.title_top(title.clone());
+                    }
+                    Paragraph::new(colored_lines).block(block)
+                } else {
+                    let banner_text = padded_banner.join("\n");
+                    let mut block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(version_title.as_str());
+                    if let Some(ref title) = url_title {
+                        block = block.title_top(title.clone());
+                    }
+                    Paragraph::new(banner_text).block(block)
+                };
+                frame.render_widget(Clear, left_chunks[0]);
+                frame.render_widget(banner_widget, left_chunks[0]);
+                if use_color {
+                    paint_gradient_border(frame.buffer_mut(), left_chunks[0], frame_area);
                 }
-                Paragraph::new(banner_text).block(block)
-            };
-            frame.render_widget(Clear, left_chunks[0]);
-            frame.render_widget(banner_widget, left_chunks[0]);
-            if use_color {
-                paint_gradient_border(frame.buffer_mut(), left_chunks[0], frame_area);
-            }
 
-            // Steps box (bottom-left)
-            let step_inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
-            let mut step_lines = ctx.steps.render_lines(step_inner_width, ctx.selected);
-            // Add one line of padding at the top and bottom of the Steps section.
-            step_lines.insert(0, String::new());
-            step_lines.push(String::new());
-            let step_text = step_lines.join("\n");
-            let step_widget = Paragraph::new(step_text).block(
-                Block::default()
+                // Steps box (bottom-left)
+                let step_inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
+                let mut step_lines = ctx.steps.render_lines(step_inner_width, ctx.selected);
+                // Add one line of padding at the top and bottom of the Steps section.
+                step_lines.insert(0, String::new());
+                step_lines.push(String::new());
+                let step_text = step_lines.join("\n");
+                let step_widget = Paragraph::new(step_text).block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(" Steps "),
+                );
+                frame.render_widget(Clear, left_chunks[1]);
+                frame.render_widget(step_widget, left_chunks[1]);
+                if use_color {
+                    paint_gradient_border(frame.buffer_mut(), left_chunks[1], frame_area);
+                }
+
+                // ── Right column: output pane ──
+                // Reserve 2 lines for padding (top + bottom) inside the Output box.
+                const OUTPUT_PADDING: usize = 2;
+                let log_inner_height = h_chunks[1].height.saturating_sub(2) as usize;
+                // When a confirm/file-select overlay is active it appends extra
+                // lines after the log content.  Reduce the log window so the
+                // total (top-pad + log + overlay) fits inside `log_inner_height`.
+                //
+                // Without overlay: 1 (top pad) + log_height + 1 (bottom pad) = inner
+                // With confirm:    1 + log_height + 1 (blank) + CONFIRM_LINES  = inner
+                // With file-sel:   1 + log_height + 1 (blank) + file_sel_lines = inner
+                let overlay_extra = if ctx.confirm.is_some() {
+                    // blank separator + CONFIRM_LINES, minus the 1-line bottom pad
+                    // that would normally occupy that slot
+                    CONFIRM_LINES // 3 extra lines beyond the normal bottom pad
+                } else if let Some(fs) = ctx.file_select {
+                    file_select_line_count(fs.items.len()) // extra lines beyond normal bottom pad
+                } else if let Some(ss) = ctx.single_select {
+                    single_select_line_count(ss.items.len())
+                } else {
+                    0
+                };
+                let log_height = log_inner_height.saturating_sub(OUTPUT_PADDING + overlay_extra);
+                let log_width = h_chunks[1].width.saturating_sub(2 + 2 * HORIZ_PAD as u16) as usize;
+                let mut log_lines =
+                    ctx.log
+                        .render_to_string(log_height, log_width, ctx.scroll_offset);
+                // Insert one blank line at the top for visual breathing room.
+                // Pad to `log_width` so Paragraph writes every cell in the row,
+                // preventing stale buffer content from bleeding through.
+                let pad = " ".repeat(log_width);
+                log_lines.insert(0, pad.clone());
+                if let Some(cs) = ctx.confirm {
+                    log_lines.push(String::new());
+                    append_confirm_lines(&mut log_lines, cs);
+                } else if let Some(fs) = ctx.file_select {
+                    log_lines.push(String::new());
+                    append_file_select_lines(&mut log_lines, fs);
+                } else if let Some(ss) = ctx.single_select {
+                    append_single_select_lines(&mut log_lines, ss);
+                } else {
+                    log_lines.push(pad);
+                }
+                let log_text = log_lines.join("\n");
+                let hint_line = build_hint_line(&ctx, log_height, log_width);
+                let mut output_block = Block::default()
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .title(" Steps "),
-            );
-            frame.render_widget(Clear, left_chunks[1]);
-            frame.render_widget(step_widget, left_chunks[1]);
-            if use_color {
-                paint_gradient_border(frame.buffer_mut(), left_chunks[1], frame_area);
-            }
-
-            // ── Right column: output pane ──
-            // Reserve 2 lines for padding (top + bottom) inside the Output box.
-            const OUTPUT_PADDING: usize = 2;
-            let log_inner_height = h_chunks[1].height.saturating_sub(2) as usize;
-            // When a confirm/file-select overlay is active it appends extra
-            // lines after the log content.  Reduce the log window so the
-            // total (top-pad + log + overlay) fits inside `log_inner_height`.
-            //
-            // Without overlay: 1 (top pad) + log_height + 1 (bottom pad) = inner
-            // With confirm:    1 + log_height + 1 (blank) + CONFIRM_LINES  = inner
-            // With file-sel:   1 + log_height + 1 (blank) + file_sel_lines = inner
-            let overlay_extra = if ctx.confirm.is_some() {
-                // blank separator + CONFIRM_LINES, minus the 1-line bottom pad
-                // that would normally occupy that slot
-                CONFIRM_LINES // 3 extra lines beyond the normal bottom pad
-            } else if let Some(fs) = ctx.file_select {
-                file_select_line_count(fs.items.len()) // extra lines beyond normal bottom pad
-            } else if let Some(ss) = ctx.single_select {
-                single_select_line_count(ss.items.len())
+                    .title(" Output ")
+                    .padding(Padding::horizontal(HORIZ_PAD as u16));
+                if let Some(hint) = hint_line {
+                    output_block = output_block.title_bottom(hint);
+                }
+                let log_widget = Paragraph::new(log_text).block(output_block);
+                frame.render_widget(Clear, h_chunks[1]);
+                frame.render_widget(log_widget, h_chunks[1]);
+                if use_color {
+                    paint_gradient_border(frame.buffer_mut(), h_chunks[1], frame_area);
+                }
             } else {
-                0
-            };
-            let log_height = log_inner_height.saturating_sub(OUTPUT_PADDING + overlay_extra);
-            let log_width = h_chunks[1].width.saturating_sub(2 + 2 * HORIZ_PAD as u16) as usize;
-            let mut log_lines = ctx
-                .log
-                .render_to_string(log_height, log_width, ctx.scroll_offset);
-            // Insert one blank line at the top for visual breathing room.
-            // Pad to `log_width` so Paragraph writes every cell in the row,
-            // preventing stale buffer content from bleeding through.
-            let pad = " ".repeat(log_width);
-            log_lines.insert(0, pad.clone());
-            if let Some(cs) = ctx.confirm {
-                log_lines.push(String::new());
-                append_confirm_lines(&mut log_lines, cs);
-            } else if let Some(fs) = ctx.file_select {
-                log_lines.push(String::new());
-                append_file_select_lines(&mut log_lines, fs);
-            } else if let Some(ss) = ctx.single_select {
-                append_single_select_lines(&mut log_lines, ss);
-            } else {
-                log_lines.push(pad);
-            }
-            let log_text = log_lines.join("\n");
-            let hint_line = build_hint_line(&ctx, log_height, log_width);
-            let mut output_block = Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(" Output ")
-                .padding(Padding::horizontal(HORIZ_PAD as u16));
-            if let Some(hint) = hint_line {
-                output_block = output_block.title_bottom(hint);
-            }
-            let log_widget = Paragraph::new(log_text).block(output_block);
-            frame.render_widget(Clear, h_chunks[1]);
-            frame.render_widget(log_widget, h_chunks[1]);
-            if use_color {
-                paint_gradient_border(frame.buffer_mut(), h_chunks[1], frame_area);
-            }
-        } else {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Fill(1)])
-                .split(content_area);
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Fill(1)])
+                    .split(content_area);
 
-            let condensed = ctx.steps.render_condensed(area.width as usize);
-            frame.render_widget(Clear, chunks[0]);
-            frame.render_widget(Paragraph::new(condensed), chunks[0]);
+                let condensed = ctx.steps.render_condensed(area.width as usize);
+                frame.render_widget(Clear, chunks[0]);
+                frame.render_widget(Paragraph::new(condensed), chunks[0]);
 
-            let log_inner_height = chunks[1].height as usize;
-            let log_width = area.width as usize;
-            // Reserve space for overlay lines so they are not clipped.
-            let overlay_extra = if ctx.confirm.is_some() {
-                CONFIRM_LINES
-            } else if let Some(fs) = ctx.file_select {
-                file_select_line_count(fs.items.len())
-            } else if let Some(ss) = ctx.single_select {
-                single_select_line_count(ss.items.len())
-            } else {
-                0
-            };
-            let log_height = log_inner_height.saturating_sub(overlay_extra);
-            let mut log_lines = ctx
-                .log
-                .render_to_string(log_height, log_width, ctx.scroll_offset);
-            if let Some(cs) = ctx.confirm {
-                append_confirm_lines(&mut log_lines, cs);
-            } else if let Some(fs) = ctx.file_select {
-                append_file_select_lines(&mut log_lines, fs);
-            } else if let Some(ss) = ctx.single_select {
-                append_single_select_lines(&mut log_lines, ss);
+                let log_inner_height = chunks[1].height as usize;
+                let log_width = area.width as usize;
+                // Reserve space for overlay lines so they are not clipped.
+                let overlay_extra = if ctx.confirm.is_some() {
+                    CONFIRM_LINES
+                } else if let Some(fs) = ctx.file_select {
+                    file_select_line_count(fs.items.len())
+                } else if let Some(ss) = ctx.single_select {
+                    single_select_line_count(ss.items.len())
+                } else {
+                    0
+                };
+                let log_height = log_inner_height.saturating_sub(overlay_extra);
+                let mut log_lines =
+                    ctx.log
+                        .render_to_string(log_height, log_width, ctx.scroll_offset);
+                if let Some(cs) = ctx.confirm {
+                    append_confirm_lines(&mut log_lines, cs);
+                } else if let Some(fs) = ctx.file_select {
+                    append_file_select_lines(&mut log_lines, fs);
+                } else if let Some(ss) = ctx.single_select {
+                    append_single_select_lines(&mut log_lines, ss);
+                }
+                let log_text = log_lines.join("\n");
+                frame.render_widget(Clear, chunks[1]);
+                frame.render_widget(Paragraph::new(log_text), chunks[1]);
             }
-            let log_text = log_lines.join("\n");
-            frame.render_widget(Clear, chunks[1]);
-            frame.render_widget(Paragraph::new(log_text), chunks[1]);
-        }
-    })?;
+        })
+        .map_err(|e| io::Error::other(e.to_string()))?;
     Ok(())
 }
 
