@@ -44,4 +44,20 @@ mod tests {
         let cli = Cli::parse_from(["actual", "runners"]);
         assert!(run(cli).is_ok());
     }
+
+    #[test]
+    fn test_run_cache_clear_returns_ok() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        config::paths::save_to(&config::Config::default(), &config_file).unwrap();
+
+        // Redirect config path via env var so the live ~/.actualai config is not used.
+        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let cli = Cli::parse_from(["actual", "cache", "clear"]);
+        let result = run(cli);
+        std::env::remove_var("ACTUAL_CONFIG");
+
+        assert!(result.is_ok());
+    }
 }
