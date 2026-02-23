@@ -206,31 +206,48 @@ actual config set cursor_model <model-name>
 
 When determining which runner to use, the CLI checks in this priority order:
 
-1. **`--model` CLI flag** (if provided): infers runner from model name pattern
-2. **`cursor_model` config key** (if set): always implies cursor-cli
-3. **`model` config key** (if set): infers runner from model name pattern
-4. **`--runner` CLI flag or `runner` config key**: explicit runner choice
-5. **Default**: claude-cli
+1. **`--runner` CLI flag** (if provided): use that runner directly, no probing
+2. **`runner` config key** (if set): use that runner directly, no probing
+3. **Auto-detection** (`auto_detect_runner`): probe the environment to find which runner is actually available (see below)
 
-The `--runner` flag always takes precedence when explicitly set alongside `--model`. But when only `--model` is provided, the runner is inferred from the model name.
+When `--runner` or `runner` config is set, the runner is used unconditionally — no environment probing occurs.
 
-## Model-to-Runner Inference
+## Auto-Detection (no `--runner` / no config `runner`)
 
-The `infer_from_model` function maps model names to runners:
+When no explicit runner is specified, `auto_detect_runner` selects a runner by probing the environment in candidate order. The probe order is determined by the model:
 
-| Model Pattern | Regex / Match | Inferred Runner |
-|---------------|---------------|-----------------|
-| Short aliases: `sonnet`, `opus`, `haiku` | Exact match (case-insensitive) | claude-cli |
-| Full Anthropic: `claude-*` | Starts with `claude-` | anthropic-api |
-| OpenAI standard: `gpt-*`, `o1*`, `o3*`, `o4*`, `chatgpt-*` | Starts with prefix (non-codex) | codex-cli |
-| Codex models: `codex-*`, `gpt-*-codex*` | Contains `codex` | codex-cli |
-| Unrecognized | No match | Error with known model list |
+1. **`--model` CLI flag** (if provided): use `runner_candidates(model)` to get an ordered list
+2. **`cursor_model` config key** (if set): always produces `[CursorCli]`
+3. **`model` config key** (if set): use `runner_candidates(model)` to get an ordered list
+4. **No model**: default candidate list `[ClaudeCli, AnthropicApi]`
+
+Each candidate is probed in order:
+- **ClaudeCli**: checks that the binary exists and auth is valid
+- **AnthropicApi**: checks that `ANTHROPIC_API_KEY` is set (env or config)
+- **OpenAiApi**: checks that `OPENAI_API_KEY` is set (env or config)
+- **CodexCli**: checks that the `codex` binary exists and auth is available
+- **CursorCli**: checks that the `cursor-agent` binary exists and auth is available
+
+The **first candidate whose probe succeeds** is selected. If all fail, the `NoRunnerAvailable` error (exit code 2) is returned with a list of every candidate and the reason each failed.
+
+## Model-to-Runner Candidate Mapping
+
+The `runner_candidates(model)` function returns an **ordered list** of candidates for a given model name:
+
+| Model Pattern | Candidates (in priority order) |
+|---------------|-------------------------------|
+| Short aliases: `sonnet`, `opus`, `haiku` | `[ClaudeCli, AnthropicApi]` |
+| Full Anthropic: `claude-*` | `[AnthropicApi, ClaudeCli]` |
+| OpenAI standard: `gpt-*`, `o1*`, `o3*`, `o4*`, `chatgpt-*` | `[CodexCli, OpenAiApi]` |
+| Codex models: `codex-*`, `gpt-*-codex*` | `[CodexCli, OpenAiApi]` |
+| Unrecognized / custom | `[ClaudeCli, AnthropicApi, OpenAiApi, CodexCli, CursorCli]` |
 
 ### Edge Cases
 
-- `chatgpt-*` goes to codex-cli (not a separate runner)
-- Short aliases (`sonnet`) go to claude-cli, while full names (`claude-sonnet-4-6`) go to anthropic-api
-- This means `actual sync --model sonnet` uses claude-cli but `actual sync --model claude-sonnet-4-6` uses anthropic-api
+- Short aliases (`sonnet`) try `ClaudeCli` first, then fall back to `AnthropicApi`
+- Full names (`claude-sonnet-4-6`) try `AnthropicApi` first, then fall back to `ClaudeCli`
+- `chatgpt-*` goes to `CodexCli` first, then `OpenAiApi`
+- Unrecognized model names probe all runners in the order listed above
 
 ## Troubleshooting
 
@@ -252,6 +269,7 @@ Check with: `which claude`, `which codex`, `which agent`
 | CodexNotAuthenticated | codex-cli | Set `OPENAI_API_KEY` or `codex login` |
 | ApiKeyMissing | anthropic-api / openai-api | Set the required env var |
 | CodexCliModelRequiresApiKey | codex-cli + OAuth | Set `OPENAI_API_KEY` (OAuth only supports default model) |
+| NoRunnerAvailable | (auto-detect) | Install a runner or set an API key; see error output for which candidates were tried |
 
 ### Runner Timeout
 
