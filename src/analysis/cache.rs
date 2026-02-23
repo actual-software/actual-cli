@@ -156,6 +156,23 @@ pub fn get_git_branch(repo_path: &Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Returns `true` if the serialized form of `cached` exceeds [`CACHE_MAX_SIZE_BYTES`].
+///
+/// When this returns `true`, the caller should skip persisting the cache entry.
+fn is_analysis_cache_oversized(cached: &CachedAnalysis) -> bool {
+    use crate::config::types::CACHE_MAX_SIZE_BYTES;
+    let serialized_size = serde_yml::to_string(cached).map(|s| s.len()).unwrap_or(0);
+    if serialized_size > CACHE_MAX_SIZE_BYTES {
+        tracing::warn!(
+            "analysis cache size ({} bytes) exceeds limit ({} bytes); skipping cache",
+            serialized_size,
+            CACHE_MAX_SIZE_BYTES
+        );
+        return true;
+    }
+    false
+}
+
 /// Run repository analysis with caching based on git HEAD.
 ///
 /// If the repository has a git HEAD that matches the cached analysis,
@@ -219,16 +236,7 @@ pub fn run_analysis_cached(
     };
 
     // Size guard: skip caching if the analysis data exceeds the limit.
-    use crate::config::types::CACHE_MAX_SIZE_BYTES;
-    let serialized_size = serde_yml::to_string(&cached_analysis)
-        .map(|s| s.len())
-        .unwrap_or(0);
-    if serialized_size > CACHE_MAX_SIZE_BYTES {
-        tracing::warn!(
-            "analysis cache size ({} bytes) exceeds limit ({} bytes); skipping cache",
-            serialized_size,
-            CACHE_MAX_SIZE_BYTES
-        );
+    if is_analysis_cache_oversized(&cached_analysis) {
         return Ok(AnalysisOutcome {
             analysis,
             cache_status,
@@ -1033,6 +1041,64 @@ cached_analysis:
         assert_eq!(CacheStatus::Miss.label(), "(fresh)");
         assert_eq!(CacheStatus::ForcedMiss.label(), "(forced refresh)");
         assert_eq!(CacheStatus::Uncacheable.label(), "(no cache)");
+    }
+
+    #[test]
+    fn test_is_analysis_cache_oversized_returns_false_for_small_analysis() {
+        let cached = CachedAnalysis {
+            repo_path: "/fake/repo".to_string(),
+            head_commit: Some("abc123".to_string()),
+            config_hash: Some("cfghash".to_string()),
+            analysis: valid_analysis(),
+            analyzed_at: chrono::Utc::now(),
+        };
+        assert!(
+            !is_analysis_cache_oversized(&cached),
+            "small analysis should not be considered oversized"
+        );
+    }
+
+    #[test]
+    fn test_is_analysis_cache_oversized_returns_true_for_large_analysis() {
+        use crate::analysis::types::Project;
+        use crate::config::types::CACHE_MAX_SIZE_BYTES;
+
+        // Each project description is 1 KiB; 12_000 projects ≈ 12 MiB > 10 MiB limit.
+        let big_description = "x".repeat(1024);
+        let projects: Vec<Project> = (0..12_000)
+            .map(|i| Project {
+                path: format!("proj-{i}"),
+                name: format!("project-{i}"),
+                languages: vec![],
+                frameworks: vec![],
+                package_manager: None,
+                description: Some(big_description.clone()),
+                dep_count: 0,
+                dev_dep_count: 0,
+                selection: None,
+            })
+            .collect();
+        let big_analysis = RepoAnalysis {
+            is_monorepo: true,
+            workspace_type: None,
+            projects,
+        };
+        let cached = CachedAnalysis {
+            repo_path: "/fake/repo".to_string(),
+            head_commit: Some("abc123".to_string()),
+            config_hash: Some("cfghash".to_string()),
+            analysis: big_analysis,
+            analyzed_at: chrono::Utc::now(),
+        };
+        let size = serde_yml::to_string(&cached).map(|s| s.len()).unwrap_or(0);
+        assert!(
+            size > CACHE_MAX_SIZE_BYTES,
+            "test fixture must exceed the limit ({size} bytes vs {CACHE_MAX_SIZE_BYTES} bytes)"
+        );
+        assert!(
+            is_analysis_cache_oversized(&cached),
+            "large analysis must be flagged as oversized"
+        );
     }
 
     #[test]
