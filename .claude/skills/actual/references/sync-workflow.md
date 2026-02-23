@@ -145,10 +145,13 @@ The environment check in step 1 displays:
 
 ## Analysis and Caching
 
-- Cache key: derived from the git repository state
-- Cache location: managed internally by the CLI
-- Cache invalidation: automatic when repo content changes
+- Cache key: derived from the git repository state + config hash (include/exclude categories, include_general, max_per_framework)
+- Cache location: managed internally by the CLI (stored in `~/.actualai/actual/config.yaml` under `cached_analysis`)
+- Cache invalidation: automatic when repo content changes or config fields change
+- **TTL**: cached entries expire after 7 days and are treated as a miss
+- **Size limit**: entries larger than 10 MiB when serialized are silently skipped (not cached)
 - `--force` always bypasses the cache
+- Use `actual cache clear` to manually wipe cached analysis and tailoring results
 
 ## ADR Fetching
 
@@ -163,7 +166,7 @@ The environment check in step 1 displays:
 - Input: raw ADR content + codebase analysis context
 - Output: ADR content adapted to the specific project
 - Runner: uses whichever runner is configured (same as sync's main runner)
-- Caching: tailored results are cached per (ADR content hash, codebase hash)
+- Caching: tailored results are cached per (ADR content hash, codebase hash); TTL 7 days; max 10 MiB
 - Budget: `--max-budget-usd` limits total spend across all tailoring calls
 
 ## Diff and Write
