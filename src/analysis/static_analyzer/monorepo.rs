@@ -280,7 +280,7 @@ fn detect_cargo_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::
     }
 
     let content = read_with_path(&path)?;
-    let toml_val: toml::Value = content.parse().map_err(|e: toml::de::Error| {
+    let toml_val: toml::Value = toml::from_str(&content).map_err(|e: toml::de::Error| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("invalid Cargo.toml: {e}"),
@@ -561,7 +561,7 @@ fn name_from_package_json(dir: &Path) -> Option<String> {
 fn name_from_cargo_toml(dir: &Path) -> Option<String> {
     let path = dir.join("Cargo.toml");
     let content = fs::read_to_string(path).ok()?;
-    let toml_val: toml::Value = content.parse().ok()?;
+    let toml_val: toml::Value = toml::from_str(&content).ok()?;
     toml_val
         .get("package")?
         .get("name")?
@@ -572,7 +572,7 @@ fn name_from_cargo_toml(dir: &Path) -> Option<String> {
 fn name_from_pyproject_toml(dir: &Path) -> Option<String> {
     let path = dir.join("pyproject.toml");
     let content = fs::read_to_string(path).ok()?;
-    let toml_val: toml::Value = content.parse().ok()?;
+    let toml_val: toml::Value = toml::from_str(&content).ok()?;
 
     // Try [project].name first
     if let Some(name) = toml_val

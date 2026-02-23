@@ -167,7 +167,7 @@ fn parse_cargo_toml(
         Some(c) => c,
         None => return,
     };
-    let parsed: toml::Value = match content.parse() {
+    let parsed: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("failed to parse {}: {e}", path.display());
@@ -229,7 +229,7 @@ fn parse_pyproject_toml(
         Some(c) => c,
         None => return,
     };
-    let parsed: toml::Value = match content.parse() {
+    let parsed: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("failed to parse {}: {e}", path.display());
@@ -378,7 +378,7 @@ fn parse_pipfile(
         Some(c) => c,
         None => return,
     };
-    let parsed: toml::Value = match content.parse() {
+    let parsed: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("failed to parse {}: {e}", path.display());
@@ -654,7 +654,7 @@ pub(crate) fn parse_gradle_version_catalog(
         None => return,
     };
 
-    let table: toml::Table = match content.parse() {
+    let table: toml::Table = match toml::from_str(&content) {
         Ok(t) => t,
         Err(_) => return,
     };
