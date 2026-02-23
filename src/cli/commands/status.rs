@@ -128,10 +128,6 @@ fn format_config_section(
             None => "(inferred from model)".to_string(),
         };
         panel = panel.kv("Runner", &runner);
-
-        if let Some(ref cursor_model) = cfg.cursor_model {
-            panel = panel.kv("Cursor model", cursor_model);
-        }
     }
 
     panel.render(width)
@@ -602,42 +598,10 @@ mod tests {
     }
 
     #[test]
-    fn test_format_config_section_verbose_shows_cursor_model() {
-        let cfg = Config {
-            cursor_model: Some("cursor-fast".to_string()),
-            ..Config::default()
-        };
-        let path = PathBuf::from("/tmp/test/config.yaml");
-        let output = format_config_section(&cfg, &path, true, true, 80);
-        let p = plain(&output);
-        assert!(
-            p.contains("Cursor model"),
-            "should show Cursor model in verbose mode: {p}"
-        );
-        assert!(
-            p.contains("cursor-fast"),
-            "should show cursor model value: {p}"
-        );
-    }
-
-    #[test]
-    fn test_format_config_section_verbose_hides_cursor_model_when_not_set() {
-        let cfg = Config::default();
-        let path = PathBuf::from("/tmp/test/config.yaml");
-        let output = format_config_section(&cfg, &path, true, true, 80);
-        let p = plain(&output);
-        assert!(
-            !p.contains("Cursor model"),
-            "should not show Cursor model when not set: {p}"
-        );
-    }
-
-    #[test]
     fn test_format_config_section_verbose_all_fields() {
         let cfg = Config {
             runner: Some("openai-api".to_string()),
             model: Some("sonnet".to_string()),
-            cursor_model: Some("cursor-small".to_string()),
             ..Config::default()
         };
         let path = PathBuf::from("/tmp/test/config.yaml");
@@ -651,10 +615,9 @@ mod tests {
             !p.contains("OpenAI model"),
             "should NOT show separate OpenAI model row: {p}"
         );
-        assert!(p.contains("Cursor model"), "should show Cursor model: {p}");
         assert!(
-            p.contains("cursor-small"),
-            "should show cursor model value: {p}"
+            !p.contains("Cursor model"),
+            "should NOT show Cursor model row: {p}"
         );
     }
 
@@ -662,7 +625,6 @@ mod tests {
     fn test_format_config_section_verbose_not_shown_when_not_verbose() {
         let cfg = Config {
             runner: Some("anthropic-api".to_string()),
-            cursor_model: Some("cursor-fast".to_string()),
             ..Config::default()
         };
         let path = PathBuf::from("/tmp/test/config.yaml");

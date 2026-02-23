@@ -65,16 +65,14 @@ fn require_api_key_for_model(
 ///
 /// Priority order:
 ///   1. `args_model` (--model CLI flag overrides everything)
-///   2. `cursor_model` (dedicated Cursor config field forces CursorCli)
-///   3. `model` (the unified model config field)
-///   4. Default: probe ClaudeCli first, then AnthropicApi
+///   2. `model` (the unified model config field)
+///   3. Default: probe ClaudeCli first, then AnthropicApi
 ///
 /// For each model, determines the list of candidate runners in priority order,
 /// then probes each in turn.  Returns the first available runner, or
 /// `Err(ActualError::NoRunnerAvailable)` if none are available.
 fn auto_detect_runner(
     args_model: Option<&str>,
-    cursor_model: Option<&str>,
     model: Option<&str>,
     cfg: &crate::config::types::Config,
 ) -> Result<RunnerChoice, ActualError> {
@@ -82,18 +80,13 @@ fn auto_detect_runner(
 
     // Resolve candidates in priority order:
     // 1. --model flag overrides everything
-    // 2. cursor_model in Config forces CursorCli (removed in next task)
-    // 3. model config field
-    // 4. No model → default to claude-cli / anthropic-api candidates
+    // 2. model config field
+    // 3. No model → default to claude-cli / anthropic-api candidates
     let (effective_model_display, candidates): (String, Vec<RunnerChoice>) =
         if let Some(m) = args_model {
             let lower = m.to_ascii_lowercase();
             let c = runner_candidates(&lower);
             (m.to_string(), c)
-        } else if cursor_model.is_some() {
-            // cursor_model: Some(_) forces CursorCli (special-cased until b2j.2 removes it)
-            let display = cursor_model.unwrap_or("").to_string();
-            (display, vec![RunnerChoice::CursorCli])
         } else if let Some(m) = model {
             let lower = m.to_ascii_lowercase();
             let c = runner_candidates(&lower);
@@ -254,12 +247,7 @@ where
         // Auto-select runner from model when neither --runner flag nor
         // config runner is set.  See `auto_detect_runner` doc comment
         // for the full priority order.
-        auto_detect_runner(
-            args.model.as_deref(),
-            cfg.cursor_model.as_deref(),
-            cfg.model.as_deref(),
-            &cfg,
-        )?
+        auto_detect_runner(args.model.as_deref(), cfg.model.as_deref(), &cfg)?
     };
 
     // Resolve the per-subprocess timeout: config value takes precedence over the
@@ -451,7 +439,6 @@ where
             let model = args
                 .model
                 .as_deref()
-                .or(cfg.cursor_model.as_deref())
                 .or(cfg.model.as_deref())
                 .map(|s| s.to_string());
             let display_model = model
@@ -1122,7 +1109,7 @@ mod tests {
         let bin_dir = tempfile::tempdir().unwrap();
         let fake_claude = make_fake_claude_logged_in(bin_dir.path());
         let _g1 = EnvGuard::set("CLAUDE_BINARY", fake_claude.to_str().unwrap());
-        let result = auto_detect_runner(None, None, None, &default_cfg());
+        let result = auto_detect_runner(None, None, &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::ClaudeCli);
     }
 
@@ -1131,7 +1118,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
         let _g2 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
-        let result = auto_detect_runner(None, None, None, &default_cfg());
+        let result = auto_detect_runner(None, None, &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
 
@@ -1140,31 +1127,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
         let _g2 = EnvGuard::remove("ANTHROPIC_API_KEY");
-        let result = auto_detect_runner(None, None, None, &default_cfg());
-        assert!(
-            matches!(result, Err(ActualError::NoRunnerAvailable { .. })),
-            "expected NoRunnerAvailable, got: {result:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn auto_detect_cursor_model_forces_cursor_cli_when_available() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let bin_dir = tempfile::tempdir().unwrap();
-        let fake_cursor = make_fake_binary(bin_dir.path(), "fake-cursor");
-        let _g1 = EnvGuard::set("CURSOR_BINARY", fake_cursor.to_str().unwrap());
-        let _g2 = EnvGuard::set("CURSOR_API_KEY", "cursor-test-key");
-        let result = auto_detect_runner(None, Some("auto"), None, &default_cfg());
-        assert_eq!(result.unwrap(), RunnerChoice::CursorCli);
-    }
-
-    #[test]
-    fn auto_detect_cursor_model_cursor_unavailable_returns_error() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("CURSOR_BINARY", "/nonexistent/cursor-agent");
-        let _g2 = EnvGuard::remove("CURSOR_API_KEY");
-        let result = auto_detect_runner(None, Some("auto"), None, &default_cfg());
+        let result = auto_detect_runner(None, None, &default_cfg());
         assert!(
             matches!(result, Err(ActualError::NoRunnerAvailable { .. })),
             "expected NoRunnerAvailable, got: {result:?}"
@@ -1179,7 +1142,7 @@ mod tests {
         let fake_codex = make_fake_binary(bin_dir.path(), "fake-codex");
         let _g1 = EnvGuard::set("CODEX_BINARY", fake_codex.to_str().unwrap());
         let _g2 = EnvGuard::set("OPENAI_API_KEY", "sk-openai");
-        let result = auto_detect_runner(Some("gpt-5"), None, None, &default_cfg());
+        let result = auto_detect_runner(Some("gpt-5"), None, &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::CodexCli);
     }
 
@@ -1188,7 +1151,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("CODEX_BINARY", "/nonexistent/codex");
         let _g2 = EnvGuard::set("OPENAI_API_KEY", "sk-openai");
-        let result = auto_detect_runner(Some("gpt-5"), None, None, &default_cfg());
+        let result = auto_detect_runner(Some("gpt-5"), None, &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::OpenAiApi);
     }
 
@@ -1196,7 +1159,7 @@ mod tests {
     fn auto_detect_args_model_anthropic_full_returns_anthropic_api() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
-        let result = auto_detect_runner(Some("claude-sonnet-4-6"), None, None, &default_cfg());
+        let result = auto_detect_runner(Some("claude-sonnet-4-6"), None, &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
 
@@ -1207,7 +1170,7 @@ mod tests {
         let bin_dir = tempfile::tempdir().unwrap();
         let fake_claude = make_fake_claude_logged_in(bin_dir.path());
         let _g1 = EnvGuard::set("CLAUDE_BINARY", fake_claude.to_str().unwrap());
-        let result = auto_detect_runner(Some("sonnet"), None, None, &default_cfg());
+        let result = auto_detect_runner(Some("sonnet"), None, &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::ClaudeCli);
     }
 
@@ -1219,7 +1182,7 @@ mod tests {
         let fake_codex = make_fake_binary(bin_dir.path(), "fake-codex");
         let _g1 = EnvGuard::set("CODEX_BINARY", fake_codex.to_str().unwrap());
         let _g2 = EnvGuard::set("OPENAI_API_KEY", "sk-openai");
-        let result = auto_detect_runner(None, None, Some("gpt-5-mini"), &default_cfg());
+        let result = auto_detect_runner(None, Some("gpt-5-mini"), &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::CodexCli);
     }
 
@@ -1227,21 +1190,16 @@ mod tests {
     fn auto_detect_cfg_model_anthropic_returns_anthropic_api() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant");
-        let result = auto_detect_runner(None, None, Some("claude-sonnet-4-6"), &default_cfg());
+        let result = auto_detect_runner(None, Some("claude-sonnet-4-6"), &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
 
     #[test]
-    fn auto_detect_args_model_overrides_cursor_model() {
+    fn auto_detect_args_model_overrides_cfg_model() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant");
-        let result = auto_detect_runner(
-            Some("claude-sonnet-4-6"),
-            Some("auto"),
-            None,
-            &default_cfg(),
-        );
-        // args_model wins → AnthropicApi (not CursorCli)
+        let result = auto_detect_runner(Some("claude-sonnet-4-6"), None, &default_cfg());
+        // args_model wins → AnthropicApi
         assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
 
@@ -1250,7 +1208,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("CURSOR_BINARY", "/nonexistent/cursor-agent");
         let _g2 = EnvGuard::remove("CURSOR_API_KEY");
-        let result = auto_detect_runner(Some("my-custom-model"), None, None, &default_cfg());
+        let result = auto_detect_runner(Some("my-custom-model"), None, &default_cfg());
         assert!(
             matches!(
                 result,
@@ -1265,7 +1223,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
         let _g2 = EnvGuard::remove("ANTHROPIC_API_KEY");
-        let result = auto_detect_runner(Some("sonnet"), None, None, &default_cfg());
+        let result = auto_detect_runner(Some("sonnet"), None, &default_cfg());
         let err = result.expect_err("expected NoRunnerAvailable");
         let msg = err.to_string();
         assert!(
@@ -1287,7 +1245,7 @@ mod tests {
             anthropic_api_key: Some("sk-ant-from-config".to_string()),
             ..Default::default()
         };
-        let result = auto_detect_runner(None, None, None, &cfg);
+        let result = auto_detect_runner(None, None, &cfg);
         assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
 
@@ -1303,7 +1261,7 @@ mod tests {
             openai_api_key: Some("sk-openai-from-config".to_string()),
             ..Default::default()
         };
-        let result = auto_detect_runner(Some("gpt-5"), None, None, &cfg);
+        let result = auto_detect_runner(Some("gpt-5"), None, &cfg);
         assert_eq!(result.unwrap(), RunnerChoice::CodexCli);
     }
 
@@ -1511,6 +1469,24 @@ mod tests {
         assert!(
             !matches!(&result, Err(ActualError::ApiKeyMissing { .. })),
             "API key from env should resolve: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_preamble_cursor_model_yaml_field_folds_into_model() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("CURSOR_BINARY", "/nonexistent/cursor-agent");
+        let _g2 = EnvGuard::remove("CURSOR_API_KEY");
+        let dir = tempfile::tempdir().unwrap();
+        // YAML uses old cursor_model key — must load into cfg.model via alias
+        let _g3 = with_temp_config(&dir, "cursor_model: cursor-fast\n");
+        let args = make_sync_args(None);
+        let result = sync_run_inner(&args, auth_not_authenticated);
+        // cursor-fast is unrecognized → runner_candidates returns [CursorCli]
+        // → all fail (binary missing) → NoRunnerAvailable
+        assert!(
+            matches!(result, Err(ActualError::NoRunnerAvailable { .. })),
+            "cursor_model YAML should fold into model and route through auto_detect_runner: {result:?}"
         );
     }
 }

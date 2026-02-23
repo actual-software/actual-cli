@@ -314,7 +314,7 @@ impl TailoringRunner for CursorCliRunner {
         // Ignore `_model_override` — it comes from `ConcurrentTailoringConfig`
         // which resolves from `config.model` (a Claude Code alias like "haiku").
         // The Cursor runner's `self.model` was already correctly resolved in
-        // `sync_wiring` from `--model` flag > `config.cursor_model` > None
+        // `sync_wiring` from `--model` flag > `config.model` > None
         // (Cursor CLI default), so we always use it here.
         let model = self.model.as_deref();
 

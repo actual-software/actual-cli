@@ -33,7 +33,6 @@ actual config path
 |-----|------|---------|------------|---------|
 | `api_url` | string | (built-in) | URL format | API server URL |
 | `model` | string | (none) | non-empty | Default model for ALL runners (runner is auto-inferred from model name) |
-| `cursor_model` | string | (none) | non-empty | Model for cursor-cli (setting this auto-infers cursor-cli) |
 | `runner` | enum | claude-cli | One of: claude-cli, anthropic-api, openai-api, codex-cli, cursor-cli | AI runner backend |
 | `batch_size` | u32 | 15 | min 1 | ADRs per API batch |
 | `concurrency` | u32 | 10 | min 1 | Parallel API requests |
@@ -54,14 +53,13 @@ actual config path
 
 ### Runner and Model Keys
 
-The `model` key is the **unified model config key** for all runners. The runner is automatically inferred from the model name — setting `model: gpt-5` selects CodexCli, `model: claude-sonnet-4-6` selects AnthropicApi, etc. Setting `cursor_model` always implies cursor-cli.
+The `model` key is the **unified model config key** for all runners. The runner is automatically inferred from the model name — setting `model: gpt-5` selects CodexCli, `model: claude-sonnet-4-6` selects AnthropicApi, etc.
 
 The runner resolution order is:
 1. `--model` CLI flag (infers runner from model name)
-2. `cursor_model` config (always implies cursor-cli)
-3. `model` config (infers runner from model name)
-4. `runner` config or `--runner` flag
-5. Default: claude-cli
+2. `model` config (infers runner from model name)
+3. `runner` config or `--runner` flag
+4. Default: claude-cli
 
 ### Numeric Keys
 
