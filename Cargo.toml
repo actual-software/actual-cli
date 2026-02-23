@@ -5,7 +5,7 @@ members = [".", "crates/tui-test"]
 name = "actual-cli"
 version = "0.1.0"
 edition = "2021"
-description = "ADR-powered CLAUDE.md generator"
+description = "ADR-powered AI context file generator"
 autobenches = false
 default-run = "actual"
 

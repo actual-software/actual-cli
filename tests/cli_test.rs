@@ -11,7 +11,9 @@ fn test_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("ADR-powered CLAUDE.md generator"))
+        .stdout(predicate::str::contains(
+            "ADR-powered AI context file generator",
+        ))
         .stdout(predicate::str::contains("sync"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("auth"))
