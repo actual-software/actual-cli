@@ -48,7 +48,7 @@ indicatif = "0.17"
 console = "0.15"
 similar = "2"
 ratatui = "0.30"
-crossterm = "0.28"
+crossterm = "0.29"
 
 # File system
 dirs = "5"
