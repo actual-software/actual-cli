@@ -121,6 +121,27 @@ actual config path
 
 There is no `config get <key>` subcommand. Use `config show` to view all values.
 
+## Cache Management
+
+The CLI caches analysis and tailoring results in `~/.actualai/actual/config.yaml` under the `cached_analysis` and `cached_tailoring` keys. These are managed automatically.
+
+To clear the cache manually:
+
+```bash
+actual cache clear
+```
+
+This removes both `cached_analysis` and `cached_tailoring` entries from the config file. Other config values are preserved.
+
+### Cache Behavior
+
+| Property | Analysis cache | Tailoring cache |
+|----------|---------------|-----------------|
+| TTL | 7 days | 7 days |
+| Max size | 10 MiB | 10 MiB |
+| Key | git HEAD + config hash | ADR content hash + codebase hash |
+| Bypass | `--force` flag | `--force` flag |
+
 ## Environment Variable Overrides
 
 | Env Var | Overrides Config Key | Notes |
