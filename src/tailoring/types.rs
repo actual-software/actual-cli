@@ -102,8 +102,9 @@ pub struct FileOutput {
     /// Per-ADR sections: one entry per ADR included in this file
     pub sections: Vec<AdrSection>,
     /// Brief explanation of what this file contains and why.
-    /// Populated from LLM output and emitted via `tracing::debug!`.
-    /// Not surfaced in user-visible UI (not in --verbose, not in diff panels).
+    /// Populated from LLM output and emitted via `tracing::debug!` in
+    /// `invoke_tailoring` (`invoke.rs`) after the full tailoring result is
+    /// assembled. Not surfaced in user-visible UI (not in --verbose, not in diff panels).
     pub reasoning: String,
 }
 

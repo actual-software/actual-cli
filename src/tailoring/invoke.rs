@@ -35,39 +35,6 @@ fn format_bundle_context(ctx: &RepoBundleContext) -> String {
 /// If `root_dir` is `Some`, the repository context is pre-bundled via
 /// [`bundle_context`] and injected into the prompt. On failure, bundling is
 /// skipped with a warning and tailoring continues without bundled context.
-/// Core tailoring invocation with a pre-built prompt string.
-///
-/// Separated from [`invoke_tailoring`] so that the prompt-building step
-/// (which involves decoding obfuscated bytes) can be tested independently,
-/// allowing full coverage of the runner invocation and retry logic.
-pub(crate) async fn invoke_tailoring_with_prompt<R: TailoringRunner>(
-    runner: &R,
-    prompt: &str,
-    adrs: &[Adr],
-    model_override: Option<&str>,
-    max_budget_usd: Option<f64>,
-    format: &OutputFormat,
-) -> Result<TailoringOutput, ActualError> {
-    let schema = tailoring_output_schema()?;
-    let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
-
-    // First attempt
-    match runner
-        .run_tailoring(prompt, &schema, model_override, max_budget_usd)
-        .await
-    {
-        Ok(output) => validate_and_filter_output(output, &valid_ids, format),
-        Err(ActualError::RunnerOutputParse(_)) => {
-            // Retry once on JSON parse failure
-            let output = runner
-                .run_tailoring(prompt, &schema, model_override, max_budget_usd)
-                .await?;
-            validate_and_filter_output(output, &valid_ids, format)
-        }
-        Err(e) => Err(e),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn invoke_tailoring<R: TailoringRunner>(
     runner: &R,
@@ -99,23 +66,41 @@ pub async fn invoke_tailoring<R: TailoringRunner>(
     };
 
     let adr_json = serialize_json(adrs, "ADRs")?;
-    let prompt_result = build_prompt(
+    let prompt = build_prompt(
         &adr_json,
         projects_json,
         existing_output_paths,
         format,
         bundled_context,
-    );
-    let prompt = prompt_result?;
-    invoke_tailoring_with_prompt(
-        runner,
-        &prompt,
-        adrs,
-        model_override,
-        max_budget_usd,
-        format,
-    )
-    .await
+    )?;
+
+    let schema = tailoring_output_schema()?;
+    let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
+
+    // First attempt; retry once on JSON parse failure.
+    let output = match runner
+        .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
+        .await
+    {
+        Ok(output) => output,
+        Err(ActualError::RunnerOutputParse(_)) => {
+            runner
+                .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
+                .await?
+        }
+        Err(e) => return Err(e),
+    };
+
+    let result = validate_and_filter_output(output, &valid_ids, format)?;
+
+    // Log reasoning for each output file after the full result is assembled.
+    for file in &result.files {
+        if !file.reasoning.is_empty() {
+            tracing::debug!(path = %file.path, reasoning = %file.reasoning, "tailoring reasoning");
+        }
+    }
+
+    Ok(result)
 }
 
 /// Serialize a value to JSON, mapping errors to `ActualError::InternalError`.
@@ -132,11 +117,10 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
 /// Extracted so the error-path conversion can be unit-tested without
 /// having to corrupt the real obfuscated prompt constant.
 fn prompt_result_to_error(raw: Result<String, ActualError>) -> Result<String, ActualError> {
-    raw.map_err(|_| {
-        ActualError::InternalError(
-            "Tailoring prompt constant is malformed (build artifact mismatch). Please reinstall."
-                .to_string(),
-        )
+    raw.map_err(|e| {
+        ActualError::InternalError(format!(
+            "Tailoring prompt constant is malformed (build artifact mismatch). Please reinstall. Error: {e}"
+        ))
     })
 }
 
@@ -255,7 +239,6 @@ pub(crate) fn validate_and_filter_output(
         }
         deduped.reverse();
         file.sections = deduped;
-        tracing::debug!(path = %file.path, reasoning = %file.reasoning, "tailoring reasoning");
     }
     Ok(output)
 }
@@ -627,13 +610,18 @@ mod tests {
     #[test]
     fn test_prompt_result_to_error_propagates_err_as_internal_error() {
         let raw: Result<String, ActualError> =
-            Err(ActualError::InternalError("decode failure".to_string()));
+            Err(ActualError::InternalError("decode failed".to_string()));
         let result = prompt_result_to_error(raw);
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("malformed"),
             "expected 'malformed' in error message: {msg}"
+        );
+        // Verify the original error is not silently discarded
+        assert!(
+            msg.contains("decode failed"),
+            "expected original error 'decode failed' to be preserved in: {msg}"
         );
         assert!(matches!(err, ActualError::InternalError(_)));
     }
