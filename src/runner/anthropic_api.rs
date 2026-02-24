@@ -689,6 +689,31 @@ mod tests {
         );
     }
 
+    // Test: HTTP 400 with non-JSON body maps to RunnerFailed (covers json-parse-fail branch)
+    #[tokio::test]
+    async fn test_400_non_json_body_maps_to_runner_failed() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(400)
+            .with_header("content-type", "text/plain")
+            .with_body("not json at all")
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed, got: {:?}",
+            result
+        );
+    }
+
     // Test: HTTP 400 without credit_limit_reached maps to RunnerFailed
     #[tokio::test]
     async fn test_400_without_credit_limit_maps_to_runner_failed() {
