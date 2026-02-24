@@ -1191,4 +1191,53 @@ mod tests {
             "expected a 'Rate limited' retry event, got: {events:?}"
         );
     }
+
+    // Test: event_tx emits overloaded retry event on 529 then success
+    #[tokio::test]
+    async fn test_event_tx_emits_overloaded_event_on_529() {
+        let mut server = Server::new_async().await;
+
+        let mock_529 = server
+            .mock("POST", "/v1/messages")
+            .with_status(529)
+            .with_body(r#"{"error": {"type": "overloaded_error", "message": "API overloaded"}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let response_body = anthropic_tool_use_response(tailoring_output_json());
+        let mock_200 = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        runner.set_event_tx(tx);
+
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock_529.assert_async().await;
+        mock_200.assert_async().await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after 529 retry, got: {:?}",
+            result
+        );
+
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            events.push(msg);
+        }
+
+        assert!(
+            events.iter().any(|e| e.contains("overloaded")),
+            "expected an 'overloaded' retry event, got: {events:?}"
+        );
+    }
 }
