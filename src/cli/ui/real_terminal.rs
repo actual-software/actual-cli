@@ -92,100 +92,47 @@ impl TerminalIO for RealTerminal {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::cli::ui::terminal::TerminalIO;
+    use crate::cli::ui::test_utils::MockTerminal;
 
-    /// A minimal `TerminalIO` implementation used to verify the
-    /// `confirm` / `confirm_with_cancel` contract without touching OS I/O.
-    ///
-    /// `interact_result` holds the `Option<bool>` that `confirm_with_cancel`
-    /// will return (mirroring what `dialoguer::Confirm::interact_opt` returns).
-    struct StubTerminal {
-        interact_result: Option<bool>,
-    }
+    // These tests verify the `confirm` / `confirm_with_cancel` default-trait
+    // behaviour using `MockTerminal` from `test_utils`, which uses those
+    // defaults and records I/O without touching OS resources.
 
-    impl StubTerminal {
-        fn returning(result: Option<bool>) -> Self {
-            Self {
-                interact_result: result,
-            }
-        }
-    }
-
-    impl TerminalIO for StubTerminal {
-        fn read_line(&self, _prompt: &str) -> Result<String, ActualError> {
-            unreachable!("read_line not expected in this test context")
-        }
-
-        fn write_line(&self, _text: &str) {}
-
-        fn select_files(
-            &self,
-            _prompt: &str,
-            _items: &[String],
-            _defaults: &[bool],
-        ) -> Result<Option<Vec<usize>>, ActualError> {
-            unreachable!("select_files not expected in this test context")
-        }
-
-        fn select_one(
-            &self,
-            _prompt: &str,
-            _items: &[String],
-            _default: Option<usize>,
-        ) -> Result<usize, ActualError> {
-            unreachable!("select_one not expected in this test context")
-        }
-
-        /// Mirrors `RealTerminal::confirm_with_cancel` by returning the stored
-        /// `Option<bool>` directly, just as `interact_opt()` would.
-        fn confirm_with_cancel(&self, _prompt: &str) -> Result<Option<bool>, ActualError> {
-            Ok(self.interact_result)
-        }
-
-        /// Mirrors `RealTerminal::confirm` by delegating to `confirm_with_cancel`
-        /// and mapping `None` to `false`.
-        fn confirm(&self, prompt: &str) -> Result<bool, ActualError> {
-            self.confirm_with_cancel(prompt)
-                .map(|opt| opt.unwrap_or(false))
-        }
+    #[test]
+    fn confirm_returns_true_for_yes_input() {
+        let mock = MockTerminal::new(vec!["y"]);
+        assert_eq!(mock.confirm("proceed?").unwrap(), true);
     }
 
     #[test]
-    fn confirm_maps_none_to_false() {
-        // None means user pressed Ctrl-C / Escape — confirm() must treat it as No
-        let stub = StubTerminal::returning(None);
-        assert_eq!(stub.confirm("proceed?").unwrap(), false);
+    fn confirm_returns_true_for_yes_long_input() {
+        let mock = MockTerminal::new(vec!["yes"]);
+        assert_eq!(mock.confirm("proceed?").unwrap(), true);
     }
 
     #[test]
-    fn confirm_maps_some_true_to_true() {
-        let stub = StubTerminal::returning(Some(true));
-        assert_eq!(stub.confirm("proceed?").unwrap(), true);
+    fn confirm_returns_false_for_no_input() {
+        let mock = MockTerminal::new(vec!["n"]);
+        assert_eq!(mock.confirm("proceed?").unwrap(), false);
     }
 
     #[test]
-    fn confirm_maps_some_false_to_false() {
-        let stub = StubTerminal::returning(Some(false));
-        assert_eq!(stub.confirm("proceed?").unwrap(), false);
+    fn confirm_returns_false_for_unrecognised_input() {
+        // Unrecognised input defaults to false (safe rejection).
+        let mock = MockTerminal::new(vec!["maybe"]);
+        assert_eq!(mock.confirm("proceed?").unwrap(), false);
     }
 
     #[test]
-    fn confirm_with_cancel_preserves_none() {
-        // Ctrl-C / Escape must be visible to callers as None, not collapsed to false
-        let stub = StubTerminal::returning(None);
-        assert_eq!(stub.confirm_with_cancel("proceed?").unwrap(), None);
+    fn confirm_with_cancel_wraps_true_in_some() {
+        let mock = MockTerminal::new(vec!["y"]);
+        assert_eq!(mock.confirm_with_cancel("proceed?").unwrap(), Some(true));
     }
 
     #[test]
-    fn confirm_with_cancel_preserves_some_true() {
-        let stub = StubTerminal::returning(Some(true));
-        assert_eq!(stub.confirm_with_cancel("proceed?").unwrap(), Some(true));
-    }
-
-    #[test]
-    fn confirm_with_cancel_preserves_some_false() {
-        let stub = StubTerminal::returning(Some(false));
-        assert_eq!(stub.confirm_with_cancel("proceed?").unwrap(), Some(false));
+    fn confirm_with_cancel_wraps_false_in_some() {
+        let mock = MockTerminal::new(vec!["n"]);
+        assert_eq!(mock.confirm_with_cancel("proceed?").unwrap(), Some(false));
     }
 }
