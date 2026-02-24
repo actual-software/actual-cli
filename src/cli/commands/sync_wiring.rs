@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 const DEFAULT_ANTHROPIC_MODEL: &str = DEFAULT_MODEL;
-const DEFAULT_OPENAI_MODEL: &str = "gpt-5.2";
 
 use clap::ValueEnum as _;
 
@@ -150,7 +149,7 @@ fn codex_cli_fallback_if_model_error(
                     tracing::warn!(
                         "Codex CLI failed with a model error, falling back to OpenAI API runner"
                     );
-                    let fallback_model = model.unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
+                    let fallback_model = model.unwrap_or_else(|| "gpt-5.2".to_string());
                     let fallback_auth = AuthDisplay {
                         authenticated: true,
                         email: Some("OpenAI API (fallback)".to_string()),
@@ -335,12 +334,12 @@ where
                 authenticated: true,
                 email: Some("OpenAI API".to_string()),
             };
-            // Model resolution: --model flag > model config > default.
+            // Model resolution: --model flag > model config > OpenAI default.
             let model = args
                 .model
                 .as_deref()
                 .or(cfg.model.as_deref())
-                .unwrap_or(DEFAULT_OPENAI_MODEL)
+                .unwrap_or("gpt-5.2")
                 .to_string();
             let runner_display = RunnerDisplay {
                 runner_name: RunnerChoice::OpenAiApi.display_name().to_string(),
