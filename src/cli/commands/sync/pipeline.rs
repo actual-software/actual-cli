@@ -3097,6 +3097,7 @@ mod tests {
         std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    #[tracing_test::traced_test]
     #[test]
     fn test_find_existing_claude_md_unreadable_file_emits_warn() {
         use std::os::unix::fs::PermissionsExt;
@@ -3104,11 +3105,15 @@ mod tests {
         let file_path = dir.path().join("CLAUDE.md");
         std::fs::write(&file_path, "secret content").unwrap();
         std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        // Should not panic; unreadable file is silently skipped with a warn
+        // unreadable file is skipped and a warning is emitted
         let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert!(
             result.is_empty(),
             "unreadable file should be skipped: {result}"
+        );
+        assert!(
+            logs_contain("failed to read output file"),
+            "expected a warning to be emitted for the unreadable file"
         );
         // Restore permissions for cleanup
         std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644)).unwrap();

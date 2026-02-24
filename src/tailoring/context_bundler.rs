@@ -293,7 +293,13 @@ fn is_likely_text_file(path: &Path) -> bool {
 
 /// Read a file's content, truncating at `MAX_FILE_LINES` lines.
 fn read_file_truncated(path: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to read output file {}: {e}", path.display());
+            return None;
+        }
+    };
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() <= MAX_FILE_LINES {
         Some(content)
@@ -691,6 +697,28 @@ mod tests {
     #[test]
     fn test_read_file_truncated_nonexistent() {
         assert!(read_file_truncated(Path::new("/nonexistent/file.txt")).is_none());
+    }
+
+    // Test 20b: read_file_truncated emits a warning when a file cannot be read (permission denied)
+    #[tracing_test::traced_test]
+    #[test]
+    fn test_read_file_truncated_unreadable_emits_warn() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("secret.txt");
+        fs::write(&path, "content").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = read_file_truncated(&path);
+
+        assert!(result.is_none(), "expected None for unreadable file");
+        assert!(
+            logs_contain("failed to read output file"),
+            "expected a warning to be emitted for the unreadable file"
+        );
+
+        // Restore permissions for cleanup
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     // Test 21: read_file_truncated returns full content for short files
