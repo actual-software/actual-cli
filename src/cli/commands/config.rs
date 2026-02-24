@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::Path;
 
 use crate::cli::args::{ConfigAction, ConfigArgs};
@@ -47,6 +48,10 @@ fn serialize_config_for_display(cfg: &config::Config) -> Result<String, ActualEr
         .map_err(|e| ActualError::ConfigError(format!("Failed to serialize config to YAML: {e}")))
 }
 
+fn has_any_api_key(cfg: &config::Config) -> bool {
+    cfg.anthropic_api_key.is_some() || cfg.openai_api_key.is_some() || cfg.cursor_api_key.is_some()
+}
+
 fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
     match &args.action {
         ConfigAction::Path => {
@@ -57,13 +62,12 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
             let cfg = config::paths::load_from(path)?;
             let yaml = serialize_config_for_display(&cfg)?;
             print!("{}", redact_yaml(&yaml));
-            if cfg.anthropic_api_key.is_some()
-                || cfg.openai_api_key.is_some()
-                || cfg.cursor_api_key.is_some()
-            {
+            std::io::stdout().flush().ok();
+            if has_any_api_key(&cfg) {
                 eprintln!(
-                    "\nNote: API keys in config are stored as plaintext (mode 0600). \
-                     Consider using environment variables instead for better security."
+                    "\nNote: API keys are stored as plaintext in ~/.actualai/actual/config.yaml \
+                     (owner-readable only, mode 0600). For stronger security, use environment \
+                     variables instead to avoid storing keys on disk."
                 );
             }
             Ok(())
@@ -277,6 +281,41 @@ mod tests {
             ))
         });
         assert!(result.is_err());
+    }
+
+    // --- Tests for has_any_api_key ---
+
+    #[test]
+    fn test_has_any_api_key_true_when_anthropic_key_set() {
+        let cfg = config::Config {
+            anthropic_api_key: Some("sk-test".to_string()),
+            ..config::Config::default()
+        };
+        assert!(has_any_api_key(&cfg));
+    }
+
+    #[test]
+    fn test_has_any_api_key_true_when_openai_key_set() {
+        let cfg = config::Config {
+            openai_api_key: Some("sk-openai-test".to_string()),
+            ..config::Config::default()
+        };
+        assert!(has_any_api_key(&cfg));
+    }
+
+    #[test]
+    fn test_has_any_api_key_true_when_cursor_key_set() {
+        let cfg = config::Config {
+            cursor_api_key: Some("cursor-test".to_string()),
+            ..config::Config::default()
+        };
+        assert!(has_any_api_key(&cfg));
+    }
+
+    #[test]
+    fn test_has_any_api_key_false_when_no_keys() {
+        let cfg = config::Config::default();
+        assert!(!has_any_api_key(&cfg));
     }
 
     // --- Tests for redact_yaml ---
@@ -531,9 +570,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");
 
-        let cfg = config::Config {
-            ..config::Config::default()
-        };
+        let cfg = config::Config::default();
         config::paths::save_to(&cfg, &config_file).unwrap();
 
         let args = ConfigArgs {
