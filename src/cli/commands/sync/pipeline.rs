@@ -1706,6 +1706,25 @@ mod tests {
         assert!(cwd.is_absolute() || cwd == std::path::PathBuf::from("."));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_cwd_fallback_when_current_dir_fails() {
+        // Create a temp dir, cd into it, then delete it so current_dir() fails.
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp_path = tmp.path().to_path_buf();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&tmp_path).unwrap();
+        // Drop the tempdir while we are inside it — current_dir() will now fail.
+        drop(tmp);
+        let result = resolve_cwd();
+        // Restore cwd before any assertion so other tests are not affected.
+        let _ = std::env::set_current_dir(&original);
+        assert_eq!(result, std::path::PathBuf::from("."));
+    }
+
     // ── run_sync flag-passthrough tests ──
 
     /// JSON body for an empty API match response.
