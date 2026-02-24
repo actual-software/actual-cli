@@ -143,9 +143,9 @@ cursor-agent login
 
 ### ApiKeyMissing
 
-**Cause**: The runner requires an API key that is not set.
+**Cause**: The runner requires an API key that is not set, or the provided key was rejected by the API (HTTP 401/403).
 
-**Hint**: The error message specifies which key is needed (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
+**Hint**: The error message and hint both specify exactly which environment variable needs to be set (e.g., `Set ANTHROPIC_API_KEY environment variable or add it to your config file`).
 
 **Diagnosis**:
 ```bash
@@ -231,9 +231,9 @@ actual sync --runner anthropic-api
 
 **Cause**: The API account does not have sufficient credits for the requested operation.
 
-**Hint**: Add credits to your API account.
+**Hint**: Add credits at your provider's billing page or check your account quota.
 
-**Diagnosis**: Check your account balance at the provider's dashboard.
+**Diagnosis**: Check your account balance at the provider's dashboard (e.g., [Anthropic billing](https://console.anthropic.com/settings/billing) or [OpenAI billing](https://platform.openai.com/settings/organization/billing)).
 
 **Fix**: Add credits. Consider using `--max-budget-usd` to control spending.
 
@@ -267,7 +267,7 @@ curl -I <api_url>   # test connectivity
 
 **Cause**: The runner process exited with a non-zero status.
 
-**Hint**: Check the runner's stderr output for details.
+**Hint**: Run with `--verbose` to see full runner output, or check that your runner is correctly installed and authenticated.
 
 **Diagnosis**:
 ```bash
