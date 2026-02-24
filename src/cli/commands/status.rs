@@ -62,6 +62,8 @@ fn run_status(
     cwd: &Path,
     output_format: &OutputFormat,
 ) {
+    // Single terminal_width() query — term_size uses crossterm which makes no fd distinction,
+    // so stdout and stderr always return the same value; one variable suffices.
     let width = term_size::terminal_width();
 
     // Banner + header bar (written to stderr)
@@ -149,6 +151,7 @@ fn format_output_files_section(cwd: &Path, format: &OutputFormat, width: usize) 
     let mut panel = Panel::titled(&panel_title);
     let mut managed_count: usize = 0;
     let mut unmanaged_count: usize = 0;
+    let mut unreadable_count: usize = 0;
 
     for file_path in &files {
         let relative = file_path.strip_prefix(cwd).unwrap_or(file_path);
@@ -157,8 +160,11 @@ fn format_output_files_section(cwd: &Path, format: &OutputFormat, width: usize) 
         let content = match std::fs::read_to_string(file_path) {
             Ok(content) => content,
             Err(e) => {
-                tracing::warn!("Cannot read output file {}: {e}", file_path.display());
-                String::new()
+                tracing::warn!("failed to read output file {}: {e}", file_path.display());
+                unreadable_count += 1;
+                let label = format!("{} {display_path}", theme::ERROR);
+                panel = panel.kv(&label, "unreadable");
+                continue;
             }
         };
 
@@ -188,12 +194,23 @@ fn format_output_files_section(cwd: &Path, format: &OutputFormat, width: usize) 
         }
     }
 
-    let footer = format!(
-        "{} managed {} {} unmanaged",
-        managed_count,
-        theme::muted("·"),
-        unmanaged_count
-    );
+    let footer = if unreadable_count > 0 {
+        format!(
+            "{} managed {} {} unmanaged {} {} unreadable",
+            managed_count,
+            theme::muted("·"),
+            unmanaged_count,
+            theme::muted("·"),
+            unreadable_count,
+        )
+    } else {
+        format!(
+            "{} managed {} {} unmanaged",
+            managed_count,
+            theme::muted("·"),
+            unmanaged_count
+        )
+    };
     panel = panel.footer(&footer);
 
     panel.render(width)
@@ -793,9 +810,10 @@ mod tests {
         );
     }
 
+    // TODO: no Windows equivalent for permission-bit testing
     #[cfg(unix)]
     #[test]
-    fn test_format_output_files_section_unreadable_file_warns_and_treats_as_unmanaged() {
+    fn test_format_output_files_section_unreadable_file_warns_and_shows_unreadable() {
         use std::os::unix::fs::PermissionsExt;
         use tracing_test::traced_test;
 
@@ -813,11 +831,21 @@ mod tests {
             // Restore permissions so tempdir cleanup doesn't fail.
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-            // File is treated as unmanaged because content was empty.
-            assert!(p.contains("unmanaged"), "should show 'unmanaged': {p}");
+            // File is given a distinct "unreadable" label, not silently classified as "unmanaged".
+            assert!(p.contains("unreadable"), "should show 'unreadable': {p}");
+            // Must NOT be counted as managed (footer shows "0 managed").
+            assert!(
+                !p.contains("1 managed"),
+                "should not count unreadable file as managed: {p}"
+            );
+            // Must NOT be counted as unmanaged either.
+            assert!(
+                !p.contains("1 unmanaged"),
+                "should not count unreadable file as unmanaged: {p}"
+            );
             // A warning must have been emitted.
             assert!(
-                logs_contain("Cannot read output file"),
+                logs_contain("failed to read output file"),
                 "should emit a warning for unreadable file"
             );
         }
