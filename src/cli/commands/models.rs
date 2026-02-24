@@ -167,6 +167,32 @@ pub fn known_cursor_model_names() -> Vec<&'static str> {
 
 pub fn exec() -> Result<(), ActualError> {
     run_models();
+
+    // Attempt live fetch (no-op if no API key; graceful on error)
+    let live_openai = crate::model_cache::get_openai_models(
+        crate::config::paths::load()
+            .ok()
+            .as_ref()
+            .and_then(|c: &crate::config::types::Config| c.openai_api_key.as_deref()),
+        None,
+    );
+    if !live_openai.is_empty() {
+        // Show supplementary live models not already in the static list
+        let static_ids: std::collections::HashSet<&str> =
+            known_model_names().iter().copied().collect();
+        let new_models: Vec<&String> = live_openai
+            .iter()
+            .filter(|id| !static_ids.contains(id.as_str()))
+            .collect();
+        if !new_models.is_empty() {
+            println!();
+            println!("Additional live models from OpenAI API:");
+            for id in new_models {
+                println!("  {id}");
+            }
+        }
+    }
+
     Ok(())
 }
 

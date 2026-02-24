@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod generation;
+pub mod model_cache;
 pub mod runner;
 pub mod tailoring;
 pub mod telemetry;
