@@ -389,10 +389,24 @@ mod tests {
 
     #[test]
     fn test_get_unset_value() {
+        // `model` is None in a default config — getting it should return "not set"
         let config = Config::default();
-        let err = get(&config, "api_url").unwrap_err();
+        let err = get(&config, "model").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("not set"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_get_api_url_returns_default() {
+        // `api_url` now has a built-in default value, so getting it on a
+        // freshly-constructed Config must succeed and return the default URL.
+        let config = Config::default();
+        let value = get(&config, "api_url").unwrap();
+        assert_eq!(
+            value,
+            crate::config::types::DEFAULT_API_URL,
+            "default api_url must match DEFAULT_API_URL"
+        );
     }
 
     #[test]

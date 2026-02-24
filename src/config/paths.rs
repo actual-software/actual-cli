@@ -205,7 +205,11 @@ mod tests {
         let config = load_from(&config_file).unwrap();
         assert_eq!(config.model, Some("opus".to_string()));
         assert_eq!(config.batch_size, Some(10));
-        assert_eq!(config.api_url, None);
+        assert_eq!(
+            config.api_url,
+            Some(crate::config::types::DEFAULT_API_URL.to_string()),
+            "api_url should default to DEFAULT_API_URL when not specified in YAML"
+        );
     }
 
     #[test]
