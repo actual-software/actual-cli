@@ -51,6 +51,7 @@ static RUNNER_FAMILIES: &[RunnerFamily] = &[
         name: "Claude / Anthropic",
         runners: &["claude-cli", "anthropic-api"],
         models: &[
+            ModelEntry::new("claude-opus-4"),
             ModelEntry::new("claude-opus-4-5"),
             ModelEntry::default_model("claude-sonnet-4-6"),
             ModelEntry::with_note("sonnet", "short alias, claude-cli only"),
@@ -299,6 +300,10 @@ mod tests {
             ids.contains(&"claude-opus-4-5"),
             "should include claude-opus-4-5"
         );
+        assert!(
+            ids.contains(&"claude-opus-4"),
+            "should include claude-opus-4"
+        );
     }
 
     #[test]
@@ -348,6 +353,7 @@ mod tests {
         let names = known_model_names();
         assert!(names.contains(&"claude-sonnet-4-6"));
         assert!(names.contains(&"claude-opus-4-5"));
+        assert!(names.contains(&"claude-opus-4"));
         assert!(names.contains(&"sonnet"));
         assert!(names.contains(&"opus"));
         assert!(names.contains(&"haiku"));
