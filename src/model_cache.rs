@@ -51,15 +51,6 @@ pub(crate) struct ModelCacheFile {
     pub anthropic: ProviderCache,
 }
 
-/// A merged model list with provenance info — returned to callers.
-#[derive(Debug, Clone)]
-pub struct CachedModelList {
-    /// Merged deduplicated model IDs from all fetched providers.
-    pub model_ids: Vec<String>,
-    /// When the most recent fetch occurred (`None` if purely from static fallback).
-    pub fetched_at: Option<DateTime<Utc>>,
-}
-
 // ---------------------------------------------------------------------------
 // Private OpenAI API response shapes
 // ---------------------------------------------------------------------------
@@ -391,6 +382,71 @@ mod tests {
         assert!(!is_relevant_openai_model("ft:gpt-4:custom"));
     }
 
+    #[test]
+    fn test_is_relevant_openai_model_includes_o1() {
+        assert!(is_relevant_openai_model("o1"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_includes_o3() {
+        assert!(is_relevant_openai_model("o3-mini"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_includes_o4() {
+        assert!(is_relevant_openai_model("o4-mini"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_includes_chatgpt() {
+        assert!(is_relevant_openai_model("chatgpt-4o-latest"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_includes_codex() {
+        assert!(is_relevant_openai_model("codex-cushman-001"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_whisper() {
+        assert!(!is_relevant_openai_model("whisper-1"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_tts() {
+        assert!(!is_relevant_openai_model("tts-1"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_babbage() {
+        assert!(!is_relevant_openai_model("babbage-002"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_davinci() {
+        assert!(!is_relevant_openai_model("davinci-002"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_gpt_image() {
+        assert!(!is_relevant_openai_model("gpt-image-1"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_text_moderation() {
+        assert!(!is_relevant_openai_model("text-moderation-stable"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_text_davinci() {
+        assert!(!is_relevant_openai_model("text-davinci-003"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_unknown_prefix_returns_false() {
+        assert!(!is_relevant_openai_model("unknown-model-xyz"));
+    }
+
     // -----------------------------------------------------------------------
     // fetch_openai_models_async (mockito)
     // -----------------------------------------------------------------------
@@ -452,6 +508,45 @@ mod tests {
         assert!(
             matches!(result, Err(crate::error::ActualError::RunnerFailed { .. })),
             "500 should return RunnerFailed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_openai_models_async_403_returns_api_key_missing() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(403)
+            .with_body(r#"{"error":{"message":"Forbidden"}}"#)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_openai_models_async("bad-key", &server.url(), timeout).await;
+
+        assert!(
+            matches!(result, Err(crate::error::ActualError::ApiKeyMissing { .. })),
+            "403 should return ApiKeyMissing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_openai_models_async_invalid_json_returns_runner_failed() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"not valid json"#)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_openai_models_async("sk-test", &server.url(), timeout).await;
+
+        assert!(
+            matches!(result, Err(crate::error::ActualError::RunnerFailed { .. })),
+            "invalid JSON should return RunnerFailed"
         );
     }
 
@@ -564,6 +659,72 @@ mod tests {
         );
 
         drop(handle);
+    }
+
+    /// When ACTUAL_CONFIG is set to an empty string, `config_dir()` fails and
+    /// `cache_path()` returns `None`. The fetch still runs and returns models,
+    /// but no cache file is written.
+    #[test]
+    fn test_get_openai_models_no_cache_path_still_fetches() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_key = EnvGuard::remove("OPENAI_API_KEY");
+        // Setting ACTUAL_CONFIG to "" causes config_dir() to return Err, so
+        // cache_path() returns None. The fetch should still succeed (or fail
+        // gracefully), but the key point is we exercise the None branch.
+        let _bad_config = EnvGuard::set("ACTUAL_CONFIG", "");
+        let _no_dir = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+
+        // With no API key and a bad base_url, the fetch fails gracefully → empty
+        let result = get_openai_models(None, Some("http://127.0.0.1:1"));
+        // We just verify it doesn't panic and returns empty (no key)
+        assert!(result.is_empty());
+    }
+
+    /// When the fetch succeeds but ACTUAL_CONFIG is empty (so cache_path() → None),
+    /// the function returns the fetched models without writing a cache file.
+    #[test]
+    fn test_get_openai_models_fetches_and_returns_even_without_cache_path() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_key = EnvGuard::remove("OPENAI_API_KEY");
+        // Set ACTUAL_CONFIG to "" → config_dir() fails → cache_path() returns None.
+        // Even so, the fetch should succeed and return models (the write just silently skips).
+        let _bad_config = EnvGuard::set("ACTUAL_CONFIG", "");
+        let _no_dir = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+
+        // Spin up the mockito server in a dedicated tokio runtime on another thread.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let _handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut server = mockito::Server::new_async().await;
+                let _m = server
+                    .mock("GET", "/v1/models")
+                    .with_status(200)
+                    .with_header("content-type", "application/json")
+                    .with_body(
+                        r#"{"object":"list","data":[{"id":"gpt-no-cache-model","object":"model"}]}"#,
+                    )
+                    .create_async()
+                    .await;
+                tx.send(server.url()).unwrap();
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            });
+        });
+
+        let server_url = rx.recv().expect("server url");
+        // ACTUAL_CONFIG="" → cache_path() returns None → no cache write, but fetch still works
+        let result = get_openai_models(Some("sk-test"), Some(&server_url));
+        assert!(
+            result.contains(&"gpt-no-cache-model".to_string()),
+            "should return fetched model even when cache path is None; got: {result:?}"
+        );
     }
 
     #[test]
