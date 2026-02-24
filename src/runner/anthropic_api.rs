@@ -150,9 +150,39 @@ impl AnthropicApiRunner {
                 continue;
             }
 
-            // HTTP 400 (Bad Request) or 529 (overloaded) may indicate credit limit reached.
+            // HTTP 529: Anthropic "overloaded_error" — a transient capacity issue.
+            // Retry it the same way as 429 rate-limit responses.
+            if status.as_u16() == 529 {
+                attempt += 1;
+                if attempt > MAX_RATE_LIMIT_RETRIES {
+                    return Err(ActualError::RunnerFailed {
+                        message: format!(
+                            "Anthropic API overloaded after {MAX_RATE_LIMIT_RETRIES} retries"
+                        ),
+                        stderr: String::new(),
+                    });
+                }
+                let wait_secs =
+                    parse_retry_after(response.headers()).unwrap_or_else(|| 1u64 << (attempt - 1));
+                let wait_secs = wait_secs.min(60);
+                tracing::warn!(
+                    "Anthropic API overloaded, waiting {}s before retry {}/{}",
+                    wait_secs,
+                    attempt,
+                    MAX_RATE_LIMIT_RETRIES
+                );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(format!(
+                        "API overloaded — retrying in {wait_secs}s ({attempt}/{MAX_RATE_LIMIT_RETRIES})..."
+                    ));
+                }
+                sleep(self.retry_base * wait_secs as u32).await;
+                continue;
+            }
+
+            // HTTP 400 (Bad Request) may indicate credit limit reached.
             // Parse the body and check for the "credit_limit_reached" error type.
-            if status == reqwest::StatusCode::BAD_REQUEST || status.as_u16() == 529 {
+            if status == reqwest::StatusCode::BAD_REQUEST {
                 let body_bytes = response
                     .bytes()
                     .await
@@ -739,18 +769,19 @@ mod tests {
         );
     }
 
-    // Test: HTTP 529 with credit_limit_reached maps to CreditBalanceTooLow
+    // Test: HTTP 529 (API overloaded) exhausts retries and returns RunnerFailed.
+    // 529 is a transient capacity error and should be retried like 429, not treated
+    // as a billing error. 1 initial + MAX_RATE_LIMIT_RETRIES retries = 4 total.
     #[tokio::test]
-    async fn test_529_credit_limit_reached_maps_to_credit_balance_too_low() {
+    async fn test_529_overloaded_exhausts_retries_and_returns_runner_failed() {
         let mut server = Server::new_async().await;
 
         let mock = server
             .mock("POST", "/v1/messages")
             .with_status(529)
             .with_header("content-type", "application/json")
-            .with_body(
-                r#"{"error": {"type": "credit_limit_reached", "message": "Credit limit reached"}}"#,
-            )
+            .with_body(r#"{"error": {"type": "overloaded_error", "message": "API overloaded"}}"#)
+            .expect(4)
             .create_async()
             .await;
 
@@ -759,9 +790,48 @@ mod tests {
         let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         mock.assert_async().await;
+        match result {
+            Err(ActualError::RunnerFailed { message, .. }) => {
+                assert!(
+                    message.contains("overloaded"),
+                    "expected 'overloaded' in message: {message}"
+                );
+            }
+            other => panic!("expected RunnerFailed after 529 retries, got: {:?}", other),
+        }
+    }
+
+    // Test: HTTP 529 retries then succeeds on a subsequent 200.
+    #[tokio::test]
+    async fn test_529_overloaded_retries_and_succeeds() {
+        let mut server = Server::new_async().await;
+
+        let mock_529 = server
+            .mock("POST", "/v1/messages")
+            .with_status(529)
+            .with_body(r#"{"error": {"type": "overloaded_error", "message": "API overloaded"}}"#)
+            .expect(2)
+            .create_async()
+            .await;
+
+        let response_body = anthropic_tool_use_response(tailoring_output_json());
+        let mock_200 = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock_529.assert_async().await;
+        mock_200.assert_async().await;
         assert!(
-            matches!(result, Err(ActualError::CreditBalanceTooLow { .. })),
-            "expected CreditBalanceTooLow, got: {:?}",
+            result.is_ok(),
+            "expected Ok after 529 retry, got: {:?}",
             result
         );
     }
