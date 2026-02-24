@@ -57,6 +57,15 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
             let cfg = config::paths::load_from(path)?;
             let yaml = serialize_config_for_display(&cfg)?;
             print!("{}", redact_yaml(&yaml));
+            if cfg.anthropic_api_key.is_some()
+                || cfg.openai_api_key.is_some()
+                || cfg.cursor_api_key.is_some()
+            {
+                eprintln!(
+                    "\nNote: API keys in config are stored as plaintext (mode 0600). \
+                     Consider using environment variables instead for better security."
+                );
+            }
             Ok(())
         }
         ConfigAction::Set(args) => {
@@ -487,5 +496,53 @@ mod tests {
         // Restore writable permissions so temp dir cleanup succeeds
         perms.set_mode(0o644);
         std::fs::set_permissions(&config_file, perms).unwrap();
+    }
+
+    /// Verify that `config show` still returns Ok when API keys are present in the config.
+    /// (The warning is emitted to stderr; we confirm the function does not fail.)
+    #[test]
+    fn test_show_with_api_keys_returns_ok() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+
+        // Write a config that has all three API key fields set
+        let cfg = config::Config {
+            anthropic_api_key: Some("sk-ant-test".to_string()),
+            openai_api_key: Some("sk-openai-test".to_string()),
+            cursor_api_key: Some("cursor-test".to_string()),
+            ..config::Config::default()
+        };
+        config::paths::save_to(&cfg, &config_file).unwrap();
+
+        let args = ConfigArgs {
+            action: ConfigAction::Show,
+        };
+        let result = run_with_path(&args, &config_file);
+        assert!(
+            result.is_ok(),
+            "show should succeed even when API keys are set"
+        );
+    }
+
+    /// Verify that `config show` returns Ok when no API keys are configured
+    /// (no warning should be emitted in that case).
+    #[test]
+    fn test_show_without_api_keys_returns_ok() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+
+        let cfg = config::Config {
+            ..config::Config::default()
+        };
+        config::paths::save_to(&cfg, &config_file).unwrap();
+
+        let args = ConfigArgs {
+            action: ConfigAction::Show,
+        };
+        let result = run_with_path(&args, &config_file);
+        assert!(
+            result.is_ok(),
+            "show should succeed when no API keys are set"
+        );
     }
 }
