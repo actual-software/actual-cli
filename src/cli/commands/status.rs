@@ -62,7 +62,6 @@ fn run_status(
     cwd: &Path,
     output_format: &OutputFormat,
 ) {
-    let stderr_width = term_size::terminal_width();
     let width = term_size::terminal_width();
 
     // Banner + header bar (written to stderr)
@@ -70,7 +69,7 @@ fn run_status(
     let auth = try_detect_auth();
     eprint!(
         "{}",
-        render_header_bar(stderr_width, env!("CARGO_PKG_VERSION"), auth.as_ref())
+        render_header_bar(width, env!("CARGO_PKG_VERSION"), auth.as_ref())
     );
 
     // Config panel
@@ -155,7 +154,13 @@ fn format_output_files_section(cwd: &Path, format: &OutputFormat, width: usize) 
         let relative = file_path.strip_prefix(cwd).unwrap_or(file_path);
         let display_path = format!("./{}", relative.display());
 
-        let content = std::fs::read_to_string(file_path).unwrap_or_default();
+        let content = match std::fs::read_to_string(file_path) {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::warn!("Cannot read output file {}: {e}", file_path.display());
+                String::new()
+            }
+        };
 
         if markers::has_managed_section(&content) {
             managed_count += 1;
