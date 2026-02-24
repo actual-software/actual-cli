@@ -301,6 +301,14 @@ fn parse_model(s: &str) -> Result<String, String> {
     Ok(s.to_string())
 }
 
+/// Arguments for the `models` command
+#[derive(Parser, Debug)]
+pub struct ModelsArgs {
+    /// Skip live API fetch; show only the hardcoded model list
+    #[arg(long)]
+    pub no_fetch: bool,
+}
+
 /// ADR-powered AI context file generator
 #[derive(Parser, Debug)]
 #[command(name = "actual", version, about)]
@@ -322,7 +330,7 @@ pub enum Command {
     /// List all available AI backend runners
     Runners,
     /// List known model names grouped by runner
-    Models,
+    Models(ModelsArgs),
     /// Clear local cache (analysis and tailoring results)
     Cache(CacheArgs),
 }
@@ -1287,5 +1295,42 @@ mod parse_tests {
         assert!(!is_codex_model("gpt-4o"));
         assert!(!is_codex_model("gpt-5.2"));
         assert!(!is_codex_model("claude-sonnet-4-6"));
+    }
+
+    // ---- ModelsArgs / --no-fetch flag tests ----
+
+    fn no_fetch_from_command(cmd: Command) -> bool {
+        match cmd {
+            Command::Models(args) => args.no_fetch,
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn test_models_no_fetch_flag_absent_is_false() {
+        let cli = Cli::try_parse_from(["actual", "models"])
+            .expect("models without --no-fetch should parse");
+        assert!(!no_fetch_from_command(cli.command));
+    }
+
+    #[test]
+    fn test_models_no_fetch_flag_present_is_true() {
+        let cli = Cli::try_parse_from(["actual", "models", "--no-fetch"])
+            .expect("models with --no-fetch should parse");
+        assert!(no_fetch_from_command(cli.command));
+    }
+
+    #[test]
+    fn test_models_parses() {
+        let cli =
+            Cli::try_parse_from(["actual", "models"]).expect("models subcommand should parse");
+        assert!(matches!(cli.command, Command::Models(_)));
+    }
+
+    #[test]
+    fn test_no_fetch_from_non_models_command_returns_false() {
+        // Exercises the `_ => false` arm of no_fetch_from_command
+        let cli = Cli::try_parse_from(["actual", "status"]).unwrap();
+        assert!(!no_fetch_from_command(cli.command));
     }
 }

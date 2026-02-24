@@ -180,7 +180,13 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
         }
         ConfigKey::Model => {
             config.model = Some(value.to_string());
-            if !known_model_names().contains(&value) {
+            let static_known = known_model_names();
+            let cached_openai = crate::model_cache::read_cached_openai_models();
+            let cached_anthropic = crate::model_cache::read_cached_anthropic_models();
+            let in_static = static_known.contains(&value);
+            let in_live = cached_openai.iter().any(|m| m == value)
+                || cached_anthropic.iter().any(|m| m == value);
+            if !in_static && !in_live {
                 eprintln!(
                     "Warning: '{value}' is not a known model name. Run 'actual models' to see known models."
                 );

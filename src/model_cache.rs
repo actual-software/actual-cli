@@ -459,6 +459,52 @@ pub fn get_openai_models(config_key: Option<&str>, base_url: Option<&str>) -> Ve
 }
 
 // ---------------------------------------------------------------------------
+// Provenance helpers (read-only, no network call)
+// ---------------------------------------------------------------------------
+
+/// Read the cached OpenAI model timestamp from disk (no network call).
+/// Returns None if there is no cache file or no timestamp.
+pub fn read_openai_cache_timestamp() -> Option<chrono::DateTime<chrono::Utc>> {
+    cache_path().and_then(|path| load_cache_file(&path).openai.fetched_at)
+}
+
+/// Read the cached Anthropic model timestamp from disk (no network call).
+/// Returns None if there is no cache file or no timestamp.
+pub fn read_anthropic_cache_timestamp() -> Option<chrono::DateTime<chrono::Utc>> {
+    cache_path().and_then(|path| load_cache_file(&path).anthropic.fetched_at)
+}
+
+/// Read cached OpenAI models from disk without making a network call.
+/// Returns empty Vec if no cache or no timestamp present.
+pub fn read_cached_openai_models() -> Vec<String> {
+    cache_path()
+        .and_then(|path| {
+            let file = load_cache_file(&path);
+            if file.openai.fetched_at.is_some() {
+                Some(file.openai.models)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// Read cached Anthropic models from disk without making a network call.
+/// Returns empty Vec if no cache or no timestamp present.
+pub fn read_cached_anthropic_models() -> Vec<String> {
+    cache_path()
+        .and_then(|path| {
+            let file = load_cache_file(&path);
+            if file.anthropic.fetched_at.is_some() {
+                Some(file.anthropic.models)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1251,5 +1297,154 @@ mod tests {
         assert_eq!(std::env::var(key).unwrap(), "original-value");
         // Clean up
         std::env::remove_var(key);
+    }
+
+    // -----------------------------------------------------------------------
+    // Provenance helpers: read_openai_cache_timestamp, read_anthropic_cache_timestamp,
+    //                     read_cached_openai_models, read_cached_anthropic_models
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_read_openai_cache_timestamp_returns_none_when_no_file() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = read_openai_cache_timestamp();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_read_openai_cache_timestamp_returns_some_when_cached() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let cache_file = dir.path().join("model-cache.yaml");
+
+        let ts = Utc::now();
+        let cache = ModelCacheFile {
+            openai: ProviderCache {
+                fetched_at: Some(ts),
+                models: vec!["gpt-4o".to_string()],
+            },
+            anthropic: ProviderCache::default(),
+        };
+        save_cache_file(&cache_file, &cache);
+
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = read_openai_cache_timestamp();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_read_anthropic_cache_timestamp_returns_none_when_no_file() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = read_anthropic_cache_timestamp();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_read_anthropic_cache_timestamp_returns_some_when_cached() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let cache_file = dir.path().join("model-cache.yaml");
+
+        let ts = Utc::now();
+        let cache = ModelCacheFile {
+            openai: ProviderCache::default(),
+            anthropic: ProviderCache {
+                fetched_at: Some(ts),
+                models: vec!["claude-sonnet-4-6".to_string()],
+            },
+        };
+        save_cache_file(&cache_file, &cache);
+
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = read_anthropic_cache_timestamp();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_read_cached_openai_models_returns_empty_when_no_cache() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = read_cached_openai_models();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_read_cached_openai_models_returns_models_when_cached() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let cache_file = dir.path().join("model-cache.yaml");
+
+        let cache = ModelCacheFile {
+            openai: ProviderCache {
+                fetched_at: Some(Utc::now()),
+                models: vec!["gpt-cached-1".to_string(), "gpt-cached-2".to_string()],
+            },
+            anthropic: ProviderCache::default(),
+        };
+        save_cache_file(&cache_file, &cache);
+
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = read_cached_openai_models();
+        assert!(result.contains(&"gpt-cached-1".to_string()));
+        assert!(result.contains(&"gpt-cached-2".to_string()));
+    }
+
+    #[test]
+    fn test_read_cached_anthropic_models_returns_empty_when_no_cache() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = read_cached_anthropic_models();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_read_cached_anthropic_models_returns_models_when_cached() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempdir().expect("tempdir");
+        let cache_file = dir.path().join("model-cache.yaml");
+
+        let cache = ModelCacheFile {
+            openai: ProviderCache::default(),
+            anthropic: ProviderCache {
+                fetched_at: Some(Utc::now()),
+                models: vec!["claude-cached-1".to_string(), "claude-cached-2".to_string()],
+            },
+        };
+        save_cache_file(&cache_file, &cache);
+
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = read_cached_anthropic_models();
+        assert!(result.contains(&"claude-cached-1".to_string()));
+        assert!(result.contains(&"claude-cached-2".to_string()));
     }
 }
