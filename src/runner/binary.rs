@@ -61,7 +61,7 @@ mod tests {
         let err = ActualError::ClaudeNotFound;
         assert_eq!(
             err.hint(),
-            Some("npm install -g @anthropic-ai/claude-code"),
+            Some("npm install -g @anthropic-ai/claude-code".to_string()),
             "Hint should contain install instructions"
         );
     }
