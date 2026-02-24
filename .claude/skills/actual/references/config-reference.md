@@ -55,6 +55,8 @@ actual config path
 
 The `model` key is the **unified model config key** for all runners. The runner is automatically inferred from the model name — setting `model: gpt-5` selects CodexCli, `model: claude-sonnet-4-6` selects AnthropicApi, etc.
 
+**Model validation** checks the merged model list: the static hardcoded list plus any models previously fetched from the OpenAI and Anthropic APIs (stored in the local model cache). This means models returned by `actual models` (live or cached) will not trigger spurious "unknown model" warnings when set via `config set model`.
+
 The runner resolution order is:
 1. `--model` CLI flag (infers runner from model name)
 2. `model` config (infers runner from model name)
