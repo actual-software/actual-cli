@@ -43,6 +43,8 @@ pub fn find_claude_binary() -> Result<PathBuf, ActualError> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
@@ -61,7 +63,7 @@ mod tests {
         let err = ActualError::ClaudeNotFound;
         assert_eq!(
             err.hint(),
-            Some("npm install -g @anthropic-ai/claude-code".to_string()),
+            Some(Cow::Borrowed("npm install -g @anthropic-ai/claude-code")),
             "Hint should contain install instructions"
         );
     }

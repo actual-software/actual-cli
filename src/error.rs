@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -99,37 +101,43 @@ impl ActualError {
     }
 
     /// Returns a human-friendly fix suggestion for this error, if available.
-    pub fn hint(&self) -> Option<String> {
+    pub fn hint(&self) -> Option<Cow<'static, str>> {
         match self {
-            Self::ClaudeNotFound => Some("npm install -g @anthropic-ai/claude-code".to_string()),
-            Self::CodexNotFound => Some("npm install -g @openai/codex".to_string()),
-            Self::CursorNotFound => Some("curl https://cursor.com/install -fsS | bash".to_string()),
-            Self::ClaudeNotAuthenticated => Some("claude auth login".to_string()),
+            Self::ClaudeNotFound => {
+                Some(Cow::Borrowed("npm install -g @anthropic-ai/claude-code"))
+            }
+            Self::CodexNotFound => Some(Cow::Borrowed("npm install -g @openai/codex")),
+            Self::CursorNotFound => {
+                Some(Cow::Borrowed("curl https://cursor.com/install -fsS | bash"))
+            }
+            Self::ClaudeNotAuthenticated => Some(Cow::Borrowed("claude auth login")),
             Self::CodexNotAuthenticated => {
-                Some("Set OPENAI_API_KEY or run: codex login".to_string())
+                Some(Cow::Borrowed("Set OPENAI_API_KEY or run: codex login"))
             }
             Self::CursorNotAuthenticated => {
-                Some("Set CURSOR_API_KEY or run: cursor-agent login".to_string())
+                Some(Cow::Borrowed("Set CURSOR_API_KEY or run: cursor-agent login"))
             }
-            Self::ApiKeyMissing { env_var } => Some(format!(
+            Self::ApiKeyMissing { env_var } => Some(Cow::Owned(format!(
                 "Set {env_var} environment variable or add it to your config file"
-            )),
+            ))),
             Self::CodexCliModelRequiresApiKey { .. } => {
-                Some("Set OPENAI_API_KEY or switch to --runner openai-api".to_string())
+                Some(Cow::Borrowed("Set OPENAI_API_KEY or switch to --runner openai-api"))
             }
-            Self::NoRunnerAvailable { .. } => Some(
-                "Install a runner (e.g. `npm install -g @anthropic-ai/claude-code`) or set an API key".to_string(),
-            ),
-            Self::CreditBalanceTooLow { .. } => Some(
-                "Add credits at your provider's billing page or check your account quota".to_string(),
-            ),
-            Self::ConfigError(_) => Some("Check ~/.actualai/actual/config.yaml".to_string()),
-            Self::RunnerTimeout { .. } => Some(
-                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit".to_string(),
-            ),
-            Self::RunnerFailed { .. } => Some(
-                "Run with --verbose to see full runner output, or check that your runner is correctly installed and authenticated".to_string(),
-            ),
+            Self::NoRunnerAvailable { .. } => Some(Cow::Borrowed(
+                "Install a runner (e.g. `npm install -g @anthropic-ai/claude-code`) or set an API key",
+            )),
+            Self::CreditBalanceTooLow { .. } => Some(Cow::Borrowed(
+                "Add credits at your provider's billing page or check your account quota",
+            )),
+            Self::ConfigError(_) => {
+                Some(Cow::Borrowed("Check ~/.actualai/actual/config.yaml"))
+            }
+            Self::RunnerTimeout { .. } => Some(Cow::Borrowed(
+                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit",
+            )),
+            Self::RunnerFailed { .. } => Some(Cow::Borrowed(
+                "Check the error details above. For subprocess runners, re-run with --verbose for more output.",
+            )),
             _ => None,
         }
     }
@@ -155,6 +163,8 @@ impl ActualError {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
 
     #[test]
@@ -427,7 +437,7 @@ mod tests {
     fn test_hint_claude_not_found() {
         assert_eq!(
             ActualError::ClaudeNotFound.hint(),
-            Some("npm install -g @anthropic-ai/claude-code".to_string())
+            Some(Cow::Borrowed("npm install -g @anthropic-ai/claude-code"))
         );
     }
 
@@ -435,7 +445,7 @@ mod tests {
     fn test_hint_codex_not_found() {
         assert_eq!(
             ActualError::CodexNotFound.hint(),
-            Some("npm install -g @openai/codex".to_string())
+            Some(Cow::Borrowed("npm install -g @openai/codex"))
         );
     }
 
@@ -443,7 +453,7 @@ mod tests {
     fn test_hint_cursor_not_found() {
         assert_eq!(
             ActualError::CursorNotFound.hint(),
-            Some("curl https://cursor.com/install -fsS | bash".to_string())
+            Some(Cow::Borrowed("curl https://cursor.com/install -fsS | bash"))
         );
     }
 
@@ -451,7 +461,7 @@ mod tests {
     fn test_hint_claude_not_authenticated() {
         assert_eq!(
             ActualError::ClaudeNotAuthenticated.hint(),
-            Some("claude auth login".to_string())
+            Some(Cow::Borrowed("claude auth login"))
         );
     }
 
@@ -459,7 +469,7 @@ mod tests {
     fn test_hint_codex_not_authenticated() {
         assert_eq!(
             ActualError::CodexNotAuthenticated.hint(),
-            Some("Set OPENAI_API_KEY or run: codex login".to_string())
+            Some(Cow::Borrowed("Set OPENAI_API_KEY or run: codex login"))
         );
     }
 
@@ -467,7 +477,9 @@ mod tests {
     fn test_hint_cursor_not_authenticated() {
         assert_eq!(
             ActualError::CursorNotAuthenticated.hint(),
-            Some("Set CURSOR_API_KEY or run: cursor-agent login".to_string())
+            Some(Cow::Borrowed(
+                "Set CURSOR_API_KEY or run: cursor-agent login"
+            ))
         );
     }
 
@@ -475,7 +487,7 @@ mod tests {
     fn test_hint_config_error() {
         assert_eq!(
             ActualError::ConfigError("test".to_string()).hint(),
-            Some("Check ~/.actualai/actual/config.yaml".to_string())
+            Some(Cow::Borrowed("Check ~/.actualai/actual/config.yaml"))
         );
     }
 
@@ -483,9 +495,9 @@ mod tests {
     fn test_hint_claude_timeout() {
         assert_eq!(
             ActualError::RunnerTimeout { seconds: 30 }.hint(),
-            Some(
-                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit".to_string(),
-            )
+            Some(Cow::Borrowed(
+                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit",
+            ))
         );
     }
 
@@ -592,6 +604,10 @@ mod tests {
             stderr: String::new(),
         };
         let hint = err.hint().expect("expected Some hint for RunnerFailed");
+        assert!(
+            hint.contains("error details"),
+            "expected 'error details' in hint: {hint:?}"
+        );
         assert!(
             hint.contains("--verbose"),
             "expected '--verbose' in hint: {hint:?}"

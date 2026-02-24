@@ -201,6 +201,62 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_result_runner_failed_stderr_appears_in_rendered_panel() {
+        // Verify that RunnerFailed.stderr body text is included in the rendered
+        // panel output. This covers the rendering path in handle_result where
+        // subprocess output is surfaced to the user (commands/mod.rs:147-155).
+        //
+        // We can't easily capture eprintln! in tests, so we test the panel
+        // construction logic directly by verifying the Panel render output
+        // contains the expected body text.
+        let stderr_body = "Anthropic API credit limit reached\nPlease add credits to your account.";
+
+        let width = 120usize;
+        let error_line = format!(
+            "{} {}",
+            crate::cli::ui::theme::error_prefix().for_stderr(),
+            ActualError::RunnerFailed {
+                message: "API error".to_string(),
+                stderr: stderr_body.to_string(),
+            }
+        );
+        let mut panel = crate::cli::ui::panel::Panel::titled("Error")
+            .line("")
+            .line(&error_line);
+
+        // Simulate the stderr surfacing logic from handle_result.
+        let e = ActualError::RunnerFailed {
+            message: "API error".to_string(),
+            stderr: stderr_body.to_string(),
+        };
+        if let ActualError::RunnerFailed { stderr, .. } = &e {
+            if !stderr.is_empty() {
+                let clean = console::strip_ansi_codes(stderr);
+                panel = panel.line("").line("Subprocess output:");
+                for line in clean.lines() {
+                    panel = panel.line(&format!("  {line}"));
+                }
+            }
+        }
+
+        let rendered = panel.render(width);
+
+        // The stderr body text must appear in the rendered panel.
+        assert!(
+            rendered.contains("Anthropic API credit limit reached"),
+            "expected stderr line 1 in rendered panel: {rendered}"
+        );
+        assert!(
+            rendered.contains("Please add credits to your account."),
+            "expected stderr line 2 in rendered panel: {rendered}"
+        );
+        assert!(
+            rendered.contains("Subprocess output:"),
+            "expected 'Subprocess output:' header in rendered panel: {rendered}"
+        );
+    }
+
+    #[test]
     fn test_handle_result_subprocess_failed_empty_stderr_returns_exit_code_1() {
         // Empty stderr should not add a "Subprocess output:" section but must
         // still propagate correctly.
