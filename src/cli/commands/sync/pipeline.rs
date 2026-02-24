@@ -3098,6 +3098,23 @@ mod tests {
     }
 
     #[test]
+    fn test_find_existing_claude_md_unreadable_file_emits_warn() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("CLAUDE.md");
+        std::fs::write(&file_path, "secret content").unwrap();
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Should not panic; unreadable file is silently skipped with a warn
+        let result = find_existing_output_files(dir.path(), &OutputFormat::ClaudeMd);
+        assert!(
+            result.is_empty(),
+            "unreadable file should be skipped: {result}"
+        );
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    #[test]
     fn test_find_existing_claude_md_skips_vendor() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
