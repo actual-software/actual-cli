@@ -31,7 +31,7 @@ actual config path
 
 | Key | Type | Default | Validation | Purpose |
 |-----|------|---------|------------|---------|
-| `api_url` | string | (built-in) | URL format | API server URL |
+| `api_url` | string | `https://api-service.api.prod.actual.ai` | URL format | API server URL |
 | `model` | string | (none) | non-empty | Default model for ALL runners (runner is auto-inferred from model name) |
 | `runner` | enum | claude-cli | One of: claude-cli, anthropic-api, openai-api, codex-cli, cursor-cli | AI runner backend |
 | `batch_size` | u32 | 15 | min 1 | ADRs per API batch |
