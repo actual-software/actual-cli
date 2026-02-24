@@ -251,10 +251,28 @@ impl TailoringRunner for OpenAiApiRunner {
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                return Err(ActualError::ClaudeNotAuthenticated);
+                return Err(ActualError::ApiKeyMissing {
+                    env_var: "OPENAI_API_KEY".to_string(),
+                });
             }
 
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                // Save Retry-After header before consuming the body.
+                let retry_after = parse_retry_after(response.headers());
+                // Check body for insufficient_quota before retrying.
+                let body_text = extract_error_body(response.bytes().await, 4096);
+                if let Ok(json) = serde_json::from_str::<Value>(&body_text) {
+                    let code = json
+                        .get("error")
+                        .and_then(|e| e.get("code"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if code == "insufficient_quota" {
+                        return Err(ActualError::CreditBalanceTooLow {
+                            message: "OpenAI API quota exceeded".to_string(),
+                        });
+                    }
+                }
                 attempt += 1;
                 if attempt > MAX_RATE_LIMIT_RETRIES {
                     return Err(ActualError::RunnerFailed {
@@ -265,8 +283,7 @@ impl TailoringRunner for OpenAiApiRunner {
                     });
                 }
                 // Respect Retry-After header if present, else use exponential backoff.
-                let wait_secs =
-                    parse_retry_after(response.headers()).unwrap_or_else(|| 1u64 << (attempt - 1)); // 1s, 2s, 4s
+                let wait_secs = retry_after.unwrap_or_else(|| 1u64 << (attempt - 1)); // 1s, 2s, 4s
                 let wait_secs = wait_secs.min(60);
                 tracing::warn!(
                     "OpenAI API rate limited, waiting {}s before retry {}/{}",
@@ -482,9 +499,9 @@ mod tests {
         mock.assert_async().await;
     }
 
-    // Test 2: HTTP 401 maps to ClaudeNotAuthenticated
+    // Test 2: HTTP 401 maps to ApiKeyMissing with OPENAI_API_KEY
     #[tokio::test]
-    async fn test_401_maps_to_not_authenticated() {
+    async fn test_401_maps_to_api_key_missing() {
         let mut server = Server::new_async().await;
 
         let mock = server
@@ -499,11 +516,15 @@ mod tests {
             .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
             .await;
 
-        assert!(
-            matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
-            "expected ClaudeNotAuthenticated, got: {:?}",
-            result
-        );
+        match result {
+            Err(ActualError::ApiKeyMissing { env_var }) => {
+                assert_eq!(
+                    env_var, "OPENAI_API_KEY",
+                    "expected OPENAI_API_KEY, got: {env_var}"
+                );
+            }
+            other => panic!("expected ApiKeyMissing, got: {:?}", other),
+        }
 
         mock.assert_async().await;
     }
@@ -738,9 +759,9 @@ mod tests {
         }
     }
 
-    // Test 7: HTTP 403 also maps to ClaudeNotAuthenticated
+    // Test 7: HTTP 403 maps to ApiKeyMissing with OPENAI_API_KEY
     #[tokio::test]
-    async fn test_403_maps_to_not_authenticated() {
+    async fn test_403_maps_to_api_key_missing() {
         let mut server = Server::new_async().await;
 
         let mock = server
@@ -755,13 +776,43 @@ mod tests {
             .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
             .await;
 
-        assert!(
-            matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
-            "expected ClaudeNotAuthenticated for 403, got: {:?}",
-            result
-        );
+        match result {
+            Err(ActualError::ApiKeyMissing { env_var }) => {
+                assert_eq!(
+                    env_var, "OPENAI_API_KEY",
+                    "expected OPENAI_API_KEY, got: {env_var}"
+                );
+            }
+            other => panic!("expected ApiKeyMissing for 403, got: {:?}", other),
+        }
 
         mock.assert_async().await;
+    }
+
+    // Test: HTTP 429 with insufficient_quota maps to CreditBalanceTooLow
+    #[tokio::test]
+    async fn test_429_insufficient_quota_maps_to_credit_balance_too_low() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(429)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"code": "insufficient_quota", "message": "You exceeded your current quota"}}"#)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(
+            matches!(result, Err(ActualError::CreditBalanceTooLow { .. })),
+            "expected CreditBalanceTooLow, got: {:?}",
+            result
+        );
     }
 
     // Test 8: HTTP 500 maps to RunnerFailed with status in message

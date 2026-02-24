@@ -253,7 +253,7 @@ mod tests {
         assert!(content.contains("Always use Result"));
     }
 
-    /// Test 3: Anthropic runner returns 401 → exit code 2 (not authenticated).
+    /// Test 3: Anthropic runner returns 401 → exit code 2 (API key missing).
     #[test]
     fn anthropic_401_exits_code_2() {
         let mut adr_server = mockito::Server::new();
@@ -286,7 +286,7 @@ mod tests {
             ])
             .assert()
             .code(2)
-            .stderr(predicate::str::contains("not authenticated"));
+            .stderr(predicate::str::contains("ANTHROPIC_API_KEY"));
     }
 
     /// Test 4: Anthropic runner returns 500 → exit code 1 (runner failed).
@@ -515,7 +515,7 @@ mod tests {
         assert!(content.contains("Always use Result"));
     }
 
-    /// Test 8: OpenAI runner returns 401 → exit code 2 (not authenticated).
+    /// Test 8: OpenAI runner returns 401 → exit code 2 (API key missing).
     #[test]
     fn openai_401_exits_code_2() {
         let mut adr_server = mockito::Server::new();
@@ -548,7 +548,7 @@ mod tests {
             ])
             .assert()
             .code(2)
-            .stderr(predicate::str::contains("not authenticated"));
+            .stderr(predicate::str::contains("OPENAI_API_KEY"));
     }
 
     /// Test 9: OpenAI runner returns 500 → exit code 1 (runner failed).
