@@ -1,0 +1,641 @@
+//! OpenAI (and future Anthropic) model list fetching and disk-backed caching.
+//!
+//! # Design
+//!
+//! - `get_openai_models()` is the main entry point.  It is synchronous so it can
+//!   be called from any non-async context (e.g. the `actual models` command).
+//! - A 24-hour TTL cache is stored at `~/.actualai/actual/model-cache.yaml`.
+//! - On any error (no API key, network failure, parse error) the function returns
+//!   an empty `Vec` so the caller can fall back to the static hardcoded list.
+//! - The `ModelCacheFile` struct has an `anthropic` section reserved for
+//!   actual-3kh.2.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// One provider's entry in the model cache file.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub(crate) struct ProviderCache {
+    pub fetched_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+impl ProviderCache {
+    /// Returns `true` if the cache was fetched within the last `ttl_hours` hours.
+    pub fn is_fresh(&self, ttl_hours: u32) -> bool {
+        self.fetched_at
+            .map(|t| {
+                Utc::now()
+                    .signed_duration_since(t)
+                    .num_hours()
+                    .unsigned_abs()
+                    < ttl_hours as u64
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// The top-level model cache file structure.
+///
+/// The `anthropic` section is reserved for actual-3kh.2.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub(crate) struct ModelCacheFile {
+    #[serde(default)]
+    pub openai: ProviderCache,
+    #[serde(default)]
+    pub anthropic: ProviderCache,
+}
+
+/// A merged model list with provenance info — returned to callers.
+#[derive(Debug, Clone)]
+pub struct CachedModelList {
+    /// Merged deduplicated model IDs from all fetched providers.
+    pub model_ids: Vec<String>,
+    /// When the most recent fetch occurred (`None` if purely from static fallback).
+    pub fetched_at: Option<DateTime<Utc>>,
+}
+
+// ---------------------------------------------------------------------------
+// Private OpenAI API response shapes
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct OpenAiModelObject {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModelObject>,
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const CACHE_FILENAME: &str = "model-cache.yaml";
+const DEFAULT_CACHE_TTL_HOURS: u32 = 24;
+const FETCH_TIMEOUT_SECS: u64 = 10;
+
+// ---------------------------------------------------------------------------
+// Cache file helpers
+// ---------------------------------------------------------------------------
+
+fn cache_path() -> Option<std::path::PathBuf> {
+    crate::config::paths::config_dir()
+        .ok()
+        .map(|d| d.join(CACHE_FILENAME))
+}
+
+fn load_cache_file(path: &std::path::Path) -> ModelCacheFile {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_yml::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_cache_file(path: &std::path::Path, cache: &ModelCacheFile) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(yaml) = serde_yml::to_string(cache) {
+        let _ = std::fs::write(path, yaml);
+        // 0600 on unix (model names are not secrets, but consistent with config dir)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI model filtering
+// ---------------------------------------------------------------------------
+
+fn is_relevant_openai_model(id: &str) -> bool {
+    // Exclude fine-tuned models
+    if id.starts_with("ft:") {
+        return false;
+    }
+
+    // Exclude non-chat/completion model families
+    let excluded_prefixes = [
+        "text-embedding-",
+        "text-moderation-",
+        "text-davinci-",
+        "dall-e-",
+        "whisper-",
+        "tts-",
+        "babbage-",
+        "davinci-",
+        "gpt-image-",
+    ];
+    if excluded_prefixes.iter().any(|p| id.starts_with(p)) {
+        return false;
+    }
+
+    // Include known useful prefixes
+    let included_prefixes = ["gpt-", "o1", "o3", "o4", "chatgpt-", "codex-"];
+    included_prefixes.iter().any(|p| id.starts_with(p))
+}
+
+// ---------------------------------------------------------------------------
+// Async fetch (injectable base URL for tests)
+// ---------------------------------------------------------------------------
+
+/// Fetch the model list from the OpenAI `/v1/models` endpoint.
+///
+/// `base_url` should be `"https://api.openai.com"` in production, or a local
+/// mock server URL in tests.
+pub(crate) async fn fetch_openai_models_async(
+    api_key: &str,
+    base_url: &str,
+    timeout: std::time::Duration,
+) -> Result<Vec<String>, crate::error::ActualError> {
+    use crate::error::ActualError;
+
+    let is_local =
+        base_url.starts_with("http://localhost") || base_url.starts_with("http://127.0.0.1");
+
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .https_only(!is_local)
+        .build()
+        .map_err(|e| ActualError::RunnerFailed {
+            message: format!("Failed to build HTTP client: {e}"),
+            stderr: String::new(),
+        })?;
+
+    let url = format!("{base_url}/v1/models");
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+        .map_err(|e| ActualError::RunnerFailed {
+            message: format!("OpenAI models fetch failed: {e}"),
+            stderr: String::new(),
+        })?;
+
+    let status = response.status();
+
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(ActualError::ApiKeyMissing {
+            env_var: "OPENAI_API_KEY".to_string(),
+        });
+    }
+
+    if !status.is_success() {
+        let body = response
+            .bytes()
+            .await
+            .map(|b| String::from_utf8_lossy(&b[..b.len().min(512)]).into_owned())
+            .unwrap_or_default();
+        return Err(ActualError::RunnerFailed {
+            message: format!("OpenAI models API returned {status}"),
+            stderr: body,
+        });
+    }
+
+    let parsed =
+        response
+            .json::<OpenAiModelsResponse>()
+            .await
+            .map_err(|e| ActualError::RunnerFailed {
+                message: format!("Failed to parse OpenAI models response: {e}"),
+                stderr: String::new(),
+            })?;
+
+    let models: Vec<String> = parsed
+        .data
+        .into_iter()
+        .map(|m| m.id)
+        .filter(|id| is_relevant_openai_model(id))
+        .collect();
+
+    Ok(models)
+}
+
+// ---------------------------------------------------------------------------
+// Public synchronous entry point
+// ---------------------------------------------------------------------------
+
+/// Fetch OpenAI models: return cached list if fresh, otherwise fetch live.
+///
+/// Returns an empty `Vec` on any error (graceful degradation — the caller is
+/// expected to merge this with the hardcoded static list).
+///
+/// # Arguments
+///
+/// * `config_key` — the `openai_api_key` from config.  `OPENAI_API_KEY` env
+///   var takes priority over this value.
+/// * `base_url` — `None` in production, `Some("http://...")` in tests to
+///   override the OpenAI base URL.  When `Some`, the TTL check is skipped so
+///   tests always exercise the network path.
+pub fn get_openai_models(config_key: Option<&str>, base_url: Option<&str>) -> Vec<String> {
+    // Resolve API key (env var takes priority)
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .or_else(|| config_key.map(|s| s.to_string()));
+
+    let Some(api_key) = api_key else {
+        return Vec::new(); // no key available — skip silently
+    };
+
+    let ttl = DEFAULT_CACHE_TTL_HOURS;
+
+    // Return cached list if fresh (skip TTL check when base_url is overridden for tests)
+    if base_url.is_none() {
+        if let Some(path) = cache_path() {
+            let file = load_cache_file(&path);
+            if file.openai.is_fresh(ttl) {
+                return file.openai.models.clone();
+            }
+        }
+    }
+
+    // Fetch live
+    let production_base = "https://api.openai.com";
+    let url = base_url.unwrap_or(production_base);
+    let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to build runtime for OpenAI model fetch: {e}");
+            return Vec::new();
+        }
+    };
+
+    match rt.block_on(fetch_openai_models_async(&api_key, url, timeout)) {
+        Ok(models) => {
+            // Persist to cache
+            if let Some(path) = cache_path() {
+                let mut file = load_cache_file(&path);
+                file.openai = ProviderCache {
+                    fetched_at: Some(Utc::now()),
+                    models: models.clone(),
+                };
+                save_cache_file(&path, &file);
+            }
+            models
+        }
+        Err(e) => {
+            tracing::warn!("OpenAI model fetch failed (using hardcoded fallback): {e}");
+            Vec::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // -----------------------------------------------------------------------
+    // ProviderCache::is_fresh
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_provider_cache_is_fresh_recent() {
+        let cache = ProviderCache {
+            fetched_at: Some(Utc::now()),
+            models: vec!["gpt-4o".to_string()],
+        };
+        assert!(cache.is_fresh(24), "just-created cache should be fresh");
+    }
+
+    #[test]
+    fn test_provider_cache_is_expired_old() {
+        let cache = ProviderCache {
+            fetched_at: Some(Utc::now() - chrono::Duration::hours(25)),
+            models: vec!["gpt-4o".to_string()],
+        };
+        assert!(!cache.is_fresh(24), "25h-old cache should be expired");
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache file I/O
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_save_and_load_cache_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("model-cache.yaml");
+
+        let mut cache = ModelCacheFile::default();
+        cache.openai = ProviderCache {
+            fetched_at: Some(Utc::now()),
+            models: vec!["gpt-4o".to_string(), "gpt-5.2".to_string()],
+        };
+
+        save_cache_file(&path, &cache);
+        let loaded = load_cache_file(&path);
+
+        assert_eq!(loaded.openai.models, cache.openai.models);
+        assert!(loaded.openai.fetched_at.is_some());
+    }
+
+    #[test]
+    fn test_load_cache_absent_returns_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nonexistent.yaml");
+        let loaded = load_cache_file(&path);
+        assert!(loaded.openai.models.is_empty());
+        assert!(loaded.openai.fetched_at.is_none());
+    }
+
+    #[test]
+    fn test_load_cache_corrupt_returns_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("corrupt.yaml");
+        std::fs::write(&path, "{{{{ not valid yaml }}}}").unwrap();
+        let loaded = load_cache_file(&path);
+        assert!(loaded.openai.models.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // is_relevant_openai_model
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_relevant_openai_model_includes_gpt() {
+        assert!(is_relevant_openai_model("gpt-5.2"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_embeddings() {
+        assert!(!is_relevant_openai_model("text-embedding-ada-002"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_dalle() {
+        assert!(!is_relevant_openai_model("dall-e-3"));
+    }
+
+    #[test]
+    fn test_is_relevant_openai_model_excludes_ft() {
+        assert!(!is_relevant_openai_model("ft:gpt-4:custom"));
+    }
+
+    // -----------------------------------------------------------------------
+    // fetch_openai_models_async (mockito)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fetch_openai_models_async_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"object":"list","data":[{"id":"gpt-4o","object":"model"},{"id":"text-embedding-ada-002","object":"model"}]}"#,
+            )
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_openai_models_async("sk-test", &server.url(), timeout).await;
+
+        let models = result.expect("should succeed");
+        assert!(models.contains(&"gpt-4o".to_string()));
+        // embeddings should be filtered out
+        assert!(!models.contains(&"text-embedding-ada-002".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_openai_models_async_401_returns_api_key_missing() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(401)
+            .with_body(r#"{"error":{"message":"Unauthorized"}}"#)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_openai_models_async("bad-key", &server.url(), timeout).await;
+
+        assert!(
+            matches!(result, Err(crate::error::ActualError::ApiKeyMissing { .. })),
+            "401 should return ApiKeyMissing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_openai_models_async_500_returns_runner_failed() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(500)
+            .with_body(r#"{"error":{"message":"Internal Server Error"}}"#)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_openai_models_async("sk-test", &server.url(), timeout).await;
+
+        assert!(
+            matches!(result, Err(crate::error::ActualError::RunnerFailed { .. })),
+            "500 should return RunnerFailed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // get_openai_models (synchronous)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_openai_models_no_api_key_returns_empty() {
+        // Ensure env var is absent for this test
+        let _guard = EnvGuard::remove("OPENAI_API_KEY");
+        let result = get_openai_models(None, None);
+        assert!(result.is_empty(), "no API key should return empty");
+    }
+
+    #[test]
+    fn test_get_openai_models_uses_cache_when_fresh() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_key = EnvGuard::remove("OPENAI_API_KEY");
+
+        let dir = tempdir().unwrap();
+        let cache_file = dir.path().join("model-cache.yaml");
+
+        // Write a fresh cache
+        let fresh_cache = ModelCacheFile {
+            openai: ProviderCache {
+                fetched_at: Some(Utc::now()),
+                models: vec!["gpt-cached-model".to_string()],
+            },
+            anthropic: ProviderCache::default(),
+        };
+        save_cache_file(&cache_file, &fresh_cache);
+
+        // Point config dir to our temp dir
+        let _config_dir_guard = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = get_openai_models(Some("sk-from-config"), None);
+        assert!(
+            result.contains(&"gpt-cached-model".to_string()),
+            "should return cached model; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_get_openai_models_fetch_error_returns_empty() {
+        // Use a base_url that cannot connect — should return empty gracefully
+        let result = get_openai_models(
+            Some("sk-test"),
+            Some("http://127.0.0.1:1"), // nothing listening on port 1
+        );
+        assert!(
+            result.is_empty(),
+            "network error should return empty (graceful)"
+        );
+    }
+
+    #[test]
+    fn test_get_openai_models_fetches_and_caches() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_key = EnvGuard::remove("OPENAI_API_KEY");
+
+        // We need a blocking mockito server — use a std::sync channel to run it
+        // from a separate thread.
+        let dir = tempdir().unwrap();
+        let _config_dir_guard = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        // Spin up the mockito server in a dedicated tokio runtime on another thread.
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut server = mockito::Server::new_async().await;
+                let _m = server
+                    .mock("GET", "/v1/models")
+                    .with_status(200)
+                    .with_header("content-type", "application/json")
+                    .with_body(
+                        r#"{"object":"list","data":[{"id":"gpt-live-model","object":"model"}]}"#,
+                    )
+                    .create_async()
+                    .await;
+                tx.send(server.url()).unwrap();
+                // Keep the server alive long enough for the test to call it
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            });
+        });
+
+        let server_url = rx.recv().expect("server url");
+        let result = get_openai_models(Some("sk-test"), Some(&server_url));
+
+        assert!(
+            result.contains(&"gpt-live-model".to_string()),
+            "should return live model; got: {result:?}"
+        );
+
+        // Verify it was written to cache
+        let cache_path = dir.path().join("model-cache.yaml");
+        assert!(cache_path.exists(), "cache file should be written");
+        let loaded = load_cache_file(&cache_path);
+        assert!(
+            loaded.openai.models.contains(&"gpt-live-model".to_string()),
+            "cache should contain the fetched model"
+        );
+
+        drop(handle);
+    }
+
+    #[test]
+    fn test_openai_and_anthropic_cache_sections_independent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("model-cache.yaml");
+
+        // Write only the openai section
+        let mut cache = ModelCacheFile::default();
+        cache.openai = ProviderCache {
+            fetched_at: Some(Utc::now()),
+            models: vec!["gpt-4o".to_string()],
+        };
+        save_cache_file(&path, &cache);
+
+        // Read back and check anthropic is empty
+        let loaded = load_cache_file(&path);
+        assert!(
+            !loaded.openai.models.is_empty(),
+            "openai should have models"
+        );
+        assert!(
+            loaded.anthropic.models.is_empty(),
+            "anthropic section should be empty"
+        );
+        assert!(
+            loaded.anthropic.fetched_at.is_none(),
+            "anthropic fetched_at should be None"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Unix-only: file permissions
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_cache_file_creates_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("model-cache.yaml");
+
+        save_cache_file(&path, &ModelCacheFile::default());
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "cache file should have mode 0600");
+    }
+
+    // -----------------------------------------------------------------------
+    // Local helper: env-var guard (mirrors testutil::EnvGuard for use here)
+    // -----------------------------------------------------------------------
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
