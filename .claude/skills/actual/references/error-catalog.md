@@ -267,7 +267,7 @@ curl -I <api_url>   # test connectivity
 
 **Cause**: The runner process exited with a non-zero status.
 
-**Hint**: Run with `--verbose` to see full runner output, or check that your runner is correctly installed and authenticated.
+**Hint**: Check the error details above. For subprocess runners, re-run with --verbose for more output.
 
 **Diagnosis**:
 ```bash
