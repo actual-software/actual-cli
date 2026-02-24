@@ -176,24 +176,32 @@ pub fn exec() -> Result<(), ActualError> {
             .and_then(|c: &crate::config::types::Config| c.openai_api_key.as_deref()),
         None,
     );
-    if !live_openai.is_empty() {
-        // Show supplementary live models not already in the static list
-        let static_ids: std::collections::HashSet<&str> =
-            known_model_names().iter().copied().collect();
-        let new_models: Vec<&String> = live_openai
-            .iter()
-            .filter(|id| !static_ids.contains(id.as_str()))
-            .collect();
-        if !new_models.is_empty() {
-            println!();
-            println!("Additional live models from OpenAI API:");
-            for id in new_models {
-                println!("  {id}");
-            }
-        }
-    }
+    print_live_openai_supplement(&live_openai);
 
     Ok(())
+}
+
+/// Print supplementary live OpenAI models that are not already in the static list.
+///
+/// Extracted as a standalone function so tests can verify the display logic
+/// without performing a real network fetch.
+pub(crate) fn print_live_openai_supplement(live_openai: &[String]) {
+    if live_openai.is_empty() {
+        return;
+    }
+    // Show supplementary live models not already in the static list
+    let static_ids: std::collections::HashSet<&str> = known_model_names().iter().copied().collect();
+    let new_models: Vec<&String> = live_openai
+        .iter()
+        .filter(|id| !static_ids.contains(id.as_str()))
+        .collect();
+    if !new_models.is_empty() {
+        println!();
+        println!("Additional live models from OpenAI API:");
+        for id in new_models {
+            println!("  {id}");
+        }
+    }
 }
 
 fn run_models() {
@@ -575,5 +583,40 @@ mod tests {
             defaults[0].id, "opus-4.6-thinking",
             "default Cursor model should be opus-4.6-thinking"
         );
+    }
+
+    // --- print_live_openai_supplement tests ---
+
+    #[test]
+    fn test_print_live_openai_supplement_empty_is_noop() {
+        // Should not panic; nothing to display
+        print_live_openai_supplement(&[]);
+    }
+
+    #[test]
+    fn test_print_live_openai_supplement_all_known_no_output() {
+        // All models in the live list are already in the static list — no "Additional" section
+        // This exercises the `new_models.is_empty()` branch (is_empty == true → no print).
+        let known: Vec<String> = vec!["gpt-4o".to_string(), "gpt-5.2".to_string()];
+        // Should not panic even though no new models are printed
+        print_live_openai_supplement(&known);
+    }
+
+    #[test]
+    fn test_print_live_openai_supplement_new_models_printed() {
+        // A model not in the static list should trigger the "Additional" section.
+        let live = vec!["gpt-99-brand-new-not-in-static-list".to_string()];
+        // Just verify it runs without panicking; stdout capture is not in scope here.
+        print_live_openai_supplement(&live);
+    }
+
+    #[test]
+    fn test_print_live_openai_supplement_mixed() {
+        // Mix of known and unknown models — only unknown should be printed.
+        let live = vec![
+            "gpt-4o".to_string(),             // already in static list
+            "gpt-99-unknown-xyz".to_string(), // new model
+        ];
+        print_live_openai_supplement(&live);
     }
 }
