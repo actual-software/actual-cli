@@ -1,14 +1,15 @@
-//! OpenAI (and future Anthropic) model list fetching and disk-backed caching.
+//! OpenAI and Anthropic model list fetching and disk-backed caching.
 //!
 //! # Design
 //!
-//! - `get_openai_models()` is the main entry point.  It is synchronous so it can
-//!   be called from any non-async context (e.g. the `actual models` command).
+//! - `get_openai_models()` / `get_anthropic_models()` are the main entry points.
+//!   They are synchronous so they can be called from any non-async context
+//!   (e.g. the `actual models` command).
 //! - A 24-hour TTL cache is stored at `~/.actualai/actual/model-cache.yaml`.
 //! - On any error (no API key, network failure, parse error) the function returns
 //!   an empty `Vec` so the caller can fall back to the static hardcoded list.
-//! - The `ModelCacheFile` struct has an `anthropic` section reserved for
-//!   actual-3kh.2.
+//! - Each provider's cache entry is independent: an expired OpenAI cache does not
+//!   force an Anthropic re-fetch, and vice versa.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -213,7 +214,179 @@ pub(crate) async fn fetch_openai_models_async(
 }
 
 // ---------------------------------------------------------------------------
-// Public synchronous entry point
+// Private Anthropic API response shapes
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct AnthropicModelObject {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct AnthropicModelsResponse {
+    data: Vec<AnthropicModelObject>,
+    has_more: bool,
+    last_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Async fetch for Anthropic (injectable base URL for tests)
+// ---------------------------------------------------------------------------
+
+/// Fetch the model list from the Anthropic `/v1/models` endpoint.
+///
+/// Paginates automatically until `has_more == false`.
+///
+/// `base_url` should be `"https://api.anthropic.com"` in production, or a
+/// local mock server URL in tests.
+pub(crate) async fn fetch_anthropic_models_async(
+    api_key: &str,
+    base_url: &str,
+    timeout: std::time::Duration,
+) -> Result<Vec<String>, crate::error::ActualError> {
+    use crate::error::ActualError;
+
+    let is_local =
+        base_url.starts_with("http://localhost") || base_url.starts_with("http://127.0.0.1");
+
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .https_only(!is_local)
+        .build()
+        .expect("reqwest client build failed");
+
+    let mut all_models = Vec::new();
+    let mut after_id: Option<String> = None;
+
+    loop {
+        let url = match &after_id {
+            Some(id) => format!("{base_url}/v1/models?after_id={id}"),
+            None => format!("{base_url}/v1/models"),
+        };
+
+        let response = client
+            .get(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .map_err(|e| ActualError::RunnerFailed {
+                message: format!("Anthropic models fetch failed: {e}"),
+                stderr: String::new(),
+            })?;
+
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(ActualError::ApiKeyMissing {
+                env_var: "ANTHROPIC_API_KEY".to_string(),
+            });
+        }
+
+        if !status.is_success() {
+            let body = response
+                .bytes()
+                .await
+                .map(|b| String::from_utf8_lossy(&b[..b.len().min(512)]).into_owned())
+                .unwrap_or_default();
+            return Err(ActualError::RunnerFailed {
+                message: format!("Anthropic models API returned {status}"),
+                stderr: body,
+            });
+        }
+
+        let parsed = response
+            .json::<AnthropicModelsResponse>()
+            .await
+            .map_err(|e| ActualError::RunnerFailed {
+                message: format!("Failed to parse Anthropic models response: {e}"),
+                stderr: String::new(),
+            })?;
+
+        all_models.extend(parsed.data.into_iter().map(|m| m.id));
+
+        if !parsed.has_more {
+            break;
+        }
+        after_id = parsed.last_id;
+    }
+
+    Ok(all_models)
+}
+
+// ---------------------------------------------------------------------------
+// Public synchronous entry point (Anthropic)
+// ---------------------------------------------------------------------------
+
+/// Fetch Anthropic models: return cached list if fresh, otherwise fetch live.
+///
+/// Returns an empty `Vec` on any error (graceful degradation — the caller is
+/// expected to merge this with the hardcoded static list).
+///
+/// # Arguments
+///
+/// * `config_key` — the `anthropic_api_key` from config.  `ANTHROPIC_API_KEY`
+///   env var takes priority over this value.
+/// * `base_url` — `None` in production, `Some("http://...")` in tests to
+///   override the Anthropic base URL.  When `Some`, the TTL check is skipped
+///   so tests always exercise the network path.
+pub fn get_anthropic_models(config_key: Option<&str>, base_url: Option<&str>) -> Vec<String> {
+    // Resolve API key (env var takes priority)
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .or_else(|| config_key.map(|s| s.to_string()));
+
+    let Some(api_key) = api_key else {
+        return Vec::new(); // no key available — skip silently
+    };
+
+    let ttl = DEFAULT_CACHE_TTL_HOURS;
+
+    // Return cached list if fresh (skip TTL check when base_url is overridden for tests).
+    let cached = base_url.is_none().then(|| {
+        cache_path().and_then(|path| {
+            let file = load_cache_file(&path);
+            file.anthropic
+                .is_fresh(ttl)
+                .then_some(file.anthropic.models)
+        })
+    });
+    if let Some(Some(models)) = cached {
+        return models;
+    }
+
+    // Fetch live
+    let production_base = "https://api.anthropic.com";
+    let url = base_url.unwrap_or(production_base);
+    let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime build failed");
+
+    match rt.block_on(fetch_anthropic_models_async(&api_key, url, timeout)) {
+        Ok(models) => {
+            // Persist to cache
+            if let Some(path) = cache_path() {
+                let mut file = load_cache_file(&path);
+                file.anthropic = ProviderCache {
+                    fetched_at: Some(Utc::now()),
+                    models: models.clone(),
+                };
+                save_cache_file(&path, &file);
+            }
+            models
+        }
+        Err(e) => {
+            tracing::warn!("Anthropic model fetch failed (using hardcoded fallback): {e}");
+            Vec::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public synchronous entry point (OpenAI)
 // ---------------------------------------------------------------------------
 
 /// Fetch OpenAI models: return cached list if fresh, otherwise fetch live.
@@ -443,6 +616,295 @@ mod tests {
     #[test]
     fn test_is_relevant_openai_model_unknown_prefix_returns_false() {
         assert!(!is_relevant_openai_model("unknown-model-xyz"));
+    }
+
+    // -----------------------------------------------------------------------
+    // fetch_anthropic_models_async (mockito)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fetch_anthropic_models_async_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data":[{"id":"claude-opus-4-6"},{"id":"claude-sonnet-4-6"}],"has_more":false,"last_id":"claude-sonnet-4-6"}"#,
+            )
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_anthropic_models_async("sk-ant-test", &server.url(), timeout).await;
+
+        let models = result.expect("should succeed");
+        assert!(models.contains(&"claude-opus-4-6".to_string()));
+        assert!(models.contains(&"claude-sonnet-4-6".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_anthropic_models_async_pagination() {
+        let mut server = mockito::Server::new_async().await;
+        let _m1 = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"claude-a"}],"has_more":true,"last_id":"claude-a"}"#)
+            .create_async()
+            .await;
+        let _m2 = server
+            .mock("GET", "/v1/models?after_id=claude-a")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"claude-b"}],"has_more":false,"last_id":"claude-b"}"#)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_anthropic_models_async("sk-ant-test", &server.url(), timeout).await;
+
+        let models = result.expect("should succeed");
+        assert!(models.contains(&"claude-a".to_string()));
+        assert!(models.contains(&"claude-b".to_string()));
+        assert_eq!(models.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_anthropic_models_async_401_returns_api_key_missing() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(401)
+            .with_body(r#"{"error":{"message":"Unauthorized"}}"#)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_anthropic_models_async("bad-key", &server.url(), timeout).await;
+
+        assert!(matches!(
+            result,
+            Err(crate::error::ActualError::ApiKeyMissing { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_anthropic_models_async_403_returns_api_key_missing() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(403)
+            .with_body(r#"{"error":{"message":"Forbidden"}}"#)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_anthropic_models_async("bad-key", &server.url(), timeout).await;
+
+        assert!(matches!(
+            result,
+            Err(crate::error::ActualError::ApiKeyMissing { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_anthropic_models_async_500_returns_runner_failed() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(500)
+            .with_body(r#"{"error":{"message":"Internal Server Error"}}"#)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_anthropic_models_async("sk-ant-test", &server.url(), timeout).await;
+
+        assert!(matches!(
+            result,
+            Err(crate::error::ActualError::RunnerFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_anthropic_models_async_invalid_json_returns_runner_failed() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"not valid json"#)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(5);
+        let result = fetch_anthropic_models_async("sk-ant-test", &server.url(), timeout).await;
+
+        assert!(matches!(
+            result,
+            Err(crate::error::ActualError::RunnerFailed { .. })
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // get_anthropic_models (synchronous)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_anthropic_models_no_api_key_returns_empty() {
+        let _guard = EnvGuard::remove("ANTHROPIC_API_KEY");
+        let result = get_anthropic_models(None, None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_anthropic_models_uses_cache_when_fresh() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_key = TEnvGuard::remove("ANTHROPIC_API_KEY");
+
+        let dir = tempdir().unwrap();
+        let cache_file = dir.path().join("model-cache.yaml");
+
+        let fresh_cache = ModelCacheFile {
+            openai: ProviderCache::default(),
+            anthropic: ProviderCache {
+                fetched_at: Some(Utc::now()),
+                models: vec!["claude-cached-model".to_string()],
+            },
+        };
+        save_cache_file(&cache_file, &fresh_cache);
+
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let result = get_anthropic_models(Some("sk-ant-from-config"), None);
+        assert!(result.contains(&"claude-cached-model".to_string()));
+    }
+
+    #[test]
+    fn test_get_anthropic_models_fetch_error_returns_empty() {
+        let result = get_anthropic_models(
+            Some("sk-ant-test"),
+            Some("http://127.0.0.1:1"), // nothing listening on port 1
+        );
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_anthropic_models_fetches_and_caches() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_key = TEnvGuard::remove("ANTHROPIC_API_KEY");
+
+        let dir = tempdir().unwrap();
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut server = mockito::Server::new_async().await;
+                let _m = server
+                    .mock("GET", "/v1/models")
+                    .with_status(200)
+                    .with_header("content-type", "application/json")
+                    .with_body(r#"{"data":[{"id":"claude-live-model"}],"has_more":false,"last_id":"claude-live-model"}"#)
+                    .create_async()
+                    .await;
+                tx.send(server.url()).unwrap();
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            });
+        });
+
+        let server_url = rx.recv().expect("server url");
+        let result = get_anthropic_models(Some("sk-ant-test"), Some(&server_url));
+
+        assert!(result.contains(&"claude-live-model".to_string()));
+
+        let cache_path = dir.path().join("model-cache.yaml");
+        assert!(cache_path.exists());
+        let loaded = load_cache_file(&cache_path);
+        assert!(loaded
+            .anthropic
+            .models
+            .contains(&"claude-live-model".to_string()));
+
+        drop(handle);
+    }
+
+    #[test]
+    fn test_get_anthropic_models_cache_independent_from_openai() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_key = TEnvGuard::remove("ANTHROPIC_API_KEY");
+
+        let dir = tempdir().unwrap();
+        let cache_file = dir.path().join("model-cache.yaml");
+
+        // Stale OpenAI cache, fresh Anthropic cache
+        let cache = ModelCacheFile {
+            openai: ProviderCache {
+                fetched_at: Some(Utc::now() - chrono::Duration::hours(25)),
+                models: vec!["gpt-4o".to_string()],
+            },
+            anthropic: ProviderCache {
+                fetched_at: Some(Utc::now()),
+                models: vec!["claude-cached-fresh".to_string()],
+            },
+        };
+        save_cache_file(&cache_file, &cache);
+
+        let _config_dir_guard = TEnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
+
+        // Anthropic cache is fresh — should return cached without network call
+        let result = get_anthropic_models(Some("sk-ant-from-config"), None);
+        assert!(result.contains(&"claude-cached-fresh".to_string()));
+
+        // OpenAI cache is stale — verify it is not fresh
+        let loaded = load_cache_file(&cache_file);
+        assert!(!loaded.openai.is_fresh(DEFAULT_CACHE_TTL_HOURS));
+        assert!(loaded.anthropic.is_fresh(DEFAULT_CACHE_TTL_HOURS));
+    }
+
+    #[test]
+    fn test_get_anthropic_models_fetches_and_returns_even_without_cache_path() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_key = TEnvGuard::remove("ANTHROPIC_API_KEY");
+        let _bad_config = TEnvGuard::set("ACTUAL_CONFIG", "");
+        let _no_dir = TEnvGuard::remove("ACTUAL_CONFIG_DIR");
+
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let _handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut server = mockito::Server::new_async().await;
+                let _m = server
+                    .mock("GET", "/v1/models")
+                    .with_status(200)
+                    .with_header("content-type", "application/json")
+                    .with_body(r#"{"data":[{"id":"claude-no-cache-model"}],"has_more":false,"last_id":"claude-no-cache-model"}"#)
+                    .create_async()
+                    .await;
+                tx.send(server.url()).unwrap();
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            });
+        });
+
+        let server_url = rx.recv().expect("server url");
+        let result = get_anthropic_models(Some("sk-ant-test"), Some(&server_url));
+        assert!(result.contains(&"claude-no-cache-model".to_string()));
     }
 
     // -----------------------------------------------------------------------
