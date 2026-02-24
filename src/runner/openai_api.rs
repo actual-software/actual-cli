@@ -815,6 +815,35 @@ mod tests {
         );
     }
 
+    // Test: HTTP 429 with non-JSON body retries and eventually returns RunnerFailed
+    // (covers the json-parse-fail branch of the insufficient_quota check)
+    #[tokio::test]
+    async fn test_429_non_json_body_retries_and_fails() {
+        let mut server = Server::new_async().await;
+
+        // Return 429 with non-JSON body on every attempt.
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(429)
+            .with_header("content-type", "text/plain")
+            .with_body("rate limited")
+            .expect(4) // 1 initial + 3 retries = MAX_RATE_LIMIT_RETRIES + 1
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed after exhausted retries, got: {:?}",
+            result
+        );
+    }
+
     // Test 8: HTTP 500 maps to RunnerFailed with status in message
     #[tokio::test]
     async fn test_500_maps_to_subprocess_failed() {
