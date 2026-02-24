@@ -102,6 +102,19 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
         .map_err(|e| ActualError::InternalError(format!("Failed to serialize {label}: {e}")))
 }
 
+/// Convert a raw prompt-decode result into the canonical `ActualError`.
+///
+/// Extracted so the error-path conversion can be unit-tested without
+/// having to corrupt the real obfuscated prompt constant.
+fn prompt_result_to_error(raw: Result<String, ActualError>) -> Result<String, ActualError> {
+    raw.map_err(|_| {
+        ActualError::InternalError(
+            "Tailoring prompt constant is malformed (build artifact mismatch). Please reinstall."
+                .to_string(),
+        )
+    })
+}
+
 /// Build the tailoring prompt string from the input data.
 ///
 /// Returns `Err(ActualError::InternalError)` if the obfuscated prompt constant is
@@ -114,19 +127,13 @@ pub(crate) fn build_prompt(
     format: &OutputFormat,
     bundled_context: &str,
 ) -> Result<String, ActualError> {
-    tailoring_prompt(
+    prompt_result_to_error(tailoring_prompt(
         projects_json,
         existing_output_paths,
         adr_json,
         format,
         bundled_context,
-    )
-    .map_err(|_| {
-        ActualError::InternalError(
-            "Tailoring prompt constant is malformed (build artifact mismatch). Please reinstall."
-                .to_string(),
-        )
-    })
+    ))
 }
 
 /// Returns `true` if `path` is a valid output file path for the given `format`.
@@ -590,6 +597,27 @@ mod tests {
             "expected 'Failed to serialize test' in: {msg}"
         );
         assert!(matches!(err, ActualError::InternalError(_)));
+    }
+
+    #[test]
+    fn test_prompt_result_to_error_propagates_err_as_internal_error() {
+        let raw: Result<String, ActualError> =
+            Err(ActualError::InternalError("decode failure".to_string()));
+        let result = prompt_result_to_error(raw);
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("malformed"),
+            "expected 'malformed' in error message: {msg}"
+        );
+        assert!(matches!(err, ActualError::InternalError(_)));
+    }
+
+    #[test]
+    fn test_prompt_result_to_error_passes_ok_through() {
+        let raw: Result<String, ActualError> = Ok("hello prompt".to_string());
+        let result = prompt_result_to_error(raw);
+        assert_eq!(result.unwrap(), "hello prompt");
     }
 
     #[test]
