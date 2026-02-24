@@ -284,12 +284,18 @@ actual config set invocation_timeout_secs 1200
 If you get an error about an unrecognized model:
 
 ```bash
-# List all known models (fetches live list from OpenAI/Anthropic APIs if keys are set)
+# List all known models
 actual models
-
-# List only hardcoded models, skip live API fetch
-actual models --no-fetch
 
 # Check what runner a model maps to
 actual runners
 ```
+
+## actual models
+
+Lists known model names grouped by runner, with live model fetching from OpenAI and Anthropic APIs.
+
+By default, `actual models` fetches the live model list from the OpenAI and Anthropic APIs (using cached credentials) and merges the results with the hardcoded static list. Live models are annotated with `(live)` in the output. The freshness of the cached live list is shown per-family.
+
+Options:
+  --no-fetch    Skip live API fetch; show only the hardcoded model list (useful for offline or air-gapped environments)
