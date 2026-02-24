@@ -35,6 +35,39 @@ fn format_bundle_context(ctx: &RepoBundleContext) -> String {
 /// If `root_dir` is `Some`, the repository context is pre-bundled via
 /// [`bundle_context`] and injected into the prompt. On failure, bundling is
 /// skipped with a warning and tailoring continues without bundled context.
+/// Core tailoring invocation with a pre-built prompt string.
+///
+/// Separated from [`invoke_tailoring`] so that the prompt-building step
+/// (which involves decoding obfuscated bytes) can be tested independently,
+/// allowing full coverage of the runner invocation and retry logic.
+pub(crate) async fn invoke_tailoring_with_prompt<R: TailoringRunner>(
+    runner: &R,
+    prompt: &str,
+    adrs: &[Adr],
+    model_override: Option<&str>,
+    max_budget_usd: Option<f64>,
+    format: &OutputFormat,
+) -> Result<TailoringOutput, ActualError> {
+    let schema = tailoring_output_schema()?;
+    let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
+
+    // First attempt
+    match runner
+        .run_tailoring(prompt, &schema, model_override, max_budget_usd)
+        .await
+    {
+        Ok(output) => validate_and_filter_output(output, &valid_ids, format),
+        Err(ActualError::RunnerOutputParse(_)) => {
+            // Retry once on JSON parse failure
+            let output = runner
+                .run_tailoring(prompt, &schema, model_override, max_budget_usd)
+                .await?;
+            validate_and_filter_output(output, &valid_ids, format)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn invoke_tailoring<R: TailoringRunner>(
     runner: &R,
@@ -66,31 +99,23 @@ pub async fn invoke_tailoring<R: TailoringRunner>(
     };
 
     let adr_json = serialize_json(adrs, "ADRs")?;
-    let prompt = build_prompt(
+    let prompt_result = build_prompt(
         &adr_json,
         projects_json,
         existing_output_paths,
         format,
         bundled_context,
-    )?;
-    let schema = tailoring_output_schema()?;
-    let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
-
-    // First attempt
-    match runner
-        .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
-        .await
-    {
-        Ok(output) => validate_and_filter_output(output, &valid_ids, format),
-        Err(ActualError::RunnerOutputParse(_)) => {
-            // Retry once on JSON parse failure
-            let output = runner
-                .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
-                .await?;
-            validate_and_filter_output(output, &valid_ids, format)
-        }
-        Err(e) => Err(e),
-    }
+    );
+    let prompt = prompt_result?;
+    invoke_tailoring_with_prompt(
+        runner,
+        &prompt,
+        adrs,
+        model_override,
+        max_budget_usd,
+        format,
+    )
+    .await
 }
 
 /// Serialize a value to JSON, mapping errors to `ActualError::InternalError`.
