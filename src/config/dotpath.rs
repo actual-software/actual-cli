@@ -450,14 +450,11 @@ mod tests {
         // `config set model <name>` to emit a false "unknown model" warning.
         // All of them must be present in known_model_names() so the warning
         // path is not triggered.
+        //
+        // Audited 2026-02-23 against live OpenAI API and docs.
+        // Removed: o1-preview (shutdown 2025-07-28), chatgpt-4o-latest (shutdown 2026-02-17)
         let known = known_model_names();
-        for name in &[
-            "gpt-4o",
-            "o4-mini",
-            "o3-mini",
-            "o1-preview",
-            "chatgpt-4o-latest",
-        ] {
+        for name in &["gpt-4o", "o4-mini", "o3", "o3-mini", "o1"] {
             let mut config = Config::default();
             // set() succeeds regardless (warning is soft), but we also assert
             // the model is in the known list so the warning would NOT fire.

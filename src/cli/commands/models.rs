@@ -45,16 +45,37 @@ struct RunnerFamily {
     models: &'static [ModelEntry],
 }
 
+// Last audited: 2026-02-23
+// Sources:
+//   OpenAI live API: https://api.openai.com/v1/models (verified via OPENAI_API_KEY)
+//   OpenAI docs: https://platform.openai.com/docs/models
+//   OpenAI deprecations: https://platform.openai.com/docs/deprecations
+//   Anthropic docs: https://docs.anthropic.com/en/docs/about-claude/models
+//
+// Models removed from this list (already shut down or deprecated):
+//   o1-preview: shutdown 2025-07-28 (removed)
+//   chatgpt-4o-latest: shutdown 2026-02-17 (removed — past shutdown date)
+//   o1-mini: shutdown 2025-10-27 (not previously listed, excluded)
+
 /// Static list of runner families and their known models.
 static RUNNER_FAMILIES: &[RunnerFamily] = &[
     RunnerFamily {
         name: "Claude / Anthropic",
         runners: &["claude-cli", "anthropic-api"],
         // Ordered newest-first within each model line, aliases at the end.
+        // Source: https://docs.anthropic.com/en/docs/about-claude/models
         models: &[
+            // Current / recommended models (as of 2026-02-23)
             ModelEntry::default_model("claude-sonnet-4-6"),
+            ModelEntry::new("claude-opus-4-6"),
+            ModelEntry::new("claude-haiku-4-5"),
+            // Legacy models (still available via API)
             ModelEntry::new("claude-opus-4-5"),
+            ModelEntry::new("claude-opus-4-1"),
+            ModelEntry::new("claude-sonnet-4-5"),
+            ModelEntry::new("claude-sonnet-4"),
             ModelEntry::new("claude-opus-4"),
+            // Short aliases (claude-cli only)
             ModelEntry::with_note("sonnet", "short alias, claude-cli only"),
             ModelEntry::with_note("opus", "short alias, claude-cli only"),
             ModelEntry::with_note("haiku", "short alias, claude-cli only"),
@@ -64,32 +85,42 @@ static RUNNER_FAMILIES: &[RunnerFamily] = &[
         name: "OpenAI",
         runners: &["openai-api"],
         // keep in sync with RUNNER_FAMILIES default for openai-api (see sync_wiring.rs unwrap_or)
+        // Source: https://platform.openai.com/docs/models (verified via live API 2026-02-23)
+        // Removed: o1-preview (shutdown 2025-07-28), chatgpt-4o-latest (shutdown 2026-02-17)
         models: &[
             ModelEntry::default_model("gpt-5.2"),
+            ModelEntry::new("gpt-5.1"),
+            ModelEntry::new("gpt-5"),
             ModelEntry::new("gpt-5-mini"),
+            ModelEntry::new("gpt-5-nano"),
             ModelEntry::new("gpt-4.1"),
+            ModelEntry::new("gpt-4.1-mini"),
+            ModelEntry::new("gpt-4.1-nano"),
             ModelEntry::new("gpt-4o"),
             ModelEntry::new("o4-mini"),
+            ModelEntry::new("o3"),
             ModelEntry::new("o3-mini"),
-            ModelEntry::new("o1-preview"),
-            ModelEntry::new("chatgpt-4o-latest"),
+            ModelEntry::new("o1"),
         ],
     },
     RunnerFamily {
         name: "Codex CLI",
         runners: &["codex-cli"],
-        // OpenAI-family models (gpt-*, o-series, chatgpt-*) prefer codex-cli over
-        // openai-api; they also appear in the OpenAI family above for discoverability.
+        // OpenAI-family models (gpt-*, o-series) prefer codex-cli over openai-api;
+        // they also appear in the OpenAI family above for discoverability.
+        // Source: https://platform.openai.com/docs/models (verified via live API 2026-02-23)
+        // Removed: o1-preview (shutdown 2025-07-28), chatgpt-4o-latest (shutdown 2026-02-17)
         models: &[
             ModelEntry::default_model("gpt-5.2-codex"),
             ModelEntry::new("gpt-5.1-codex"),
+            ModelEntry::new("gpt-5.1-codex-max"),
             ModelEntry::new("gpt-5.1-codex-mini"),
             ModelEntry::new("gpt-5-codex"),
             ModelEntry::new("gpt-4o"),
             ModelEntry::new("o4-mini"),
+            ModelEntry::new("o3"),
             ModelEntry::new("o3-mini"),
-            ModelEntry::new("o1-preview"),
-            ModelEntry::new("chatgpt-4o-latest"),
+            ModelEntry::new("o1"),
         ],
     },
     RunnerFamily {
@@ -311,12 +342,21 @@ mod tests {
             "should include claude-sonnet-4-6"
         );
         assert!(
+            ids.contains(&"claude-opus-4-6"),
+            "should include claude-opus-4-6"
+        );
+        assert!(
+            ids.contains(&"claude-haiku-4-5"),
+            "should include claude-haiku-4-5"
+        );
+        assert!(
             ids.contains(&"claude-opus-4-5"),
             "should include claude-opus-4-5"
         );
+        // Legacy models still available
         assert!(
             ids.contains(&"claude-opus-4"),
-            "should include claude-opus-4"
+            "should include claude-opus-4 (legacy)"
         );
     }
 
@@ -327,17 +367,31 @@ mod tests {
             .find(|f| f.name == "OpenAI")
             .expect("should have OpenAI family");
         let ids: Vec<&str> = openai_family.models.iter().map(|m| m.id).collect();
+        // GPT-5 family (current)
         assert!(ids.contains(&"gpt-5.2"), "should include gpt-5.2");
+        assert!(ids.contains(&"gpt-5.1"), "should include gpt-5.1");
+        assert!(ids.contains(&"gpt-5"), "should include gpt-5");
         assert!(ids.contains(&"gpt-5-mini"), "should include gpt-5-mini");
+        assert!(ids.contains(&"gpt-5-nano"), "should include gpt-5-nano");
+        // GPT-4.1 family
         assert!(ids.contains(&"gpt-4.1"), "should include gpt-4.1");
-        // o-series and chatgpt models recognised by infer_from_model
+        assert!(ids.contains(&"gpt-4.1-mini"), "should include gpt-4.1-mini");
+        assert!(ids.contains(&"gpt-4.1-nano"), "should include gpt-4.1-nano");
+        // GPT-4o (still live)
         assert!(ids.contains(&"gpt-4o"), "should include gpt-4o");
+        // o-series (current)
         assert!(ids.contains(&"o4-mini"), "should include o4-mini");
+        assert!(ids.contains(&"o3"), "should include o3");
         assert!(ids.contains(&"o3-mini"), "should include o3-mini");
-        assert!(ids.contains(&"o1-preview"), "should include o1-preview");
+        assert!(ids.contains(&"o1"), "should include o1");
+        // Removed: o1-preview (shutdown 2025-07-28), chatgpt-4o-latest (shutdown 2026-02-17)
         assert!(
-            ids.contains(&"chatgpt-4o-latest"),
-            "should include chatgpt-4o-latest"
+            !ids.contains(&"o1-preview"),
+            "o1-preview must NOT be listed (shutdown 2025-07-28)"
+        );
+        assert!(
+            !ids.contains(&"chatgpt-4o-latest"),
+            "chatgpt-4o-latest must NOT be listed (shutdown 2026-02-17)"
         );
     }
 
@@ -357,18 +411,28 @@ mod tests {
             "should include gpt-5.1-codex"
         );
         assert!(
+            ids.contains(&"gpt-5.1-codex-max"),
+            "should include gpt-5.1-codex-max"
+        );
+        assert!(
             ids.contains(&"gpt-5.1-codex-mini"),
             "should include gpt-5.1-codex-mini"
         );
         assert!(ids.contains(&"gpt-5-codex"), "should include gpt-5-codex");
-        // o-series and chatgpt models route to codex-cli (preferred runner)
+        // o-series and gpt-4o models route to codex-cli (preferred runner)
         assert!(ids.contains(&"gpt-4o"), "should include gpt-4o");
         assert!(ids.contains(&"o4-mini"), "should include o4-mini");
+        assert!(ids.contains(&"o3"), "should include o3");
         assert!(ids.contains(&"o3-mini"), "should include o3-mini");
-        assert!(ids.contains(&"o1-preview"), "should include o1-preview");
+        assert!(ids.contains(&"o1"), "should include o1");
+        // Removed: o1-preview (shutdown 2025-07-28), chatgpt-4o-latest (shutdown 2026-02-17)
         assert!(
-            ids.contains(&"chatgpt-4o-latest"),
-            "should include chatgpt-4o-latest"
+            !ids.contains(&"o1-preview"),
+            "o1-preview must NOT be listed (shutdown 2025-07-28)"
+        );
+        assert!(
+            !ids.contains(&"chatgpt-4o-latest"),
+            "chatgpt-4o-latest must NOT be listed (shutdown 2026-02-17)"
         );
     }
 
@@ -384,6 +448,8 @@ mod tests {
     fn test_known_model_names_includes_claude_models() {
         let names = known_model_names();
         assert!(names.contains(&"claude-sonnet-4-6"));
+        assert!(names.contains(&"claude-opus-4-6"));
+        assert!(names.contains(&"claude-haiku-4-5"));
         assert!(names.contains(&"claude-opus-4-5"));
         assert!(names.contains(&"claude-opus-4"));
         assert!(names.contains(&"sonnet"));
@@ -394,15 +460,31 @@ mod tests {
     #[test]
     fn test_known_model_names_includes_openai_models() {
         let names = known_model_names();
+        // GPT-5 family
         assert!(names.contains(&"gpt-5.2"));
+        assert!(names.contains(&"gpt-5.1"));
+        assert!(names.contains(&"gpt-5"));
         assert!(names.contains(&"gpt-5-mini"));
+        assert!(names.contains(&"gpt-5-nano"));
+        // GPT-4.1 family
         assert!(names.contains(&"gpt-4.1"));
-        // o-series and chatgpt models
+        assert!(names.contains(&"gpt-4.1-mini"));
+        assert!(names.contains(&"gpt-4.1-nano"));
+        // GPT-4o and o-series (current)
         assert!(names.contains(&"gpt-4o"));
         assert!(names.contains(&"o4-mini"));
+        assert!(names.contains(&"o3"));
         assert!(names.contains(&"o3-mini"));
-        assert!(names.contains(&"o1-preview"));
-        assert!(names.contains(&"chatgpt-4o-latest"));
+        assert!(names.contains(&"o1"));
+        // Deprecated/removed models must NOT appear
+        assert!(
+            !names.contains(&"o1-preview"),
+            "o1-preview was shut down 2025-07-28"
+        );
+        assert!(
+            !names.contains(&"chatgpt-4o-latest"),
+            "chatgpt-4o-latest was shut down 2026-02-17"
+        );
     }
 
     #[test]
@@ -410,6 +492,7 @@ mod tests {
         let names = known_model_names();
         assert!(names.contains(&"gpt-5.2-codex"));
         assert!(names.contains(&"gpt-5.1-codex"));
+        assert!(names.contains(&"gpt-5.1-codex-max"));
         assert!(names.contains(&"gpt-5.1-codex-mini"));
         assert!(names.contains(&"gpt-5-codex"));
     }
