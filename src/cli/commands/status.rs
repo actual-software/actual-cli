@@ -793,6 +793,38 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_format_output_files_section_unreadable_file_warns_and_treats_as_unmanaged() {
+        use std::os::unix::fs::PermissionsExt;
+        use tracing_test::traced_test;
+
+        #[traced_test]
+        fn inner() {
+            let dir = tempdir().unwrap();
+            let file = dir.path().join("CLAUDE.md");
+            std::fs::write(&file, "# content").unwrap();
+            // Remove read permissions so the file exists but cannot be read.
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+            let output = format_output_files_section(dir.path(), &OutputFormat::ClaudeMd, 80);
+            let p = plain(&output);
+
+            // Restore permissions so tempdir cleanup doesn't fail.
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+            // File is treated as unmanaged because content was empty.
+            assert!(p.contains("unmanaged"), "should show 'unmanaged': {p}");
+            // A warning must have been emitted.
+            assert!(
+                logs_contain("Cannot read output file"),
+                "should emit a warning for unreadable file"
+            );
+        }
+
+        inner();
+    }
+
     // ─── format_verbose_section ──────────────────────────────────
 
     #[test]
