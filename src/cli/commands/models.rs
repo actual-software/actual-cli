@@ -165,77 +165,29 @@ pub fn known_cursor_model_names() -> Vec<&'static str> {
         .unwrap_or_default()
 }
 
-pub fn exec() -> Result<(), ActualError> {
-    run_models();
+pub fn exec(no_fetch: bool) -> Result<(), ActualError> {
+    let config = crate::config::paths::load().ok();
+    let config_ref = config.as_ref();
 
-    // Attempt live fetch (no-op if no API key; graceful on error)
-    let live_openai = crate::model_cache::get_openai_models(
-        crate::config::paths::load()
-            .ok()
-            .as_ref()
-            .and_then(|c: &crate::config::types::Config| c.openai_api_key.as_deref()),
-        None,
-    );
-    print_live_openai_supplement(&live_openai);
+    let (live_openai, live_anthropic) = if no_fetch {
+        (Vec::new(), Vec::new())
+    } else {
+        let openai = crate::model_cache::get_openai_models(
+            config_ref.and_then(|c: &crate::config::types::Config| c.openai_api_key.as_deref()),
+            None,
+        );
+        let anthropic = crate::model_cache::get_anthropic_models(
+            config_ref.and_then(|c: &crate::config::types::Config| c.anthropic_api_key.as_deref()),
+            None,
+        );
+        (openai, anthropic)
+    };
 
-    let live_anthropic = crate::model_cache::get_anthropic_models(
-        crate::config::paths::load()
-            .ok()
-            .as_ref()
-            .and_then(|c: &crate::config::types::Config| c.anthropic_api_key.as_deref()),
-        None,
-    );
-    print_live_anthropic_supplement(&live_anthropic);
-
+    run_models(no_fetch, &live_openai, &live_anthropic);
     Ok(())
 }
 
-/// Print supplementary live OpenAI models that are not already in the static list.
-///
-/// Extracted as a standalone function so tests can verify the display logic
-/// without performing a real network fetch.
-pub(crate) fn print_live_openai_supplement(live_openai: &[String]) {
-    if live_openai.is_empty() {
-        return;
-    }
-    // Show supplementary live models not already in the static list
-    let static_ids: std::collections::HashSet<&str> = known_model_names().iter().copied().collect();
-    let new_models: Vec<&String> = live_openai
-        .iter()
-        .filter(|id| !static_ids.contains(id.as_str()))
-        .collect();
-    if !new_models.is_empty() {
-        println!();
-        println!("Additional live models from OpenAI API:");
-        for id in new_models {
-            println!("  {id}");
-        }
-    }
-}
-
-/// Print supplementary live Anthropic models that are not already in the static list.
-///
-/// Extracted as a standalone function so tests can verify the display logic
-/// without performing a real network fetch.
-pub(crate) fn print_live_anthropic_supplement(live_anthropic: &[String]) {
-    if live_anthropic.is_empty() {
-        return;
-    }
-    let static_ids: std::collections::HashSet<&str> = known_model_names().iter().copied().collect();
-    let new_models: Vec<&String> = live_anthropic
-        .iter()
-        .filter(|id| !static_ids.contains(id.as_str()))
-        .collect();
-    if !new_models.is_empty() {
-        println!();
-        println!("Additional live models from Anthropic API:");
-        for id in new_models {
-            println!("  {id}");
-        }
-    }
-}
-
-fn run_models() {
+fn run_models(no_fetch: bool, live_openai: &[String], live_anthropic: &[String]) {
     println!("Known models by runner\n");
     println!("  (default) marks the model used when none is configured");
     println!("  Set with: actual config set model <name>\n");
@@ -244,19 +196,91 @@ fn run_models() {
         let runners_str = family.runners.join(", ");
         println!("  {} ({})", family.name, runners_str);
 
+        // Determine which live list applies to this family
+        let live_for_family: &[String] = if family.runners.contains(&"openai-api") {
+            live_openai
+        } else if family.runners.contains(&"anthropic-api")
+            || family.runners.contains(&"claude-cli")
+        {
+            live_anthropic
+        } else {
+            &[]
+        };
+
         for model in family.models {
             let default_tag = if model.is_default { " (default)" } else { "" };
             match model.note {
-                Some(note) => {
-                    println!("    {}{}  — {}", model.id, default_tag, note);
-                }
-                None => {
-                    println!("    {}{}", model.id, default_tag);
-                }
+                Some(note) => println!("    {}{}  — {}", model.id, default_tag, note),
+                None => println!("    {}{}", model.id, default_tag),
             }
         }
 
+        // Print new models from live list not already in static list
+        let static_ids: std::collections::HashSet<&str> =
+            family.models.iter().map(|m| m.id).collect();
+        for id in live_for_family {
+            if !static_ids.contains(id.as_str()) {
+                println!("    {id}  + (live)");
+            }
+        }
+
+        // Print provenance line
+        let timestamp = if family.runners.contains(&"openai-api") {
+            crate::model_cache::read_openai_cache_timestamp()
+        } else if family.runners.contains(&"anthropic-api")
+            || family.runners.contains(&"claude-cli")
+        {
+            crate::model_cache::read_anthropic_cache_timestamp()
+        } else {
+            None
+        };
+        let provenance = provenance_line(family, no_fetch, live_for_family, timestamp);
+        println!("  {provenance}");
         println!();
+    }
+}
+
+fn provenance_line(
+    family: &RunnerFamily,
+    no_fetch: bool,
+    live_list: &[String],
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+) -> String {
+    if no_fetch {
+        return "(hardcoded — pass no --no-fetch to fetch live list)".to_string();
+    }
+
+    // Cursor / Codex CLI have no live API
+    if !family.runners.contains(&"openai-api")
+        && !family.runners.contains(&"anthropic-api")
+        && !family.runners.contains(&"claude-cli")
+    {
+        return "(hardcoded)".to_string();
+    }
+
+    if live_list.is_empty() {
+        // No live data — either no API key or fetch failed
+        let key_hint = if family.runners.contains(&"openai-api") {
+            "set OPENAI_API_KEY"
+        } else {
+            "set ANTHROPIC_API_KEY"
+        };
+        return format!("(hardcoded — {key_hint} to fetch live list)");
+    }
+
+    // We got live data — check cache timestamp
+    match timestamp {
+        Some(t) => {
+            let hours = chrono::Utc::now().signed_duration_since(t).num_hours();
+            if hours < 1 {
+                "(live, fetched just now)".to_string()
+            } else if hours == 1 {
+                "(cached, 1h ago)".to_string()
+            } else {
+                format!("(cached, {hours}h ago)")
+            }
+        }
+        None => "(live)".to_string(),
     }
 }
 
@@ -266,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_exec_returns_ok() {
-        assert!(exec().is_ok());
+        assert!(exec(true).is_ok());
     }
 
     #[test]
@@ -616,69 +640,126 @@ mod tests {
         );
     }
 
-    // --- print_live_anthropic_supplement tests ---
+    // --- exec() tests ---
 
     #[test]
-    fn test_print_live_anthropic_supplement_empty_is_noop() {
-        print_live_anthropic_supplement(&[]);
+    fn test_exec_no_fetch_returns_ok() {
+        assert!(exec(true).is_ok());
     }
 
     #[test]
-    fn test_print_live_anthropic_supplement_all_known_no_output() {
-        let known: Vec<String> = vec![
-            "claude-sonnet-4-6".to_string(),
-            "claude-opus-4-6".to_string(),
-        ];
-        print_live_anthropic_supplement(&known);
+    fn test_exec_with_fetch_returns_ok() {
+        // no_fetch=false with no API key configured is also fine (returns empty live list)
+        assert!(exec(false).is_ok());
+    }
+
+    // --- run_models() tests ---
+
+    #[test]
+    fn test_run_models_no_fetch() {
+        // Should not panic; no live models passed in
+        run_models(true, &[], &[]);
     }
 
     #[test]
-    fn test_print_live_anthropic_supplement_new_models_printed() {
-        let live = vec!["claude-99-brand-new-not-in-static-list".to_string()];
-        print_live_anthropic_supplement(&live);
+    fn test_run_models_with_live_models() {
+        let openai = vec!["gpt-new-xyz".to_string()];
+        let anthropic = vec!["claude-new-xyz".to_string()];
+        run_models(false, &openai, &anthropic);
+    }
+
+    // --- provenance_line() tests ---
+
+    fn openai_family() -> &'static RunnerFamily {
+        RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.runners.contains(&"openai-api"))
+            .expect("should have OpenAI family")
+    }
+
+    fn claude_family() -> &'static RunnerFamily {
+        RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "Claude / Anthropic")
+            .expect("should have Claude family")
+    }
+
+    fn cursor_family() -> &'static RunnerFamily {
+        RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "Cursor")
+            .expect("should have Cursor family")
+    }
+
+    fn codex_family() -> &'static RunnerFamily {
+        RUNNER_FAMILIES
+            .iter()
+            .find(|f| f.name == "Codex CLI")
+            .expect("should have Codex CLI family")
     }
 
     #[test]
-    fn test_print_live_anthropic_supplement_mixed() {
-        let live = vec![
-            "claude-sonnet-4-6".to_string(),     // already in static list
-            "claude-99-unknown-xyz".to_string(), // new model
-        ];
-        print_live_anthropic_supplement(&live);
-    }
-
-    // --- print_live_openai_supplement tests ---
-
-    #[test]
-    fn test_print_live_openai_supplement_empty_is_noop() {
-        // Should not panic; nothing to display
-        print_live_openai_supplement(&[]);
+    fn test_provenance_line_no_fetch() {
+        let result = provenance_line(openai_family(), true, &[], None);
+        assert!(result.contains("no --no-fetch"));
     }
 
     #[test]
-    fn test_print_live_openai_supplement_all_known_no_output() {
-        // All models in the live list are already in the static list — no "Additional" section
-        // This exercises the `new_models.is_empty()` branch (is_empty == true → no print).
-        let known: Vec<String> = vec!["gpt-4o".to_string(), "gpt-5.2".to_string()];
-        // Should not panic even though no new models are printed
-        print_live_openai_supplement(&known);
+    fn test_provenance_line_cursor_family() {
+        let result = provenance_line(cursor_family(), false, &[], None);
+        assert_eq!(result, "(hardcoded)");
     }
 
     #[test]
-    fn test_print_live_openai_supplement_new_models_printed() {
-        // A model not in the static list should trigger the "Additional" section.
-        let live = vec!["gpt-99-brand-new-not-in-static-list".to_string()];
-        // Just verify it runs without panicking; stdout capture is not in scope here.
-        print_live_openai_supplement(&live);
+    fn test_provenance_line_codex_family() {
+        // Codex CLI family has no live API either
+        let result = provenance_line(codex_family(), false, &[], None);
+        assert_eq!(result, "(hardcoded)");
     }
 
     #[test]
-    fn test_print_live_openai_supplement_mixed() {
-        // Mix of known and unknown models — only unknown should be printed.
-        let live = vec![
-            "gpt-4o".to_string(),             // already in static list
-            "gpt-99-unknown-xyz".to_string(), // new model
-        ];
-        print_live_openai_supplement(&live);
+    fn test_provenance_line_empty_openai_live_list() {
+        let result = provenance_line(openai_family(), false, &[], None);
+        assert!(result.contains("OPENAI_API_KEY"), "got: {result}");
+    }
+
+    #[test]
+    fn test_provenance_line_empty_anthropic_live_list() {
+        let result = provenance_line(claude_family(), false, &[], None);
+        assert!(result.contains("ANTHROPIC_API_KEY"), "got: {result}");
+    }
+
+    #[test]
+    fn test_provenance_line_with_live_openai_no_timestamp() {
+        let live = vec!["gpt-99".to_string()];
+        let result = provenance_line(openai_family(), false, &live, None);
+        assert_eq!(result, "(live)");
+    }
+
+    #[test]
+    fn test_provenance_line_with_live_anthropic_recent() {
+        // Timestamp less than 1 hour ago → "just now"
+        let ts = chrono::Utc::now() - chrono::Duration::minutes(30);
+        let live = vec!["claude-new".to_string()];
+        let result = provenance_line(claude_family(), false, &live, Some(ts));
+        assert!(result.contains("just now"), "got: {result}");
+    }
+
+    #[test]
+    fn test_provenance_line_with_live_openai_one_hour() {
+        // Timestamp exactly 1 hour ago → "1h ago"
+        let ts = chrono::Utc::now() - chrono::Duration::hours(1);
+        let live = vec!["gpt-99".to_string()];
+        let result = provenance_line(openai_family(), false, &live, Some(ts));
+        assert!(result.contains("1h ago"), "got: {result}");
+    }
+
+    #[test]
+    fn test_provenance_line_with_live_openai_old() {
+        // Timestamp 2 hours ago → "2h ago"
+        let ts = chrono::Utc::now() - chrono::Duration::hours(2);
+        let live = vec!["gpt-99".to_string()];
+        let result = provenance_line(openai_family(), false, &live, Some(ts));
+        assert!(result.contains("2h ago"), "got: {result}");
     }
 }

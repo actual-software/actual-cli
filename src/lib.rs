@@ -19,8 +19,8 @@ pub use error::ActualError;
 
 // Re-export CLI types for backward compatibility with tests
 pub use cli::args::{
-    CacheAction, CacheArgs, Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs, RunnerChoice,
-    StatusArgs, SyncArgs,
+    CacheAction, CacheArgs, Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs, ModelsArgs,
+    RunnerChoice, StatusArgs, SyncArgs,
 };
 
 pub fn run(cli: Cli) -> Result<(), ActualError> {
@@ -30,7 +30,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Auth => cli::commands::auth::exec(),
         Command::Config(args) => cli::commands::config::exec(args),
         Command::Runners => cli::commands::runners::exec(),
-        Command::Models => cli::commands::models::exec(),
+        Command::Models(args) => cli::commands::models::exec(args.no_fetch),
         Command::Cache(args) => cli::commands::cache::exec(args),
     }
 }
