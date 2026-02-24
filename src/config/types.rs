@@ -5,6 +5,9 @@ use crate::analysis::types::RepoAnalysis;
 use crate::generation::OutputFormat;
 use crate::tailoring::types::TailoringOutput;
 
+/// Default API endpoint URL.
+pub const DEFAULT_API_URL: &str = "https://api-service.api.prod.actual.ai";
+
 /// Default batch size for ADR tailoring.
 pub const DEFAULT_BATCH_SIZE: usize = 15;
 
@@ -23,14 +26,18 @@ pub const CACHE_TTL_DAYS: i64 = 7;
 /// Maximum serialized size of a cached value in bytes (10 MiB).
 pub const CACHE_MAX_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
+fn default_api_url() -> Option<String> {
+    Some(DEFAULT_API_URL.to_string())
+}
+
 /// Top-level configuration for the actual CLI.
 ///
 /// Stored as YAML at `~/.actualai/actual/config.yaml`.
 /// All fields are optional; missing fields use sensible defaults.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     /// API endpoint URL.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default = "default_api_url", skip_serializing_if = "Option::is_none")]
     pub api_url: Option<String>,
 
     /// Default model used by ALL runners (e.g. "sonnet", "haiku", "opus", "gpt-5", "gpt-5.2").
@@ -142,6 +149,33 @@ pub struct Config {
     /// Only applies to the claude-cli runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            api_url: default_api_url(),
+            model: None,
+            include_categories: None,
+            exclude_categories: None,
+            include_general: None,
+            max_per_framework: None,
+            max_budget_usd: None,
+            batch_size: None,
+            concurrency: None,
+            invocation_timeout_secs: None,
+            output_format: None,
+            telemetry: None,
+            rejected_adrs: None,
+            cached_analysis: None,
+            cached_tailoring: None,
+            runner: None,
+            anthropic_api_key: None,
+            openai_api_key: None,
+            cursor_api_key: None,
+            max_turns: None,
+        }
+    }
 }
 
 /// Telemetry configuration.
@@ -309,7 +343,11 @@ mod tests {
         let config: Config = serde_yml::from_str(yaml).expect("deserialize partial YAML");
         assert_eq!(config.model, Some("opus".to_string()));
         assert_eq!(config.batch_size, Some(10));
-        assert_eq!(config.api_url, None);
+        assert_eq!(
+            config.api_url,
+            Some(DEFAULT_API_URL.to_string()),
+            "api_url should default to DEFAULT_API_URL when not specified in YAML"
+        );
         assert_eq!(config.telemetry, None);
         assert_eq!(config.concurrency, None);
     }
