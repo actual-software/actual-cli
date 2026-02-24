@@ -216,10 +216,7 @@ pub(crate) fn find_existing_output_files(root_dir: &Path, format: &OutputFormat)
             let content = match std::fs::read_to_string(path) {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::warn!(
-                        "Could not read existing output file {}: {e}",
-                        path.display()
-                    );
+                    tracing::warn!("failed to read output file {}: {e}", path.display());
                     return None;
                 }
             };
