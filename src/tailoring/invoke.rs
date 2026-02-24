@@ -1146,4 +1146,46 @@ mod tests {
             "invoke_tailoring must not fail when context bundling fails: {result:?}"
         );
     }
+
+    #[tokio::test]
+    async fn test_empty_reasoning_skips_debug_log() {
+        // When the LLM returns an empty reasoning field, the debug log should be
+        // skipped (if !file.reasoning.is_empty() guard). Verify the call succeeds.
+        let adrs = vec![make_adr("adr-001")];
+        let output = TailoringOutput {
+            files: vec![FileOutput {
+                path: "CLAUDE.md".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-001".to_string(),
+                    content: "# Rules\n\nFollow standards.".to_string(),
+                }],
+                reasoning: String::new(), // empty reasoning — guard skips debug log
+            }],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 1,
+                applicable: 1,
+                not_applicable: 0,
+                files_generated: 1,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = MockTailoringRunner::single(&json);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+            None,
+        )
+        .await;
+
+        let output = result.unwrap();
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].reasoning, "");
+    }
 }
