@@ -50,10 +50,11 @@ static RUNNER_FAMILIES: &[RunnerFamily] = &[
     RunnerFamily {
         name: "Claude / Anthropic",
         runners: &["claude-cli", "anthropic-api"],
+        // Ordered newest-first within each model line, aliases at the end.
         models: &[
-            ModelEntry::new("claude-opus-4"),
-            ModelEntry::new("claude-opus-4-5"),
             ModelEntry::default_model("claude-sonnet-4-6"),
+            ModelEntry::new("claude-opus-4-5"),
+            ModelEntry::new("claude-opus-4"),
             ModelEntry::with_note("sonnet", "short alias, claude-cli only"),
             ModelEntry::with_note("opus", "short alias, claude-cli only"),
             ModelEntry::with_note("haiku", "short alias, claude-cli only"),
@@ -62,20 +63,33 @@ static RUNNER_FAMILIES: &[RunnerFamily] = &[
     RunnerFamily {
         name: "OpenAI",
         runners: &["openai-api"],
+        // keep in sync with RUNNER_FAMILIES default for openai-api (see sync_wiring.rs unwrap_or)
         models: &[
             ModelEntry::default_model("gpt-5.2"),
             ModelEntry::new("gpt-5-mini"),
             ModelEntry::new("gpt-4.1"),
+            ModelEntry::new("gpt-4o"),
+            ModelEntry::new("o4-mini"),
+            ModelEntry::new("o3-mini"),
+            ModelEntry::new("o1-preview"),
+            ModelEntry::new("chatgpt-4o-latest"),
         ],
     },
     RunnerFamily {
         name: "Codex CLI",
         runners: &["codex-cli"],
+        // OpenAI-family models (gpt-*, o-series, chatgpt-*) prefer codex-cli over
+        // openai-api; they also appear in the OpenAI family above for discoverability.
         models: &[
             ModelEntry::default_model("gpt-5.2-codex"),
             ModelEntry::new("gpt-5.1-codex"),
             ModelEntry::new("gpt-5.1-codex-mini"),
             ModelEntry::new("gpt-5-codex"),
+            ModelEntry::new("gpt-4o"),
+            ModelEntry::new("o4-mini"),
+            ModelEntry::new("o3-mini"),
+            ModelEntry::new("o1-preview"),
+            ModelEntry::new("chatgpt-4o-latest"),
         ],
     },
     RunnerFamily {
@@ -316,6 +330,15 @@ mod tests {
         assert!(ids.contains(&"gpt-5.2"), "should include gpt-5.2");
         assert!(ids.contains(&"gpt-5-mini"), "should include gpt-5-mini");
         assert!(ids.contains(&"gpt-4.1"), "should include gpt-4.1");
+        // o-series and chatgpt models recognised by infer_from_model
+        assert!(ids.contains(&"gpt-4o"), "should include gpt-4o");
+        assert!(ids.contains(&"o4-mini"), "should include o4-mini");
+        assert!(ids.contains(&"o3-mini"), "should include o3-mini");
+        assert!(ids.contains(&"o1-preview"), "should include o1-preview");
+        assert!(
+            ids.contains(&"chatgpt-4o-latest"),
+            "should include chatgpt-4o-latest"
+        );
     }
 
     #[test]
@@ -338,6 +361,15 @@ mod tests {
             "should include gpt-5.1-codex-mini"
         );
         assert!(ids.contains(&"gpt-5-codex"), "should include gpt-5-codex");
+        // o-series and chatgpt models route to codex-cli (preferred runner)
+        assert!(ids.contains(&"gpt-4o"), "should include gpt-4o");
+        assert!(ids.contains(&"o4-mini"), "should include o4-mini");
+        assert!(ids.contains(&"o3-mini"), "should include o3-mini");
+        assert!(ids.contains(&"o1-preview"), "should include o1-preview");
+        assert!(
+            ids.contains(&"chatgpt-4o-latest"),
+            "should include chatgpt-4o-latest"
+        );
     }
 
     // --- known_model_names() tests ---
@@ -365,6 +397,12 @@ mod tests {
         assert!(names.contains(&"gpt-5.2"));
         assert!(names.contains(&"gpt-5-mini"));
         assert!(names.contains(&"gpt-4.1"));
+        // o-series and chatgpt models
+        assert!(names.contains(&"gpt-4o"));
+        assert!(names.contains(&"o4-mini"));
+        assert!(names.contains(&"o3-mini"));
+        assert!(names.contains(&"o1-preview"));
+        assert!(names.contains(&"chatgpt-4o-latest"));
     }
 
     #[test]

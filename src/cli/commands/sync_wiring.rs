@@ -149,6 +149,7 @@ fn codex_cli_fallback_if_model_error(
                     tracing::warn!(
                         "Codex CLI failed with a model error, falling back to OpenAI API runner"
                     );
+                    // keep in sync with RUNNER_FAMILIES default for openai-api (models.rs)
                     let fallback_model = model.unwrap_or_else(|| "gpt-5.2".to_string());
                     let fallback_auth = AuthDisplay {
                         authenticated: true,
@@ -335,6 +336,7 @@ where
                 email: Some("OpenAI API".to_string()),
             };
             // Model resolution: --model flag > model config > OpenAI default.
+            // keep in sync with RUNNER_FAMILIES default for openai-api (models.rs)
             let model = args
                 .model
                 .as_deref()
