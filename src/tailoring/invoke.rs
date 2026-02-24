@@ -66,13 +66,16 @@ pub async fn invoke_tailoring<R: TailoringRunner>(
     };
 
     let adr_json = serialize_json(adrs, "ADRs")?;
-    let prompt = build_prompt(
+    // Note: split onto two lines so LLVM coverage instruments the call site and
+    // the `?` propagation separately, avoiding a false "missed" line report.
+    let prompt_result = build_prompt(
         &adr_json,
         projects_json,
         existing_output_paths,
         format,
         bundled_context,
-    )?;
+    );
+    let prompt = prompt_result?;
 
     let schema = tailoring_output_schema()?;
     let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
