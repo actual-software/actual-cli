@@ -426,6 +426,7 @@ mod tests {
         for name in &[
             "claude-sonnet-4-6",
             "claude-opus-4-5",
+            "claude-opus-4",
             "sonnet",
             "opus",
             "haiku",
@@ -439,6 +440,37 @@ mod tests {
                 known.contains(name),
                 "expected '{}' to be in known_model_names()",
                 name
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_openai_o_series_and_chatgpt_models_no_warning() {
+        // Regression: these models were absent from RUNNER_FAMILIES, causing
+        // `config set model <name>` to emit a false "unknown model" warning.
+        // All of them must be present in known_model_names() so the warning
+        // path is not triggered.
+        let known = known_model_names();
+        for name in &[
+            "gpt-4o",
+            "o4-mini",
+            "o3-mini",
+            "o1-preview",
+            "chatgpt-4o-latest",
+        ] {
+            let mut config = Config::default();
+            // set() succeeds regardless (warning is soft), but we also assert
+            // the model is in the known list so the warning would NOT fire.
+            set(&mut config, "model", name).unwrap();
+            assert_eq!(
+                get(&config, "model").unwrap(),
+                *name,
+                "config.model should store '{name}'"
+            );
+            assert!(
+                known.contains(name),
+                "'{name}' must be in known_model_names() — \
+                 otherwise `config set model {name}` emits a false unknown-model warning"
             );
         }
     }
