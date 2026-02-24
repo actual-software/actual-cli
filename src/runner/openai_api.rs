@@ -260,6 +260,7 @@ impl TailoringRunner for OpenAiApiRunner {
                 // Save Retry-After header before consuming the body.
                 let retry_after = parse_retry_after(response.headers());
                 // Check body for insufficient_quota before retrying.
+                // Check before incrementing attempt — insufficient_quota is unrecoverable, no retry needed.
                 let body_text = extract_error_body(response.bytes().await, 4096);
                 if let Ok(json) = serde_json::from_str::<Value>(&body_text) {
                     let code = json
@@ -275,6 +276,7 @@ impl TailoringRunner for OpenAiApiRunner {
                 }
                 attempt += 1;
                 if attempt > MAX_RATE_LIMIT_RETRIES {
+                    tracing::debug!("OpenAI API error body: {body_text}");
                     return Err(ActualError::RunnerFailed {
                         message: format!(
                             "OpenAI API rate limited after {MAX_RATE_LIMIT_RETRIES} retries"
