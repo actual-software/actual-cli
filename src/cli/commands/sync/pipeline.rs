@@ -39,6 +39,9 @@ pub(crate) fn resolve_cwd() -> std::path::PathBuf {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("current_dir() failed ({e}), falling back to '.'");
+            // We warn and continue rather than failing hard: sync may still work if
+            // the process has a valid working directory via the kernel's "." dentry.
+            // Callers should treat the result as best-effort in degraded environments.
             std::path::PathBuf::from(".")
         }
     }
@@ -1707,9 +1710,17 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tracing_test::traced_test]
     #[test]
     fn test_resolve_cwd_fallback_when_current_dir_fails() {
         // Create a temp dir, cd into it, then delete it so current_dir() fails.
+        //
+        // Note: some overlay filesystem setups (e.g. certain container environments)
+        // allow getcwd() to succeed even after the directory is deleted. In those
+        // environments this test becomes a no-op — the fallback branch is never
+        // reached and the assertion below will still pass (resolve_cwd returns the
+        // real path). The tracing assertion, however, would fail. If this test is
+        // flaky in CI, consider skipping it on affected platforms.
         let _lock = crate::testutil::ENV_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1721,8 +1732,15 @@ mod tests {
         drop(tmp);
         let result = resolve_cwd();
         // Restore cwd before any assertion so other tests are not affected.
+        // Ignoring the error here is intentional: we hold ENV_MUTEX, so no
+        // other test can be affected, and a failed restore would show up as
+        // subsequent test failures rather than silently corrupting state.
         let _ = std::env::set_current_dir(&original);
         assert_eq!(result, std::path::PathBuf::from("."));
+        assert!(
+            logs_contain("current_dir() failed"),
+            "expected resolve_cwd() to emit a tracing::warn! when current_dir() fails"
+        );
     }
 
     // ── run_sync flag-passthrough tests ──
@@ -2655,7 +2673,7 @@ mod tests {
         let key_target = compute_repo_key(target_dir.path());
         let key_symlink = compute_repo_key(&link_path);
 
-        // Both must produce valid 64-char hex hashes
+        // Both must produce valid 64-char hex hashes (format sanity checks)
         assert_eq!(key_target.len(), 64, "target key should be 64-char hex");
         assert!(
             key_target.chars().all(|c| c.is_ascii_hexdigit()),
@@ -2666,11 +2684,29 @@ mod tests {
             key_symlink.chars().all(|c| c.is_ascii_hexdigit()),
             "symlink key should be hex"
         );
-        // Document: on macOS current_dir() resolves symlinks so keys match;
-        // on Linux symlink path may differ from canonical path.
-        // This test documents the actual behavior without enforcing a specific outcome.
-        // If they differ, it means a user cd'ing into a symlink dir gets a different
-        // rejection namespace — a known limitation documented here.
+
+        // The relationship between keys depends on whether a git remote URL is
+        // available. In this test, both dirs are temp dirs outside any git repo,
+        // so compute_repo_key falls back to hashing the path string directly.
+        //
+        // Since `target_dir.path()` and `link_path` are different path strings
+        // (the latter contains the symlink component), they hash to different
+        // values — the path is used as-is, symlinks are NOT resolved in the
+        // fallback path on either platform.
+        //
+        // User-visible consequence: if a user's repo is accessed via a symlink
+        // path and has no configured git remote, they get a different rejection
+        // namespace than if accessed via the real path. When a git remote IS
+        // present, both paths produce the same remote URL → same cache key.
+        //
+        // Note: On macOS, current_dir() resolves symlinks (affecting resolve_cwd),
+        // but compute_repo_key uses the path as passed, so the behavior here is
+        // the same on both Linux and macOS.
+        assert_ne!(
+            key_target,
+            key_symlink,
+            "symlink path produces a different cache key than the real path (path used as-is in fallback)"
+        );
     }
 
     #[cfg(unix)]
