@@ -428,7 +428,7 @@ fn test_run_sync_not_authenticated_with_fake_claude() {
 #[test]
 fn test_cli_parse_models() {
     let cli = Cli::parse_from(["actual", "models"]);
-    assert!(matches!(cli.command, Command::Models));
+    assert!(matches!(cli.command, Command::Models(_)));
 }
 
 #[test]
