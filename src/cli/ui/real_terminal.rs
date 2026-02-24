@@ -114,7 +114,7 @@ mod tests {
 
     impl TerminalIO for StubTerminal {
         fn read_line(&self, _prompt: &str) -> Result<String, ActualError> {
-            unimplemented!("not used in these tests")
+            unreachable!("read_line not expected in this test context")
         }
 
         fn write_line(&self, _text: &str) {}
@@ -125,7 +125,7 @@ mod tests {
             _items: &[String],
             _defaults: &[bool],
         ) -> Result<Option<Vec<usize>>, ActualError> {
-            unimplemented!("not used in these tests")
+            unreachable!("select_files not expected in this test context")
         }
 
         fn select_one(
@@ -134,7 +134,7 @@ mod tests {
             _items: &[String],
             _default: Option<usize>,
         ) -> Result<usize, ActualError> {
-            unimplemented!("not used in these tests")
+            unreachable!("select_one not expected in this test context")
         }
 
         /// Mirrors `RealTerminal::confirm_with_cancel` by returning the stored
