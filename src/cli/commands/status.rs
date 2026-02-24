@@ -109,7 +109,7 @@ fn format_config_section(
         &config_annotation,
     );
 
-    let mut panel = if cfg.api_url.is_none() {
+    let mut panel = if api_url == DEFAULT_API_URL {
         panel_with_config.kv_annotated("API URL", api_url, "(default)")
     } else {
         panel_with_config.kv("API URL", api_url)
