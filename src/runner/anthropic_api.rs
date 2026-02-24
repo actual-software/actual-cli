@@ -116,7 +116,9 @@ impl AnthropicApiRunner {
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                return Err(ActualError::ClaudeNotAuthenticated);
+                return Err(ActualError::ApiKeyMissing {
+                    env_var: "ANTHROPIC_API_KEY".to_string(),
+                });
             }
 
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -146,6 +148,35 @@ impl AnthropicApiRunner {
                 }
                 sleep(self.retry_base * wait_secs as u32).await;
                 continue;
+            }
+
+            // HTTP 400 (Bad Request) or 529 (overloaded) may indicate credit limit reached.
+            // Parse the body and check for the "credit_limit_reached" error type.
+            if status == reqwest::StatusCode::BAD_REQUEST || status.as_u16() == 529 {
+                let body_bytes = response
+                    .bytes()
+                    .await
+                    .unwrap_or_else(|e| format!("<body read error: {e}>").into_bytes().into());
+                let truncated = &body_bytes[..body_bytes.len().min(4096)];
+                let body_str = String::from_utf8_lossy(truncated).into_owned();
+                // Check if this is a credit limit error.
+                if let Ok(json) = serde_json::from_str::<Value>(&body_str) {
+                    let error_type = json
+                        .get("error")
+                        .and_then(|e| e.get("type"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if error_type == "credit_limit_reached" {
+                        return Err(ActualError::CreditBalanceTooLow {
+                            message: "Anthropic API credit limit reached".to_string(),
+                        });
+                    }
+                }
+                tracing::debug!("Anthropic API error body: {body_str}");
+                return Err(ActualError::RunnerFailed {
+                    message: format!("Anthropic API error: {status}"),
+                    stderr: body_str,
+                });
             }
 
             if status.is_server_error() {
@@ -369,9 +400,9 @@ mod tests {
         assert_eq!(output.summary.total_input, 1);
     }
 
-    // Test 2: 401 maps to ClaudeNotAuthenticated
+    // Test 2: 401 maps to ApiKeyMissing with ANTHROPIC_API_KEY
     #[tokio::test]
-    async fn test_401_maps_to_not_authenticated() {
+    async fn test_401_maps_to_api_key_missing() {
         let mut server = Server::new_async().await;
 
         let mock = server
@@ -386,11 +417,15 @@ mod tests {
         let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         mock.assert_async().await;
-        assert!(
-            matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
-            "expected ClaudeNotAuthenticated, got: {:?}",
-            result
-        );
+        match result {
+            Err(ActualError::ApiKeyMissing { env_var }) => {
+                assert_eq!(
+                    env_var, "ANTHROPIC_API_KEY",
+                    "expected ANTHROPIC_API_KEY, got: {env_var}"
+                );
+            }
+            other => panic!("expected ApiKeyMissing, got: {:?}", other),
+        }
     }
 
     // Test 3: 429 exhausts all retries and returns RunnerFailed
@@ -599,9 +634,9 @@ mod tests {
         assert!(result.is_ok(), "expected Ok with model override");
     }
 
-    // Test 9: 403 maps to ClaudeNotAuthenticated
+    // Test 9: 403 maps to ApiKeyMissing with ANTHROPIC_API_KEY
     #[tokio::test]
-    async fn test_403_maps_to_not_authenticated() {
+    async fn test_403_maps_to_api_key_missing() {
         let mut server = Server::new_async().await;
 
         let mock = server
@@ -616,9 +651,92 @@ mod tests {
         let result = runner.run_tailoring("prompt", schema, None, None).await;
 
         mock.assert_async().await;
+        match result {
+            Err(ActualError::ApiKeyMissing { env_var }) => {
+                assert_eq!(
+                    env_var, "ANTHROPIC_API_KEY",
+                    "expected ANTHROPIC_API_KEY, got: {env_var}"
+                );
+            }
+            other => panic!("expected ApiKeyMissing, got: {:?}", other),
+        }
+    }
+
+    // Test: HTTP 400 with credit_limit_reached maps to CreditBalanceTooLow
+    #[tokio::test]
+    async fn test_400_credit_limit_reached_maps_to_credit_balance_too_low() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"error": {"type": "credit_limit_reached", "message": "Credit limit reached"}}"#,
+            )
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
         assert!(
-            matches!(result, Err(ActualError::ClaudeNotAuthenticated)),
-            "expected ClaudeNotAuthenticated, got: {:?}",
+            matches!(result, Err(ActualError::CreditBalanceTooLow { .. })),
+            "expected CreditBalanceTooLow, got: {:?}",
+            result
+        );
+    }
+
+    // Test: HTTP 400 without credit_limit_reached maps to RunnerFailed
+    #[tokio::test]
+    async fn test_400_without_credit_limit_maps_to_runner_failed() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error": {"type": "invalid_request_error", "message": "Bad request"}}"#)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed, got: {:?}",
+            result
+        );
+    }
+
+    // Test: HTTP 529 with credit_limit_reached maps to CreditBalanceTooLow
+    #[tokio::test]
+    async fn test_529_credit_limit_reached_maps_to_credit_balance_too_low() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(529)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"error": {"type": "credit_limit_reached", "message": "Credit limit reached"}}"#,
+            )
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        assert!(
+            matches!(result, Err(ActualError::CreditBalanceTooLow { .. })),
+            "expected CreditBalanceTooLow, got: {:?}",
             result
         );
     }

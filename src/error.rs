@@ -99,36 +99,36 @@ impl ActualError {
     }
 
     /// Returns a human-friendly fix suggestion for this error, if available.
-    pub fn hint(&self) -> Option<&str> {
+    pub fn hint(&self) -> Option<String> {
         match self {
-            Self::ClaudeNotFound => Some("npm install -g @anthropic-ai/claude-code"),
-            Self::CodexNotFound => Some("npm install -g @openai/codex"),
-            Self::CursorNotFound => Some("curl https://cursor.com/install -fsS | bash"),
-            Self::ClaudeNotAuthenticated => Some("claude auth login"),
+            Self::ClaudeNotFound => Some("npm install -g @anthropic-ai/claude-code".to_string()),
+            Self::CodexNotFound => Some("npm install -g @openai/codex".to_string()),
+            Self::CursorNotFound => Some("curl https://cursor.com/install -fsS | bash".to_string()),
+            Self::ClaudeNotAuthenticated => Some("claude auth login".to_string()),
             Self::CodexNotAuthenticated => {
-                Some("Set OPENAI_API_KEY or run: codex login")
+                Some("Set OPENAI_API_KEY or run: codex login".to_string())
             }
             Self::CursorNotAuthenticated => {
-                Some("Set CURSOR_API_KEY or run: cursor-agent login")
+                Some("Set CURSOR_API_KEY or run: cursor-agent login".to_string())
             }
-            Self::ApiKeyMissing { env_var } => {
-                // We can't return a string containing env_var dynamically from a &str hint,
-                // so provide a generic hint pointing users to the config.
-                let _ = env_var;
-                Some("Set the API key environment variable or add it to your config file")
-            }
+            Self::ApiKeyMissing { env_var } => Some(format!(
+                "Set {env_var} environment variable or add it to your config file"
+            )),
             Self::CodexCliModelRequiresApiKey { .. } => {
-                Some("Set OPENAI_API_KEY or switch to --runner openai-api")
+                Some("Set OPENAI_API_KEY or switch to --runner openai-api".to_string())
             }
             Self::NoRunnerAvailable { .. } => Some(
-                "Install a runner (e.g. `npm install -g @anthropic-ai/claude-code`) or set an API key",
+                "Install a runner (e.g. `npm install -g @anthropic-ai/claude-code`) or set an API key".to_string(),
             ),
-            Self::CreditBalanceTooLow { .. } => {
-                Some("Add credits at https://console.anthropic.com/settings/billing")
-            }
-            Self::ConfigError(_) => Some("Check ~/.actualai/actual/config.yaml"),
+            Self::CreditBalanceTooLow { .. } => Some(
+                "Add credits at your provider's billing page or check your account quota".to_string(),
+            ),
+            Self::ConfigError(_) => Some("Check ~/.actualai/actual/config.yaml".to_string()),
             Self::RunnerTimeout { .. } => Some(
-                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit",
+                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit".to_string(),
+            ),
+            Self::RunnerFailed { .. } => Some(
+                "Run with --verbose to see full runner output, or check that your runner is correctly installed and authenticated".to_string(),
             ),
             _ => None,
         }
@@ -427,7 +427,7 @@ mod tests {
     fn test_hint_claude_not_found() {
         assert_eq!(
             ActualError::ClaudeNotFound.hint(),
-            Some("npm install -g @anthropic-ai/claude-code")
+            Some("npm install -g @anthropic-ai/claude-code".to_string())
         );
     }
 
@@ -435,7 +435,7 @@ mod tests {
     fn test_hint_codex_not_found() {
         assert_eq!(
             ActualError::CodexNotFound.hint(),
-            Some("npm install -g @openai/codex")
+            Some("npm install -g @openai/codex".to_string())
         );
     }
 
@@ -443,7 +443,7 @@ mod tests {
     fn test_hint_cursor_not_found() {
         assert_eq!(
             ActualError::CursorNotFound.hint(),
-            Some("curl https://cursor.com/install -fsS | bash")
+            Some("curl https://cursor.com/install -fsS | bash".to_string())
         );
     }
 
@@ -451,7 +451,7 @@ mod tests {
     fn test_hint_claude_not_authenticated() {
         assert_eq!(
             ActualError::ClaudeNotAuthenticated.hint(),
-            Some("claude auth login")
+            Some("claude auth login".to_string())
         );
     }
 
@@ -459,7 +459,7 @@ mod tests {
     fn test_hint_codex_not_authenticated() {
         assert_eq!(
             ActualError::CodexNotAuthenticated.hint(),
-            Some("Set OPENAI_API_KEY or run: codex login")
+            Some("Set OPENAI_API_KEY or run: codex login".to_string())
         );
     }
 
@@ -467,7 +467,7 @@ mod tests {
     fn test_hint_cursor_not_authenticated() {
         assert_eq!(
             ActualError::CursorNotAuthenticated.hint(),
-            Some("Set CURSOR_API_KEY or run: cursor-agent login")
+            Some("Set CURSOR_API_KEY or run: cursor-agent login".to_string())
         );
     }
 
@@ -475,7 +475,7 @@ mod tests {
     fn test_hint_config_error() {
         assert_eq!(
             ActualError::ConfigError("test".to_string()).hint(),
-            Some("Check ~/.actualai/actual/config.yaml")
+            Some("Check ~/.actualai/actual/config.yaml".to_string())
         );
     }
 
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(
             ActualError::RunnerTimeout { seconds: 30 }.hint(),
             Some(
-                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit",
+                "Set `invocation_timeout_secs` in ~/.actualai/actual/config.yaml to increase the limit".to_string(),
             )
         );
     }
@@ -519,10 +519,26 @@ mod tests {
         };
         let hint = err.hint();
         assert!(hint.is_some(), "expected Some hint for ApiKeyMissing");
+        let hint_str = hint.unwrap();
         assert!(
-            hint.unwrap().contains("API key"),
-            "expected 'API key' in hint: {:?}",
-            hint
+            hint_str.contains("ANTHROPIC_API_KEY"),
+            "expected env var name in hint: {hint_str:?}"
+        );
+        assert!(
+            hint_str.contains("environment variable"),
+            "expected 'environment variable' in hint: {hint_str:?}"
+        );
+    }
+
+    #[test]
+    fn test_hint_api_key_missing_includes_env_var_name() {
+        let err = ActualError::ApiKeyMissing {
+            env_var: "OPENAI_API_KEY".to_string(),
+        };
+        let hint = err.hint().expect("expected Some hint for ApiKeyMissing");
+        assert!(
+            hint.contains("OPENAI_API_KEY"),
+            "expected 'OPENAI_API_KEY' in hint: {hint:?}"
         );
     }
 
@@ -531,15 +547,12 @@ mod tests {
         let err = ActualError::CodexCliModelRequiresApiKey {
             model: "gpt-5.2-codex".to_string(),
         };
-        let hint = err.hint();
+        let hint = err
+            .hint()
+            .expect("expected Some hint for CodexCliModelRequiresApiKey");
         assert!(
-            hint.is_some(),
-            "expected Some hint for CodexCliModelRequiresApiKey"
-        );
-        assert!(
-            hint.unwrap().contains("OPENAI_API_KEY"),
-            "expected 'OPENAI_API_KEY' in hint: {:?}",
-            hint
+            hint.contains("OPENAI_API_KEY"),
+            "expected 'OPENAI_API_KEY' in hint: {hint:?}"
         );
     }
 
@@ -549,12 +562,12 @@ mod tests {
             model: "sonnet".to_string(),
             tried: "  - claude-cli: binary not found".to_string(),
         };
-        let hint = err.hint();
-        assert!(hint.is_some(), "expected Some hint for NoRunnerAvailable");
+        let hint = err
+            .hint()
+            .expect("expected Some hint for NoRunnerAvailable");
         assert!(
-            hint.unwrap().contains("Install a runner"),
-            "expected install hint in: {:?}",
-            hint
+            hint.contains("Install a runner"),
+            "expected install hint in: {hint:?}"
         );
     }
 
@@ -563,12 +576,25 @@ mod tests {
         let err = ActualError::CreditBalanceTooLow {
             message: "Credit balance is too low".to_string(),
         };
-        let hint = err.hint();
-        assert!(hint.is_some(), "expected Some hint for CreditBalanceTooLow");
+        let hint = err
+            .hint()
+            .expect("expected Some hint for CreditBalanceTooLow");
         assert!(
-            hint.unwrap().contains("console.anthropic.com"),
-            "expected billing URL in hint: {:?}",
-            hint
+            hint.contains("billing"),
+            "expected 'billing' in hint: {hint:?}"
+        );
+    }
+
+    #[test]
+    fn test_hint_runner_failed() {
+        let err = ActualError::RunnerFailed {
+            message: "exit code 1".to_string(),
+            stderr: String::new(),
+        };
+        let hint = err.hint().expect("expected Some hint for RunnerFailed");
+        assert!(
+            hint.contains("--verbose"),
+            "expected '--verbose' in hint: {hint:?}"
         );
     }
 
