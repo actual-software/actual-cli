@@ -2,6 +2,18 @@
 
 `actual` generates and maintains AI instruction files (`CLAUDE.md`, `AGENTS.md`, or Cursor rules) for your codebase by pulling tailored Architecture Decision Records from Actual's API and writing them into your repo.
 
+## macOS: remove quarantine before running
+
+macOS will block the binary the first time because it isn't signed yet. Run this once after downloading:
+
+```bash
+xattr -dr com.apple.quarantine ./actual
+chmod +x ./actual
+sudo mv ./actual /usr/local/bin/actual
+```
+
+Then verify it works: `actual --version`
+
 ## Prerequisites
 
 You need an AI runner. The two easiest options:
