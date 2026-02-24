@@ -35,8 +35,13 @@ use super::cache::{
 use super::write::confirm_and_write;
 
 pub(crate) fn resolve_cwd() -> std::path::PathBuf {
-    let fallback = std::path::PathBuf::from(".");
-    std::env::current_dir().unwrap_or(fallback)
+    match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("current_dir() failed ({e}), falling back to '.'");
+            std::path::PathBuf::from(".")
+        }
+    }
 }
 
 /// Format a cache age in seconds as a human-readable string.
@@ -2633,15 +2638,20 @@ mod tests {
 
         // Both must produce valid 64-char hex hashes
         assert_eq!(key_target.len(), 64, "target key should be 64-char hex");
+        assert!(
+            key_target.chars().all(|c| c.is_ascii_hexdigit()),
+            "target key should be hex"
+        );
         assert_eq!(key_symlink.len(), 64, "symlink key should be 64-char hex");
+        assert!(
+            key_symlink.chars().all(|c| c.is_ascii_hexdigit()),
+            "symlink key should be hex"
+        );
         // Document: on macOS current_dir() resolves symlinks so keys match;
         // on Linux symlink path may differ from canonical path.
         // This test documents the actual behavior without enforcing a specific outcome.
         // If they differ, it means a user cd'ing into a symlink dir gets a different
         // rejection namespace — a known limitation documented here.
-        println!("key_target: {}", key_target);
-        println!("key_symlink: {}", key_symlink);
-        // Just verify both are valid hashes (no assertion on equality)
     }
 
     #[cfg(unix)]
