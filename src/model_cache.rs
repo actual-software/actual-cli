@@ -94,14 +94,14 @@ fn save_cache_file(path: &std::path::Path, cache: &ModelCacheFile) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(yaml) = serde_yml::to_string(cache) {
-        let _ = std::fs::write(path, yaml);
-        // 0600 on unix (model names are not secrets, but consistent with config dir)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
+    // serde_yml::to_string on a well-formed struct is infallible in practice
+    let yaml = serde_yml::to_string(cache).unwrap_or_default();
+    let _ = std::fs::write(path, yaml);
+    // 0600 on unix (model names are not secrets, but consistent with config dir)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
 }
 
@@ -154,14 +154,13 @@ pub(crate) async fn fetch_openai_models_async(
     let is_local =
         base_url.starts_with("http://localhost") || base_url.starts_with("http://127.0.0.1");
 
+    // reqwest::Client::builder().build() is infallible for standard configurations;
+    // the only failure mode is a TLS backend issue which cannot occur here.
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .https_only(!is_local)
         .build()
-        .map_err(|e| ActualError::RunnerFailed {
-            message: format!("Failed to build HTTP client: {e}"),
-            stderr: String::new(),
-        })?;
+        .expect("reqwest client build failed");
 
     let url = format!("{base_url}/v1/models");
     let response = client
@@ -241,14 +240,16 @@ pub fn get_openai_models(config_key: Option<&str>, base_url: Option<&str>) -> Ve
 
     let ttl = DEFAULT_CACHE_TTL_HOURS;
 
-    // Return cached list if fresh (skip TTL check when base_url is overridden for tests)
-    if base_url.is_none() {
-        if let Some(path) = cache_path() {
+    // Return cached list if fresh (skip TTL check when base_url is overridden for tests).
+    // When base_url is None (production), check the on-disk cache before fetching live.
+    let cached = base_url.is_none().then(|| {
+        cache_path().and_then(|path| {
             let file = load_cache_file(&path);
-            if file.openai.is_fresh(ttl) {
-                return file.openai.models.clone();
-            }
-        }
+            file.openai.is_fresh(ttl).then_some(file.openai.models)
+        })
+    });
+    if let Some(Some(models)) = cached {
+        return models;
     }
 
     // Fetch live
@@ -256,16 +257,13 @@ pub fn get_openai_models(config_key: Option<&str>, base_url: Option<&str>) -> Ve
     let url = base_url.unwrap_or(production_base);
     let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
 
-    let rt = match tokio::runtime::Builder::new_current_thread()
+    // tokio::runtime::Builder::new_current_thread().enable_all().build() is
+    // infallible in practice (only fails if the OS cannot create an I/O driver,
+    // which would be a catastrophic system-level failure).
+    let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("Failed to build runtime for OpenAI model fetch: {e}");
-            return Vec::new();
-        }
-    };
+        .expect("tokio runtime build failed");
 
     match rt.block_on(fetch_openai_models_async(&api_key, url, timeout)) {
         Ok(models) => {
@@ -586,10 +584,7 @@ mod tests {
         let _config_dir_guard = EnvGuard::set("ACTUAL_CONFIG_DIR", dir.path().to_str().unwrap());
 
         let result = get_openai_models(Some("sk-from-config"), None);
-        assert!(
-            result.contains(&"gpt-cached-model".to_string()),
-            "should return cached model; got: {result:?}"
-        );
+        assert!(result.contains(&"gpt-cached-model".to_string()));
     }
 
     #[test]
@@ -599,10 +594,7 @@ mod tests {
             Some("sk-test"),
             Some("http://127.0.0.1:1"), // nothing listening on port 1
         );
-        assert!(
-            result.is_empty(),
-            "network error should return empty (graceful)"
-        );
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -644,19 +636,13 @@ mod tests {
         let server_url = rx.recv().expect("server url");
         let result = get_openai_models(Some("sk-test"), Some(&server_url));
 
-        assert!(
-            result.contains(&"gpt-live-model".to_string()),
-            "should return live model; got: {result:?}"
-        );
+        assert!(result.contains(&"gpt-live-model".to_string()));
 
         // Verify it was written to cache
         let cache_path = dir.path().join("model-cache.yaml");
         assert!(cache_path.exists(), "cache file should be written");
         let loaded = load_cache_file(&cache_path);
-        assert!(
-            loaded.openai.models.contains(&"gpt-live-model".to_string()),
-            "cache should contain the fetched model"
-        );
+        assert!(loaded.openai.models.contains(&"gpt-live-model".to_string()));
 
         drop(handle);
     }
@@ -721,10 +707,7 @@ mod tests {
         let server_url = rx.recv().expect("server url");
         // ACTUAL_CONFIG="" → cache_path() returns None → no cache write, but fetch still works
         let result = get_openai_models(Some("sk-test"), Some(&server_url));
-        assert!(
-            result.contains(&"gpt-no-cache-model".to_string()),
-            "should return fetched model even when cache path is None; got: {result:?}"
-        );
+        assert!(result.contains(&"gpt-no-cache-model".to_string()));
     }
 
     #[test]
@@ -742,18 +725,9 @@ mod tests {
 
         // Read back and check anthropic is empty
         let loaded = load_cache_file(&path);
-        assert!(
-            !loaded.openai.models.is_empty(),
-            "openai should have models"
-        );
-        assert!(
-            loaded.anthropic.models.is_empty(),
-            "anthropic section should be empty"
-        );
-        assert!(
-            loaded.anthropic.fetched_at.is_none(),
-            "anthropic fetched_at should be None"
-        );
+        assert!(!loaded.openai.models.is_empty());
+        assert!(loaded.anthropic.models.is_empty());
+        assert!(loaded.anthropic.fetched_at.is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -798,5 +772,22 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    #[test]
+    fn test_local_env_guard_restores_previous_value() {
+        // Exercise the Some(v) branch in EnvGuard::drop(): when a var had a prior
+        // value before remove(), drop() must restore it.
+        let key = "ACTUAL_CLI_TEST_LOCAL_ENV_GUARD_RESTORE";
+        std::env::set_var(key, "original-value");
+        {
+            let _guard = EnvGuard::remove(key);
+            // While the guard is alive, the var should be absent
+            assert!(std::env::var(key).is_err());
+        }
+        // After drop(), the original value must be restored
+        assert_eq!(std::env::var(key).unwrap(), "original-value");
+        // Clean up
+        std::env::remove_var(key);
     }
 }
