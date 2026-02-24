@@ -284,8 +284,11 @@ actual config set invocation_timeout_secs 1200
 If you get an error about an unrecognized model:
 
 ```bash
-# List all known models
+# List all known models (fetches live list from OpenAI/Anthropic APIs if keys are set)
 actual models
+
+# List only hardcoded models, skip live API fetch
+actual models --no-fetch
 
 # Check what runner a model maps to
 actual runners
