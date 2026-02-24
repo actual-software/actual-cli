@@ -102,8 +102,8 @@ pub struct FileOutput {
     /// Per-ADR sections: one entry per ADR included in this file
     pub sections: Vec<AdrSection>,
     /// Brief explanation of what this file contains and why.
-    /// Populated from LLM output but not yet surfaced in the UI.
-    /// TODO: display in --verbose output or the diff review panel.
+    /// Populated from LLM output and emitted via `tracing::debug!`.
+    /// Not surfaced in user-visible UI (not in --verbose, not in diff panels).
     pub reasoning: String,
 }
 
