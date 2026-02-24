@@ -178,6 +178,15 @@ pub fn exec() -> Result<(), ActualError> {
     );
     print_live_openai_supplement(&live_openai);
 
+    let live_anthropic = crate::model_cache::get_anthropic_models(
+        crate::config::paths::load()
+            .ok()
+            .as_ref()
+            .and_then(|c: &crate::config::types::Config| c.anthropic_api_key.as_deref()),
+        None,
+    );
+    print_live_anthropic_supplement(&live_anthropic);
+
     Ok(())
 }
 
@@ -198,6 +207,28 @@ pub(crate) fn print_live_openai_supplement(live_openai: &[String]) {
     if !new_models.is_empty() {
         println!();
         println!("Additional live models from OpenAI API:");
+        for id in new_models {
+            println!("  {id}");
+        }
+    }
+}
+
+/// Print supplementary live Anthropic models that are not already in the static list.
+///
+/// Extracted as a standalone function so tests can verify the display logic
+/// without performing a real network fetch.
+pub(crate) fn print_live_anthropic_supplement(live_anthropic: &[String]) {
+    if live_anthropic.is_empty() {
+        return;
+    }
+    let static_ids: std::collections::HashSet<&str> = known_model_names().iter().copied().collect();
+    let new_models: Vec<&String> = live_anthropic
+        .iter()
+        .filter(|id| !static_ids.contains(id.as_str()))
+        .collect();
+    if !new_models.is_empty() {
+        println!();
+        println!("Additional live models from Anthropic API:");
         for id in new_models {
             println!("  {id}");
         }
@@ -583,6 +614,37 @@ mod tests {
             defaults[0].id, "opus-4.6-thinking",
             "default Cursor model should be opus-4.6-thinking"
         );
+    }
+
+    // --- print_live_anthropic_supplement tests ---
+
+    #[test]
+    fn test_print_live_anthropic_supplement_empty_is_noop() {
+        print_live_anthropic_supplement(&[]);
+    }
+
+    #[test]
+    fn test_print_live_anthropic_supplement_all_known_no_output() {
+        let known: Vec<String> = vec![
+            "claude-sonnet-4-6".to_string(),
+            "claude-opus-4-6".to_string(),
+        ];
+        print_live_anthropic_supplement(&known);
+    }
+
+    #[test]
+    fn test_print_live_anthropic_supplement_new_models_printed() {
+        let live = vec!["claude-99-brand-new-not-in-static-list".to_string()];
+        print_live_anthropic_supplement(&live);
+    }
+
+    #[test]
+    fn test_print_live_anthropic_supplement_mixed() {
+        let live = vec![
+            "claude-sonnet-4-6".to_string(),     // already in static list
+            "claude-99-unknown-xyz".to_string(), // new model
+        ];
+        print_live_anthropic_supplement(&live);
     }
 
     // --- print_live_openai_supplement tests ---
