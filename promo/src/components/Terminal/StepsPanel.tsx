@@ -22,13 +22,14 @@ export interface StepDef {
   completionFrame?: number; // frame when step went to success/warning
 }
 
+// Matches real TUI: ✓ (U+2713) for success, not ✔ (U+2714 heavy)
 const STATUS_ICONS: Record<StepStatus, string> = {
   waiting: "○",
   running: "", // handled by Spinner component
-  success: "✔",
+  success: "✓",
   warning: "⚠",
   error: "✖",
-  skipped: "─",
+  skipped: "-",
 };
 
 const STATUS_COLORS: Record<StepStatus, string> = {
@@ -42,13 +43,12 @@ const STATUS_COLORS: Record<StepStatus, string> = {
 
 interface StepRowProps {
   step: StepDef;
-  isActive: boolean;
 }
 
-const StepRow: React.FC<StepRowProps> = ({ step, isActive }) => {
+const StepRow: React.FC<StepRowProps> = ({ step }) => {
   const frame = useCurrentFrame();
 
-  // Glow on completion
+  // Spring glow burst on step completion
   const glowValue =
     step.completionFrame != null
       ? spring({
@@ -58,7 +58,7 @@ const StepRow: React.FC<StepRowProps> = ({ step, isActive }) => {
           durationInFrames: 30,
         })
       : 0;
-  const glow = Math.min(glowValue, 1.3); // clamp overshoot
+  const glow = Math.min(glowValue, 1.3);
 
   const color = STATUS_COLORS[step.status];
   const iconColor =
@@ -71,24 +71,22 @@ const StepRow: React.FC<StepRowProps> = ({ step, isActive }) => {
       style={{
         fontFamily: FONTS.mono,
         fontSize: 13,
-        lineHeight: 1.8,
+        lineHeight: 1.7,
         display: "flex",
         alignItems: "center",
-        gap: 6,
-        padding: "0 10px",
-        color:
-          step.status === "waiting" ? COLORS.textDim : COLORS.textPrimary,
+        padding: "1px 12px",
+        color: step.status === "waiting" ? COLORS.textDim : COLORS.textPrimary,
       }}
     >
-      {/* Active marker */}
-      <span style={{ width: "1ch", color: COLORS.borderGreen }}>
-        {isActive ? "▶" : " "}
-      </span>
-
-      {/* Status icon — wrapped with GlowWrapper for spring-animated drop-shadow */}
+      {/* Status icon — no ▶ active marker (matches real TUI) */}
       <GlowWrapper intensity={glow} color={COLORS.borderGreen} maxRadius={12}>
         <span
-          style={{ color: iconColor, width: "1ch", display: "inline-block" }}
+          style={{
+            color: iconColor,
+            width: "1.2ch",
+            display: "inline-block",
+            marginRight: 6,
+          }}
         >
           {step.status === "running" && step.spinnerStartFrame != null ? (
             <Spinner startFrame={step.spinnerStartFrame} color={color} />
@@ -98,12 +96,12 @@ const StepRow: React.FC<StepRowProps> = ({ step, isActive }) => {
         </span>
       </GlowWrapper>
 
-      {/* Label */}
+      {/* Label — grows to push duration right */}
       <span style={{ flexGrow: 1 }}>{step.label}</span>
 
-      {/* Duration */}
+      {/* Duration — right-aligned, dim, matches real TUI [0.0s] format */}
       {step.duration && (
-        <span style={{ color: COLORS.textDim, fontSize: 11 }}>
+        <span style={{ color: COLORS.textDim, fontSize: 12, marginLeft: 8 }}>
           [{step.duration}]
         </span>
       )}
@@ -118,17 +116,12 @@ interface StepsPanelProps {
 
 export const StepsPanel: React.FC<StepsPanelProps> = ({
   steps,
-  activeStepIndex,
+  // activeStepIndex kept in interface for API compatibility but not rendered
+  // (real TUI doesn't show a ▶ marker — the running spinner is sufficient)
 }) => (
-  <div
-    style={{
-      borderTop: `1px solid ${COLORS.borderTeal}44`,
-      paddingTop: 4,
-      paddingBottom: 4,
-    }}
-  >
-    {steps.map((step, i) => (
-      <StepRow key={step.label} step={step} isActive={i === activeStepIndex} />
+  <div style={{ paddingTop: 6, paddingBottom: 6 }}>
+    {steps.map((step) => (
+      <StepRow key={step.label} step={step} />
     ))}
   </div>
 );
