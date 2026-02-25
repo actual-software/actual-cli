@@ -111,13 +111,13 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
       <div
         style={{
           position: "absolute",
-          right: "8%",
+          right: "10%",
           top: "50%",
           transform: "translateY(-50%)",
           display: "flex",
           flexDirection: "column",
           gap: 16,
-          maxWidth: 420,
+          maxWidth: 500,
         }}
       >
         {/* Wordmark */}
