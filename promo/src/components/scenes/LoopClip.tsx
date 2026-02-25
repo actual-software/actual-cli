@@ -7,16 +7,18 @@ import { Vignette } from "../effects/Vignette";
 import { COLORS } from "../../data/brand";
 import { getStateAtFrame, FRAMES } from "../../data/tui-states";
 
-// Loop clip: 600 frames (10s at 60fps), seamless pipeline loop for README embedding.
-// Maps the full pipeline (REVEAL_END → SUMMARY_END) into 600 frames.
-// Fades in over the first 20 frames and fades out over the last 40 for seamless looping.
+// Loop clip: 720 frames (12s at 60fps), seamless pipeline loop for README embedding.
+// Maps the full pipeline (REVEAL_END → SUMMARY_END) into 600 frames, then holds
+// on the completed state for 2s (120 frames) before fading out.
 export const LoopClip: React.FC = () => {
   const frame = useCurrentFrame();
 
-  // Map 0–599 → REVEAL_END → SUMMARY_END (full pipeline including Summary step)
+  // Map 0–599 → REVEAL_END → SUMMARY_END, then clamp at SUMMARY_END for the 2s hold
   const pipelineDuration = FRAMES.SUMMARY_END - FRAMES.REVEAL_END;
-  const absoluteFrame =
-    FRAMES.REVEAL_END + Math.floor((frame * pipelineDuration) / 600);
+  const absoluteFrame = Math.min(
+    FRAMES.REVEAL_END + Math.floor((frame * pipelineDuration) / 600),
+    FRAMES.SUMMARY_END
+  );
   const state = getStateAtFrame(absoluteFrame);
 
   const completedCount = state.steps.filter(
@@ -27,7 +29,7 @@ export const LoopClip: React.FC = () => {
   const fadeIn = interpolate(frame, [0, 20], [0, 1], {
     extrapolateRight: "clamp",
   });
-  const fadeOut = interpolate(frame, [560, 600], [1, 0], {
+  const fadeOut = interpolate(frame, [680, 720], [1, 0], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
