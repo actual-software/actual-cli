@@ -1,7 +1,6 @@
 import React from "react";
 import { useCurrentFrame, interpolate, spring } from "remotion";
 import { TerminalWindow } from "../Terminal/TerminalWindow";
-import { HeaderBar } from "../Terminal/HeaderBar";
 import { TuiLayout } from "../Terminal/TuiLayout";
 import { COLORS, SPRING_CONFIGS } from "../../data/brand";
 
@@ -44,7 +43,6 @@ export const SceneTuiReveal: React.FC = () => {
     >
       <div style={{ transform: `scale(${scale})` }}>
         <TerminalWindow width={1200} height={620}>
-          <HeaderBar />
           <TuiLayout
             steps={ALL_WAITING}
             activeStepIndex={0}

@@ -1,7 +1,6 @@
 import React from "react";
 import { useCurrentFrame } from "remotion";
 import { TerminalWindow } from "../components/Terminal/TerminalWindow";
-import { HeaderBar } from "../components/Terminal/HeaderBar";
 import { TuiLayout } from "../components/Terminal/TuiLayout";
 import { getStateAtFrame, FRAMES } from "../data/tui-states";
 
@@ -23,7 +22,6 @@ export const PipelinePreview: React.FC = () => {
       }}
     >
       <TerminalWindow width={1200} height={620} glowIntensity={0}>
-        <HeaderBar />
         <TuiLayout
           steps={state.steps}
           activeStepIndex={state.activeStepIndex}

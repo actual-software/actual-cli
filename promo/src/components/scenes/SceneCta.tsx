@@ -1,7 +1,6 @@
 import React from "react";
 import { useCurrentFrame, interpolate, spring } from "remotion";
 import { TerminalWindow } from "../Terminal/TerminalWindow";
-import { HeaderBar } from "../Terminal/HeaderBar";
 import { TuiLayout } from "../Terminal/TuiLayout";
 import { COLORS, FONTS, SPRING_CONFIGS } from "../../data/brand";
 import { COPY } from "../../data/copy";
@@ -91,7 +90,6 @@ export const SceneCta: React.FC = () => {
         }}
       >
         <TerminalWindow width={1200} height={620} glowIntensity={0.2}>
-          <HeaderBar />
           <TuiLayout
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}

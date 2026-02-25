@@ -1,7 +1,6 @@
 import React from "react";
 import { useCurrentFrame, spring } from "remotion";
 import { TerminalWindow } from "../Terminal/TerminalWindow";
-import { HeaderBar } from "../Terminal/HeaderBar";
 import { TuiLayout } from "../Terminal/TuiLayout";
 import { COLORS, SPRING_CONFIGS } from "../../data/brand";
 import { getStateAtFrame, FRAMES } from "../../data/tui-states";
@@ -37,7 +36,6 @@ export const SceneComplete: React.FC = () => {
     >
       <div style={{ transform: `scale(${cameraScale})` }}>
         <TerminalWindow width={1200} height={620} glowIntensity={glowIntensity}>
-          <HeaderBar />
           <TuiLayout
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}

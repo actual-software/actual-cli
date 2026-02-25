@@ -1,7 +1,6 @@
 import React from "react";
 import { useCurrentFrame, interpolate } from "remotion";
 import { TerminalWindow } from "../Terminal/TerminalWindow";
-import { HeaderBar } from "../Terminal/HeaderBar";
 import { TuiLayout } from "../Terminal/TuiLayout";
 import { FilmGrain } from "../effects/FilmGrain";
 import { Vignette } from "../effects/Vignette";
@@ -52,7 +51,6 @@ export const LoopClip: React.FC = () => {
           height={640}
           glowIntensity={(completedCount / 5) * 0.3}
         >
-          <HeaderBar />
           <TuiLayout
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}
