@@ -1,5 +1,5 @@
 import React from "react";
-import { COLORS } from "../../data/brand";
+import { COLORS, FONTS } from "../../data/brand";
 import { LogoPanel } from "./LogoPanel";
 import { StepsPanel, StepDef } from "./StepsPanel";
 import { OutputPane } from "./OutputPane";
@@ -13,6 +13,52 @@ interface TuiLayoutProps {
   glowIntensity?: number;
 }
 
+// Ratatui-style bordered panel. Title (if provided) is overlaid on the top border,
+// exactly like ratatui's Block::new().title("...").borders(Borders::ALL).
+// The outer div is position:relative with NO overflow:hidden so the title at
+// top:-8px protrudes above the box border without being clipped. The inner
+// content wrapper handles overflow.
+const TuiBox: React.FC<{
+  title?: string;
+  children: React.ReactNode;
+  style?: React.CSSProperties;
+  contentStyle?: React.CSSProperties;
+}> = ({ title, children, style, contentStyle }) => (
+  <div
+    style={{
+      position: "relative",
+      border: `1px solid ${COLORS.borderTeal}`,
+      borderRadius: 4,
+      display: "flex",
+      flexDirection: "column",
+      ...style,
+    }}
+  >
+    {title && (
+      <div
+        style={{
+          position: "absolute",
+          top: -8,
+          left: 10,
+          background: COLORS.surface,
+          padding: "0 4px",
+          fontFamily: FONTS.mono,
+          fontSize: 12,
+          color: COLORS.borderTeal,
+          lineHeight: "16px",
+          zIndex: 1,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {title}
+      </div>
+    )}
+    <div style={{ flex: 1, overflow: "hidden", ...contentStyle }}>
+      {children}
+    </div>
+  </div>
+);
+
 export const TuiLayout: React.FC<TuiLayoutProps> = ({
   steps,
   activeStepIndex,
@@ -23,33 +69,74 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
     <div
       style={{
         display: "flex",
-        height: "100%",
+        flexDirection: "column",
+        flexGrow: 1,
         background: COLORS.surface,
         color: COLORS.textPrimary,
+        // paddingTop: 14px gives the "Output" title room above its box border.
+        // The title is position:absolute at top:-8px, so we need >=8px clearance.
+        padding: "14px 8px 8px 8px",
+        boxSizing: "border-box",
         overflow: "hidden",
       }}
     >
-      {/* Left panel: logo + steps, fixed 340px */}
+      {/* Main row: left column + right output box */}
       <div
         style={{
-          width: 340,
-          flexShrink: 0,
           display: "flex",
-          flexDirection: "column",
-          borderRight: `1px solid ${COLORS.borderGreen}33`,
+          flex: 1,
+          gap: 8,
+          overflow: "hidden",
+          minHeight: 0,
         }}
       >
-        <LogoPanel />
-        <StepsPanel steps={steps} activeStepIndex={activeStepIndex} />
+        {/* Left column: logo box + steps box */}
+        <div
+          style={{
+            width: 330,
+            flexShrink: 0,
+            display: "flex",
+            flexDirection: "column",
+            minHeight: 0,
+          }}
+        >
+          {/* Bird art — fills remaining height */}
+          <TuiBox style={{ flex: 1, minHeight: 0 }}>
+            <LogoPanel />
+          </TuiBox>
+
+          {/* Steps — marginTop:14 gives the "Steps" title room above its border */}
+          <TuiBox
+            title="Steps"
+            style={{ flexShrink: 0, marginTop: 14 }}
+            contentStyle={{ overflow: "visible", flex: "none" }}
+          >
+            <StepsPanel steps={steps} activeStepIndex={activeStepIndex} />
+          </TuiBox>
+        </div>
+
+        {/* Right column: output */}
+        <TuiBox title="Output" style={{ flex: 1, minHeight: 0 }}>
+          <OutputPane lines={outputLines} confirmWidget={confirmWidget} />
+        </TuiBox>
       </div>
 
-      {/* Right panel: output pane */}
-      <div style={{ flexGrow: 1, overflow: "hidden" }}>
-        <OutputPane
-          lines={outputLines}
-          confirmWidget={confirmWidget}
-        />
-      </div>
+      {/* Footer bar — matches real TUI's bottom key-hint line.
+          Shown only when confirm widget is active (← → select  Enter confirm). */}
+      {confirmWidget && (
+        <div
+          style={{
+            fontFamily: FONTS.mono,
+            fontSize: 11,
+            color: COLORS.textDim,
+            textAlign: "right",
+            paddingTop: 4,
+            flexShrink: 0,
+          }}
+        >
+          ← → select{"  "}Enter confirm
+        </div>
+      )}
     </div>
   );
 };
