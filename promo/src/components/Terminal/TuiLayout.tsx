@@ -14,16 +14,17 @@ interface TuiLayoutProps {
 }
 
 // Ratatui-style bordered panel. Title (if provided) is overlaid on the top border,
-// exactly like ratatui's Block::new().title("...").borders(Borders::ALL).
-// The outer div is position:relative with NO overflow:hidden so the title at
-// top:-8px protrudes above the box border without being clipped. The inner
-// content wrapper handles overflow.
+// and bottomTitle (if provided) is overlaid on the bottom border — right-aligned,
+// exactly like ratatui's Block::new().title("...").title_bottom("...").
+// The outer div is position:relative with NO overflow:hidden so titles at
+// top:-8px / bottom:-8px protrude without being clipped.
 const TuiBox: React.FC<{
   title?: React.ReactNode;
+  bottomTitle?: React.ReactNode;
   children: React.ReactNode;
   style?: React.CSSProperties;
   contentStyle?: React.CSSProperties;
-}> = ({ title, children, style, contentStyle }) => (
+}> = ({ title, bottomTitle, children, style, contentStyle }) => (
   <div
     style={{
       position: "relative",
@@ -50,6 +51,24 @@ const TuiBox: React.FC<{
         }}
       >
         {title}
+      </div>
+    )}
+    {bottomTitle && (
+      <div
+        style={{
+          position: "absolute",
+          bottom: -8,
+          right: 10,
+          background: COLORS.surface,
+          padding: "0 4px",
+          fontFamily: FONTS.mono,
+          fontSize: 12,
+          lineHeight: "16px",
+          zIndex: 1,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {bottomTitle}
       </div>
     )}
     <div style={{ flex: 1, overflow: "hidden", ...contentStyle }}>
@@ -83,9 +102,10 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
         flexGrow: 1,
         background: COLORS.surface,
         color: COLORS.textPrimary,
-        // paddingTop: 14px gives the box titles room above their borders.
-        // The title is position:absolute at top:-8px, so we need >=8px clearance.
-        padding: "14px 8px 8px 8px",
+        // paddingTop: 14px gives top titles room; paddingBottom: 14px gives
+        // bottom titles room. The titles are position:absolute at ±8px, so
+        // we need >=8px clearance on both ends.
+        padding: "14px 8px 14px 8px",
         boxSizing: "border-box",
         overflow: "hidden",
       }}
@@ -125,31 +145,27 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
           </TuiBox>
         </div>
 
-        {/* Right column: output */}
+        {/* Right column: output.
+            bottomTitle matches real TUI: key hints embedded in Output box bottom border.
+            Shows confirm hints when widget active, otherwise standard navigation hints. */}
         <TuiBox
           title={<span style={{ color: COLORS.borderTeal }}>Output</span>}
+          bottomTitle={
+            confirmWidget ? (
+              <span style={{ color: COLORS.textDim }}>
+                ← → select{"  "}Enter confirm
+              </span>
+            ) : (
+              <span style={{ color: COLORS.textDim }}>
+                ↑/↓ steps{"  "}q quit
+              </span>
+            )
+          }
           style={{ flex: 1, minHeight: 0 }}
         >
           <OutputPane lines={outputLines} confirmWidget={confirmWidget} />
         </TuiBox>
       </div>
-
-      {/* Footer bar — matches real TUI's bottom key-hint line.
-          Shown only when confirm widget is active (← → select  Enter confirm). */}
-      {confirmWidget && (
-        <div
-          style={{
-            fontFamily: FONTS.mono,
-            fontSize: 11,
-            color: COLORS.textDim,
-            textAlign: "right",
-            paddingTop: 4,
-            flexShrink: 0,
-          }}
-        >
-          ← → select{"  "}Enter confirm
-        </div>
-      )}
     </div>
   );
 };
