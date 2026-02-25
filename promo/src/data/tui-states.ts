@@ -57,15 +57,15 @@ const F = {
   WRITE_START: 480,
   CONFIRM_APPEAR: 490, // confirm widget appears 10f into write
   ACCEPT_FRAME: 520,  // 0.5s pause (30f) before auto-accept
-  WRITE_END: 540, // 1.0s for write  (unchanged)
+  WRITE_END: 570, // 1.5s for write  (+0.5s hold on accepted state)
 
-  SUMMARY_START: 540, // Summary begins immediately after Write Files
-  SUMMARY_END: 660, // 2.0s for summary step
+  SUMMARY_START: 570, // Summary begins immediately after Write Files
+  SUMMARY_END: 690, // 2.0s for summary step
 
   // Post-pipeline
-  COMPLETE_START: 660,
-  CTA_START: 780,
-  CLIP_END: 960,
+  COMPLETE_START: 690,
+  CTA_START: 810,
+  CLIP_END: 990,
 } as const;
 
 // ─── Output line sets per step ────────────────────────────────────────────────
