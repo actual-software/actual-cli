@@ -43,29 +43,29 @@ const F = {
 
   // Step start frames (relative to REVEAL_END)
   ENV_START: 360,
-  ENV_END: 510, // 2.5s for env step
+  ENV_END: 450, // 1.5s for env step  (-1s)
 
-  ANALYSIS_START: 510,
-  ANALYSIS_END: 720, // 3.5s for analysis
+  ANALYSIS_START: 450,
+  ANALYSIS_END: 570, // 2.0s for analysis  (-1.5s)
 
-  FETCH_START: 720,
-  FETCH_END: 900, // 3s for fetch
+  FETCH_START: 570,
+  FETCH_END: 660, // 1.5s for fetch  (-1.5s)
 
-  TAILOR_START: 900,
-  TAILOR_END: 1080, // 3s for tailoring
+  TAILOR_START: 660,
+  TAILOR_END: 840, // 3s for tailoring  (unchanged)
 
-  WRITE_START: 1080,
-  CONFIRM_APPEAR: 1200, // confirm widget appears mid-write
-  ACCEPT_FRAME: 1290, // auto-accept fires
-  WRITE_END: 1320, // 4s for write
+  WRITE_START: 840,
+  CONFIRM_APPEAR: 860, // confirm widget appears early in write
+  ACCEPT_FRAME: 885, // auto-accept fires
+  WRITE_END: 900, // 1.0s for write  (-3s)
 
-  SUMMARY_START: 1320, // Summary begins immediately after Write Files
-  SUMMARY_END: 1500, // 3s for summary step
+  SUMMARY_START: 900, // Summary begins immediately after Write Files
+  SUMMARY_END: 1080, // 3s for summary step
 
   // Post-pipeline
-  COMPLETE_START: 1500,
-  CTA_START: 1620,
-  CLIP_END: 1800,
+  COMPLETE_START: 1080,
+  CTA_START: 1200,
+  CLIP_END: 1380,
 } as const;
 
 // ─── Output line sets per step ────────────────────────────────────────────────
@@ -110,7 +110,7 @@ const ANALYSIS_LINES = staggerLines(
     { text: "  ✔ error propagation (anyhow)", color: COLORS.borderGreen },
   ],
   F.ANALYSIS_START,
-  18 // 18 frames between lines = slow scroll feel
+  12 // 12 frames between lines — tightened to fit 120f window
 );
 
 const FETCH_LINES = staggerLines(
@@ -243,7 +243,7 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.ENV_END,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "success", duration: "2.5s", completionFrame: F.ENV_END },
+      { index: 0, status: "success", duration: "1.5s", completionFrame: F.ENV_END },
       { index: 1, status: "running", spinnerStartFrame: F.ANALYSIS_START },
     ]),
     activeStepIndex: 1,
@@ -254,8 +254,8 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.ANALYSIS_END,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "success", duration: "2.5s" },
-      { index: 1, status: "success", duration: "3.5s", completionFrame: F.ANALYSIS_END },
+      { index: 0, status: "success", duration: "1.5s" },
+      { index: 1, status: "success", duration: "2.0s", completionFrame: F.ANALYSIS_END },
       { index: 2, status: "running", spinnerStartFrame: F.FETCH_START },
     ]),
     activeStepIndex: 2,
@@ -266,9 +266,9 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.FETCH_END,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "success", duration: "2.5s" },
-      { index: 1, status: "success", duration: "3.5s" },
-      { index: 2, status: "success", duration: "3.0s", completionFrame: F.FETCH_END },
+      { index: 0, status: "success", duration: "1.5s" },
+      { index: 1, status: "success", duration: "2.0s" },
+      { index: 2, status: "success", duration: "1.5s", completionFrame: F.FETCH_END },
       { index: 3, status: "running", spinnerStartFrame: F.TAILOR_START },
     ]),
     activeStepIndex: 3,
@@ -279,9 +279,9 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.TAILOR_END,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "success", duration: "2.5s" },
-      { index: 1, status: "success", duration: "3.5s" },
-      { index: 2, status: "success", duration: "3.0s" },
+      { index: 0, status: "success", duration: "1.5s" },
+      { index: 1, status: "success", duration: "2.0s" },
+      { index: 2, status: "success", duration: "1.5s" },
       { index: 3, status: "success", duration: "3.0s", completionFrame: F.TAILOR_END },
       { index: 4, status: "running", spinnerStartFrame: F.WRITE_START },
     ]),
@@ -299,9 +299,9 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.CONFIRM_APPEAR,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "success", duration: "2.5s" },
-      { index: 1, status: "success", duration: "3.5s" },
-      { index: 2, status: "success", duration: "3.0s" },
+      { index: 0, status: "success", duration: "1.5s" },
+      { index: 1, status: "success", duration: "2.0s" },
+      { index: 2, status: "success", duration: "1.5s" },
       { index: 3, status: "success", duration: "3.0s" },
       { index: 4, status: "running", spinnerStartFrame: F.WRITE_START },
     ]),
@@ -335,11 +335,11 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.SUMMARY_START,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "success", duration: "2.5s" },
-      { index: 1, status: "success", duration: "3.5s" },
-      { index: 2, status: "success", duration: "3.0s" },
+      { index: 0, status: "success", duration: "1.5s" },
+      { index: 1, status: "success", duration: "2.0s" },
+      { index: 2, status: "success", duration: "1.5s" },
       { index: 3, status: "success", duration: "3.0s" },
-      { index: 4, status: "success", duration: "4.0s", completionFrame: F.WRITE_END },
+      { index: 4, status: "success", duration: "1.0s", completionFrame: F.WRITE_END },
       { index: 5, status: "running", spinnerStartFrame: F.SUMMARY_START },
     ]),
     activeStepIndex: 5,
@@ -361,9 +361,9 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.SUMMARY_END,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "success", duration: "2.5s" },
-      { index: 1, status: "success", duration: "3.5s" },
-      { index: 2, status: "success", duration: "3.0s" },
+      { index: 0, status: "success", duration: "1.5s" },
+      { index: 1, status: "success", duration: "2.0s" },
+      { index: 2, status: "success", duration: "1.5s" },
       { index: 3, status: "success", duration: "3.0s" },
       { index: 4, status: "success", duration: "4.0s" },
       { index: 5, status: "success", duration: "3.0s", completionFrame: F.SUMMARY_END },
