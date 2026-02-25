@@ -22,15 +22,16 @@ export const HeroClip: React.FC = () => {
       >
         <SceneTuiReveal />
       </Sequence>
+      {/* Pipeline + Summary step (REVEAL_END → COMPLETE_START) */}
       <Sequence
         from={FRAMES.REVEAL_END}
-        durationInFrames={FRAMES.WRITE_END - FRAMES.REVEAL_END}
+        durationInFrames={FRAMES.COMPLETE_START - FRAMES.REVEAL_END}
       >
         <ScenePipeline />
       </Sequence>
       <Sequence
-        from={FRAMES.WRITE_END}
-        durationInFrames={FRAMES.CTA_START - FRAMES.WRITE_END}
+        from={FRAMES.COMPLETE_START}
+        durationInFrames={FRAMES.CTA_START - FRAMES.COMPLETE_START}
       >
         <SceneComplete />
       </Sequence>
