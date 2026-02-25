@@ -39,33 +39,33 @@ export interface TuiState {
 const F = {
   // Scene boundaries
   HOOK_END: 180, // 3s — TUI appears
-  REVEAL_END: 360, // 6s — all steps ○, logo settled
+  REVEAL_END: 300, // 5s — all steps ○, logo settled  (-1s)
 
-  // Step start frames (relative to REVEAL_END)
-  ENV_START: 360,
-  ENV_END: 390, // 0.5s for env step  (-1s)
+  // Step start frames
+  ENV_START: 300,
+  ENV_END: 330, // 0.5s for env step
 
-  ANALYSIS_START: 390,
-  ANALYSIS_END: 420, // 0.5s for analysis  (-1.5s)
+  ANALYSIS_START: 330,
+  ANALYSIS_END: 360, // 0.5s for analysis
 
-  FETCH_START: 420,
-  FETCH_END: 450, // 0.5s for fetch  (-1s)
+  FETCH_START: 360,
+  FETCH_END: 390, // 0.5s for fetch
 
-  TAILOR_START: 450,
-  TAILOR_END: 540, // 1.5s for tailoring  (-1.5s)
+  TAILOR_START: 390,
+  TAILOR_END: 480, // 1.5s for tailoring
 
-  WRITE_START: 540,
-  CONFIRM_APPEAR: 560, // confirm widget appears early in write
-  ACCEPT_FRAME: 585, // auto-accept fires
-  WRITE_END: 600, // 1.0s for write  (unchanged)
+  WRITE_START: 480,
+  CONFIRM_APPEAR: 490, // confirm widget appears 10f into write
+  ACCEPT_FRAME: 520,  // 0.5s pause (30f) before auto-accept
+  WRITE_END: 540, // 1.0s for write  (unchanged)
 
-  SUMMARY_START: 600, // Summary begins immediately after Write Files
-  SUMMARY_END: 720, // 2.0s for summary step  (-1s)
+  SUMMARY_START: 540, // Summary begins immediately after Write Files
+  SUMMARY_END: 660, // 2.0s for summary step
 
   // Post-pipeline
-  COMPLETE_START: 720,
-  CTA_START: 840,
-  CLIP_END: 1020,
+  COMPLETE_START: 660,
+  CTA_START: 780,
+  CLIP_END: 960,
 } as const;
 
 // ─── Output line sets per step ────────────────────────────────────────────────
