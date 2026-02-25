@@ -43,10 +43,12 @@ const STATUS_COLORS: Record<StepStatus, string> = {
 
 interface StepRowProps {
   step: StepDef;
+  currentFrame?: number; // override useCurrentFrame() for remapped clips
 }
 
-const StepRow: React.FC<StepRowProps> = ({ step }) => {
-  const frame = useCurrentFrame();
+const StepRow: React.FC<StepRowProps> = ({ step, currentFrame }) => {
+  const remotionFrame = useCurrentFrame();
+  const frame = currentFrame ?? remotionFrame;
 
   // Spring glow burst on step completion
   const glowValue =
@@ -61,10 +63,8 @@ const StepRow: React.FC<StepRowProps> = ({ step }) => {
   const glow = Math.min(glowValue, 1.3);
 
   const color = STATUS_COLORS[step.status];
-  const iconColor =
-    step.status === "success"
-      ? `rgba(0,251,126,${0.6 + glow * 0.4})`
-      : color;
+  // Always use full-brightness color — GlowWrapper handles the completion burst.
+  const iconColor = color;
 
   return (
     <div
@@ -89,7 +89,7 @@ const StepRow: React.FC<StepRowProps> = ({ step }) => {
           }}
         >
           {step.status === "running" && step.spinnerStartFrame != null ? (
-            <Spinner startFrame={step.spinnerStartFrame} color={color} />
+            <Spinner startFrame={step.spinnerStartFrame} color={color} currentFrame={currentFrame} />
           ) : (
             STATUS_ICONS[step.status]
           )}
@@ -112,16 +112,18 @@ const StepRow: React.FC<StepRowProps> = ({ step }) => {
 interface StepsPanelProps {
   steps: StepDef[];
   activeStepIndex: number;
+  currentFrame?: number; // override useCurrentFrame() for remapped clips
 }
 
 export const StepsPanel: React.FC<StepsPanelProps> = ({
   steps,
+  currentFrame,
   // activeStepIndex kept in interface for API compatibility but not rendered
   // (real TUI doesn't show a ▶ marker — the running spinner is sufficient)
 }) => (
   <div style={{ paddingTop: 6, paddingBottom: 6 }}>
     {steps.map((step) => (
-      <StepRow key={step.label} step={step} />
+      <StepRow key={step.label} step={step} currentFrame={currentFrame} />
     ))}
   </div>
 );

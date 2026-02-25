@@ -11,25 +11,53 @@ interface TuiLayoutProps {
   outputLines: OutputLine[];
   confirmWidget?: ConfirmWidgetState;
   glowIntensity?: number;
+  /** Pass absoluteFrame from remapped clips (LoopClip, FastPipeline) so that
+   *  OutputPane/StepsPanel/Spinner compare against correct absolute frame numbers. */
+  currentFrame?: number;
 }
 
-// Ratatui-style bordered panel. Title (if provided) is overlaid on the top border,
-// and bottomTitle (if provided) is overlaid on the bottom border — right-aligned,
-// exactly like ratatui's Block::new().title("...").title_bottom("...").
-// The outer div is position:relative with NO overflow:hidden so titles at
-// top:-8px / bottom:-8px protrude without being clipped.
+// Matches the ratatui gradient.rs: linear lerp from #00FB7E (top) → #179CA9 (bottom)
+// over the full frame height. t=0 is the top of the TUI, t=1 is the bottom.
+function gradientColor(t: number): string {
+  const r = Math.round(0x00 + t * (0x17 - 0x00));
+  const g = Math.round(0xfb + t * (0x9c - 0xfb));
+  const b = Math.round(0x7e + t * (0xa9 - 0x7e));
+  return `rgb(${r},${g},${b})`;
+}
+
+// Returns a CSS linear-gradient for a box whose top edge is at fraction y0
+// and bottom edge is at fraction y1 within the full TUI content area.
+// This replicates ratatui's "t computed against full frame height" behaviour.
+function borderGradient(y0: number, y1: number): string {
+  return `linear-gradient(to bottom, ${gradientColor(y0)}, ${gradientColor(y1)})`;
+}
+
+// Ratatui-style bordered panel using the gradient-outer / solid-inner trick.
+// The 2px "border" is rendered as the exposed gradient background behind
+// a solid-surfaced inner div. Supports border-radius unlike border-image.
+// Titles protrude ±8px via position:absolute — NO overflow:hidden on the
+// outer div so they are not clipped (TuiLayout's padded outer div clips instead).
 const TuiBox: React.FC<{
   title?: React.ReactNode;
   bottomTitle?: React.ReactNode;
   children: React.ReactNode;
   style?: React.CSSProperties;
   contentStyle?: React.CSSProperties;
-}> = ({ title, bottomTitle, children, style, contentStyle }) => (
+  gradient?: string; // CSS gradient string for the border
+}> = ({
+  title,
+  bottomTitle,
+  children,
+  style,
+  contentStyle,
+  gradient = borderGradient(0, 1),
+}) => (
   <div
     style={{
       position: "relative",
-      border: `1px solid ${COLORS.borderTeal}`,
-      borderRadius: 4,
+      background: gradient,
+      padding: 2,
+      borderRadius: 6,
       display: "flex",
       flexDirection: "column",
       ...style,
@@ -71,7 +99,16 @@ const TuiBox: React.FC<{
         {bottomTitle}
       </div>
     )}
-    <div style={{ flex: 1, overflow: "hidden", ...contentStyle }}>
+    <div
+      style={{
+        background: COLORS.surface,
+        borderRadius: 4,
+        flex: 1,
+        minHeight: 0,
+        overflow: "hidden",
+        ...contentStyle,
+      }}
+    >
       {children}
     </div>
   </div>
@@ -83,8 +120,8 @@ const LogoBoxTitle = (
   <>
     <span style={{ color: COLORS.textPrimary }}>actual </span>
     <span style={{ color: COLORS.borderGreen }}>v0.1.0</span>
-    <span style={{ color: COLORS.textDim }}> ──── </span>
-    <span style={{ color: COLORS.borderTeal }}>https://app.actual.ai</span>
+    <span style={{ color: COLORS.borderGreen }}> ──── </span>
+    <span style={{ color: COLORS.textPrimary }}>https://app.actual.ai</span>
   </>
 );
 
@@ -93,6 +130,7 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
   activeStepIndex,
   outputLines,
   confirmWidget,
+  currentFrame,
 }) => {
   return (
     <div
@@ -133,26 +171,34 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
             minHeight: 0,
           }}
         >
-          {/* Bird art — natural content height (ASCII art + padding) */}
-          <TuiBox title={LogoBoxTitle} style={{ flexShrink: 0 }}>
+          {/* Bird art — natural content height (ASCII art + padding).
+              Occupies roughly the top 38% of the content area → gradient t=0→0.38 */}
+          <TuiBox
+            title={LogoBoxTitle}
+            style={{ flexShrink: 0 }}
+            gradient={borderGradient(0.0, 0.38)}
+          >
             <LogoPanel />
           </TuiBox>
 
-          {/* Steps — fills remaining column height */}
+          {/* Steps — fills remaining column height.
+              Occupies roughly t=0.40→1.0 (after logo + 14px gap) */}
           <TuiBox
-            title={<span style={{ color: COLORS.borderTeal }}>Steps</span>}
+            title={<span style={{ color: COLORS.textPrimary }}>Steps</span>}
             style={{ flex: 1, marginTop: 14, minHeight: 0 }}
-            contentStyle={{ overflow: "hidden", flex: "none" }}
+            contentStyle={{ overflow: "hidden" }}
+            gradient={borderGradient(0.40, 1.0)}
           >
-            <StepsPanel steps={steps} activeStepIndex={activeStepIndex} />
+            <StepsPanel steps={steps} activeStepIndex={activeStepIndex} currentFrame={currentFrame} />
           </TuiBox>
         </div>
 
-        {/* Right column: output.
+        {/* Right column: output — spans full content height → full gradient t=0→1.0.
             bottomTitle matches real TUI: key hints embedded in Output box bottom border.
             Shows confirm hints when widget active, otherwise standard navigation hints. */}
         <TuiBox
-          title={<span style={{ color: COLORS.borderTeal }}>Output</span>}
+          title={<span style={{ color: COLORS.textPrimary }}>Output</span>}
+          gradient={borderGradient(0.0, 1.0)}
           bottomTitle={
             confirmWidget ? (
               <span style={{ color: COLORS.textDim }}>
@@ -166,7 +212,7 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
           }
           style={{ flex: 1, minHeight: 0 }}
         >
-          <OutputPane lines={outputLines} confirmWidget={confirmWidget} />
+          <OutputPane lines={outputLines} confirmWidget={confirmWidget} currentFrame={currentFrame} />
         </TuiBox>
       </div>
     </div>

@@ -34,11 +34,12 @@ export const HeroClip: React.FC = () => {
       >
         <SceneComplete />
       </Sequence>
+      {/* +180f (3s) hold on the CTA wordmark/tagline */}
       <Sequence
         from={FRAMES.CTA_START}
-        durationInFrames={FRAMES.CLIP_END - FRAMES.CTA_START}
+        durationInFrames={FRAMES.CLIP_END - FRAMES.CTA_START + 180}
       >
-        <SceneCta />
+        <SceneCta totalDuration={FRAMES.CLIP_END - FRAMES.CTA_START + 180} />
       </Sequence>
 
       {/* Composition-level overlays */}

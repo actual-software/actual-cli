@@ -56,6 +56,7 @@ export const LoopClip: React.FC = () => {
             activeStepIndex={state.activeStepIndex}
             outputLines={state.outputLines}
             confirmWidget={state.confirmWidget}
+            currentFrame={absoluteFrame}
           />
         </TerminalWindow>
       </div>
