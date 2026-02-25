@@ -3,6 +3,7 @@ import { useCurrentFrame } from "remotion";
 import { spring } from "remotion";
 import { COLORS, FONTS } from "../../data/brand";
 import { Spinner } from "./Spinner";
+import { GlowWrapper } from "../effects/GlowWrapper";
 
 export type StepStatus =
   | "waiting"
@@ -77,10 +78,6 @@ const StepRow: React.FC<StepRowProps> = ({ step, isActive }) => {
         padding: "0 10px",
         color:
           step.status === "waiting" ? COLORS.textDim : COLORS.textPrimary,
-        filter:
-          glow > 0.1
-            ? `drop-shadow(0 0 ${glow * 8}px ${COLORS.borderGreen})`
-            : "none",
       }}
     >
       {/* Active marker */}
@@ -88,16 +85,18 @@ const StepRow: React.FC<StepRowProps> = ({ step, isActive }) => {
         {isActive ? "▶" : " "}
       </span>
 
-      {/* Status icon */}
-      <span
-        style={{ color: iconColor, width: "1ch", display: "inline-block" }}
-      >
-        {step.status === "running" && step.spinnerStartFrame != null ? (
-          <Spinner startFrame={step.spinnerStartFrame} color={color} />
-        ) : (
-          STATUS_ICONS[step.status]
-        )}
-      </span>
+      {/* Status icon — wrapped with GlowWrapper for spring-animated drop-shadow */}
+      <GlowWrapper intensity={glow} color={COLORS.borderGreen} maxRadius={12}>
+        <span
+          style={{ color: iconColor, width: "1ch", display: "inline-block" }}
+        >
+          {step.status === "running" && step.spinnerStartFrame != null ? (
+            <Spinner startFrame={step.spinnerStartFrame} color={color} />
+          ) : (
+            STATUS_ICONS[step.status]
+          )}
+        </span>
+      </GlowWrapper>
 
       {/* Label */}
       <span style={{ flexGrow: 1 }}>{step.label}</span>
