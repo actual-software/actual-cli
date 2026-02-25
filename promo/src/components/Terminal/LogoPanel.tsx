@@ -49,15 +49,19 @@ export const LogoPanel: React.FC = () => {
       >
         {BANNER_LINES.map((line, lineIdx) => (
           <div key={lineIdx} style={{ whiteSpace: "pre" }}>
-            {line.split("").map((char, charIdx) => {
-              const maxWidth = 44; // left panel character width
-              const t = charIdx / maxWidth;
-              return (
-                <span key={charIdx} style={{ color: interpolateColor(t) }}>
-                  {char}
-                </span>
-              );
-            })}
+            {line.length === 0
+              ? // Empty line: render a non-breaking space so the div retains
+                // its lineHeight instead of collapsing to zero height.
+                "\u00A0"
+              : line.split("").map((char, charIdx) => {
+                  const maxWidth = 44; // left panel character width
+                  const t = charIdx / maxWidth;
+                  return (
+                    <span key={charIdx} style={{ color: interpolateColor(t) }}>
+                      {char}
+                    </span>
+                  );
+                })}
           </div>
         ))}
       </div>
