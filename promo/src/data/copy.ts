@@ -1,8 +1,8 @@
 export const COPY = {
   cta: {
-    tagline: "Guardrails for AI-Powered Software Development",
+    tagline: "Guardrails for AI-Powered Software Development, powered by Actual AI",
     url: "app.actual.ai",
-    wordmark: "actual",
+    wordmark: "actual CLI",
   },
   shell: {
     prompt: "~/my-project  on  main",
