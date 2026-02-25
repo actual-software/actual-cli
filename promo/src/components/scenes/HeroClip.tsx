@@ -8,10 +8,11 @@ import { SceneComplete } from "./SceneComplete";
 import { SceneCta } from "./SceneCta";
 import { FilmGrain } from "../effects/FilmGrain";
 import { Vignette } from "../effects/Vignette";
+import { COLORS } from "../../data/brand";
 
 export const HeroClip: React.FC = () => {
   return (
-    <div style={{ position: "relative", width: 1920, height: 1080 }}>
+    <div style={{ position: "relative", width: 1920, height: 1080, background: COLORS.background }}>
       {/* Scenes */}
       <Sequence from={0} durationInFrames={FRAMES.HOOK_END}>
         <SceneHook />
