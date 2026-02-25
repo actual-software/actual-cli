@@ -1,7 +1,6 @@
 import React from "react";
 import { Sequence, useCurrentFrame, interpolate } from "remotion";
 import { TerminalWindow } from "../Terminal/TerminalWindow";
-import { HeaderBar } from "../Terminal/HeaderBar";
 import { TuiLayout } from "../Terminal/TuiLayout";
 import { SceneComplete } from "./SceneComplete";
 import { SceneCta } from "./SceneCta";
@@ -117,7 +116,6 @@ const FastPipeline: React.FC = () => {
           height={620}
           glowIntensity={(completedCount / 5) * 0.4}
         >
-          <HeaderBar />
           <TuiLayout
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}

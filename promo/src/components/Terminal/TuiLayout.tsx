@@ -19,7 +19,7 @@ interface TuiLayoutProps {
 // top:-8px protrudes above the box border without being clipped. The inner
 // content wrapper handles overflow.
 const TuiBox: React.FC<{
-  title?: string;
+  title?: React.ReactNode;
   children: React.ReactNode;
   style?: React.CSSProperties;
   contentStyle?: React.CSSProperties;
@@ -44,7 +44,6 @@ const TuiBox: React.FC<{
           padding: "0 4px",
           fontFamily: FONTS.mono,
           fontSize: 12,
-          color: COLORS.borderTeal,
           lineHeight: "16px",
           zIndex: 1,
           whiteSpace: "nowrap",
@@ -57,6 +56,17 @@ const TuiBox: React.FC<{
       {children}
     </div>
   </div>
+);
+
+// The header title for the bird art box, matching the real CLI first border line:
+// ╭ actual v0.1.0 ──── https://app.actual.ai ╮
+const LogoBoxTitle = (
+  <>
+    <span style={{ color: COLORS.textPrimary }}>actual </span>
+    <span style={{ color: COLORS.borderGreen }}>v0.1.0</span>
+    <span style={{ color: COLORS.textDim }}> ──── </span>
+    <span style={{ color: COLORS.borderTeal }}>https://app.actual.ai</span>
+  </>
 );
 
 export const TuiLayout: React.FC<TuiLayoutProps> = ({
@@ -73,7 +83,7 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
         flexGrow: 1,
         background: COLORS.surface,
         color: COLORS.textPrimary,
-        // paddingTop: 14px gives the "Output" title room above its box border.
+        // paddingTop: 14px gives the box titles room above their borders.
         // The title is position:absolute at top:-8px, so we need >=8px clearance.
         padding: "14px 8px 8px 8px",
         boxSizing: "border-box",
@@ -100,14 +110,14 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
             minHeight: 0,
           }}
         >
-          {/* Bird art — fills remaining height */}
-          <TuiBox style={{ flex: 1, minHeight: 0 }}>
+          {/* Bird art — title is "actual v0.1.0 ──── https://app.actual.ai" */}
+          <TuiBox title={LogoBoxTitle} style={{ flex: 1, minHeight: 0 }}>
             <LogoPanel />
           </TuiBox>
 
           {/* Steps — marginTop:14 gives the "Steps" title room above its border */}
           <TuiBox
-            title="Steps"
+            title={<span style={{ color: COLORS.borderTeal }}>Steps</span>}
             style={{ flexShrink: 0, marginTop: 14 }}
             contentStyle={{ overflow: "visible", flex: "none" }}
           >
@@ -116,7 +126,10 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
         </div>
 
         {/* Right column: output */}
-        <TuiBox title="Output" style={{ flex: 1, minHeight: 0 }}>
+        <TuiBox
+          title={<span style={{ color: COLORS.borderTeal }}>Output</span>}
+          style={{ flex: 1, minHeight: 0 }}
+        >
           <OutputPane lines={outputLines} confirmWidget={confirmWidget} />
         </TuiBox>
       </div>

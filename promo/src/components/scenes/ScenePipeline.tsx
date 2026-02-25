@@ -1,7 +1,6 @@
 import React from "react";
 import { useCurrentFrame, interpolate } from "remotion";
 import { TerminalWindow } from "../Terminal/TerminalWindow";
-import { HeaderBar } from "../Terminal/HeaderBar";
 import { TuiLayout } from "../Terminal/TuiLayout";
 import { COLORS } from "../../data/brand";
 import { getStateAtFrame, FRAMES } from "../../data/tui-states";
@@ -69,7 +68,6 @@ export const ScenePipeline: React.FC = () => {
         }}
       >
         <TerminalWindow width={1200} height={620} glowIntensity={glowIntensity}>
-          <HeaderBar />
           <TuiLayout
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}
