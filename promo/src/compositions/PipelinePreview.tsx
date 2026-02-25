@@ -3,12 +3,13 @@ import { useCurrentFrame } from "remotion";
 import { TerminalWindow } from "../components/Terminal/TerminalWindow";
 import { HeaderBar } from "../components/Terminal/HeaderBar";
 import { TuiLayout } from "../components/Terminal/TuiLayout";
-import { getStateAtFrame } from "../data/tui-states";
+import { getStateAtFrame, FRAMES } from "../data/tui-states";
 
-export const TuiPreview: React.FC = () => {
+export const PipelinePreview: React.FC = () => {
   const frame = useCurrentFrame();
-  // Preview starts at the "sync complete" state (frame 1320+)
-  const state = getStateAtFrame(1320 + frame);
+  // Map frame 0 → FRAMES.REVEAL_END so pipeline starts immediately
+  const stateFrame = FRAMES.REVEAL_END + frame;
+  const state = getStateAtFrame(stateFrame);
 
   return (
     <div
@@ -21,7 +22,7 @@ export const TuiPreview: React.FC = () => {
         justifyContent: "center",
       }}
     >
-      <TerminalWindow width={1200} height={620} glowIntensity={0.3}>
+      <TerminalWindow width={1200} height={620} glowIntensity={0}>
         <HeaderBar />
         <TuiLayout
           steps={state.steps}

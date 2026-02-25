@@ -3,18 +3,13 @@ import { COLORS } from "../../data/brand";
 import { LogoPanel } from "./LogoPanel";
 import { StepsPanel, StepDef } from "./StepsPanel";
 import { OutputPane } from "./OutputPane";
-
-interface OutputLine {
-  text: string;
-  appearFrame: number;
-  color?: string;
-}
+import { OutputLine, ConfirmWidgetState } from "../../data/tui-states";
 
 interface TuiLayoutProps {
   steps: StepDef[];
   activeStepIndex: number;
   outputLines: OutputLine[];
-  confirmWidget?: React.ComponentProps<typeof OutputPane>["confirmWidget"];
+  confirmWidget?: ConfirmWidgetState;
   glowIntensity?: number;
 }
 

@@ -1,26 +1,12 @@
 import React from "react";
 import { COLORS, FONTS } from "../../data/brand";
 import { interpolate, useCurrentFrame } from "remotion";
-import { ConfirmWidget, ConfirmChoice } from "./ConfirmWidget";
-
-interface OutputLine {
-  text: string;
-  appearFrame: number; // frame when this line should appear
-  color?: string;
-}
+import { ConfirmWidget } from "./ConfirmWidget";
+import { OutputLine, ConfirmWidgetState } from "../../data/tui-states";
 
 interface OutputPaneProps {
   lines: OutputLine[];
-  confirmWidget?: {
-    appearFrame: number;
-    file: {
-      name: string;
-      isNew: boolean;
-      ruleCount: number;
-      previewLines: string[];
-    };
-    selected: ConfirmChoice;
-  };
+  confirmWidget?: ConfirmWidgetState;
   title?: string;
 }
 
