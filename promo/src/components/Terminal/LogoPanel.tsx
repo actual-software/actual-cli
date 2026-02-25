@@ -1,7 +1,10 @@
 import React from "react";
 import { COLORS, FONTS } from "../../data/brand";
 
+// Blank strings at start and end produce one empty line of vertical padding
+// above and below the art, matching the real TUI box layout.
 const BANNER_LINES = [
+  "",
   "       ..===************",
   "     ..****************",
   "   .******      ********+************",
@@ -13,6 +16,7 @@ const BANNER_LINES = [
   "      ***********- *********-",
   "        **********************+",
   "           :-++**********",
+  "",
 ];
 
 function interpolateColor(t: number): string {
@@ -25,28 +29,38 @@ function interpolateColor(t: number): string {
 
 export const LogoPanel: React.FC = () => {
   return (
+    // Outer div centers the art block horizontally. No padding here —
+    // the blank BANNER_LINES entries provide vertical spacing.
     <div
       style={{
-        fontFamily: FONTS.mono,
-        fontSize: 12,
-        lineHeight: 1.4,
-        padding: "8px 12px",
-        color: COLORS.textPrimary,
+        display: "flex",
+        justifyContent: "center",
+        padding: "0 8px",
       }}
     >
-      {BANNER_LINES.map((line, lineIdx) => (
-        <div key={lineIdx} style={{ whiteSpace: "pre" }}>
-          {line.split("").map((char, charIdx) => {
-            const maxWidth = 44; // left panel character width
-            const t = charIdx / maxWidth;
-            return (
-              <span key={charIdx} style={{ color: interpolateColor(t) }}>
-                {char}
-              </span>
-            );
-          })}
-        </div>
-      ))}
+      {/* Inner div sizes to the widest line; outer flex centers it */}
+      <div
+        style={{
+          fontFamily: FONTS.mono,
+          fontSize: 12,
+          lineHeight: 1.4,
+          color: COLORS.textPrimary,
+        }}
+      >
+        {BANNER_LINES.map((line, lineIdx) => (
+          <div key={lineIdx} style={{ whiteSpace: "pre" }}>
+            {line.split("").map((char, charIdx) => {
+              const maxWidth = 44; // left panel character width
+              const t = charIdx / maxWidth;
+              return (
+                <span key={charIdx} style={{ color: interpolateColor(t) }}>
+                  {char}
+                </span>
+              );
+            })}
+          </div>
+        ))}
+      </div>
     </div>
   );
 };
