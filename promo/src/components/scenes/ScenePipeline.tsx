@@ -15,17 +15,18 @@ export const ScenePipeline: React.FC = () => {
   // Simple interpolate for camera (smooth but not spring — avoids oscillation)
   // We compute a 0–1 progress toward the confirm widget appearance
   const confirmRelFrame = FRAMES.CONFIRM_APPEAR - FRAMES.REVEAL_END;
+  // Zoom in at 2x speed (15f instead of 30f)
   const cameraProgress = interpolate(
     frame,
-    [confirmRelFrame - 5, confirmRelFrame + 30],
+    [confirmRelFrame - 5, confirmRelFrame + 15],
     [0, 1],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );
-  // And back after accept
+  // Hold at full zoom until 0.5s (30f) after accept, then zoom out
   const acceptRelFrame = FRAMES.ACCEPT_FRAME - FRAMES.REVEAL_END;
   const cameraReturnProgress = interpolate(
     frame,
-    [acceptRelFrame, acceptRelFrame + 30],
+    [acceptRelFrame + 30, acceptRelFrame + 60],
     [0, 1],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );
@@ -33,14 +34,14 @@ export const ScenePipeline: React.FC = () => {
   const cameraScale =
     frame < confirmRelFrame
       ? 1.0
-      : frame < acceptRelFrame
+      : frame < acceptRelFrame + 30  // hold at 1.15x for 0.5s after accept
         ? interpolate(cameraProgress, [0, 1], [1.0, 1.15])
         : interpolate(cameraReturnProgress, [0, 1], [1.15, 1.0]);
 
   const cameraY =
     frame < confirmRelFrame
       ? 0
-      : frame < acceptRelFrame
+      : frame < acceptRelFrame + 30  // hold at -40px for 0.5s after accept
         ? interpolate(cameraProgress, [0, 1], [0, -40])
         : interpolate(cameraReturnProgress, [0, 1], [-40, 0]);
 
