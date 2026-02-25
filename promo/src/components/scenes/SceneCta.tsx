@@ -89,7 +89,7 @@ export const SceneCta: React.FC = () => {
           transformOrigin: "center center",
         }}
       >
-        <TerminalWindow width={1200} height={620} glowIntensity={0.2}>
+        <TerminalWindow width={1200} height={640} glowIntensity={0.2}>
           <TuiLayout
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}

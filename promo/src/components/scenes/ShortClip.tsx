@@ -28,7 +28,7 @@ const InstantHook: React.FC = () => {
         opacity,
       }}
     >
-      <TerminalWindow width={1200} height={620}>
+      <TerminalWindow width={1200} height={640}>
         <div
           style={{
             fontFamily: FONTS.mono,
@@ -113,7 +113,7 @@ const FastPipeline: React.FC = () => {
       >
         <TerminalWindow
           width={1200}
-          height={620}
+          height={640}
           glowIntensity={(completedCount / 5) * 0.4}
         >
           <TuiLayout

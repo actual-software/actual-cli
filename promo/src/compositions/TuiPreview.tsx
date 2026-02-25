@@ -20,7 +20,7 @@ export const TuiPreview: React.FC = () => {
         justifyContent: "center",
       }}
     >
-      <TerminalWindow width={1200} height={620} glowIntensity={0.3}>
+      <TerminalWindow width={1200} height={640} glowIntensity={0.3}>
         <TuiLayout
           steps={state.steps}
           activeStepIndex={state.activeStepIndex}

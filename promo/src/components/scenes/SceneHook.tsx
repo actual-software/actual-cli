@@ -49,7 +49,7 @@ export const SceneHook: React.FC = () => {
         transform: `translateY(${translateY}px)`,
       }}
     >
-      <TerminalWindow width={1200} height={620}>
+      <TerminalWindow width={1200} height={640}>
         <div
           style={{
             fontFamily: FONTS.mono,

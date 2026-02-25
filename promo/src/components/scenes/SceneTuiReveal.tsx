@@ -42,7 +42,7 @@ export const SceneTuiReveal: React.FC = () => {
       }}
     >
       <div style={{ transform: `scale(${scale})` }}>
-        <TerminalWindow width={1200} height={620}>
+        <TerminalWindow width={1200} height={640}>
           <TuiLayout
             steps={ALL_WAITING}
             activeStepIndex={0}
