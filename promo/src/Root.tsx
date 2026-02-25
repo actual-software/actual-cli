@@ -3,6 +3,7 @@ import { Composition } from "remotion";
 import { TestFrame } from "./compositions/TestFrame";
 import { TuiPreview } from "./compositions/TuiPreview";
 import { PipelinePreview } from "./compositions/PipelinePreview";
+import { HeroClip } from "./components/scenes/HeroClip";
 
 export const Root: React.FC = () => {
   return (
@@ -29,6 +30,15 @@ export const Root: React.FC = () => {
         id="PipelinePreview"
         component={PipelinePreview}
         durationInFrames={1440}
+        fps={60}
+        width={1920}
+        height={1080}
+        defaultProps={{}}
+      />
+      <Composition
+        id="HeroClip"
+        component={HeroClip}
+        durationInFrames={1800}
         fps={60}
         width={1920}
         height={1080}
