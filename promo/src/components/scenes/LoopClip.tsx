@@ -8,13 +8,13 @@ import { COLORS } from "../../data/brand";
 import { getStateAtFrame, FRAMES } from "../../data/tui-states";
 
 // Loop clip: 600 frames (10s at 60fps), seamless pipeline loop for README embedding.
-// Maps the full 960-frame pipeline (REVEAL_END → WRITE_END) into 600 frames.
+// Maps the full pipeline (REVEAL_END → SUMMARY_END) into 600 frames.
 // Fades in over the first 20 frames and fades out over the last 40 for seamless looping.
 export const LoopClip: React.FC = () => {
   const frame = useCurrentFrame();
 
-  // Map 0–599 → REVEAL_END → WRITE_END (960 frames compressed to 600)
-  const pipelineDuration = FRAMES.WRITE_END - FRAMES.REVEAL_END;
+  // Map 0–599 → REVEAL_END → SUMMARY_END (full pipeline including Summary step)
+  const pipelineDuration = FRAMES.SUMMARY_END - FRAMES.REVEAL_END;
   const absoluteFrame =
     FRAMES.REVEAL_END + Math.floor((frame * pipelineDuration) / 600);
   const state = getStateAtFrame(absoluteFrame);
@@ -49,7 +49,7 @@ export const LoopClip: React.FC = () => {
         <TerminalWindow
           width={1160}
           height={640}
-          glowIntensity={(completedCount / 5) * 0.3}
+          glowIntensity={(completedCount / 6) * 0.3}
         >
           <TuiLayout
             steps={state.steps}
