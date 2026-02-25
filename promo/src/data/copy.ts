@@ -1,6 +1,6 @@
 export const COPY = {
   cta: {
-    tagline: "AI context for your codebase. Always current.",
+    tagline: "Guardrails for\nAI-Powered Software Development",
     url: "app.actual.ai",
     wordmark: "actual",
   },

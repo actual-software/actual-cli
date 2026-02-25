@@ -133,6 +133,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
             fontSize: 18,
             color: COLORS.textPrimary,
             lineHeight: 1.5,
+            whiteSpace: "pre-line",
           }}
         >
           {COPY.cta.tagline}
