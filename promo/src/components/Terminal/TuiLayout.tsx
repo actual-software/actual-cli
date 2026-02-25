@@ -110,16 +110,16 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
             minHeight: 0,
           }}
         >
-          {/* Bird art — title is "actual v0.1.0 ──── https://app.actual.ai" */}
-          <TuiBox title={LogoBoxTitle} style={{ flex: 1, minHeight: 0 }}>
+          {/* Bird art — natural content height (ASCII art + padding) */}
+          <TuiBox title={LogoBoxTitle} style={{ flexShrink: 0 }}>
             <LogoPanel />
           </TuiBox>
 
-          {/* Steps — marginTop:14 gives the "Steps" title room above its border */}
+          {/* Steps — fills remaining column height */}
           <TuiBox
             title={<span style={{ color: COLORS.borderTeal }}>Steps</span>}
-            style={{ flexShrink: 0, marginTop: 14 }}
-            contentStyle={{ overflow: "visible", flex: "none" }}
+            style={{ flex: 1, marginTop: 14, minHeight: 0 }}
+            contentStyle={{ overflow: "hidden", flex: "none" }}
           >
             <StepsPanel steps={steps} activeStepIndex={activeStepIndex} />
           </TuiBox>

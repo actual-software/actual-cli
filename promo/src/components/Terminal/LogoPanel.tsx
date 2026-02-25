@@ -31,7 +31,6 @@ export const LogoPanel: React.FC = () => {
         fontSize: 12,
         lineHeight: 1.4,
         padding: "8px 12px",
-        flexGrow: 1,
         color: COLORS.textPrimary,
       }}
     >
