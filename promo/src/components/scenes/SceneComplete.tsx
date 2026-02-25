@@ -35,7 +35,7 @@ export const SceneComplete: React.FC = () => {
       }}
     >
       <div style={{ transform: `scale(${cameraScale})` }}>
-        <TerminalWindow width={1200} height={620} glowIntensity={glowIntensity}>
+        <TerminalWindow width={1200} height={640} glowIntensity={glowIntensity}>
           <TuiLayout
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}

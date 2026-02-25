@@ -67,7 +67,7 @@ export const ScenePipeline: React.FC = () => {
           transition: "none", // Remotion handles frame-by-frame, no CSS transitions
         }}
       >
-        <TerminalWindow width={1200} height={620} glowIntensity={glowIntensity}>
+        <TerminalWindow width={1200} height={640} glowIntensity={glowIntensity}>
           <TuiLayout
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}

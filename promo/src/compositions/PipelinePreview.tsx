@@ -21,7 +21,7 @@ export const PipelinePreview: React.FC = () => {
         justifyContent: "center",
       }}
     >
-      <TerminalWindow width={1200} height={620} glowIntensity={0}>
+      <TerminalWindow width={1200} height={640} glowIntensity={0}>
         <TuiLayout
           steps={state.steps}
           activeStepIndex={state.activeStepIndex}
