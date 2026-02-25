@@ -64,7 +64,7 @@ const F = {
 
   // Post-pipeline
   COMPLETE_START: 690,
-  CTA_START: 810,
+  CTA_START: 750, // SceneComplete halved: 120f → 60f (1s)
   CLIP_END: 990,
 } as const;
 

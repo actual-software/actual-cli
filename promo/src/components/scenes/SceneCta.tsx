@@ -41,9 +41,13 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
   const absoluteFrame = FRAMES.CTA_START + frame;
   const state = getStateAtFrame(absoluteFrame);
 
+  // 0.5s static hold on the completed TUI before any animation begins
+  const HOLD = 30;
+  const animFrame = Math.max(0, frame - HOLD);
+
   // Terminal slides left and shrinks
   const slideProgress = spring({
-    frame,
+    frame: animFrame,
     fps: 60,
     config: SPRING_CONFIGS.settle,
     durationInFrames: 40,
@@ -51,19 +55,19 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
   const termX = interpolate(slideProgress, [0, 1], [0, -280]);
   const termScale = interpolate(slideProgress, [0, 1], [1.0, 0.62]);
 
-  // Right side content fades in with stagger
-  const wordmarkOpacity = interpolate(frame, [20, 45], [0, 1], {
+  // Right side content fades in with stagger (all offset by HOLD)
+  const wordmarkOpacity = interpolate(frame, [HOLD + 20, HOLD + 45], [0, 1], {
     extrapolateRight: "clamp",
   });
-  const taglineOpacity = interpolate(frame, [45, 70], [0, 1], {
+  const taglineOpacity = interpolate(frame, [HOLD + 45, HOLD + 70], [0, 1], {
     extrapolateRight: "clamp",
   });
-  const urlOpacity = interpolate(frame, [70, 90], [0, 1], {
+  const urlOpacity = interpolate(frame, [HOLD + 70, HOLD + 90], [0, 1], {
     extrapolateRight: "clamp",
   });
 
   // URL underline grows left-to-right
-  const urlUnderlineWidth = interpolate(frame, [90, 130], [0, 100], {
+  const urlUnderlineWidth = interpolate(frame, [HOLD + 90, HOLD + 130], [0, 100], {
     extrapolateRight: "clamp",
   });
 
