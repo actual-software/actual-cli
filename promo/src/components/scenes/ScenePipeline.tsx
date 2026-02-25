@@ -73,6 +73,7 @@ export const ScenePipeline: React.FC = () => {
             activeStepIndex={state.activeStepIndex}
             outputLines={state.outputLines}
             confirmWidget={state.confirmWidget}
+            currentFrame={absoluteFrame}
           />
         </TerminalWindow>
       </div>

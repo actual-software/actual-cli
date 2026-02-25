@@ -40,6 +40,7 @@ export const SceneComplete: React.FC = () => {
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}
             outputLines={state.outputLines}
+            currentFrame={absoluteFrame}
           />
         </TerminalWindow>
       </div>

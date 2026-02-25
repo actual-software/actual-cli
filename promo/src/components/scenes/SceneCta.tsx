@@ -31,9 +31,15 @@ function GradientText({
   );
 }
 
-export const SceneCta: React.FC = () => {
+interface SceneCtaProps {
+  /** Total duration of this sequence in frames. Fadeout fires in the last 30f. */
+  totalDuration?: number;
+}
+
+export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
   const frame = useCurrentFrame();
-  const state = getStateAtFrame(FRAMES.CTA_START + frame);
+  const absoluteFrame = FRAMES.CTA_START + frame;
+  const state = getStateAtFrame(absoluteFrame);
 
   // Terminal slides left and shrinks
   const slideProgress = spring({
@@ -61,11 +67,13 @@ export const SceneCta: React.FC = () => {
     extrapolateRight: "clamp",
   });
 
-  // Final fade to black after frame 150
-  const fadeOut = interpolate(frame, [150, 180], [1, 0], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
+  // Final fade to black: last 30 frames of the sequence
+  const fadeOut = interpolate(
+    frame,
+    [totalDuration - 30, totalDuration],
+    [1, 0],
+    { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
+  );
 
   return (
     <div
@@ -94,6 +102,7 @@ export const SceneCta: React.FC = () => {
             steps={state.steps}
             activeStepIndex={state.activeStepIndex}
             outputLines={state.outputLines}
+            currentFrame={absoluteFrame}
           />
         </TerminalWindow>
       </div>

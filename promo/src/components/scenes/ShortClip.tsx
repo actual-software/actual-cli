@@ -121,6 +121,7 @@ const FastPipeline: React.FC = () => {
             activeStepIndex={state.activeStepIndex}
             outputLines={state.outputLines}
             confirmWidget={state.confirmWidget}
+            currentFrame={absoluteFrame}
           />
         </TerminalWindow>
       </div>
@@ -141,8 +142,9 @@ export const ShortClip: React.FC = () => (
     <Sequence from={720} durationInFrames={120}>
       <SceneComplete />
     </Sequence>
-    <Sequence from={840} durationInFrames={60}>
-      <SceneCta />
+    {/* +180f (3s) hold on the CTA wordmark/tagline */}
+    <Sequence from={840} durationInFrames={240}>
+      <SceneCta totalDuration={240} />
     </Sequence>
     <FilmGrain width={1920} height={1080} opacity={0.035} />
     <Vignette intensity={0.55} />

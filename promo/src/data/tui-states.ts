@@ -59,8 +59,11 @@ const F = {
   ACCEPT_FRAME: 1290, // auto-accept fires
   WRITE_END: 1320, // 4s for write
 
+  SUMMARY_START: 1320, // Summary begins immediately after Write Files
+  SUMMARY_END: 1500, // 3s for summary step
+
   // Post-pipeline
-  COMPLETE_START: 1320,
+  COMPLETE_START: 1500,
   CTA_START: 1620,
   CLIP_END: 1800,
 } as const;
@@ -162,6 +165,21 @@ const COMPLETE_LINES = staggerLines(
   F.WRITE_END
 );
 
+const SUMMARY_LINES = staggerLines(
+  [
+    { text: "" },
+    { text: "  Summary" },
+    { text: "  ─ 1 file written", color: COLORS.textDim },
+    { text: "      ✔ CLAUDE.md  (new)", color: COLORS.borderGreen },
+    { text: "  ─ 3 ADRs applied", color: COLORS.textDim },
+    { text: "      ✔ Error Handling Patterns", color: COLORS.borderGreen },
+    { text: "      ✔ Async Runtime Configuration", color: COLORS.borderGreen },
+    { text: "      ✔ CLI UX Standards", color: COLORS.borderGreen },
+  ],
+  F.SUMMARY_START + 20, // slight delay after Write Files completes
+  18
+);
+
 // ─── Step builders ────────────────────────────────────────────────────────────
 
 function allWaiting(): StepDef[] {
@@ -171,6 +189,7 @@ function allWaiting(): StepDef[] {
     { label: "Fetch ADRs", status: "waiting" },
     { label: "Tailoring", status: "waiting" },
     { label: "Write Files", status: "waiting" },
+    { label: "Summary", status: "waiting" },
   ];
 }
 
@@ -224,7 +243,7 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.ENV_END,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "warning", duration: "2.5s", completionFrame: F.ENV_END },
+      { index: 0, status: "success", duration: "2.5s", completionFrame: F.ENV_END },
       { index: 1, status: "running", spinnerStartFrame: F.ANALYSIS_START },
     ]),
     activeStepIndex: 1,
@@ -235,7 +254,7 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.ANALYSIS_END,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "warning", duration: "2.5s" },
+      { index: 0, status: "success", duration: "2.5s" },
       { index: 1, status: "success", duration: "3.5s", completionFrame: F.ANALYSIS_END },
       { index: 2, status: "running", spinnerStartFrame: F.FETCH_START },
     ]),
@@ -247,7 +266,7 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.FETCH_END,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "warning", duration: "2.5s" },
+      { index: 0, status: "success", duration: "2.5s" },
       { index: 1, status: "success", duration: "3.5s" },
       { index: 2, status: "success", duration: "3.0s", completionFrame: F.FETCH_END },
       { index: 3, status: "running", spinnerStartFrame: F.TAILOR_START },
@@ -260,7 +279,7 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.TAILOR_END,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "warning", duration: "2.5s" },
+      { index: 0, status: "success", duration: "2.5s" },
       { index: 1, status: "success", duration: "3.5s" },
       { index: 2, status: "success", duration: "3.0s" },
       { index: 3, status: "success", duration: "3.0s", completionFrame: F.TAILOR_END },
@@ -280,7 +299,7 @@ export const TUI_STATES: TuiState[] = [
   {
     frameStart: F.CONFIRM_APPEAR,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "warning", duration: "2.5s" },
+      { index: 0, status: "success", duration: "2.5s" },
       { index: 1, status: "success", duration: "3.5s" },
       { index: 2, status: "success", duration: "3.0s" },
       { index: 3, status: "success", duration: "3.0s" },
@@ -312,17 +331,18 @@ export const TUI_STATES: TuiState[] = [
     cameraY: -40,
   },
 
-  // 8: Write done — all success, confirm gone
+  // 8: Write done, Summary running
   {
-    frameStart: F.WRITE_END,
+    frameStart: F.SUMMARY_START,
     steps: withStatus(allWaiting(), [
-      { index: 0, status: "warning", duration: "2.5s" },
+      { index: 0, status: "success", duration: "2.5s" },
       { index: 1, status: "success", duration: "3.5s" },
       { index: 2, status: "success", duration: "3.0s" },
       { index: 3, status: "success", duration: "3.0s" },
       { index: 4, status: "success", duration: "4.0s", completionFrame: F.WRITE_END },
+      { index: 5, status: "running", spinnerStartFrame: F.SUMMARY_START },
     ]),
-    activeStepIndex: 4,
+    activeStepIndex: 5,
     outputLines: [
       ...ENV_LINES,
       ...ANALYSIS_LINES,
@@ -331,6 +351,33 @@ export const TUI_STATES: TuiState[] = [
       ...WRITE_LINES_PRE_CONFIRM,
       ...WRITE_LINES_POST_ACCEPT,
       ...COMPLETE_LINES,
+      ...SUMMARY_LINES,
+    ],
+    cameraScale: 1.0,
+    cameraY: 0,
+  },
+
+  // 9: Summary done — all steps complete
+  {
+    frameStart: F.SUMMARY_END,
+    steps: withStatus(allWaiting(), [
+      { index: 0, status: "success", duration: "2.5s" },
+      { index: 1, status: "success", duration: "3.5s" },
+      { index: 2, status: "success", duration: "3.0s" },
+      { index: 3, status: "success", duration: "3.0s" },
+      { index: 4, status: "success", duration: "4.0s" },
+      { index: 5, status: "success", duration: "3.0s", completionFrame: F.SUMMARY_END },
+    ]),
+    activeStepIndex: 5,
+    outputLines: [
+      ...ENV_LINES,
+      ...ANALYSIS_LINES,
+      ...FETCH_LINES,
+      ...TAILOR_LINES,
+      ...WRITE_LINES_PRE_CONFIRM,
+      ...WRITE_LINES_POST_ACCEPT,
+      ...COMPLETE_LINES,
+      ...SUMMARY_LINES,
     ],
     cameraScale: 1.0,
     cameraY: 0,

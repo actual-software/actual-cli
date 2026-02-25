@@ -6,8 +6,9 @@ import { getStateAtFrame } from "../data/tui-states";
 
 export const TuiPreview: React.FC = () => {
   const frame = useCurrentFrame();
-  // Preview starts at the "sync complete" state (frame 1320+)
-  const state = getStateAtFrame(1320 + frame);
+  // Preview starts at the Summary-running state (frame 1320+)
+  const absoluteFrame = 1320 + frame;
+  const state = getStateAtFrame(absoluteFrame);
 
   return (
     <div
@@ -26,6 +27,7 @@ export const TuiPreview: React.FC = () => {
           activeStepIndex={state.activeStepIndex}
           outputLines={state.outputLines}
           confirmWidget={state.confirmWidget}
+          currentFrame={absoluteFrame}
         />
       </TerminalWindow>
     </div>

@@ -43,7 +43,7 @@ export const Root: React.FC = () => {
       <Composition
         id="HeroClip"
         component={HeroClip}
-        durationInFrames={1800}
+        durationInFrames={1980}
         fps={60}
         width={1920}
         height={1080}
@@ -54,7 +54,7 @@ export const Root: React.FC = () => {
       <Composition
         id="ShortClip-169"
         component={ShortClip}
-        durationInFrames={900}
+        durationInFrames={1080}
         fps={60}
         width={1920}
         height={1080}
@@ -63,7 +63,7 @@ export const Root: React.FC = () => {
       <Composition
         id="ShortClip-11"
         component={ShortClip}
-        durationInFrames={900}
+        durationInFrames={1080}
         fps={60}
         width={1080}
         height={1080}
@@ -72,7 +72,7 @@ export const Root: React.FC = () => {
       <Composition
         id="ShortClip-916"
         component={ShortClip}
-        durationInFrames={900}
+        durationInFrames={1080}
         fps={60}
         width={1080}
         height={1920}
