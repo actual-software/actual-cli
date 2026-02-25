@@ -79,11 +79,11 @@ export const Root: React.FC = () => {
         defaultProps={{}}
       />
 
-      {/* README loop — 10s seamless pipeline loop */}
+      {/* README loop — 12s seamless pipeline loop (10s pipeline + 2s hold) */}
       <Composition
         id="LoopClip"
         component={LoopClip}
-        durationInFrames={600}
+        durationInFrames={720}
         fps={60}
         width={1200}
         height={680}
