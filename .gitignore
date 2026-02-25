@@ -35,3 +35,9 @@ tui-test-captures/
 # Environment
 .env
 .env.local
+
+# Remotion promo project build artifacts
+promo/node_modules/
+promo/out/
+promo/dist/
+promo/.cache/
