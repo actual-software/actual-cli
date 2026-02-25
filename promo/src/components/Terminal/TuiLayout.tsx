@@ -110,13 +110,16 @@ export const TuiLayout: React.FC<TuiLayoutProps> = ({
         overflow: "hidden",
       }}
     >
-      {/* Main row: left column + right output box */}
+      {/* Main row: left column + right output box.
+          NO overflow:hidden here — TuiBox titles protrude ±8px outside their
+          borders via position:absolute. overflow:hidden on this div (which has
+          no padding) would clip them. The outer TuiLayout div already has
+          overflow:hidden with padding:14px which is the correct clip boundary. */}
       <div
         style={{
           display: "flex",
           flex: 1,
           gap: 8,
-          overflow: "hidden",
           minHeight: 0,
         }}
       >
