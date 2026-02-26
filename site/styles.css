@@ -1,0 +1,471 @@
+/* =========================================
+   RESET & BASE
+   ========================================= */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+}
+
+body {
+  background-color: #030301;
+  color: #ffffff;
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+img {
+  display: block;
+}
+
+button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* =========================================
+   PAGE WRAPPER
+   ========================================= */
+.page {
+  width: 100%;
+  max-width: 1920px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background-color: #030301;
+}
+
+/* =========================================
+   NAVIGATION
+   ========================================= */
+.nav {
+  width: 100%;
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  padding: 13px 100px;
+  border-bottom: 1px solid #353534;
+}
+
+.nav-container {
+  width: 1400px;
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* Brand (logo + name) */
+.nav-brand {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  width: 328.04px;
+  height: 40px;
+  flex-shrink: 0;
+}
+
+.nav-logo-img {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.nav-brand-name {
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 20px;
+  line-height: 1.3em;
+  letter-spacing: -0.01em;
+  color: #ffffff;
+}
+
+/* Nav links pill */
+.nav-links {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 30px;
+  padding: 8px 40px;
+  border-radius: 60px;
+}
+
+.nav-link-group {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 3px;
+}
+
+.nav-link {
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 1.625em;
+  letter-spacing: -0.01em;
+  color: #ffffff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.nav-caret {
+  width: 14px;
+  height: 14px;
+  /* opacity already built into the SVG (0.6) */
+  flex-shrink: 0;
+}
+
+/* Join Now CTA (nav) */
+.nav-cta {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  padding: 4px 16px;
+  gap: 17.87px;
+  background-color: #ffffff;
+  border-radius: 8.93px;
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+  font-size: 16px;
+  line-height: 1.5em;
+  color: #000000;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.nav-cta:hover {
+  background-color: #f0f0f0;
+}
+
+/* =========================================
+   MAIN CONTENT
+   ========================================= */
+.main-content {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* =========================================
+   HERO AREA
+   ========================================= */
+.hero-area {
+  width: 1160px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 32px;
+  padding: 119px 32px 32px;
+}
+
+/* Hero Text Block */
+.hero-text-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+/* Heading row: "Welcome to" + "Actual AI" */
+.hero-heading-row {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+}
+
+.hero-heading-plain {
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+  font-size: 36px;
+  line-height: 1.806em;
+  letter-spacing: -0.015em;
+  color: #ffffff;
+}
+
+.hero-heading-gradient {
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+  font-size: 36px;
+  line-height: 1.806em;
+  letter-spacing: -0.015em;
+  background: linear-gradient(90deg, #39EBA1 0%, #43BDB7 50%, #4D93C8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-subtitle {
+  font-family: 'Roboto', sans-serif;
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 1.5em;
+  color: #ffffff;
+  text-align: center;
+  width: 100%;
+}
+
+/* Join Now CTA (hero) */
+.hero-cta {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  width: 136px;
+  background-color: #ffffff;
+  border: 1px solid rgba(31, 35, 40, 0.15);
+  border-radius: 6px;
+  box-shadow: 0px 1px 3px 0px rgba(31, 35, 40, 0.08),
+              0px 1px 0px 0px rgba(31, 35, 40, 0.06);
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1.429em;
+  color: #000000;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.hero-cta:hover {
+  background-color: #f5f5f5;
+}
+
+/* Hero illustration */
+.hero-illustration {
+  width: 100%;
+  height: 378px;
+  overflow: hidden;
+}
+
+.hero-illustration img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
+/* =========================================
+   OUR PRODUCT
+   ========================================= */
+.product-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  width: 100%;
+}
+
+.product-heading {
+  font-family: 'Inter', sans-serif;
+  font-weight: 500;
+  font-size: 24px;
+  line-height: 2.708em;
+  letter-spacing: -0.015em;
+  color: #ffffff;
+  text-align: center;
+}
+
+/* =========================================
+   FEATURE CARDS
+   ========================================= */
+.cards {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 24px;
+  width: 100%;
+}
+
+.card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 24px;
+  border: 1px solid #393939;
+  border-radius: 8px;
+  min-height: 0;
+}
+
+.card-title {
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 1.25em;
+  color: #ffffff;
+}
+
+.card-description {
+  font-family: 'Roboto', sans-serif;
+  font-weight: 400;
+  font-size: 16px;
+  line-height: 1.5em;
+  color: #D2D2D1;
+  flex: 1;
+}
+
+/* =========================================
+   TRIAL SECTION
+   ========================================= */
+.trial-section {
+  width: 100%;
+  max-width: 1920px;
+  margin: 0 auto;
+  padding: 0 24px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.trial-row {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 24px;
+  width: 100%;
+}
+
+/* Trial card column */
+.trial-col {
+  flex: 1;
+  min-width: 0;
+  padding: 24px 0;
+}
+
+.trial-card {
+  position: relative; /* needed for absolute overlay */
+  width: 100%;
+  height: 900px;
+  background: linear-gradient(90deg, rgba(239, 251, 243, 1) 1%, rgba(232, 240, 252, 1) 100%);
+  border: 1px solid #DBEAFE;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.trial-card-bg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+}
+
+/* Overlay: logo + title (absolute positioned at x:660, y:50) */
+.trial-card-overlay {
+  position: absolute;
+  top: 50px;
+  left: 660px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 13px;
+}
+
+.trial-overlay-logo {
+  width: 55px;
+  height: 55px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.trial-card-title {
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 48px;
+  line-height: 1em;
+  letter-spacing: -0.0125em;
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+/* =========================================
+   TRIAL SIDEBAR
+   ========================================= */
+.trial-sidebar {
+  width: 632px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: #ffffff;
+  border-radius: 8px;
+  overflow: hidden;
+  align-self: flex-start;
+}
+
+.sidebar-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 16px 8px;
+  border-bottom: 1px solid #DFE4ED;
+  width: 100%;
+}
+
+.sidebar-header-inner {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  width: 100%;
+  padding: 6px 16px;
+}
+
+.sidebar-label {
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 16px;
+  line-height: 1.25em;
+  color: #1F2328;
+}
+
+.sidebar-body {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 16px;
+  padding: 0 16px;
+  width: 100%;
+}
+
+.sidebar-body-inner {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex: 1;
+  padding: 8px 0;
+}
+
+.sidebar-description {
+  font-family: 'Roboto', sans-serif;
+  font-weight: 400;
+  font-size: 14px;
+  line-height: 1.714em;
+  color: #6B7280;
+}
+
+.sidebar-screenshot {
+  width: 100%;
+  height: 215px;
+  object-fit: cover;
+  object-position: top left;
+  display: block;
+}
