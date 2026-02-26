@@ -69,9 +69,11 @@ const FastPipeline: React.FC = () => {
     [0, 1],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );
+  // Hold at full zoom for 30f after accept (matching ScenePipeline) so logs
+  // are visible scrolling before the camera pulls back.
   const cameraReturnProgress = interpolate(
     frame,
-    [acceptShortFrame, acceptShortFrame + 20],
+    [acceptShortFrame + 30, acceptShortFrame + 50],
     [0, 1],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );
@@ -79,14 +81,14 @@ const FastPipeline: React.FC = () => {
   const cameraScale =
     frame < confirmShortFrame
       ? 1.0
-      : frame < acceptShortFrame
+      : frame < acceptShortFrame + 30
         ? interpolate(cameraProgress, [0, 1], [1.0, 1.15])
         : interpolate(cameraReturnProgress, [0, 1], [1.15, 1.0]);
 
   const cameraY =
     frame < confirmShortFrame
       ? 0
-      : frame < acceptShortFrame
+      : frame < acceptShortFrame + 30
         ? interpolate(cameraProgress, [0, 1], [0, -40])
         : interpolate(cameraReturnProgress, [0, 1], [-40, 0]);
 
