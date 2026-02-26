@@ -477,6 +477,73 @@ mod tests {
         );
     }
 
+    /// When the `--json` error goes to stdout instead of stderr, the stdout
+    /// branch of `json_flag_not_recognized` must still trigger the fallback.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_json_flag_error_in_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        // --json error goes to stdout (not stderr)
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             for arg in \"$@\"; do\n\
+               if [ \"$arg\" = \"--json\" ]; then\n\
+                 printf \"unknown option '--json'\\n\"\n\
+                 exit 1\n\
+               fi\n\
+             done\n\
+             printf 'Logged in\\n'\n\
+             exit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = check_auth_async(Path::new(&script), std::time::Duration::from_secs(5)).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok when --json error in stdout and no-flag exits 0, got: {result:?}"
+        );
+        assert!(result.unwrap().logged_in);
+    }
+
+    /// Spawn failure inside the no-json fallback must propagate RunnerFailed.
+    #[tokio::test]
+    async fn test_check_auth_async_no_json_spawn_failure() {
+        let result = check_auth_async_no_json(
+            std::path::Path::new("/nonexistent/binary/claude"),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed from spawn failure in no-json path, got: {result:?}"
+        );
+    }
+
+    /// Timeout inside the no-json fallback must propagate RunnerTimeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_no_json_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result =
+            check_auth_async_no_json(Path::new(&script), std::time::Duration::from_millis(100))
+                .await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerTimeout { .. })),
+            "expected RunnerTimeout in no-json path, got: {result:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_run_auth_invalid_json() {
