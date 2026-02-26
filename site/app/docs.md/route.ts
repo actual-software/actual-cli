@@ -1,4 +1,54 @@
 import { NextResponse } from "next/server";
+import {
+    ADR_BOT_FLAGS,
+    ADR_BOT_EXAMPLES,
+    RUNNERS,
+    OUTPUT_FORMATS,
+    CONFIG_KEYS,
+    CONFIG_EXAMPLES,
+    ENV_VARS,
+    COMMON_ERRORS,
+    EXIT_CODES,
+} from "../../lib/docs-data";
+
+function buildFlagsTable(flags: { flag: string; type: string; desc: string }[]): string {
+    const rows = flags.map((f) => `| ${f.flag} | ${f.type} | ${f.desc} |`).join("\n");
+    return `| Flag | Type | Description |\n|------|------|-------------|\n${rows}`;
+}
+
+function buildRunnersTable(runners: { name: string; req: string; model: string; setup: string }[]): string {
+    const rows = runners
+        .map((r) => `| ${r.name === "claude-cli" ? `${r.name} (default)` : r.name} | ${r.req} | ${r.model} | ${r.setup.replace(/\n/g, " ")} |`)
+        .join("\n");
+    return `| Runner | Requires | Default Model | Setup |\n|--------|----------|---------------|-------|\n${rows}`;
+}
+
+function buildOutputFormatsTable(formats: { value: string; file: string; tool: string }[]): string {
+    const rows = formats
+        .map((f) => `| ${f.value === "claude-md" ? `${f.value} (default)` : f.value} | ${f.file} | ${f.tool} |`)
+        .join("\n");
+    return `| Value | Output File | Tool |\n|-------|-------------|------|\n${rows}`;
+}
+
+function buildConfigKeysTable(keys: { key: string; default_: string; desc: string }[]): string {
+    const rows = keys.map((k) => `| ${k.key} | ${k.default_} | ${k.desc} |`).join("\n");
+    return `| Key | Default | Description |\n|-----|---------|-------------|\n${rows}`;
+}
+
+function buildEnvVarsTable(vars: { name: string; purpose: string }[]): string {
+    const rows = vars.map((v) => `| ${v.name} | ${v.purpose} |`).join("\n");
+    return `| Variable | Purpose |\n|----------|--------|\n${rows}`;
+}
+
+function buildErrorsTable(errors: { err: string; fix: string }[]): string {
+    const rows = errors.map((e) => `| ${e.err} | ${e.fix} |`).join("\n");
+    return `| Error | Fix |\n|-------|-----|\n${rows}`;
+}
+
+function buildExitCodesTable(codes: { code: string; meaning: string }[]): string {
+    const rows = codes.map((c) => `| ${c.code} | ${c.meaning} |`).join("\n");
+    return `| Code | Meaning |\n|------|--------|\n${rows}`;
+}
 
 const DOCS_MD = `# actual CLI — Getting Started & Command Reference
 
@@ -40,33 +90,12 @@ actual adr-bot [flags]
 
 Flags:
 
-| Flag | Type | Description |
-|------|------|-------------|
-| --dry-run | bool | Preview changes without writing files |
-| --full | bool | With --dry-run, print full rendered file to stdout |
-| --force | bool | Skip confirmation prompts and bypass all caches |
-| --no-tailor | bool | Write raw ADRs without AI tailoring |
-| --project <PATH> | string | Target a sub-project in a monorepo (repeatable) |
-| --output-format <FMT> | enum | claude-md (default) \| agents-md \| cursor-rules |
-| --runner <RUNNER> | enum | claude-cli \| anthropic-api \| openai-api \| codex-cli \| cursor-cli |
-| --model <MODEL> | string | Override AI model; runner is auto-inferred |
-| --max-budget-usd <N> | float | Spending cap per tailoring invocation (USD) |
-| --reset-rejections | bool | Clear remembered ADR rejections |
-| --verbose | bool | Show detailed progress and runner output |
-| --show-errors | bool | Stream runner stderr in real time |
-| --no-tui | bool | Disable TUI; use plain line output |
-| --api-url <URL> | string | Override the ADR bank API endpoint |
+${buildFlagsTable(ADR_BOT_FLAGS)}
 
 Examples:
 
 \`\`\`bash
-actual adr-bot --dry-run
-actual adr-bot --force
-actual adr-bot --output-format agents-md
-actual adr-bot --runner anthropic-api
-actual adr-bot --model gpt-5.2
-actual adr-bot --project packages/api --project packages/web
-actual adr-bot --verbose --show-errors
+${ADR_BOT_EXAMPLES.map((e) => `# ${e.comment}\n${e.cmd}`).join("\n\n")}
 \`\`\`
 
 ---
@@ -106,34 +135,12 @@ actual config set <KEY> <VALUE> # set a config value
 
 Settable keys:
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| runner | claude-cli | AI backend: claude-cli \| anthropic-api \| openai-api \| codex-cli \| cursor-cli |
-| model | — | Default model (runner auto-inferred from name) |
-| output_format | claude-md | claude-md \| agents-md \| cursor-rules |
-| batch_size | 15 | ADRs per API request batch |
-| concurrency | 10 | Max concurrent API requests |
-| invocation_timeout_secs | 600 | Runner timeout in seconds |
-| max_budget_usd | — | Spending cap per tailoring invocation |
-| max_turns | — | Max conversation turns (claude-cli only) |
-| max_per_framework | — | Max ADRs per detected framework |
-| include_general | — | Include language-agnostic ADRs |
-| include_categories | — | Only include these ADR categories (comma-separated) |
-| exclude_categories | — | Exclude these ADR categories (comma-separated) |
-| anthropic_api_key | — | Anthropic API key (stored at mode 0600) |
-| openai_api_key | — | OpenAI API key |
-| cursor_api_key | — | Cursor API key |
-| telemetry.enabled | true | Enable or disable telemetry |
+${buildConfigKeysTable(CONFIG_KEYS)}
 
 Examples:
 
 \`\`\`bash
-actual config set runner anthropic-api
-actual config set model claude-sonnet-4-6
-actual config set output_format agents-md
-actual config set invocation_timeout_secs 1200
-actual config set telemetry.enabled false
-actual config set anthropic_api_key "sk-ant-..."
+${CONFIG_EXAMPLES.join("\n")}
 \`\`\`
 
 ---
@@ -175,13 +182,7 @@ Cache entries expire automatically after 7 days. Pass --force to actual adr-bot 
 
 A runner is the AI backend actual uses to tailor ADRs to your codebase.
 
-| Runner | Requires | Default Model | Setup |
-|--------|----------|---------------|-------|
-| claude-cli (default) | claude binary | claude-sonnet-4-6 | npm install -g @anthropic-ai/claude-code && claude auth login |
-| anthropic-api | ANTHROPIC_API_KEY | claude-sonnet-4-6 | export ANTHROPIC_API_KEY=sk-ant-... |
-| openai-api | OPENAI_API_KEY | gpt-5.2 | export OPENAI_API_KEY=sk-... |
-| codex-cli | codex binary | gpt-5.2-codex | npm install -g @openai/codex && codex login |
-| cursor-cli | agent binary | opus-4.6-thinking | curl https://cursor.com/install -fsS \| bash |
+${buildRunnersTable(RUNNERS)}
 
 Runner auto-detection (when no --runner specified):
 - Anthropic short aliases (sonnet, opus, haiku) → claude-cli, then anthropic-api
@@ -195,11 +196,7 @@ Note: Short aliases only work with claude-cli. anthropic-api requires full model
 
 ## Output Formats
 
-| Value | Output File | Tool |
-|-------|-------------|------|
-| claude-md (default) | CLAUDE.md | Claude Code |
-| agents-md | AGENTS.md | Codex CLI, OpenCode |
-| cursor-rules | .cursor/rules/actual-policies.mdc | Cursor IDE |
+${buildOutputFormatsTable(OUTPUT_FORMATS)}
 
 All formats use managed-section markers. Content outside the markers is always preserved:
 
@@ -220,15 +217,7 @@ Config file: ~/.actualai/actual/config.yaml (auto-created, mode 0600 on Unix)
 
 Environment variables:
 
-| Variable | Purpose |
-|----------|---------|
-| ACTUAL_CONFIG | Exact path to config file (highest precedence) |
-| ACTUAL_CONFIG_DIR | Directory for config (must be absolute) |
-| ANTHROPIC_API_KEY | Anthropic API key (overrides config) |
-| OPENAI_API_KEY | OpenAI API key (overrides config) |
-| CURSOR_API_KEY | Cursor API key (overrides config) |
-| CLAUDE_BINARY | Override path to the claude binary |
-| RUST_LOG | Log level (default: warn) |
+${buildEnvVarsTable(ENV_VARS)}
 
 ---
 
@@ -236,14 +225,7 @@ Environment variables:
 
 Common errors and fixes:
 
-| Error | Fix |
-|-------|-----|
-| Claude Code is not installed | npm install -g @anthropic-ai/claude-code |
-| Claude Code is not authenticated | claude auth login |
-| No runner available for model '…' | Install a runner or set an API key; run actual runners |
-| Runner timed out after 600s | actual config set invocation_timeout_secs 1200 |
-| Insufficient credits | Add credits at provider billing page |
-| Analysis returned no projects | Run from inside a git repo; use --project <PATH> for monorepos |
+${buildErrorsTable(COMMON_ERRORS)}
 
 Debug flags:
 
@@ -255,15 +237,7 @@ RUST_LOG=debug actual adr-bot --no-tui 2>&1
 
 Exit codes:
 
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | General runtime error |
-| 2 | Auth / setup error |
-| 3 | Billing / API error |
-| 4 | User cancelled |
-| 5 | I/O error |
-`.trim();
+${buildExitCodesTable(EXIT_CODES)}`.trim();
 
 export async function GET() {
     return new NextResponse(DOCS_MD, {
