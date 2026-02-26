@@ -214,7 +214,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
             opacity: wordmarkOpacity,
           }}
         >
-          <GradientText text={COPY.cta.wordmark} fontSize={72} />
+          <GradientText text={COPY.cta.wordmark} fontSize={90} />
         </div>
 
         {/* Bottom band — tagline + URL row (portrait: 3× font size vs square) */}
@@ -257,7 +257,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
             <span
               style={{
                 fontFamily: FONTS.mono,
-                fontSize: 60,
+                fontSize: 51,
                 lineHeight: 1,
                 color: COLORS.borderGreen,
                 letterSpacing: 1,
