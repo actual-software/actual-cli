@@ -9,6 +9,7 @@ const BRAND_GRADIENT = "linear-gradient(90deg, #39eba1 0%, #43bdb7 50.483%, #4d9
 
 const NAV_SECTIONS = [
     { id: "quickstart", label: "Quick Start" },
+    { id: "languages", label: "Supported Languages" },
     { id: "commands", label: "Commands" },
     { id: "sync", label: "  actual adr-bot" },
     { id: "auth", label: "  actual auth" },
@@ -260,6 +261,67 @@ actual auth   # verify`}</Pre>
                                     </P>
                                 </div>
                             </div>
+                        </div>
+                    </Section>
+
+                    {/* Supported Languages & Frameworks */}
+                    <Section id="languages">
+                        <H2>Supported Languages &amp; Frameworks</H2>
+                        <P>
+                            <Code>actual</Code> ships with a curated ADR bank covering the ecosystems below.
+                            Each entry represents a language + framework combination with dedicated architectural
+                            decision records tailored to real-world patterns in that stack.
+                        </P>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-[12px]">
+                            {[
+                                {
+                                    language: "TypeScript",
+                                    color: "#3178c6",
+                                    frameworks: ["Next.js", "HeroUI"],
+                                },
+                                {
+                                    language: "Rust",
+                                    color: "#ce422b",
+                                    frameworks: ["Ratatui"],
+                                },
+                                {
+                                    language: "Python",
+                                    color: "#f7c948",
+                                    frameworks: ["FastAPI", "Django"],
+                                },
+                                {
+                                    language: "Java",
+                                    color: "#e76f00",
+                                    frameworks: ["Spring Boot"],
+                                },
+                            ].map(({ language, color, frameworks }) => (
+                                <div key={language} className="border border-[#393939] rounded-[6px] overflow-hidden bg-[#030301]">
+                                    <div className="flex items-center gap-[8px] px-[14px] py-[10px] bg-[#0d0d0d] border-b border-[#393939]">
+                                        <span className="size-[8px] rounded-full flex-shrink-0" style={{ background: color }} />
+                                        <span className="text-[13px] font-semibold text-white/90">{language}</span>
+                                    </div>
+                                    <div className="flex flex-wrap gap-[6px] px-[14px] py-[12px]">
+                                        {frameworks.map((fw) => (
+                                            <span
+                                                key={fw}
+                                                className="text-[12px] font-medium text-white/70 bg-white/5 border border-white/10 rounded-[4px] px-[8px] py-[3px]"
+                                            >
+                                                {fw}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="bg-[#141414] border border-white/10 rounded-[6px] p-[16px] flex flex-col gap-[6px]">
+                            <p className="text-[11px] font-semibold uppercase tracking-[0.07em] text-white/40">More coming soon</p>
+                            <p className="text-white/60 text-[13px] leading-[1.65]">
+                                We&apos;re hard at work expanding language and framework coverage and continuously
+                                improving ADR quality. If your stack isn&apos;t listed yet, <Code>actual adr-bot</Code> will
+                                still analyze your repo and apply any general-purpose ADRs that fit.
+                            </p>
                         </div>
                     </Section>
 
