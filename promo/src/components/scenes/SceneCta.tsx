@@ -34,16 +34,26 @@ function GradientText({
 interface SceneCtaProps {
   /** Total duration of this sequence in frames. Fadeout fires in the last 30f. */
   totalDuration?: number;
-  /** "wide" = 16:9 layout (terminal slides left, CTA right). "square" = 1:1 sandwich (wordmark top, CTA bottom). */
-  layout?: "wide" | "square";
+  /** Layout variant:
+   *  "wide"     = 16:9 — terminal slides left, CTA appears on the right.
+   *  "square"   = 1:1  — sandwich: wordmark top band, terminal middle, CTA bottom band.
+   *  "portrait" = 9:16 — terminal scaled at top, CTA text stacked below.
+   */
+  layout?: "wide" | "square" | "portrait";
   /** Horizontal offset (px) applied to the terminal in square layout — should match the pipeline scene shift. */
   terminalOffsetX?: number;
+  /** Portrait layout: vertical offset from canvas top for the terminal (px). Should match PortraitSceneWrapper. */
+  portraitTermTop?: number;
+  /** Portrait layout: CSS scale applied to the 1200×640 terminal area. Should match PortraitSceneWrapper. */
+  portraitScale?: number;
 }
 
 export const SceneCta: React.FC<SceneCtaProps> = ({
   totalDuration = 180,
   layout = "wide",
   terminalOffsetX = 0,
+  portraitTermTop = 200,
+  portraitScale = 0.9,
 }) => {
   const frame = useCurrentFrame();
   const absoluteFrame = FRAMES.CTA_START + frame;
@@ -91,7 +101,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );
 
-  // Shared URL row (used by both layouts)
+  // Shared URL row (used by all layouts)
   const urlRow = (
     <div
       style={{
@@ -126,6 +136,89 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
       />
     </div>
   );
+
+  // ── Portrait layout (9:16) ─────────────────────────────────────────────────
+  // Terminal stays at the same position used by the pipeline scenes (no jump on cut).
+  // CTA text (wordmark → tagline → URL) fades in below, using the ~1000px of
+  // vertical space beneath the terminal.
+  if (layout === "portrait") {
+    // Bottom edge of the scaled terminal in canvas pixels
+    const termBottom = portraitTermTop + 640 * portraitScale;
+    // CTA text block starts 80px below the terminal
+    const ctaTop = termBottom + 80;
+
+    return (
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          background: COLORS.background,
+          position: "relative",
+          overflow: "hidden",
+          opacity: fadeOut,
+        }}
+      >
+        {/* Terminal — same scale + position as PortraitSceneWrapper so there is
+            no positional jump when this scene cuts from SceneComplete. */}
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: portraitTermTop,
+            width: 1200,
+            height: 640,
+            transform: `scale(${portraitScale})`,
+            transformOrigin: "top left",
+          }}
+        >
+          <TerminalWindow width={1200} height={640} glowIntensity={0.2}>
+            <TuiLayout
+              steps={state.steps}
+              activeStepIndex={state.activeStepIndex}
+              outputLines={state.outputLines}
+              currentFrame={absoluteFrame}
+            />
+          </TerminalWindow>
+        </div>
+
+        {/* CTA text block: stacked vertically below the terminal.
+            With defaults (termTop=200, scale=0.9): ctaTop = 200+576+80 = 856px.
+            ~1064px of canvas remains — generous room for large text + spacing. */}
+        <div
+          style={{
+            position: "absolute",
+            left: 60,
+            right: 60,
+            top: ctaTop,
+            display: "flex",
+            flexDirection: "column",
+            gap: 44,
+          }}
+        >
+          {/* Wordmark — larger than other layouts, leveraging portrait real estate */}
+          <div style={{ opacity: wordmarkOpacity }}>
+            <GradientText text={COPY.cta.wordmark} fontSize={86} />
+          </div>
+
+          {/* Tagline */}
+          <div
+            style={{
+              opacity: taglineOpacity,
+              fontFamily: FONTS.mono,
+              fontSize: 22,
+              color: COLORS.textPrimary,
+              lineHeight: 1.6,
+            }}
+          >
+            {COPY.cta.tagline}
+          </div>
+
+          {/* URL + animated underline */}
+          {urlRow}
+        </div>
+      </div>
+    );
+  }
 
   // ── Square layout (1:1) ─────────────────────────────────────────────────────
   // Terminal matches the 1920px-centred position used by the pipeline scenes so
