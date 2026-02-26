@@ -93,17 +93,81 @@ async fn check_auth_async(
                 return Ok(status);
             }
         }
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Older versions (e.g. ≤2.1.25) don't recognise --json at all.
+        // Retry without the flag so those users aren't blocked.
+        if json_flag_not_recognized(&stderr, &output.stdout) {
+            return check_auth_async_no_json(binary_path, timeout).await;
+        }
+
         return Err(ActualError::RunnerFailed {
             message: format!(
                 "claude auth status exited with code {}",
                 output.status.code().unwrap_or(-1)
             ),
-            stderr,
+            stderr: stderr.into_owned(),
         });
     }
     let status: ClaudeAuthStatus = serde_json::from_slice(&output.stdout)?;
     Ok(status)
+}
+
+/// Returns `true` when the subprocess output suggests that `--json` is not a
+/// recognised flag in this version of the Claude CLI.
+fn json_flag_not_recognized(stderr: &str, stdout: &[u8]) -> bool {
+    stderr.contains("--json") || String::from_utf8_lossy(stdout).contains("--json")
+}
+
+/// Fallback for Claude CLI versions that do not support `--json`.
+///
+/// Runs `claude auth status` without the flag.  Newer versions already emit
+/// JSON without being asked; for older ones that produce plain text we treat
+/// exit code 0 as "authenticated".
+async fn check_auth_async_no_json(
+    binary_path: &Path,
+    timeout: std::time::Duration,
+) -> Result<ClaudeAuthStatus, ActualError> {
+    let mut cmd = tokio::process::Command::new(binary_path);
+    cmd.args(["auth", "status"]);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.kill_on_drop(true);
+
+    let child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| ActualError::RunnerFailed {
+            message: format!("failed to spawn claude: {e}"),
+            stderr: String::new(),
+        })?;
+
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| ActualError::RunnerTimeout {
+            seconds: timeout.as_secs_f64().ceil() as u64,
+        })?
+        .map_err(wait_io_error)?;
+
+    // Some versions output valid JSON even without the flag.
+    if let Ok(status) = serde_json::from_slice::<ClaudeAuthStatus>(&output.stdout) {
+        return Ok(status);
+    }
+
+    // Plain-text output: exit code 0 means the auth check passed.
+    if output.status.success() {
+        return Ok(ClaudeAuthStatus::minimal_authenticated());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Err(ActualError::RunnerFailed {
+        message: format!(
+            "claude auth status exited with code {}",
+            output.status.code().unwrap_or(-1)
+        ),
+        stderr,
+    })
 }
 
 fn run_auth_with_binary(binary_path: &Path) -> Result<(), ActualError> {
@@ -314,6 +378,102 @@ mod tests {
         assert!(
             matches!(result, Err(ActualError::RunnerFailed { .. })),
             "expected RunnerFailed when loggedIn:false with non-zero exit, got: {result:?}"
+        );
+    }
+
+    /// Simulates Claude CLI versions (e.g. ≤2.1.25) that reject --json but
+    /// succeed without it, producing plain text output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_no_json_flag_text_output() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             for arg in \"$@\"; do\n\
+               if [ \"$arg\" = \"--json\" ]; then\n\
+                 printf \"unknown option '--json'\\n\" >&2\n\
+                 exit 1\n\
+               fi\n\
+             done\n\
+             printf 'Logged in as user@example.com\\n'\n\
+             exit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = check_auth_async(Path::new(&script), std::time::Duration::from_secs(5)).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok when --json unknown and no-flag exits 0, got: {result:?}"
+        );
+        assert!(result.unwrap().logged_in);
+    }
+
+    /// Same scenario but the no-flag fallback outputs JSON.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_no_json_flag_json_output() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             for arg in \"$@\"; do\n\
+               if [ \"$arg\" = \"--json\" ]; then\n\
+                 printf \"unknown option '--json'\\n\" >&2\n\
+                 exit 1\n\
+               fi\n\
+             done\n\
+             printf '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}\\n'\n\
+             exit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = check_auth_async(Path::new(&script), std::time::Duration::from_secs(5)).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok with JSON from no-flag fallback, got: {result:?}"
+        );
+        let status = result.unwrap();
+        assert!(status.logged_in);
+        assert_eq!(status.auth_method.as_deref(), Some("claude.ai"));
+    }
+
+    /// When --json is unknown and the no-flag fallback also exits non-zero,
+    /// RunnerFailed must be propagated.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_no_json_flag_fallback_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             for arg in \"$@\"; do\n\
+               if [ \"$arg\" = \"--json\" ]; then\n\
+                 printf \"unknown option '--json'\\n\" >&2\n\
+                 exit 1\n\
+               fi\n\
+             done\n\
+             printf 'Not logged in\\n' >&2\n\
+             exit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = check_auth_async(Path::new(&script), std::time::Duration::from_secs(5)).await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed when fallback also fails, got: {result:?}"
         );
     }
 

@@ -27,6 +27,21 @@ impl ClaudeAuthStatus {
         self.logged_in
     }
 
+    /// Minimal authenticated status for use when the CLI does not provide
+    /// structured JSON output (e.g. older versions without `--json` support).
+    pub(crate) fn minimal_authenticated() -> Self {
+        Self {
+            logged_in: true,
+            auth_method: None,
+            api_provider: None,
+            api_key_source: None,
+            email: None,
+            org_id: None,
+            org_name: None,
+            subscription_type: None,
+        }
+    }
+
     /// Human-readable description of the authentication method.
     pub fn display_method(&self) -> &str {
         match self.auth_method.as_deref() {
