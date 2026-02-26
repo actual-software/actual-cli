@@ -49,7 +49,7 @@ export const ScenePipeline: React.FC = () => {
   const completedCount = state.steps.filter(
     (s) => s.status === "success" || s.status === "warning"
   ).length;
-  const glowIntensity = (completedCount / 5) * 0.4; // max 0.4 during pipeline
+  const glowIntensity = (completedCount / 6) * 0.4; // max 0.4 during pipeline
 
   return (
     <div
