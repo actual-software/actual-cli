@@ -4,5 +4,8 @@
   "description": "actual binary for macOS x86-64",
   "os": ["darwin"],
   "cpu": ["x64"],
-  "files": ["bin/"]
+  "files": ["bin/", "scripts/"],
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  }
 }
