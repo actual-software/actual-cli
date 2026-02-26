@@ -1,0 +1,8 @@
+{
+  "name": "@actualai/actual-darwin-x64",
+  "version": "0.1.0",
+  "description": "actual binary for macOS x86-64",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin/"]
+}

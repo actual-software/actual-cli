@@ -41,3 +41,10 @@ promo/node_modules/
 promo/out/
 promo/dist/
 promo/.cache/
+
+# npm platform binary payloads (populated by CI)
+npm/actual-darwin-arm64/bin/actual
+npm/actual-darwin-x64/bin/actual
+npm/actual-linux-x64/bin/actual
+npm/actual-linux-arm64/bin/actual
+npm/actual-win32-x64/bin/actual.exe
