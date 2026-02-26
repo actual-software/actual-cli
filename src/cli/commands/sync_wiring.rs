@@ -693,7 +693,9 @@ mod tests {
         let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test-key");
         let dir = tempfile::tempdir().unwrap();
         let _g2 = with_temp_config(&dir, "{}");
-        let args = make_sync_args(Some(RunnerChoice::AnthropicApi));
+        let mut args = make_sync_args(Some(RunnerChoice::AnthropicApi));
+        // Use no_tailor so the pipeline doesn't invoke the real AI runner with a fake key
+        args.no_tailor = true;
         // Key resolves → AnthropicApiRunner::new is called → run_sync may error
         let result = sync_run_inner(&args, auth_not_authenticated);
         // Must NOT be ApiKeyMissing — preamble succeeded
@@ -709,7 +711,9 @@ mod tests {
         let _g1 = EnvGuard::remove("ANTHROPIC_API_KEY");
         let dir = tempfile::tempdir().unwrap();
         let _g2 = with_temp_config(&dir, "anthropic_api_key: sk-ant-config-key\n");
-        let args = make_sync_args(Some(RunnerChoice::AnthropicApi));
+        let mut args = make_sync_args(Some(RunnerChoice::AnthropicApi));
+        // Use no_tailor so the pipeline doesn't invoke the real AI runner with a fake key
+        args.no_tailor = true;
         let result = sync_run_inner(&args, auth_not_authenticated);
         // Config fallback resolves the key — preamble does not return ApiKeyMissing
         assert!(
@@ -727,6 +731,8 @@ mod tests {
         let _g2 = with_temp_config(&dir, "{}");
         let mut args = make_sync_args(Some(RunnerChoice::AnthropicApi));
         args.model = Some("claude-opus-4".to_string());
+        // Use no_tailor so the pipeline doesn't invoke the real AI runner with a fake key
+        args.no_tailor = true;
         let result = sync_run_inner(&args, auth_not_authenticated);
         assert!(
             !matches!(result, Err(ActualError::ApiKeyMissing { .. })),
@@ -756,7 +762,9 @@ mod tests {
         let _g1 = EnvGuard::set("OPENAI_API_KEY", "sk-openai-test-key");
         let dir = tempfile::tempdir().unwrap();
         let _g2 = with_temp_config(&dir, "{}");
-        let args = make_sync_args(Some(RunnerChoice::OpenAiApi));
+        let mut args = make_sync_args(Some(RunnerChoice::OpenAiApi));
+        // Use no_tailor so the pipeline doesn't invoke the real AI runner with a fake key
+        args.no_tailor = true;
         let result = sync_run_inner(&args, auth_not_authenticated);
         assert!(
             !matches!(result, Err(ActualError::ApiKeyMissing { .. })),
@@ -771,7 +779,9 @@ mod tests {
         let _g1 = EnvGuard::set("OPENAI_API_KEY", "sk-openai-test");
         let dir = tempfile::tempdir().unwrap();
         let _g2 = with_temp_config(&dir, "model: gpt-5\n");
-        let args = make_sync_args(Some(RunnerChoice::OpenAiApi));
+        let mut args = make_sync_args(Some(RunnerChoice::OpenAiApi));
+        // Use no_tailor so the pipeline doesn't invoke the real AI runner with a fake key
+        args.no_tailor = true;
         let result = sync_run_inner(&args, auth_not_authenticated);
         assert!(
             !matches!(result, Err(ActualError::ApiKeyMissing { .. })),
