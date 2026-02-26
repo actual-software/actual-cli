@@ -175,8 +175,8 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
             height: 220,
             display: "flex",
             alignItems: "center",
-            justifyContent: "flex-end",
-            paddingRight: 60,
+            justifyContent: "flex-start",
+            paddingLeft: 60,
             opacity: wordmarkOpacity,
           }}
         >
