@@ -89,6 +89,12 @@ fn tilde_collapse(path: &Path, home_dir: Option<&std::path::PathBuf>) -> String 
 ///
 /// `runner_display` shows the active runner and model in the Environment
 /// section, with an optional compatibility warning.  Pass `None` in tests.
+///
+/// `runner_probe` is an optional pre-flight check that is run during the
+/// Environment phase, after git detection.  If it returns `Err`, the pipeline
+/// reports the error in the Environment step and aborts early — before the
+/// Analysis/Fetch/Tailor phases begin.  Pass `None` when the runner has
+/// already been validated outside `run_sync` (e.g. ClaudeCli/AnthropicApi).
 pub(crate) fn run_sync<R: TailoringRunner>(
     args: &SyncArgs,
     root_dir: &Path,
@@ -97,6 +103,30 @@ pub(crate) fn run_sync<R: TailoringRunner>(
     runner: &R,
     auth_display: Option<&AuthDisplay>,
     runner_display: Option<&RunnerDisplay>,
+) -> Result<(), ActualError> {
+    run_sync_with_probe(
+        args,
+        root_dir,
+        cfg_path,
+        term,
+        runner,
+        auth_display,
+        runner_display,
+        None,
+    )
+}
+
+/// Inner implementation of [`run_sync`] that accepts an optional runner probe.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
+    args: &SyncArgs,
+    root_dir: &Path,
+    cfg_path: &Path,
+    term: &dyn TerminalIO,
+    runner: &R,
+    auth_display: Option<&AuthDisplay>,
+    runner_display: Option<&RunnerDisplay>,
+    runner_probe: Option<Box<dyn Fn() -> Result<(), ActualError>>>,
 ) -> Result<(), ActualError> {
     // ── Phase 1: env check + analysis ──
 
@@ -223,6 +253,16 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 
     // Blank line for visual breathing room.
     pipeline.println("");
+
+    // Runner pre-flight probe (runs during Environment phase, before Analysis).
+    // Failures surface here rather than deep in the Tailor phase.
+    if let Some(probe) = runner_probe {
+        if let Err(e) = probe() {
+            pipeline.error(SyncPhase::Environment, &format!("Runner unavailable: {e}"));
+            pipeline.finish_remaining();
+            return Err(e);
+        }
+    }
 
     if is_git {
         pipeline.success(SyncPhase::Environment, "Environment OK");
@@ -6058,5 +6098,59 @@ mod tests {
         let result = run_sync(&args, dir.path(), &cfg_path, &term, &runner, None, None);
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         tel_mock.assert();
+    }
+
+    // ── runner_probe tests ──
+
+    #[test]
+    fn run_sync_runner_probe_failure_aborts_in_environment_phase() {
+        // A runner_probe that returns Err should cause run_sync_with_probe to
+        // abort during the Environment phase and return that error — before
+        // Analysis, Fetch, or Tailor phases run.
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, "http://unused");
+        let probe: Box<dyn Fn() -> Result<(), ActualError>> =
+            Box::new(|| Err(ActualError::CodexNotAuthenticated));
+        let result = super::run_sync_with_probe(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+            Some(probe),
+        );
+        assert!(
+            matches!(result, Err(ActualError::CodexNotAuthenticated)),
+            "expected CodexNotAuthenticated from probe, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_sync_runner_probe_none_does_not_affect_environment_phase() {
+        // When runner_probe is None the Environment phase completes normally and
+        // run_sync_with_probe behaves identically to run_sync.
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let result = super::run_sync_with_probe(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "None probe should not affect Environment phase: {result:?}"
+        );
     }
 }

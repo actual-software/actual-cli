@@ -205,18 +205,13 @@ mod tests {
 
     #[test]
     fn auth_not_authenticated_exits_2() {
-        // With auto_detect_runner: ClaudeCli probe fails (not authenticated),
-        // then AnthropicApi fails (no key set) → NoRunnerAvailable (exit code 2).
+        // With auto_detect_runner: default candidates are ClaudeCli and AnthropicApi.
+        // ClaudeCli probe fails (binary not found) and AnthropicApi fails (no key set)
+        // → NoRunnerAvailable (exit code 2).
         let server = mockito::Server::new();
         let env = TestEnv::new(&server, AUTH_FAIL, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args([
-                "adr-bot",
-                "--force",
-                "--no-tailor",
-                "--api-url",
-                &env.api_url,
-            ])
+            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
             .env_remove("ANTHROPIC_API_KEY")
             .assert()
             .code(2)
@@ -225,8 +220,8 @@ mod tests {
 
     #[test]
     fn auth_binary_crash_exits_2() {
-        // With auto_detect_runner: ClaudeCli probe fails (auth crash),
-        // then AnthropicApi fails (no key set) → NoRunnerAvailable (exit code 2).
+        // Explicitly test the ClaudeCli arm: auth crash → ClaudeNotFound (or
+        // ClaudeNotAuthenticated), which has exit code 2.
         let server = mockito::Server::new();
         let dir = tempfile::tempdir().unwrap();
         let binary_path = create_auth_crash_binary(dir.path());
@@ -238,18 +233,22 @@ mod tests {
             api_url: server.url(),
         };
 
+        // Explicitly select claude-cli so the auth crash path is exercised
+        // (without --runner, the default would try codex-cli first).
+        // A crash during `claude auth status` produces RunnerFailed (exit code 1).
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
                 "--api-url",
                 &env.api_url,
+                "--runner",
+                "claude-cli",
             ])
-            .env_remove("ANTHROPIC_API_KEY")
             .assert()
-            .code(2)
-            .stderr(predicate::str::contains("No runner available"));
+            .code(1)
+            .stderr(predicate::str::contains("Runner failed"));
     }
 
     // ── Analysis error tests ────────────────────────────────────────────
@@ -328,8 +327,17 @@ mod tests {
             api_url: server.url(),
         };
 
+        // Explicitly select claude-cli so the fake binary is used for tailoring
+        // (without --runner, the default would try codex-cli first).
         env.cmd()
-            .args(["adr-bot", "--force", "--api-url", &env.api_url])
+            .args([
+                "sync",
+                "--force",
+                "--api-url",
+                &env.api_url,
+                "--runner",
+                "claude-cli",
+            ])
             .assert()
             .code(1)
             .stderr(predicate::str::contains(

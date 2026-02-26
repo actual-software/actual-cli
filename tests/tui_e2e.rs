@@ -273,8 +273,11 @@ mod tests {
         let server = mockito::Server::new();
         let env = TestEnv::new(&server, AUTH_FAIL, ANALYSIS_SINGLE_PROJECT);
 
-        // Use --no-tui so the process exits on its own after the error
-        let mut session = spawn_sync_session(&env, &["--no-tui"]);
+        // Use --no-tui so the process exits on its own after the error.
+        // Explicitly select claude-cli so the auth check runs (the new default
+        // is codex-cli which would fail with NoRunnerAvailable before reaching
+        // the auth step).
+        let mut session = spawn_sync_session(&env, &["--no-tui", "--runner", "claude-cli"]);
 
         // Auth failure shows "not authenticated" in the error panel
         session

@@ -74,8 +74,18 @@ mod tests {
         };
 
         // Run sync --force --dry-run WITHOUT --no-tailor so that tailoring runs.
+        // Explicitly select claude-cli so the fake binary is used for tailoring
+        // (without --runner, the default would try codex-cli first).
         env.cmd()
-            .args(["adr-bot", "--force", "--dry-run", "--api-url", &env.api_url])
+            .args([
+                "sync",
+                "--force",
+                "--dry-run",
+                "--runner",
+                "claude-cli",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
@@ -751,6 +761,8 @@ User footer";
         let env =
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
 
+        // Explicitly select claude-cli so the fake binary is used for tailoring
+        // (without --runner, the default would try codex-cli first).
         let output = env
             .cmd()
             .args([
@@ -758,6 +770,8 @@ User footer";
                 "--force",
                 "--dry-run",
                 "--full",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
