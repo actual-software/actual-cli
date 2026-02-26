@@ -54,13 +54,9 @@ const FastPipeline: React.FC = () => {
     FRAMES.REVEAL_END + Math.floor((frame * pipelineDuration) / 660);
   const state = getStateAtFrame(absoluteFrame);
 
-  const confirmAbsRelFrame = FRAMES.CONFIRM_APPEAR - FRAMES.REVEAL_END; // 840
-  const acceptAbsRelFrame = FRAMES.ACCEPT_FRAME - FRAMES.REVEAL_END; // 930
+  const confirmAbsRelFrame = FRAMES.CONFIRM_APPEAR - FRAMES.REVEAL_END;
   const confirmShortFrame = Math.floor(
     (confirmAbsRelFrame * 660) / pipelineDuration
-  );
-  const acceptShortFrame = Math.floor(
-    (acceptAbsRelFrame * 660) / pipelineDuration
   );
 
   const cameraProgress = interpolate(
@@ -69,28 +65,19 @@ const FastPipeline: React.FC = () => {
     [0, 1],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );
-  // Hold at full zoom for 30f after accept (matching ScenePipeline) so logs
-  // are visible scrolling before the camera pulls back.
-  const cameraReturnProgress = interpolate(
-    frame,
-    [acceptShortFrame + 30, acceptShortFrame + 50],
-    [0, 1],
-    { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
-  );
-
+  // No zoom-out in FastPipeline: ConfirmWidget is present in TUI state 7
+  // (abs 490–569) all the way to the last frame of FastPipeline (abs 569).
+  // There is no post-accept window to zoom back into — the hard cut to
+  // SceneComplete resets the camera naturally.
   const cameraScale =
     frame < confirmShortFrame
       ? 1.0
-      : frame < acceptShortFrame + 30
-        ? interpolate(cameraProgress, [0, 1], [1.0, 1.15])
-        : interpolate(cameraReturnProgress, [0, 1], [1.15, 1.0]);
+      : interpolate(cameraProgress, [0, 1], [1.0, 1.15]);
 
   const cameraY =
     frame < confirmShortFrame
       ? 0
-      : frame < acceptShortFrame + 30
-        ? interpolate(cameraProgress, [0, 1], [0, -40])
-        : interpolate(cameraReturnProgress, [0, 1], [-40, 0]);
+      : interpolate(cameraProgress, [0, 1], [0, -40]);
 
   const completedCount = state.steps.filter(
     (s) => s.status === "success" || s.status === "warning"
