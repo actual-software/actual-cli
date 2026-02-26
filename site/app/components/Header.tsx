@@ -42,7 +42,7 @@ export default function Header() {
                             <Link href="/docs" className="leading-[26px] hover:text-white/80 transition-colors">
                                 Docs
                             </Link>
-                            <Link href="https://actual.ai/about" className="leading-[26px] hover:text-white/80 transition-colors">
+                            <Link href="/about" className="leading-[26px] hover:text-white/80 transition-colors">
                                 About
                             </Link>
                         </nav>
@@ -81,7 +81,7 @@ export default function Header() {
                                 <div className="mx-auto max-w-7xl px-4 py-4">
                                     <nav className="flex flex-col gap-3 text-sm font-medium text-white/85">
                                         <Link href="/docs" className="rounded-lg px-2 py-2 hover:bg-white/5">Docs</Link>
-                                        <Link href="https://actual.ai/about" className="rounded-lg px-2 py-2 hover:bg-white/5">About</Link>
+                                        <Link href="/about" className="rounded-lg px-2 py-2 hover:bg-white/5">About</Link>
                                         <div className="pt-2">
                                             <JoinNowButton className="w-full" />
                                         </div>
