@@ -78,7 +78,7 @@ mod tests {
         // (without --runner, the default would try codex-cli first).
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--dry-run",
                 "--runner",
@@ -277,7 +277,7 @@ User footer";
 
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -373,7 +373,7 @@ User footer";
         // First sync
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -387,7 +387,7 @@ User footer";
         // Second sync
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -464,7 +464,7 @@ User footer";
 
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -681,7 +681,7 @@ User footer";
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -730,7 +730,7 @@ User footer";
         // functional behavior: sync succeeds and produces correct output.
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",

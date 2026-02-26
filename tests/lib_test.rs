@@ -400,7 +400,7 @@ fn test_run_sync_force_with_fake_claude() {
 
     let cli = Cli::parse_from([
         "actual",
-        "sync",
+        "adr-bot",
         "--force",
         "--runner",
         "claude-cli",
