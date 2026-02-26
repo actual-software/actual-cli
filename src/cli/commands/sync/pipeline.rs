@@ -381,36 +381,23 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             find_existing_output_files(&root_dir_owned, &output_format_for_fs)
         });
 
-        let delays_503: [std::time::Duration; 3] = [
+        const DELAYS_503: [std::time::Duration; 3] = [
             std::time::Duration::from_secs(10),
             std::time::Duration::from_secs(30),
             std::time::Duration::from_secs(60),
         ];
         let retry_config = RetryConfig::default();
-        let mut attempt_503 = 0usize;
-        let api_response = loop {
-            let result = tokio::select! {
-                result = with_retry(&retry_config, || client.post_match(&request)) => result,
-                _ = tokio::signal::ctrl_c() => break Err(ActualError::UserCancelled),
-            };
-            match result {
-                Ok(v) => break Ok(v),
-                Err(ActualError::ServiceUnavailable) if attempt_503 < delays_503.len() => {
-                    let delay_secs = delays_503[attempt_503].as_secs();
-                    pipeline.update_message(
-                        SyncPhase::Fetch,
-                        &format!(
-                            "Actual AI API is updating \u{2014} retrying in {delay_secs}s ({}/{})...",
-                            attempt_503 + 1,
-                            delays_503.len()
-                        ),
-                    );
-                    tokio::time::sleep(delays_503[attempt_503]).await;
-                    attempt_503 += 1;
+        let api_response = fetch_with_503_backoff(
+            || async {
+                tokio::select! {
+                    result = with_retry(&retry_config, || client.post_match(&request)) => result,
+                    _ = tokio::signal::ctrl_c() => Err(ActualError::UserCancelled),
                 }
-                Err(e) => break Err(e),
-            }
-        };
+            },
+            &DELAYS_503,
+            &mut pipeline,
+        )
+        .await;
 
         (api_response, fs_future.await)
     });
@@ -696,6 +683,46 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
 
     pipeline.wait_for_keypress();
     Ok(())
+}
+
+/// Execute an API call with 503 backoff, showing live TUI messages during each wait.
+///
+/// On `ActualError::ServiceUnavailable`, waits for the next delay in `delays_503`
+/// and retries. After all delays are exhausted the error propagates as-is.
+/// Any other error (or `UserCancelled`) breaks out immediately.
+///
+/// `make_fut` is called once per attempt; it must produce a fresh `Future` each time
+/// so the async block is not re-polled after it has already resolved.
+pub(crate) async fn fetch_with_503_backoff<F, Fut, T>(
+    mut make_fut: F,
+    delays_503: &[std::time::Duration],
+    pipeline: &mut TuiRenderer,
+) -> Result<T, ActualError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ActualError>>,
+{
+    let mut attempt_503 = 0usize;
+    loop {
+        let result = make_fut().await;
+        match result {
+            Ok(v) => break Ok(v),
+            Err(ActualError::ServiceUnavailable) if attempt_503 < delays_503.len() => {
+                let delay_secs = delays_503[attempt_503].as_secs();
+                pipeline.update_message(
+                    SyncPhase::Fetch,
+                    &format!(
+                        "Actual AI API is updating \u{2014} retrying in {delay_secs}s ({}/{})...",
+                        attempt_503 + 1,
+                        delays_503.len()
+                    ),
+                );
+                tokio::time::sleep(delays_503[attempt_503]).await;
+                attempt_503 += 1;
+            }
+            Err(e) => break Err(e),
+        }
+    }
 }
 
 /// Return the pipeline skip message for a tailoring cache hit.
@@ -6190,6 +6217,185 @@ mod tests {
         assert!(
             result.is_ok(),
             "None probe should not affect Environment phase: {result:?}"
+        );
+    }
+
+    // ── fetch_with_503_backoff unit tests ──
+
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_with_503_backoff_succeeds_immediately() {
+        // When the first call succeeds, no retry delay occurs.
+        let mut pipeline = TuiRenderer::new(false, true);
+        let delays: &[std::time::Duration] = &[
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(60),
+        ];
+        let mut call_count = 0usize;
+        let result = super::fetch_with_503_backoff(
+            || {
+                call_count += 1;
+                async { Ok::<_, ActualError>(42u32) }
+            },
+            delays,
+            &mut pipeline,
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(call_count, 1, "should only be called once on success");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_with_503_backoff_retries_once() {
+        // First call returns ServiceUnavailable, second succeeds.
+        // Uses start_paused=true so tokio::time::sleep completes instantly.
+        let mut pipeline = TuiRenderer::new(false, true);
+        let delays: &[std::time::Duration] = &[
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+        ];
+        let mut call_count = 0usize;
+        let result = super::fetch_with_503_backoff(
+            || {
+                call_count += 1;
+                let n = call_count;
+                async move {
+                    if n == 1 {
+                        Err(ActualError::ServiceUnavailable)
+                    } else {
+                        Ok(42u32)
+                    }
+                }
+            },
+            delays,
+            &mut pipeline,
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok after retry, got {result:?}");
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(call_count, 2, "should be called twice: fail then succeed");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_with_503_backoff_exhausts_all_retries() {
+        // All calls return ServiceUnavailable → last error propagates after all delays.
+        let mut pipeline = TuiRenderer::new(false, true);
+        let delays: &[std::time::Duration] = &[
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+        ];
+        let mut call_count = 0usize;
+        let result = super::fetch_with_503_backoff(
+            || {
+                call_count += 1;
+                async move { Err::<u32, _>(ActualError::ServiceUnavailable) }
+            },
+            delays,
+            &mut pipeline,
+        )
+        .await;
+        // The guard is `attempt_503 < delays.len()`, so we get delays.len() retries + 1 final.
+        assert!(
+            matches!(result, Err(ActualError::ServiceUnavailable)),
+            "expected ServiceUnavailable after exhausting retries, got {result:?}"
+        );
+        // call_count == delays.len() + 1 (initial + one per delay)
+        assert_eq!(
+            call_count,
+            delays.len() + 1,
+            "should be called delays.len()+1 times"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_with_503_backoff_non_503_error_propagates_immediately() {
+        // Non-503 errors should not be retried.
+        let mut pipeline = TuiRenderer::new(false, true);
+        let delays: &[std::time::Duration] = &[std::time::Duration::from_millis(1)];
+        let mut call_count = 0usize;
+        let result = super::fetch_with_503_backoff(
+            || {
+                call_count += 1;
+                async move {
+                    Err::<u32, _>(ActualError::ApiError("connection refused".to_string()))
+                }
+            },
+            delays,
+            &mut pipeline,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ActualError::ApiError(_))),
+            "expected ApiError to propagate without retry, got {result:?}"
+        );
+        assert_eq!(
+            call_count, 1,
+            "should only be called once for non-503 errors"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_with_503_backoff_user_cancelled_propagates_immediately() {
+        // UserCancelled should propagate immediately without retry.
+        let mut pipeline = TuiRenderer::new(false, true);
+        let delays: &[std::time::Duration] = &[std::time::Duration::from_millis(1)];
+        let mut call_count = 0usize;
+        let result = super::fetch_with_503_backoff(
+            || {
+                call_count += 1;
+                async move { Err::<u32, _>(ActualError::UserCancelled) }
+            },
+            delays,
+            &mut pipeline,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "expected UserCancelled to propagate, got {result:?}"
+        );
+        assert_eq!(
+            call_count, 1,
+            "should only be called once for UserCancelled"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_with_503_backoff_with_two_retries_succeeds() {
+        // 503 twice then success: verifies multi-retry path works end-to-end.
+        let mut pipeline = TuiRenderer::new(false, true);
+        let delays: &[std::time::Duration] = &[
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+        ];
+        let mut call_count = 0usize;
+        let result = super::fetch_with_503_backoff(
+            || {
+                call_count += 1;
+                let n = call_count;
+                async move {
+                    if n < 3 {
+                        Err(ActualError::ServiceUnavailable)
+                    } else {
+                        Ok(99u32)
+                    }
+                }
+            },
+            delays,
+            &mut pipeline,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after 2 retries, got {result:?}"
+        );
+        assert_eq!(result.unwrap(), 99);
+        assert_eq!(
+            call_count, 3,
+            "should be called 3 times: fail, fail, succeed"
         );
     }
 }
