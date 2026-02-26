@@ -4,7 +4,7 @@ import { TestFrame } from "./compositions/TestFrame";
 import { TuiPreview } from "./compositions/TuiPreview";
 import { PipelinePreview } from "./compositions/PipelinePreview";
 import { HeroClip } from "./components/scenes/HeroClip";
-import { ShortClip } from "./components/scenes/ShortClip";
+import { SocialMediaClip } from "./components/scenes/SocialMediaClip";
 import { LoopClip } from "./components/scenes/LoopClip";
 
 export const Root: React.FC = () => {
@@ -50,10 +50,10 @@ export const Root: React.FC = () => {
         defaultProps={{}}
       />
 
-      {/* Short clip — 3 aspect ratios (all use the same component, different dimensions) */}
+      {/* Social media clip — 3 aspect ratios (all use the same component, different dimensions) */}
       <Composition
-        id="ShortClip-169"
-        component={ShortClip}
+        id="HorizontalFullClip"
+        component={SocialMediaClip}
         durationInFrames={1080}
         fps={60}
         width={1920}
@@ -61,8 +61,8 @@ export const Root: React.FC = () => {
         defaultProps={{}}
       />
       <Composition
-        id="ShortClip-11"
-        component={ShortClip}
+        id="SocialMediaSquareClip"
+        component={SocialMediaClip}
         durationInFrames={1080}
         fps={60}
         width={1080}
@@ -70,8 +70,8 @@ export const Root: React.FC = () => {
         defaultProps={{}}
       />
       <Composition
-        id="ShortClip-916"
-        component={ShortClip}
+        id="SocialMediaVerticalClip"
+        component={SocialMediaClip}
         durationInFrames={1080}
         fps={60}
         width={1080}
