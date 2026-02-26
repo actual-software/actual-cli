@@ -139,9 +139,11 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -168,9 +170,11 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -193,6 +197,8 @@ mod tests {
                 "adr-bot",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 "http://127.0.0.1:1",
             ])
@@ -261,9 +267,11 @@ mod tests {
         env.write_file("pnpm-workspace.yaml", "{{invalid yaml content");
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -298,7 +306,14 @@ mod tests {
         };
 
         env.cmd()
-            .args(["adr-bot", "--force", "--api-url", &env.api_url])
+            .args([
+                "sync",
+                "--force",
+                "--runner",
+                "claude-cli",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .code(1)
             .stderr(predicate::str::contains("Runner failed"));
