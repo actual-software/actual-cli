@@ -30,7 +30,9 @@ Displays current environment information:
 - Git branch (if in a git repo)
 - Cache status
 
-This is informational only -- sync does not abort on environment issues at this step (errors surface later when the runner is invoked).
+The environment check also runs a runner pre-flight probe: it verifies that the selected runner is available and accessible (binary present, API key set, etc.) before proceeding. If the probe fails, sync aborts here with an error in the Environment step rather than letting the run continue into Analysis and Tailoring.
+
+**Default runner**: When no `runner` or `model` is configured, sync auto-detects using the fallback order `codex-cli → openai-api`. If neither is available, the run aborts during this step with a `NoRunnerAvailable` error.
 
 ### Step 2: Analysis
 
