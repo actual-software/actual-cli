@@ -142,6 +142,8 @@ mod tests {
                 "--force",
                 "--no-tailor",
                 "--dry-run",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -183,6 +185,8 @@ mod tests {
                 "--no-tailor",
                 "--dry-run",
                 "--full",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -221,6 +225,8 @@ mod tests {
                 "--force",
                 "--no-tailor",
                 "--dry-run",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -271,9 +277,11 @@ User footer";
 
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -365,9 +373,11 @@ User footer";
         // First sync
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -377,9 +387,11 @@ User footer";
         // Second sync
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -452,9 +464,11 @@ User footer";
 
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -529,6 +543,8 @@ User footer";
                 "--force",
                 "--no-tailor",
                 "--reset-rejections",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -608,6 +624,8 @@ User footer";
                 "adr-bot",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env_a.api_url,
             ])
@@ -627,6 +645,8 @@ User footer";
                 "adr-bot",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env_b.api_url,
             ])
@@ -661,9 +681,11 @@ User footer";
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -708,9 +730,11 @@ User footer";
         // functional behavior: sync succeeds and produces correct output.
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -829,6 +853,8 @@ User footer";
                 "--no-tailor",
                 "--project",
                 "apps/web",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
