@@ -178,7 +178,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
             transformOrigin: "top left",
           }}
         >
-          <TerminalWindow width={1200} height={640} glowIntensity={0.2}>
+          <TerminalWindow width={1200} height={640} glowIntensity={terminalGlow}>
             <TuiLayout
               steps={state.steps}
               activeStepIndex={state.activeStepIndex}
