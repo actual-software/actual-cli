@@ -217,7 +217,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
           <GradientText text={COPY.cta.wordmark} fontSize={72} />
         </div>
 
-        {/* Bottom band — tagline + URL row (matches square layout) */}
+        {/* Bottom band — tagline + URL row (portrait: 3× font size vs square) */}
         <div
           style={{
             position: "absolute",
@@ -229,21 +229,52 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
             flexDirection: "column",
             justifyContent: "center",
             padding: "0 60px",
-            gap: 14,
+            gap: 28,
           }}
         >
           <div
             style={{
               opacity: taglineOpacity,
               fontFamily: FONTS.mono,
-              fontSize: 16,
+              fontSize: 48,
               color: COLORS.textPrimary,
               lineHeight: 1.5,
             }}
           >
             {COPY.cta.tagline}
           </div>
-          {urlRow}
+          {/* Portrait URL row — 3× font size */}
+          <div
+            style={{
+              opacity: urlOpacity,
+              display: "flex",
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 16,
+              width: "100%",
+            }}
+          >
+            <span
+              style={{
+                fontFamily: FONTS.mono,
+                fontSize: 60,
+                color: COLORS.borderGreen,
+                letterSpacing: 1,
+                flexShrink: 0,
+              }}
+            >
+              {COPY.cta.url}
+            </span>
+            <div
+              style={{
+                flex: 1,
+                height: 4,
+                background: `linear-gradient(90deg, ${COLORS.borderGreen}, ${COLORS.borderTeal})`,
+                transformOrigin: "left center",
+                transform: `scaleX(${urlUnderlineWidth / 100})`,
+              }}
+            />
+          </div>
         </div>
       </div>
     );
