@@ -136,24 +136,42 @@ const FastPipeline: React.FC = () => {
 // intentionally overflows so the terminal shows the left-hand side prominently.
 // The CTA uses a canvas-sized absolute overlay so its layout centres correctly
 // regardless of aspect ratio.
+// In square (1:1) mode the terminal is shifted 15% of the canvas width to the left
+// so more of the left panel (logo + steps) is visible.
+const SQUARE_TERM_OFFSET = -162; // 15% of 1080px
+
 export const ShortClip: React.FC = () => {
   const { width, height } = useVideoConfig();
   const isSquare = width === height;
+  const termShift = isSquare ? SQUARE_TERM_OFFSET : 0;
+  const shiftStyle = isSquare
+    ? { transform: `translateX(${SQUARE_TERM_OFFSET}px)` }
+    : {};
   return (
     <div style={{ position: "relative", width: 1920, height: 1080 }}>
       <Sequence from={0} durationInFrames={60}>
-        <InstantHook />
+        <div style={{ width: "100%", height: "100%", ...shiftStyle }}>
+          <InstantHook />
+        </div>
       </Sequence>
       <Sequence from={60} durationInFrames={660}>
-        <FastPipeline />
+        <div style={{ width: "100%", height: "100%", ...shiftStyle }}>
+          <FastPipeline />
+        </div>
       </Sequence>
       <Sequence from={720} durationInFrames={120}>
-        <SceneComplete />
+        <div style={{ width: "100%", height: "100%", ...shiftStyle }}>
+          <SceneComplete />
+        </div>
       </Sequence>
       {/* CTA: absolute overlay sized to the actual canvas so square layout centres correctly */}
       <Sequence from={840} durationInFrames={240}>
         <div style={{ position: "absolute", left: 0, top: 0, width, height }}>
-          <SceneCta totalDuration={240} layout={isSquare ? "square" : "wide"} />
+          <SceneCta
+            totalDuration={240}
+            layout={isSquare ? "square" : "wide"}
+            terminalOffsetX={termShift}
+          />
         </div>
       </Sequence>
       <FilmGrain width={1920} height={1080} opacity={0.035} />

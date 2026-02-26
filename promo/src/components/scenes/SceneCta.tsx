@@ -36,11 +36,14 @@ interface SceneCtaProps {
   totalDuration?: number;
   /** "wide" = 16:9 layout (terminal slides left, CTA right). "square" = 1:1 sandwich (wordmark top, CTA bottom). */
   layout?: "wide" | "square";
+  /** Horizontal offset (px) applied to the terminal in square layout — should match the pipeline scene shift. */
+  terminalOffsetX?: number;
 }
 
 export const SceneCta: React.FC<SceneCtaProps> = ({
   totalDuration = 180,
   layout = "wide",
+  terminalOffsetX = 0,
 }) => {
   const frame = useCurrentFrame();
   const absoluteFrame = FRAMES.CTA_START + frame;
@@ -139,11 +142,11 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
           opacity: fadeOut,
         }}
       >
-        {/* Terminal — 1920px-wide inner container mirrors the pipeline centering */}
+        {/* Terminal — 1920px-wide inner container mirrors the pipeline centering + offset */}
         <div
           style={{
             position: "absolute",
-            left: 0,
+            left: terminalOffsetX,
             top: 0,
             width: 1920,
             height: "100%",
