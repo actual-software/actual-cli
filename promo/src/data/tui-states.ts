@@ -158,7 +158,7 @@ const COMPLETE_LINES = staggerLines(
   [
     { text: "" },
     {
-      text: "  Sync complete: 1 created · 0 updated · 0 failed · 0 rejected  [4.8s total]",
+      text: "  ADR-bot complete: 1 created · 0 updated · 0 failed · 0 rejected  [4.8s total]",
       color: COLORS.borderGreen,
     },
   ],
