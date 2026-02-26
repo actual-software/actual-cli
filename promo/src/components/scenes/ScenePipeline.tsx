@@ -22,11 +22,14 @@ export const ScenePipeline: React.FC = () => {
     [0, 1],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );
-  // Hold at full zoom until 0.5s (30f) after accept, then zoom out
-  const acceptRelFrame = FRAMES.ACCEPT_FRAME - FRAMES.REVEAL_END;
+  // Zoom out only once the confirm widget visually disappears.
+  // ConfirmWidget is static (no frame animation) — it's present in TUI state 7
+  // (frames 490–569) and gone in state 8 (SUMMARY_START = 570). Zooming out
+  // before that makes the widget disappear while the camera is still pulling back.
+  const writeEndRelFrame = FRAMES.SUMMARY_START - FRAMES.REVEAL_END; // 270
   const cameraReturnProgress = interpolate(
     frame,
-    [acceptRelFrame + 30, acceptRelFrame + 60],
+    [writeEndRelFrame, writeEndRelFrame + 60],
     [0, 1],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );
@@ -34,14 +37,14 @@ export const ScenePipeline: React.FC = () => {
   const cameraScale =
     frame < confirmRelFrame
       ? 1.0
-      : frame < acceptRelFrame + 30  // hold at 1.15x for 0.5s after accept
+      : frame < writeEndRelFrame
         ? interpolate(cameraProgress, [0, 1], [1.0, 1.15])
         : interpolate(cameraReturnProgress, [0, 1], [1.15, 1.0]);
 
   const cameraY =
     frame < confirmRelFrame
       ? 0
-      : frame < acceptRelFrame + 30  // hold at -40px for 0.5s after accept
+      : frame < writeEndRelFrame
         ? interpolate(cameraProgress, [0, 1], [0, -40])
         : interpolate(cameraReturnProgress, [0, 1], [-40, 0]);
 
