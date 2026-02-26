@@ -75,7 +75,7 @@ mod tests {
 
         // Run sync --force --dry-run WITHOUT --no-tailor so that tailoring runs.
         env.cmd()
-            .args(["sync", "--force", "--dry-run", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--dry-run", "--api-url", &env.api_url])
             .assert()
             .success();
 
@@ -128,7 +128,7 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--dry-run",
@@ -168,7 +168,7 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--dry-run",
@@ -207,7 +207,7 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--dry-run",
@@ -260,7 +260,13 @@ User footer";
         env.write_file("CLAUDE.md", existing);
 
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
@@ -348,13 +354,25 @@ User footer";
 
         // First sync
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
         // Second sync
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
@@ -423,7 +441,13 @@ User footer";
         std::fs::write(&env.config_path, &config_yaml).unwrap();
 
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
@@ -491,7 +515,7 @@ User footer";
         // Sync with --reset-rejections
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--reset-rejections",
@@ -571,7 +595,7 @@ User footer";
         env_a
             .cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--api-url",
@@ -590,7 +614,7 @@ User footer";
         env_b
             .cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--api-url",
@@ -626,7 +650,13 @@ User footer";
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success()
             .stderr(predicate::str::contains("No files to write"));
@@ -667,7 +697,13 @@ User footer";
         // which may not appear in captured stderr (non-TTY). We verify the
         // functional behavior: sync succeeds and produces correct output.
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
@@ -718,7 +754,7 @@ User footer";
         let output = env
             .cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--dry-run",
                 "--full",
@@ -774,7 +810,7 @@ User footer";
         env.setup_monorepo();
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--project",

@@ -35,22 +35,22 @@ actual config set runner anthropic-api
 Place the `actual` binary somewhere on your PATH, then run it from inside any git repo:
 
 ```bash
-actual sync
+actual adr-bot
 ```
 
 That's it. On first run it will analyze your repo, fetch relevant ADRs from Actual's API, tailor them to your codebase using the configured AI runner, and write the result to `CLAUDE.md` in your project root.
 
 **Want to preview before writing anything?**
 ```bash
-actual sync --dry-run
-actual sync --dry-run --full   # also prints the full rendered output
+actual adr-bot --dry-run
+actual adr-bot --dry-run --full   # also prints the full rendered output
 ```
 
 ## What you get
 
-By default, `actual sync` writes to `CLAUDE.md`. Content is wrapped in managed markers so future runs update cleanly without touching anything you've written yourself. To write `AGENTS.md` instead:
+By default, `actual adr-bot` writes to `CLAUDE.md`. Content is wrapped in managed markers so future runs update cleanly without touching anything you've written yourself. To write `AGENTS.md` instead:
 ```bash
-actual sync --output-format agents-md
+actual adr-bot --output-format agents-md
 ```
 
 ## Useful flags

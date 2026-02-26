@@ -138,7 +138,13 @@ mod tests {
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .code(3)
             .stderr(predicate::str::contains("API request failed"));
@@ -161,7 +167,13 @@ mod tests {
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .code(3)
             .stderr(predicate::str::contains("INVALID_REQUEST"))
@@ -178,7 +190,7 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--api-url",
@@ -198,7 +210,13 @@ mod tests {
         let server = mockito::Server::new();
         let env = TestEnv::new(&server, AUTH_FAIL, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .env_remove("ANTHROPIC_API_KEY")
             .assert()
             .code(2)
@@ -221,7 +239,13 @@ mod tests {
         };
 
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .env_remove("ANTHROPIC_API_KEY")
             .assert()
             .code(2)
@@ -237,7 +261,13 @@ mod tests {
         // Create a malformed pnpm-workspace.yaml to trigger a static analysis error
         env.write_file("pnpm-workspace.yaml", "{{invalid yaml content");
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .code(1)
             .stderr(predicate::str::contains("Monorepo detection failed"));
@@ -269,7 +299,7 @@ mod tests {
         };
 
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .code(1)
             .stderr(predicate::str::contains("Runner failed"));
@@ -299,7 +329,7 @@ mod tests {
         };
 
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .code(1)
             .stderr(predicate::str::contains(

@@ -203,8 +203,8 @@ scenario_sync_no_tailor() {
     create_minimal_ts_project "$dir"
     git_init "$dir"
 
-    log "Running: actual sync --force --no-tailor"
-    "$ACTUAL_BIN" sync --force --no-tailor --api-url "$API_URL"
+    log "Running: actual adr-bot --force --no-tailor"
+    "$ACTUAL_BIN" adr-bot --force --no-tailor --api-url "$API_URL"
 
     if [[ ! -f "$dir/CLAUDE.md" ]]; then
         fail "sync_no_tailor: CLAUDE.md was not created"
@@ -252,8 +252,8 @@ scenario_sync_realistic_project() {
     create_realistic_ts_project "$dir"
     git_init "$dir"
 
-    log "Running: actual sync --force --no-tailor"
-    "$ACTUAL_BIN" sync --force --no-tailor --api-url "$API_URL"
+    log "Running: actual adr-bot --force --no-tailor"
+    "$ACTUAL_BIN" adr-bot --force --no-tailor --api-url "$API_URL"
 
     if [[ ! -f "$dir/CLAUDE.md" ]]; then
         fail "sync_realistic: CLAUDE.md was not created"
@@ -303,10 +303,10 @@ scenario_resync_preserves_user_content() {
     git_init "$dir"
 
     log "First sync..."
-    "$ACTUAL_BIN" sync --force --no-tailor --api-url "$API_URL"
+    "$ACTUAL_BIN" adr-bot --force --no-tailor --api-url "$API_URL"
 
     if [[ ! -f "$dir/CLAUDE.md" ]]; then
-        fail "resync: first sync did not create CLAUDE.md"
+        fail "resync: first adr-bot run did not create CLAUDE.md"
         return
     fi
 
@@ -316,7 +316,7 @@ scenario_resync_preserves_user_content() {
     printf '# My Custom Notes\n\nUser content here.\n\n%s' "$original" > "$dir/CLAUDE.md"
 
     log "Second sync..."
-    "$ACTUAL_BIN" sync --force --no-tailor --api-url "$API_URL"
+    "$ACTUAL_BIN" adr-bot --force --no-tailor --api-url "$API_URL"
 
     local content
     content="$(cat "$dir/CLAUDE.md")"
@@ -346,8 +346,8 @@ scenario_dry_run_no_files() {
     create_minimal_ts_project "$dir"
     git_init "$dir"
 
-    log "Running: actual sync --force --no-tailor --dry-run"
-    "$ACTUAL_BIN" sync --force --no-tailor --dry-run --api-url "$API_URL"
+    log "Running: actual adr-bot --force --no-tailor --dry-run"
+    "$ACTUAL_BIN" adr-bot --force --no-tailor --dry-run --api-url "$API_URL"
 
     if [[ ! -f "$dir/CLAUDE.md" ]]; then
         ok "dry_run: CLAUDE.md not created (correct)"

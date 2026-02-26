@@ -143,7 +143,7 @@ fn format_output_files_section(cwd: &Path, format: &OutputFormat, width: usize) 
         let panel = Panel::titled(&panel_title).line(&format!(
             "No {} files found. Run {} to generate.",
             filename,
-            theme::hint("`actual sync`")
+            theme::hint("`actual adr-bot`")
         ));
         return panel.render(width);
     }
@@ -703,8 +703,8 @@ mod tests {
             "should show empty message: {p}"
         );
         assert!(
-            p.contains("actual sync"),
-            "should show hint to run sync: {p}"
+            p.contains("actual adr-bot"),
+            "should show hint to run adr-bot: {p}"
         );
     }
 

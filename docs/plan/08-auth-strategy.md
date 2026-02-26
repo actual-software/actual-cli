@@ -7,7 +7,7 @@
 ## Auth Flow
 
 ```
-actual sync
+actual adr-bot
   |
   |-- 1. Check Claude Code is installed
   |     |-- `which claude` -> found or error

@@ -23,7 +23,7 @@ All 3 output formats, managed section mechanics, and merge behavior. Load this w
 Set the format:
 ```bash
 # CLI flag
-actual sync --output-format agents-md
+actual adr-bot --output-format agents-md
 
 # Config
 actual config set output_format agents-md

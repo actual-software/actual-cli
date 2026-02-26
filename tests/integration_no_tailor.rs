@@ -29,7 +29,13 @@ mod tests {
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
@@ -78,7 +84,13 @@ mod tests {
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
@@ -139,7 +151,13 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_MONOREPO);
         env.setup_monorepo();
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
@@ -191,7 +209,13 @@ mod tests {
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 
@@ -223,7 +247,7 @@ mod tests {
         .unwrap();
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--verbose",
@@ -268,7 +292,7 @@ mod tests {
         .unwrap();
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--verbose",
@@ -311,7 +335,7 @@ mod tests {
         env.setup_monorepo();
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--project",
@@ -348,7 +372,13 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_MONOREPO);
         env.setup_monorepo();
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
 

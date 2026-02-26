@@ -186,7 +186,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_anthropic()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -237,7 +237,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_anthropic()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "anthropic-api",
@@ -277,7 +277,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_anthropic()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "anthropic-api",
@@ -313,7 +313,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_anthropic()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "anthropic-api",
@@ -348,7 +348,7 @@ mod tests {
         cmd.env_remove("ANTHROPIC_API_KEY");
         cmd.current_dir(env.dir.path());
         cmd.args([
-            "sync",
+            "adr-bot",
             "--force",
             "--runner",
             "anthropic-api",
@@ -408,7 +408,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_anthropic()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "anthropic-api",
@@ -448,7 +448,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_openai()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -499,7 +499,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_openai()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "openai-api",
@@ -539,7 +539,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_openai()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "openai-api",
@@ -575,7 +575,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_openai()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "openai-api",
@@ -610,7 +610,7 @@ mod tests {
         cmd.env_remove("OPENAI_API_KEY");
         cmd.current_dir(env.dir.path());
         cmd.args([
-            "sync",
+            "adr-bot",
             "--force",
             "--runner",
             "openai-api",
@@ -665,7 +665,7 @@ mod tests {
         let env = TestEnvHttp::new(&adr_server, &llm_server);
         env.cmd_openai()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "openai-api",

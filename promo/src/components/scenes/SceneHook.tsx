@@ -4,7 +4,7 @@ import { TerminalWindow } from "../Terminal/TerminalWindow";
 import { COLORS, FONTS, SPRING_CONFIGS } from "../../data/brand";
 import { COPY } from "../../data/copy";
 
-const COMMAND = COPY.shell.command; // "actual sync"
+const COMMAND = COPY.shell.command; // "actual adr-bot"
 const PROMPT = COPY.shell.prompt; // "~/my-project  on  main"
 
 export const SceneHook: React.FC = () => {

@@ -6,15 +6,15 @@ use common::{EnvGuard, ENV_MUTEX};
 
 #[test]
 fn test_cli_parse_sync() {
-    let cli = Cli::parse_from(["actual", "sync"]);
-    assert!(matches!(cli.command, Command::Sync(_)));
+    let cli = Cli::parse_from(["actual", "adr-bot"]);
+    assert!(matches!(cli.command, Command::AdrBot(_)));
 }
 
 #[test]
 fn test_cli_parse_sync_with_flags() {
     let cli = Cli::parse_from([
         "actual",
-        "sync",
+        "adr-bot",
         "--dry-run",
         "--full",
         "--force",
@@ -32,7 +32,7 @@ fn test_cli_parse_sync_with_flags() {
         "--max-budget-usd",
         "1.50",
     ]);
-    let Command::Sync(args) = cli.command else {
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert!(args.dry_run);
@@ -49,8 +49,8 @@ fn test_cli_parse_sync_with_flags() {
 
 #[test]
 fn test_cli_parse_sync_defaults() {
-    let cli = Cli::parse_from(["actual", "sync"]);
-    let Command::Sync(args) = cli.command else {
+    let cli = Cli::parse_from(["actual", "adr-bot"]);
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert!(!args.dry_run);
@@ -67,7 +67,7 @@ fn test_cli_parse_sync_defaults() {
 
 #[test]
 fn test_cli_parse_sync_full_requires_dry_run() {
-    let result = Cli::try_parse_from(["actual", "sync", "--full"]);
+    let result = Cli::try_parse_from(["actual", "adr-bot", "--full"]);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
@@ -78,8 +78,8 @@ fn test_cli_parse_sync_full_requires_dry_run() {
 
 #[test]
 fn test_cli_parse_sync_dry_run_full_accepted() {
-    let cli = Cli::parse_from(["actual", "sync", "--dry-run", "--full"]);
-    let Command::Sync(args) = cli.command else {
+    let cli = Cli::parse_from(["actual", "adr-bot", "--dry-run", "--full"]);
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert!(args.dry_run);
@@ -90,13 +90,13 @@ fn test_cli_parse_sync_dry_run_full_accepted() {
 fn test_cli_parse_sync_multiple_projects() {
     let cli = Cli::parse_from([
         "actual",
-        "sync",
+        "adr-bot",
         "--project",
         "apps/web",
         "--project",
         "apps/api",
     ]);
-    let Command::Sync(args) = cli.command else {
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.projects, vec!["apps/web", "apps/api"]);
@@ -106,13 +106,13 @@ fn test_cli_parse_sync_multiple_projects() {
 fn test_cli_parse_sync_model_and_budget() {
     let cli = Cli::parse_from([
         "actual",
-        "sync",
+        "adr-bot",
         "--model",
         "opus",
         "--max-budget-usd",
         "0.50",
     ]);
-    let Command::Sync(args) = cli.command else {
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.model.as_deref(), Some("opus"));
@@ -188,7 +188,7 @@ fn test_run_sync_without_claude() {
     // a different runner (e.g. codex-cli) which would bypass find_claude_binary().
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
-    let cli = Cli::parse_from(["actual", "sync", "--dry-run", "--runner", "claude-cli"]);
+    let cli = Cli::parse_from(["actual", "adr-bot", "--dry-run", "--runner", "claude-cli"]);
     assert_eq!(handle_result(run(cli)), 2);
 }
 
@@ -242,7 +242,7 @@ fn test_run_config_path() {
 
 #[test]
 fn test_cli_parse_sync_negative_budget_rejected() {
-    let result = Cli::try_parse_from(["actual", "sync", "--max-budget-usd", "-5"]);
+    let result = Cli::try_parse_from(["actual", "adr-bot", "--max-budget-usd", "-5"]);
     assert!(result.is_err(), "negative budget should be rejected");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -253,8 +253,8 @@ fn test_cli_parse_sync_negative_budget_rejected() {
 
 #[test]
 fn test_cli_parse_sync_zero_budget_accepted() {
-    let cli = Cli::parse_from(["actual", "sync", "--max-budget-usd", "0"]);
-    let Command::Sync(args) = cli.command else {
+    let cli = Cli::parse_from(["actual", "adr-bot", "--max-budget-usd", "0"]);
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.max_budget_usd, Some(0.0));
@@ -262,7 +262,7 @@ fn test_cli_parse_sync_zero_budget_accepted() {
 
 #[test]
 fn test_cli_parse_sync_non_numeric_budget_rejected() {
-    let result = Cli::try_parse_from(["actual", "sync", "--max-budget-usd", "abc"]);
+    let result = Cli::try_parse_from(["actual", "adr-bot", "--max-budget-usd", "abc"]);
     assert!(result.is_err(), "non-numeric budget should be rejected");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -273,7 +273,7 @@ fn test_cli_parse_sync_non_numeric_budget_rejected() {
 
 #[test]
 fn test_cli_parse_sync_nan_budget_rejected() {
-    let result = Cli::try_parse_from(["actual", "sync", "--max-budget-usd", "nan"]);
+    let result = Cli::try_parse_from(["actual", "adr-bot", "--max-budget-usd", "nan"]);
     assert!(result.is_err(), "NaN budget should be rejected");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -284,7 +284,7 @@ fn test_cli_parse_sync_nan_budget_rejected() {
 
 #[test]
 fn test_cli_parse_sync_inf_budget_rejected() {
-    let result = Cli::try_parse_from(["actual", "sync", "--max-budget-usd", "inf"]);
+    let result = Cli::try_parse_from(["actual", "adr-bot", "--max-budget-usd", "inf"]);
     assert!(result.is_err(), "inf budget should be rejected");
     let err = result.unwrap_err().to_string();
     assert!(
@@ -295,8 +295,8 @@ fn test_cli_parse_sync_inf_budget_rejected() {
 
 #[test]
 fn test_cli_parse_sync_runner_claude_cli_accepted() {
-    let cli = Cli::parse_from(["actual", "sync", "--runner", "claude-cli"]);
-    let Command::Sync(args) = cli.command else {
+    let cli = Cli::parse_from(["actual", "adr-bot", "--runner", "claude-cli"]);
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.runner, Some(RunnerChoice::ClaudeCli));
@@ -304,8 +304,8 @@ fn test_cli_parse_sync_runner_claude_cli_accepted() {
 
 #[test]
 fn test_cli_parse_sync_runner_anthropic_api_accepted() {
-    let cli = Cli::parse_from(["actual", "sync", "--runner", "anthropic-api"]);
-    let Command::Sync(args) = cli.command else {
+    let cli = Cli::parse_from(["actual", "adr-bot", "--runner", "anthropic-api"]);
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.runner, Some(RunnerChoice::AnthropicApi));
@@ -313,8 +313,8 @@ fn test_cli_parse_sync_runner_anthropic_api_accepted() {
 
 #[test]
 fn test_cli_parse_sync_runner_openai_api_accepted() {
-    let cli = Cli::parse_from(["actual", "sync", "--runner", "openai-api"]);
-    let Command::Sync(args) = cli.command else {
+    let cli = Cli::parse_from(["actual", "adr-bot", "--runner", "openai-api"]);
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.runner, Some(RunnerChoice::OpenAiApi));
@@ -322,8 +322,8 @@ fn test_cli_parse_sync_runner_openai_api_accepted() {
 
 #[test]
 fn test_cli_parse_sync_runner_codex_cli_accepted() {
-    let cli = Cli::parse_from(["actual", "sync", "--runner", "codex-cli"]);
-    let Command::Sync(args) = cli.command else {
+    let cli = Cli::parse_from(["actual", "adr-bot", "--runner", "codex-cli"]);
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.runner, Some(RunnerChoice::CodexCli));
@@ -331,8 +331,8 @@ fn test_cli_parse_sync_runner_codex_cli_accepted() {
 
 #[test]
 fn test_cli_parse_sync_runner_cursor_cli_accepted() {
-    let cli = Cli::parse_from(["actual", "sync", "--runner", "cursor-cli"]);
-    let Command::Sync(args) = cli.command else {
+    let cli = Cli::parse_from(["actual", "adr-bot", "--runner", "cursor-cli"]);
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.runner, Some(RunnerChoice::CursorCli));
@@ -340,13 +340,13 @@ fn test_cli_parse_sync_runner_cursor_cli_accepted() {
 
 #[test]
 fn test_cli_parse_sync_runner_invalid_value_rejected() {
-    let result = Cli::try_parse_from(["actual", "sync", "--runner", "unknown-runner"]);
+    let result = Cli::try_parse_from(["actual", "adr-bot", "--runner", "unknown-runner"]);
     assert!(result.is_err(), "invalid runner value should be rejected");
 }
 
 #[test]
 fn test_cli_parse_sync_runner_log_injection_rejected() {
-    let result = Cli::try_parse_from(["actual", "sync", "--runner", "invalid\nlog-injection"]);
+    let result = Cli::try_parse_from(["actual", "adr-bot", "--runner", "invalid\nlog-injection"]);
     assert!(
         result.is_err(),
         "runner value with newline should be rejected"
@@ -355,14 +355,14 @@ fn test_cli_parse_sync_runner_log_injection_rejected() {
 
 #[test]
 fn test_cli_parse_sync_runner_empty_value_rejected() {
-    let result = Cli::try_parse_from(["actual", "sync", "--runner", ""]);
+    let result = Cli::try_parse_from(["actual", "adr-bot", "--runner", ""]);
     assert!(result.is_err(), "empty runner value should be rejected");
 }
 
 #[test]
 fn test_cli_parse_sync_no_runner_flag() {
-    let cli = Cli::parse_from(["actual", "sync"]);
-    let Command::Sync(args) = cli.command else {
+    let cli = Cli::parse_from(["actual", "adr-bot"]);
+    let Command::AdrBot(args) = cli.command else {
         unreachable!()
     };
     assert_eq!(args.runner, None);
@@ -398,7 +398,7 @@ fn test_run_sync_force_with_fake_claude() {
     let _guard_binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
     let _guard_config = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
 
-    let cli = Cli::parse_from(["actual", "sync", "--force", "--api-url", &server.url()]);
+    let cli = Cli::parse_from(["actual", "adr-bot", "--force", "--api-url", &server.url()]);
     let exit_code = handle_result(run(cli));
 
     assert_eq!(exit_code, 0, "sync --force with fake Claude should succeed");
@@ -416,7 +416,7 @@ fn test_run_sync_not_authenticated_with_fake_claude() {
 
     // Explicitly set --runner to prevent the user's config from auto-selecting
     // a different runner (e.g. codex-cli) which would bypass find_claude_binary().
-    let cli = Cli::parse_from(["actual", "sync", "--force", "--runner", "claude-cli"]);
+    let cli = Cli::parse_from(["actual", "adr-bot", "--force", "--runner", "claude-cli"]);
     let exit_code = handle_result(run(cli));
 
     assert_eq!(
