@@ -17,7 +17,7 @@ mod tests {
     fn spawn_sync_session(env: &TestEnv, extra_args: &[&str]) -> TuiSession {
         let bin = actual_binary_path();
         let mut cmd = format!(
-            "{} sync --force --no-tailor --runner claude-cli --api-url {}",
+            "{} adr-bot --force --no-tailor --runner claude-cli --api-url {}",
             bin, env.api_url
         );
         for arg in extra_args {
@@ -295,7 +295,7 @@ mod tests {
         // Override API URL to an unreachable address; use --no-tui for clean exit
         let bin = actual_binary_path();
         let cmd = format!(
-            "{} sync --force --no-tailor --runner claude-cli --no-tui --api-url http://127.0.0.1:1",
+            "{} adr-bot --force --no-tailor --runner claude-cli --no-tui --api-url http://127.0.0.1:1",
             bin
         );
         let mut session = TuiSession::new(&cmd)
@@ -414,7 +414,7 @@ mod tests {
 
         let bin = actual_binary_path();
         let cmd = format!(
-            "{} sync --force --no-tailor --runner claude-cli --api-url {}",
+            "{} adr-bot --force --no-tailor --runner claude-cli --api-url {}",
             bin, env.api_url
         );
         let mut session = TuiSession::new(&cmd)

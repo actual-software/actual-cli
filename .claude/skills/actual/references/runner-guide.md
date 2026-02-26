@@ -28,7 +28,7 @@ Runners are the AI backends that power `actual adr-bot`'s tailoring step. Each r
 
 ## claude-cli
 
-Wraps the Claude Code CLI binary. Use `--runner claude-cli` to select it explicitly.
+**The default runner.** Wraps the Claude Code CLI binary.
 
 ### Requirements
 
@@ -218,7 +218,7 @@ When no explicit runner is specified, `auto_detect_runner` selects a runner by p
 
 1. **`--model` CLI flag** (if provided): use `runner_candidates(model)` to get an ordered list
 2. **`model` config key** (if set): use `runner_candidates(model)` to get an ordered list
-3. **No model**: default candidate list `[CodexCli, OpenAiApi]`
+3. **No model**: default candidate list `[ClaudeCli, AnthropicApi]`
 
 Each candidate is probed in order:
 - **ClaudeCli**: checks that the binary exists and auth is valid

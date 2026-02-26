@@ -127,13 +127,13 @@ mod tests {
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "claude-cli",
                 "--api-url",
                 &env.api_url,
-            ]) and surface probe errors in Environment phase)
+            ])
             .assert()
             .success();
 
@@ -199,13 +199,13 @@ mod tests {
         env.setup_monorepo();
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "claude-cli",
                 "--api-url",
                 &env.api_url,
-            ]) and surface probe errors in Environment phase)
+            ])
             .assert()
             .success();
 
@@ -262,13 +262,13 @@ mod tests {
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "claude-cli",
                 "--api-url",
                 &env.api_url,
-            ]) and surface probe errors in Environment phase)
+            ])
             .assert()
             .success();
 
@@ -455,13 +455,13 @@ mod tests {
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "claude-cli",
                 "--api-url",
                 &env.api_url,
-            ]) and surface probe errors in Environment phase)
+            ])
             .assert()
             .failure();
 
@@ -509,13 +509,13 @@ mod tests {
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "claude-cli",
                 "--api-url",
                 &env.api_url,
-            ]) and surface probe errors in Environment phase)
+            ])
             .assert()
             .failure();
 
@@ -563,13 +563,13 @@ mod tests {
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "claude-cli",
                 "--api-url",
                 &env.api_url,
-            ]) and surface probe errors in Environment phase)
+            ])
             .assert()
             .failure();
 
@@ -611,13 +611,13 @@ mod tests {
 
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "claude-cli",
                 "--api-url",
                 &env.api_url,
-            ]) and surface probe errors in Environment phase)
+            ])
             .assert()
             .success();
 
@@ -678,13 +678,13 @@ mod tests {
 
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "claude-cli",
                 "--api-url",
                 &env.api_url,
-            ]) and surface probe errors in Environment phase)
+            ])
             .assert()
             .success();
 

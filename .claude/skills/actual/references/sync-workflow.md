@@ -32,7 +32,7 @@ Displays current environment information:
 
 The environment check also runs a runner pre-flight probe: it verifies that the selected runner is available and accessible (binary present, API key set, etc.) before proceeding. If the probe fails, sync aborts here with an error in the Environment step rather than letting the run continue into Analysis and Tailoring.
 
-**Default runner**: When no `runner` or `model` is configured, sync auto-detects using the fallback order `codex-cli → openai-api`. If neither is available, the run aborts during this step with a `NoRunnerAvailable` error.
+**Default runner**: When no `runner` or `model` is configured, sync auto-detects using the fallback order `claude-cli → anthropic-api`. If an OpenAI model (e.g. `gpt-5.2`) is set but no runner is specified, it uses `codex-cli → openai-api → cursor-cli` instead. If no runner is available, the run aborts during this step with a `NoRunnerAvailable` error.
 
 ### Step 2: Analysis
 
