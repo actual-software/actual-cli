@@ -30,9 +30,11 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -85,9 +87,11 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -152,9 +156,11 @@ mod tests {
         env.setup_monorepo();
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -210,9 +216,11 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -251,6 +259,8 @@ mod tests {
                 "--force",
                 "--no-tailor",
                 "--verbose",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -296,6 +306,8 @@ mod tests {
                 "--force",
                 "--no-tailor",
                 "--verbose",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -340,6 +352,8 @@ mod tests {
                 "--no-tailor",
                 "--project",
                 "apps/web",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
@@ -373,9 +387,11 @@ mod tests {
         env.setup_monorepo();
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
