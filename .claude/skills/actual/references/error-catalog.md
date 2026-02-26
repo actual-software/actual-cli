@@ -192,7 +192,7 @@ export OPENAI_API_KEY="sk-..."
 
 **Cause**: `actual adr-bot` was called without `--runner` or a `runner` config value, and none of the candidate runners for the given model passed their environment probe. The error message lists each candidate and the reason it was skipped.
 
-**Hint**: Install codex-cli (`npm install -g @openai/codex`) or set `OPENAI_API_KEY`. For Claude models, install claude-cli or set `ANTHROPIC_API_KEY`.
+**Hint**: Install a runner (e.g. `npm install -g @anthropic-ai/claude-code`) or set an API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
 **Diagnosis**:
 ```bash
