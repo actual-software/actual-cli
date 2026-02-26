@@ -157,7 +157,7 @@ const PORTRAIT_BLOCK_TY = Math.round(
   PORTRAIT_TERM_TOP - PORTRAIT_SCENE_SCALE * ((1080 - 640) / 2)
 );
 
-export const ShortClip: React.FC = () => {
+export const SocialMediaClip: React.FC = () => {
   const { width, height } = useVideoConfig();
   // Must be called before any conditional returns (React hooks rule).
   const frame = useCurrentFrame();

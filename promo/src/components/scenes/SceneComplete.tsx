@@ -12,7 +12,7 @@ interface SceneCompleteProps {
   // When the preceding scene ends zoomed in/translated, pass the ending
   // camera state so SceneComplete smoothly transitions over the first 40
   // frames instead of jumping. HeroClip doesn't need this (ScenePipeline
-  // already completes the zoom-out). ShortClip passes 1.15 / -40.
+  // already completes the zoom-out). SocialMediaClip passes 1.15 / -40.
   initialScale?: number;
   initialOffsetY?: number;
 }
