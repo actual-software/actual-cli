@@ -1,4 +1,16 @@
 import type { Metadata } from "next";
+import {
+    ADR_BOT_FLAGS,
+    ADR_BOT_EXAMPLES,
+    RUNNERS,
+    OUTPUT_FORMATS,
+    CONFIG_KEYS,
+    CONFIG_EXAMPLES,
+    ENV_VARS,
+    COMMON_ERRORS,
+    EXIT_CODES,
+    LANGUAGES,
+} from "../../lib/docs-data";
 
 export const metadata: Metadata = {
     title: "Docs — actual CLI",
@@ -274,28 +286,7 @@ actual auth   # verify`}</Pre>
                         </P>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-[12px]">
-                            {[
-                                {
-                                    language: "TypeScript",
-                                    color: "#3178c6",
-                                    frameworks: ["Next.js", "HeroUI"],
-                                },
-                                {
-                                    language: "Rust",
-                                    color: "#ce422b",
-                                    frameworks: ["Ratatui"],
-                                },
-                                {
-                                    language: "Python",
-                                    color: "#f7c948",
-                                    frameworks: ["FastAPI", "Django"],
-                                },
-                                {
-                                    language: "Java",
-                                    color: "#e76f00",
-                                    frameworks: ["Spring Boot"],
-                                },
-                            ].map(({ language, color, frameworks }) => (
+                            {LANGUAGES.map(({ language, color, frameworks }) => (
                                 <div key={language} className="border border-[#393939] rounded-[6px] overflow-hidden bg-[#030301]">
                                     <div className="flex items-center gap-[8px] px-[14px] py-[10px] bg-[#0d0d0d] border-b border-[#393939]">
                                         <span className="size-[8px] rounded-full flex-shrink-0" style={{ background: color }} />
@@ -342,44 +333,10 @@ actual auth   # verify`}</Pre>
                             and writes the output file. Prompts for confirmation before writing.
                         </P>
                         <Pre>{`actual adr-bot [flags]`}</Pre>
-                        <FlagTable rows={[
-                            { flag: "--dry-run", type: "bool", desc: "Preview what would change without writing any files." },
-                            { flag: "--full", type: "bool", desc: "With --dry-run, print the full rendered file to stdout." },
-                            { flag: "--force", type: "bool", desc: "Skip confirmation prompts and bypass all caches." },
-                            { flag: "--no-tailor", type: "bool", desc: "Skip AI tailoring; write raw ADRs as-is from the bank." },
-                            { flag: "--project <PATH>", type: "string", desc: "Target a specific sub-project in a monorepo (repeatable)." },
-                            { flag: "--output-format <FMT>", type: "enum", desc: "claude-md (default) | agents-md | cursor-rules" },
-                            { flag: "--runner <RUNNER>", type: "enum", desc: "AI backend: claude-cli | anthropic-api | openai-api | codex-cli | cursor-cli" },
-                            { flag: "--model <MODEL>", type: "string", desc: "Override AI model. Runner is auto-inferred from the model name." },
-                            { flag: "--max-budget-usd <N>", type: "float", desc: "Spending cap per tailoring invocation (USD)." },
-                            { flag: "--reset-rejections", type: "bool", desc: "Clear remembered ADR rejections and show all ADRs again." },
-                            { flag: "--verbose", type: "bool", desc: "Show detailed progress and AI runner output." },
-                            { flag: "--show-errors", type: "bool", desc: "Stream runner stderr in real time — useful for diagnosing hangs or auth failures." },
-                            { flag: "--no-tui", type: "bool", desc: "Disable the TUI; use plain line output instead." },
-                            { flag: "--api-url <URL>", type: "string", desc: "Override the ADR bank API endpoint." },
-                        ]} />
+                        <FlagTable rows={ADR_BOT_FLAGS} />
                         <div className="flex flex-col gap-[12px]">
                             <H3>Examples</H3>
-                            <Pre>{`# Preview without writing
-actual adr-bot --dry-run
-
-# Force fresh sync (bypass cache)
-actual adr-bot --force
-
-# Generate AGENTS.md instead of CLAUDE.md
-actual adr-bot --output-format agents-md
-
-# Use Anthropic API directly instead of Claude Code CLI
-actual adr-bot --runner anthropic-api
-
-# Use a specific model (runner auto-inferred)
-actual adr-bot --model gpt-5.2
-
-# Monorepo: target specific sub-projects
-actual adr-bot --project packages/api --project packages/web
-
-# Debug a hang
-actual adr-bot --verbose --show-errors`}</Pre>
+                            <Pre>{ADR_BOT_EXAMPLES.map((e) => `# ${e.comment}\n${e.cmd}`).join("\n\n")}</Pre>
                         </div>
                     </Section>
 
@@ -436,44 +393,21 @@ actual config set <KEY> <VALUE>`}</Pre>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-[#393939]/60">
-                                    {[
-                                        ["runner", "claude-cli", "AI backend to use for tailoring"],
-                                        ["model", "—", "Default model (runner is auto-inferred)"],
-                                        ["output_format", "claude-md", "claude-md | agents-md | cursor-rules"],
-                                        ["batch_size", "15", "ADRs per API request batch"],
-                                        ["concurrency", "10", "Max concurrent API requests"],
-                                        ["invocation_timeout_secs", "600", "Runner timeout in seconds"],
-                                        ["max_budget_usd", "—", "Spending cap per tailoring invocation"],
-                                        ["max_turns", "—", "Max conversation turns (claude-cli only)"],
-                                        ["max_per_framework", "—", "Max ADRs per detected framework"],
-                                        ["include_general", "—", "Include language-agnostic ADRs"],
-                                        ["include_categories", "—", "Only include these ADR categories (comma-separated)"],
-                                        ["exclude_categories", "—", "Exclude these ADR categories (comma-separated)"],
-                                        ["anthropic_api_key", "—", "Anthropic API key (stored at mode 0600)"],
-                                        ["openai_api_key", "—", "OpenAI API key"],
-                                        ["cursor_api_key", "—", "Cursor API key"],
-                                        ["telemetry.enabled", "true", "Enable or disable telemetry"],
-                                    ].map(([key, def, desc], i) => (
+                                    {CONFIG_KEYS.map((k, i) => (
                                         <tr key={i} className="hover:bg-white/[0.02] transition-colors">
                                             <td className="px-[16px] py-[10px] align-top">
-                                                <code className="font-mono text-[#39eba1] text-[12px]">{key}</code>
+                                                <code className="font-mono text-[#39eba1] text-[12px]">{k.key}</code>
                                             </td>
                                             <td className="px-[16px] py-[10px] align-top whitespace-nowrap">
-                                                <code className="font-mono text-white/40 text-[12px]">{def}</code>
+                                                <code className="font-mono text-white/40 text-[12px]">{k.default_}</code>
                                             </td>
-                                            <td className="px-[16px] py-[10px] align-top text-white/70">{desc}</td>
+                                            <td className="px-[16px] py-[10px] align-top text-white/70">{k.desc}</td>
                                         </tr>
                                     ))}
                                 </tbody>
                             </table>
                         </div>
-                        <Pre>{`# Examples
-actual config set runner anthropic-api
-actual config set model claude-sonnet-4-6
-actual config set output_format agents-md
-actual config set invocation_timeout_secs 1200
-actual config set telemetry.enabled false
-actual config set anthropic_api_key "sk-ant-..."`}</Pre>
+                        <Pre>{`# Examples\n${CONFIG_EXAMPLES.join("\n")}`}</Pre>
                     </Section>
 
                     {/* actual runners */}
@@ -523,48 +457,7 @@ actual models --no-fetch   # skip live API fetch; show hardcoded list only`}</Pr
                             <Code>--runner</Code> or <Code>actual config set runner</Code>.
                         </P>
                         <div className="flex flex-col gap-[16px]">
-                            {[
-                                {
-                                    name: "claude-cli",
-                                    color: "#39eba1",
-                                    req: "claude binary",
-                                    model: "claude-sonnet-4-6",
-                                    setup: "npm install -g @anthropic-ai/claude-code\nclaude auth login",
-                                    note: "Default runner. Uses the Claude Code CLI subprocess. Short model aliases (sonnet, opus, haiku) work with this runner.",
-                                },
-                                {
-                                    name: "anthropic-api",
-                                    color: "#43bdb7",
-                                    req: "ANTHROPIC_API_KEY",
-                                    model: "claude-sonnet-4-6",
-                                    setup: "export ANTHROPIC_API_KEY=sk-ant-...\n# or: actual config set anthropic_api_key sk-ant-...",
-                                    note: "Calls the Anthropic Messages API directly. Requires a full model name (not short aliases).",
-                                },
-                                {
-                                    name: "openai-api",
-                                    color: "#43bdb7",
-                                    req: "OPENAI_API_KEY",
-                                    model: "gpt-5.2",
-                                    setup: "export OPENAI_API_KEY=sk-...",
-                                    note: "Calls the OpenAI Responses API directly.",
-                                },
-                                {
-                                    name: "codex-cli",
-                                    color: "#4d93c8",
-                                    req: "codex binary",
-                                    model: "gpt-5.2-codex",
-                                    setup: "npm install -g @openai/codex\ncodex login   # or set OPENAI_API_KEY",
-                                    note: "Uses the Codex CLI subprocess. ChatGPT OAuth (codex login) only supports the default model; for custom models, set OPENAI_API_KEY.",
-                                },
-                                {
-                                    name: "cursor-cli",
-                                    color: "#4d93c8",
-                                    req: "agent binary",
-                                    model: "opus-4.6-thinking",
-                                    setup: "curl https://cursor.com/install -fsS | bash\ncursor-agent login   # or set CURSOR_API_KEY",
-                                    note: "Uses the Cursor agent CLI subprocess.",
-                                },
-                            ].map((r) => (
+                            {RUNNERS.map((r) => (
                                 <div key={r.name} className="border border-[#393939] rounded-[6px] p-[20px] flex flex-col gap-[12px] bg-[#030301]">
                                     <div className="flex items-center justify-between gap-[12px] flex-wrap">
                                         <code className="font-mono text-[15px] font-semibold" style={{ color: r.color }}>
@@ -602,11 +495,7 @@ actual models --no-fetch   # skip live API fetch; show hardcoded list only`}</Pr
                             markers so content outside the markers is always preserved.
                         </P>
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-[16px]">
-                            {[
-                                { value: "claude-md", file: "CLAUDE.md", tool: "Claude Code", color: "#39eba1" },
-                                { value: "agents-md", file: "AGENTS.md", tool: "Codex CLI, OpenCode", color: "#43bdb7" },
-                                { value: "cursor-rules", file: ".cursor/rules/actual-policies.mdc", tool: "Cursor IDE", color: "#4d93c8" },
-                            ].map((f) => (
+                            {OUTPUT_FORMATS.map((f) => (
                                 <div key={f.value} className="border border-[#393939] rounded-[6px] p-[16px] flex flex-col gap-[8px]">
                                     <code className="font-mono text-[13px] font-semibold" style={{ color: f.color }}>{f.value}</code>
                                     <p className="text-white text-[13px] font-medium">{f.file}</p>
@@ -638,20 +527,12 @@ actual models --no-fetch   # skip live API fetch; show hardcoded list only`}</Pr
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-[#393939]/60">
-                                    {[
-                                        ["ACTUAL_CONFIG", "Exact path to config file (highest precedence)"],
-                                        ["ACTUAL_CONFIG_DIR", "Directory for config (must be absolute)"],
-                                        ["ANTHROPIC_API_KEY", "Anthropic API key (overrides config value)"],
-                                        ["OPENAI_API_KEY", "OpenAI API key (overrides config value)"],
-                                        ["CURSOR_API_KEY", "Cursor API key (overrides config value)"],
-                                        ["CLAUDE_BINARY", "Override path to the claude binary"],
-                                        ["RUST_LOG", "Log level (default: warn)"],
-                                    ].map(([k, v], i) => (
+                                    {ENV_VARS.map((v, i) => (
                                         <tr key={i} className="hover:bg-white/[0.02] transition-colors">
                                             <td className="px-[16px] py-[10px]">
-                                                <code className="font-mono text-[#39eba1] text-[12px]">{k}</code>
+                                                <code className="font-mono text-[#39eba1] text-[12px]">{v.name}</code>
                                             </td>
-                                            <td className="px-[16px] py-[10px] text-white/70">{v}</td>
+                                            <td className="px-[16px] py-[10px] text-white/70">{v.purpose}</td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -670,32 +551,7 @@ actual models --no-fetch   # skip live API fetch; show hardcoded list only`}</Pr
 
                         <H3>Common errors</H3>
                         <div className="flex flex-col gap-[12px]">
-                            {[
-                                {
-                                    err: "Claude Code is not installed",
-                                    fix: "npm install -g @anthropic-ai/claude-code",
-                                },
-                                {
-                                    err: "Claude Code is not authenticated",
-                                    fix: "claude auth login",
-                                },
-                                {
-                                    err: "No runner available for model '…'",
-                                    fix: "Install a runner or set an API key. Run actual runners to see what's available.",
-                                },
-                                {
-                                    err: "Runner timed out after 600s",
-                                    fix: "actual config set invocation_timeout_secs 1200",
-                                },
-                                {
-                                    err: "Insufficient credits",
-                                    fix: "Add credits at your provider's billing page, or use --max-budget-usd to cap spend.",
-                                },
-                                {
-                                    err: "Analysis returned no projects",
-                                    fix: "Make sure you're running from inside a git repo. For monorepos, use --project <PATH>.",
-                                },
-                            ].map((e, i) => (
+                            {COMMON_ERRORS.map((e, i) => (
                                 <div key={i} className="border border-[#393939] rounded-[6px] overflow-hidden">
                                     <div className="bg-[#0d0d0d] border-b border-[#393939] px-[16px] py-[10px]">
                                         <code className="font-mono text-[12px] text-white/60">{e.err}</code>
@@ -730,19 +586,12 @@ RUST_LOG=debug actual adr-bot --no-tui 2>&1`}</Pre>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-[#393939]/60">
-                                    {[
-                                        ["0", "Success"],
-                                        ["1", "General runtime error"],
-                                        ["2", "Auth / setup error (binary not found, not authenticated, API key missing)"],
-                                        ["3", "Billing / API error (credits too low)"],
-                                        ["4", "User cancelled"],
-                                        ["5", "I/O error (permissions, disk space)"],
-                                    ].map(([code, meaning], i) => (
+                                    {EXIT_CODES.map((c, i) => (
                                         <tr key={i} className="hover:bg-white/[0.02] transition-colors">
                                             <td className="px-[16px] py-[10px]">
-                                                <code className="font-mono text-[#39eba1] text-[13px] font-bold">{code}</code>
+                                                <code className="font-mono text-[#39eba1] text-[13px] font-bold">{c.code}</code>
                                             </td>
-                                            <td className="px-[16px] py-[10px] text-white/70">{meaning}</td>
+                                            <td className="px-[16px] py-[10px] text-white/70">{c.meaning}</td>
                                         </tr>
                                     ))}
                                 </tbody>
