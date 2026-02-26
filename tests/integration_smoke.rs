@@ -19,9 +19,11 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "adr-bot",
+                "sync",
                 "--force",
                 "--no-tailor",
+                "--runner",
+                "claude-cli",
                 "--api-url",
                 &env.api_url,
             ])
