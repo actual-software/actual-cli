@@ -295,7 +295,7 @@ mod tests {
         // Override API URL to an unreachable address; use --no-tui for clean exit
         let bin = actual_binary_path();
         let cmd = format!(
-            "{} adr-bot --force --no-tailor --no-tui --api-url http://127.0.0.1:1",
+            "{} sync --force --no-tailor --runner claude-cli --no-tui --api-url http://127.0.0.1:1",
             bin
         );
         let mut session = TuiSession::new(&cmd)
@@ -414,7 +414,7 @@ mod tests {
 
         let bin = actual_binary_path();
         let cmd = format!(
-            "{} adr-bot --force --no-tailor --api-url {}",
+            "{} sync --force --no-tailor --runner claude-cli --api-url {}",
             bin, env.api_url
         );
         let mut session = TuiSession::new(&cmd)
