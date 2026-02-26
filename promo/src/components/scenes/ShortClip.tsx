@@ -131,11 +131,16 @@ const FastPipeline: React.FC = () => {
 
 // Short clip: 1080 frames (18s at 60fps)
 // Hook: 60f, FastPipeline: 660f (full pipeline compressed), Complete: 120f, CTA: 240f
+//
+// The outer container is always 1920×1080. On non-16:9 canvases (e.g. 1:1) this
+// intentionally overflows so the terminal shows the left-hand side prominently.
+// The CTA uses a canvas-sized absolute overlay so its layout centres correctly
+// regardless of aspect ratio.
 export const ShortClip: React.FC = () => {
   const { width, height } = useVideoConfig();
   const isSquare = width === height;
   return (
-    <div style={{ position: "relative", width, height }}>
+    <div style={{ position: "relative", width: 1920, height: 1080 }}>
       <Sequence from={0} durationInFrames={60}>
         <InstantHook />
       </Sequence>
@@ -145,11 +150,13 @@ export const ShortClip: React.FC = () => {
       <Sequence from={720} durationInFrames={120}>
         <SceneComplete />
       </Sequence>
-      {/* +180f (3s) hold on the CTA wordmark/tagline */}
+      {/* CTA: absolute overlay sized to the actual canvas so square layout centres correctly */}
       <Sequence from={840} durationInFrames={240}>
-        <SceneCta totalDuration={240} layout={isSquare ? "square" : "wide"} />
+        <div style={{ position: "absolute", left: 0, top: 0, width, height }}>
+          <SceneCta totalDuration={240} layout={isSquare ? "square" : "wide"} />
+        </div>
       </Sequence>
-      <FilmGrain width={width} height={height} opacity={0.035} />
+      <FilmGrain width={1920} height={1080} opacity={0.035} />
       <Vignette intensity={0.55} />
     </div>
   );
