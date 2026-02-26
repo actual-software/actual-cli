@@ -1,5 +1,5 @@
 import React from "react";
-import { Sequence, useCurrentFrame, interpolate } from "remotion";
+import { Sequence, useCurrentFrame, useVideoConfig, interpolate } from "remotion";
 import { TerminalWindow } from "../Terminal/TerminalWindow";
 import { TuiLayout } from "../Terminal/TuiLayout";
 import { SceneComplete } from "./SceneComplete";
@@ -129,24 +129,28 @@ const FastPipeline: React.FC = () => {
   );
 };
 
-// Short clip: 900 frames (15s at 60fps)
-// Hook: 60f, FastPipeline: 660f (full pipeline compressed), Complete: 120f, CTA: 60f
-export const ShortClip: React.FC = () => (
-  <div style={{ position: "relative", width: 1920, height: 1080 }}>
-    <Sequence from={0} durationInFrames={60}>
-      <InstantHook />
-    </Sequence>
-    <Sequence from={60} durationInFrames={660}>
-      <FastPipeline />
-    </Sequence>
-    <Sequence from={720} durationInFrames={120}>
-      <SceneComplete />
-    </Sequence>
-    {/* +180f (3s) hold on the CTA wordmark/tagline */}
-    <Sequence from={840} durationInFrames={240}>
-      <SceneCta totalDuration={240} />
-    </Sequence>
-    <FilmGrain width={1920} height={1080} opacity={0.035} />
-    <Vignette intensity={0.55} />
-  </div>
-);
+// Short clip: 1080 frames (18s at 60fps)
+// Hook: 60f, FastPipeline: 660f (full pipeline compressed), Complete: 120f, CTA: 240f
+export const ShortClip: React.FC = () => {
+  const { width, height } = useVideoConfig();
+  const isSquare = width === height;
+  return (
+    <div style={{ position: "relative", width, height }}>
+      <Sequence from={0} durationInFrames={60}>
+        <InstantHook />
+      </Sequence>
+      <Sequence from={60} durationInFrames={660}>
+        <FastPipeline />
+      </Sequence>
+      <Sequence from={720} durationInFrames={120}>
+        <SceneComplete />
+      </Sequence>
+      {/* +180f (3s) hold on the CTA wordmark/tagline */}
+      <Sequence from={840} durationInFrames={240}>
+        <SceneCta totalDuration={240} layout={isSquare ? "square" : "wide"} />
+      </Sequence>
+      <FilmGrain width={width} height={height} opacity={0.035} />
+      <Vignette intensity={0.55} />
+    </div>
+  );
+};

@@ -34,9 +34,14 @@ function GradientText({
 interface SceneCtaProps {
   /** Total duration of this sequence in frames. Fadeout fires in the last 30f. */
   totalDuration?: number;
+  /** "wide" = 16:9 layout (terminal slides left, CTA right). "square" = 1:1 sandwich (wordmark top, CTA bottom). */
+  layout?: "wide" | "square";
 }
 
-export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
+export const SceneCta: React.FC<SceneCtaProps> = ({
+  totalDuration = 180,
+  layout = "wide",
+}) => {
   const frame = useCurrentFrame();
   const absoluteFrame = FRAMES.CTA_START + frame;
   const state = getStateAtFrame(absoluteFrame);
@@ -45,7 +50,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
   const HOLD = 30;
   const animFrame = Math.max(0, frame - HOLD);
 
-  // Terminal slides left and shrinks
+  // Terminal slides left and shrinks (wide layout only)
   const slideProgress = spring({
     frame: animFrame,
     fps: 60,
@@ -55,18 +60,21 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
   const termX = interpolate(slideProgress, [0, 1], [0, -280]);
   const termScale = interpolate(slideProgress, [0, 1], [1.0, 0.62]);
 
-  // Right side content fades in with stagger (all offset by HOLD)
+  // CTA content fades in with stagger (all offset by HOLD)
   const wordmarkOpacity = interpolate(frame, [HOLD + 20, HOLD + 45], [0, 1], {
+    extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
   const taglineOpacity = interpolate(frame, [HOLD + 45, HOLD + 70], [0, 1], {
+    extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
   const urlOpacity = interpolate(frame, [HOLD + 70, HOLD + 90], [0, 1], {
+    extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  // URL underline grows left-to-right
+  // URL line grows left-to-right
   const urlUnderlineWidth = interpolate(frame, [HOLD + 90, HOLD + 130], [0, 100], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
@@ -80,6 +88,117 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" }
   );
 
+  // Shared URL row (used by both layouts)
+  const urlRow = (
+    <div
+      style={{
+        opacity: urlOpacity,
+        display: "flex",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 12,
+        width: "100%",
+      }}
+    >
+      <span
+        style={{
+          fontFamily: FONTS.mono,
+          fontSize: 20,
+          color: COLORS.borderGreen,
+          letterSpacing: 1,
+          flexShrink: 0,
+        }}
+      >
+        {COPY.cta.url}
+      </span>
+      <div
+        style={{
+          flex: 1,
+          height: 2,
+          marginRight: -200,
+          background: `linear-gradient(90deg, ${COLORS.borderGreen}, ${COLORS.borderTeal})`,
+          transformOrigin: "left center",
+          transform: `scaleX(${urlUnderlineWidth / 100})`,
+        }}
+      />
+    </div>
+  );
+
+  // ── Square layout (1:1) ─────────────────────────────────────────────────────
+  // Terminal stays centered. Wordmark appears in top band, tagline+URL in bottom band.
+  if (layout === "square") {
+    return (
+      <div
+        style={{
+          width: "100%",
+          height: "100%",
+          background: COLORS.background,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          opacity: fadeOut,
+        }}
+      >
+        {/* Terminal — centered, no movement */}
+        <TerminalWindow width={1200} height={640} glowIntensity={0.2}>
+          <TuiLayout
+            steps={state.steps}
+            activeStepIndex={state.activeStepIndex}
+            outputLines={state.outputLines}
+            currentFrame={absoluteFrame}
+          />
+        </TerminalWindow>
+
+        {/* Top band — wordmark */}
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 220,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            opacity: wordmarkOpacity,
+          }}
+        >
+          <GradientText text={COPY.cta.wordmark} fontSize={72} />
+        </div>
+
+        {/* Bottom band — tagline + URL+line */}
+        <div
+          style={{
+            position: "absolute",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            height: 220,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "center",
+            padding: "0 60px",
+            gap: 14,
+          }}
+        >
+          <div
+            style={{
+              opacity: taglineOpacity,
+              fontFamily: FONTS.mono,
+              fontSize: 16,
+              color: COLORS.textPrimary,
+              lineHeight: 1.5,
+            }}
+          >
+            {COPY.cta.tagline}
+          </div>
+          {urlRow}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Wide layout (16:9, default) ─────────────────────────────────────────────
   return (
     <div
       style={{
@@ -92,7 +211,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
         opacity: fadeOut,
       }}
     >
-      {/* Terminal — left third, slides in */}
+      {/* Terminal — slides left and shrinks */}
       <div
         style={{
           position: "absolute",
@@ -143,39 +262,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
           {COPY.cta.tagline}
         </div>
 
-        {/* URL with animated line extending to the right */}
-        <div
-          style={{
-            opacity: urlOpacity,
-            display: "flex",
-            flexDirection: "row",
-            alignItems: "center",
-            gap: 12,
-            width: "100%",
-          }}
-        >
-          <span
-            style={{
-              fontFamily: FONTS.mono,
-              fontSize: 20,
-              color: COLORS.borderGreen,
-              letterSpacing: 1,
-              flexShrink: 0,
-            }}
-          >
-            {COPY.cta.url}
-          </span>
-          <div
-            style={{
-              flex: 1,
-              height: 2,
-              marginRight: -200,
-              background: `linear-gradient(90deg, ${COLORS.borderGreen}, ${COLORS.borderTeal})`,
-              transformOrigin: "left center",
-              transform: `scaleX(${urlUnderlineWidth / 100})`,
-            }}
-          />
-        </div>
+        {urlRow}
       </div>
     </div>
   );
