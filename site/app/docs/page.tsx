@@ -228,7 +228,7 @@ npx @actualai/actual adr-bot`}</Pre>
                                         </p>
                                         <Pre>{`xattr -dr com.apple.quarantine $(which actual)`}</Pre>
                                         <p className="text-white/40 text-[12px] leading-[1.6]">
-                                            Alternatively, use <Code>npx actual adr-bot</Code> — it runs through Node.js and isn&apos;t subject to Gatekeeper.
+                                            Alternatively, use <Code>npx @actualai/actual adr-bot</Code> — it runs through Node.js and isn&apos;t subject to Gatekeeper.
                                         </p>
                                     </div>
                                 </div>
