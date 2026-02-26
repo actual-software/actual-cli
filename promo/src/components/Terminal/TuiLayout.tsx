@@ -115,12 +115,12 @@ const TuiBox: React.FC<{
 );
 
 // The header title for the bird art box, matching the real CLI first border line:
-// ╭ actual v0.1.0 ──── https://app.actual.ai ╮
+// ╭ actual v0.1.0 ───── https://app.actual.ai ╮
 const LogoBoxTitle = (
   <>
     <span style={{ color: COLORS.textPrimary }}>actual </span>
     <span style={{ color: COLORS.borderGreen }}>v0.1.0</span>
-    <span style={{ color: COLORS.borderGreen }}> ──── </span>
+    <span style={{ color: COLORS.borderGreen }}> ───── </span>
     <span style={{ color: COLORS.textPrimary }}>https://app.actual.ai</span>
   </>
 );
