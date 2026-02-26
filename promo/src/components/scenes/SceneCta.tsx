@@ -236,7 +236,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
             style={{
               opacity: taglineOpacity,
               fontFamily: FONTS.mono,
-              fontSize: 48,
+              fontSize: 36,
               color: COLORS.textPrimary,
               lineHeight: 1.5,
             }}
