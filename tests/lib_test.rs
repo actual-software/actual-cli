@@ -398,7 +398,15 @@ fn test_run_sync_force_with_fake_claude() {
     let _guard_binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
     let _guard_config = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
 
-    let cli = Cli::parse_from(["actual", "adr-bot", "--force", "--api-url", &server.url()]);
+    let cli = Cli::parse_from([
+        "actual",
+        "sync",
+        "--force",
+        "--runner",
+        "claude-cli",
+        "--api-url",
+        &server.url(),
+    ]);
     let exit_code = handle_result(run(cli));
 
     assert_eq!(exit_code, 0, "sync --force with fake Claude should succeed");
