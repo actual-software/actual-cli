@@ -114,7 +114,7 @@ export default function InstallSection() {
                         </h3>
                     </div>
                     <div className="flex flex-col gap-[8px]">
-                        <CodeBlock>npx actual adr-bot</CodeBlock>
+                        <CodeBlock>npx @actualai/actual adr-bot</CodeBlock>
                     </div>
                     <p className="text-white/50 text-[13px] leading-[1.6]">
                         No install needed. Works anywhere Node is available — great for CI

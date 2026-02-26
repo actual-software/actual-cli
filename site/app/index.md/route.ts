@@ -10,7 +10,7 @@ const INDEX_MD = `# actual — AI context for your codebase
    \`\`\`bash
    brew install actual-software/actual/actual
    # or zero-install (no Gatekeeper issues — runs through Node.js):
-   npx actual adr-bot
+   npx @actualai/actual adr-bot
    \`\`\`
 
 2. **Authenticate** — actual uses Claude Code as the default AI backend:
