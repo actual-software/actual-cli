@@ -25,6 +25,7 @@ body {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     font-feature-settings: "kern", "liga", "calt";
+    overflow-x: hidden;
 }
 
 @layer utilities {

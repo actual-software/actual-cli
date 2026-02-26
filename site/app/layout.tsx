@@ -39,7 +39,7 @@ export default function RootLayout({
         <html lang="en">
             <body className={`${inter.variable} ${geistMono.variable} antialiased`}>
                 <Header />
-                <div className="min-h-screen flex flex-col relative text-white overflow-x-hidden">
+                <div className="min-h-screen flex flex-col relative text-white">
                     {children}
                     <Footer />
                 </div>
