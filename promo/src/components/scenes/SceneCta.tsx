@@ -68,6 +68,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
 
   // URL underline grows left-to-right
   const urlUnderlineWidth = interpolate(frame, [HOLD + 90, HOLD + 130], [0, 100], {
+    extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
