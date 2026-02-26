@@ -47,7 +47,7 @@ export const ConfirmWidget: React.FC<ConfirmWidgetProps> = ({
         lineHeight: 1.7,
       }}
     >
-      <div>Proceed with sync?</div>
+      <div>Proceed with adr-bot?</div>
       <div>
         {renderBtn("Accept", "accept")}
         {renderBtn("Change", "change")}
