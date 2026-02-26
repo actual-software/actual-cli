@@ -17,7 +17,7 @@ mod tests {
     fn spawn_sync_session(env: &TestEnv, extra_args: &[&str]) -> TuiSession {
         let bin = actual_binary_path();
         let mut cmd = format!(
-            "{} adr-bot --force --no-tailor --api-url {}",
+            "{} sync --force --no-tailor --runner claude-cli --api-url {}",
             bin, env.api_url
         );
         for arg in extra_args {
@@ -274,10 +274,10 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_FAIL, ANALYSIS_SINGLE_PROJECT);
 
         // Use --no-tui so the process exits on its own after the error.
-        // Explicitly select claude-cli so the auth check runs (the new default
-        // is codex-cli which would fail with NoRunnerAvailable before reaching
-        // the auth step).
-        let mut session = spawn_sync_session(&env, &["--no-tui", "--runner", "claude-cli"]);
+        // spawn_sync_session already sets --runner claude-cli so the auth check
+        // runs (the default is codex-cli which would fail with NoRunnerAvailable
+        // before reaching the auth step).
+        let mut session = spawn_sync_session(&env, &["--no-tui"]);
 
         // Auth failure shows "not authenticated" in the error panel
         session
