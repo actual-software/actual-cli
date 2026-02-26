@@ -5,7 +5,7 @@ const LLMS_TXT = `# actual — AI context for your codebase
 > actual is a CLI tool that analyzes a git repository, fetches the team's Architectural Decision Records (ADRs) from the Actual AI bank, tailors them to the detected languages and frameworks, and writes AI context files — keeping every coding agent architecturally aligned, automatically.
 
 Install via Homebrew: \`brew install actual-software/actual/actual\`
-Zero-install: \`npx actual adr-bot\`
+Zero-install: \`npx @actualai/actual adr-bot\`
 
 Output formats: CLAUDE.md (claude-md), AGENTS.md (agents-md), .cursor/rules/actual-policies.mdc (cursor-rules)
 

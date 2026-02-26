@@ -60,7 +60,7 @@ const DOCS_MD = `# actual CLI — Getting Started & Command Reference
 # 1. Install
 brew install actual-software/actual/actual
 # or zero-install (no Gatekeeper issues — runs through Node.js):
-npx actual adr-bot
+npx @actualai/actual adr-bot
 
 # macOS Gatekeeper: the binary is not codesigned yet (Apple Developer Program application
 # pending). After brew install, remove the quarantine flag once before running:
