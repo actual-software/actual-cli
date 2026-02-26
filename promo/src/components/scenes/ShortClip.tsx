@@ -118,20 +118,106 @@ const FastPipeline: React.FC = () => {
   );
 };
 
+// Portrait (9:16) constants.
+// Scale: 1200 × 0.9 = 1080px → fills the canvas width exactly.
+// TermTop: vertical offset from canvas top where the scaled terminal sits.
+// This leaves ~1000px below the terminal for the CTA text block.
+const PORTRAIT_SCALE = 0.9;
+const PORTRAIT_TERM_TOP = 200;
+
+// Wraps a scene component (InstantHook / FastPipeline / SceneComplete) for the
+// portrait canvas. The scene renders into a 1200×640 logical area (matching the
+// TerminalWindow dimensions) which is then CSS-scaled so it fills the 1080px
+// canvas width, anchored at the top-left corner.
+const PortraitSceneWrapper: React.FC<{
+  children: React.ReactNode;
+  top: number;
+  scale: number;
+}> = ({ children, top, scale }) => (
+  <div
+    style={{
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: 1080,
+      height: 1920,
+      background: COLORS.background,
+      overflow: "hidden",
+    }}
+  >
+    {/* 1200×640 logical area scaled to fit portrait canvas width.
+        transformOrigin: top-left so scale(0.9) → visual 1080×576,
+        anchored cleanly at (0, top). */}
+    <div
+      style={{
+        position: "absolute",
+        left: 0,
+        top,
+        width: 1200,
+        height: 640,
+        transform: `scale(${scale})`,
+        transformOrigin: "top left",
+      }}
+    >
+      {children}
+    </div>
+  </div>
+);
+
 // Short clip: 1080 frames (18s at 60fps)
 // Hook: 60f, FastPipeline: 660f (full pipeline compressed), Complete: 120f, CTA: 240f
 //
-// The outer container is always 1920×1080. On non-16:9 canvases (e.g. 1:1) this
-// intentionally overflows so the terminal shows the left-hand side prominently.
-// The CTA uses a canvas-sized absolute overlay so its layout centres correctly
-// regardless of aspect ratio.
-// In square (1:1) mode the terminal is shifted 15% of the canvas width to the left
-// so more of the left panel (logo + steps) is visible.
+// Three layout modes driven by canvas dimensions:
+//   Wide (16:9, 1920×1080)  — outer container is 1920×1080, terminal centred.
+//   Square (1:1, 1080×1080) — same 1920×1080 container, terminal shifted left
+//                             by SQUARE_TERM_OFFSET to expose the logo+steps panel.
+//   Portrait (9:16, 1080×1920) — native 1080×1920 container; terminal scaled to
+//                             fill canvas width, positioned near top to leave room
+//                             for the CTA text below.
 const SQUARE_TERM_OFFSET = -162; // 15% of 1080px
 
 export const ShortClip: React.FC = () => {
   const { width, height } = useVideoConfig();
   const isSquare = width === height;
+  const isPortrait = height > width; // 9:16 (1080×1920)
+
+  // ── Portrait (9:16) layout ─────────────────────────────────────────────────
+  if (isPortrait) {
+    return (
+      <div style={{ position: "relative", width: 1080, height: 1920 }}>
+        <Sequence from={0} durationInFrames={60}>
+          <PortraitSceneWrapper top={PORTRAIT_TERM_TOP} scale={PORTRAIT_SCALE}>
+            <InstantHook />
+          </PortraitSceneWrapper>
+        </Sequence>
+        <Sequence from={60} durationInFrames={660}>
+          <PortraitSceneWrapper top={PORTRAIT_TERM_TOP} scale={PORTRAIT_SCALE}>
+            <FastPipeline />
+          </PortraitSceneWrapper>
+        </Sequence>
+        <Sequence from={720} durationInFrames={120}>
+          <PortraitSceneWrapper top={PORTRAIT_TERM_TOP} scale={PORTRAIT_SCALE}>
+            <SceneComplete />
+          </PortraitSceneWrapper>
+        </Sequence>
+        {/* CTA: absolute overlay at canvas size so portrait layout centres correctly */}
+        <Sequence from={840} durationInFrames={240}>
+          <div style={{ position: "absolute", left: 0, top: 0, width, height }}>
+            <SceneCta
+              totalDuration={240}
+              layout="portrait"
+              portraitTermTop={PORTRAIT_TERM_TOP}
+              portraitScale={PORTRAIT_SCALE}
+            />
+          </div>
+        </Sequence>
+        <FilmGrain width={1080} height={1920} opacity={0.035} />
+        <Vignette intensity={0.55} />
+      </div>
+    );
+  }
+
+  // ── Square (1:1) and Wide (16:9) layouts ───────────────────────────────────
   const termShift = isSquare ? SQUARE_TERM_OFFSET : 0;
   const shiftStyle = isSquare
     ? { transform: `translateX(${SQUARE_TERM_OFFSET}px)` }
