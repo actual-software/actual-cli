@@ -217,7 +217,13 @@ mod tests {
         let server = mockito::Server::new();
         let env = TestEnv::new(&server, AUTH_FAIL, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["adr-bot", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .env_remove("ANTHROPIC_API_KEY")
             .assert()
             .code(2)
