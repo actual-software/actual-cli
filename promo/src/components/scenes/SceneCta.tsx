@@ -63,6 +63,13 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
   const HOLD = 30;
   const animFrame = Math.max(0, frame - HOLD);
 
+  // Glow decays from SceneComplete's settled level (0.8) to the CTA resting
+  // level (0.2) over the HOLD window, so the cut is seamless.
+  const terminalGlow = interpolate(frame, [0, HOLD], [0.8, 0.2], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+
   // Terminal slides left and shrinks (wide layout only)
   const slideProgress = spring({
     frame: animFrame,
@@ -248,7 +255,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
             justifyContent: "center",
           }}
         >
-          <TerminalWindow width={1200} height={640} glowIntensity={0.2}>
+          <TerminalWindow width={1200} height={640} glowIntensity={terminalGlow}>
             <TuiLayout
               steps={state.steps}
               activeStepIndex={state.activeStepIndex}

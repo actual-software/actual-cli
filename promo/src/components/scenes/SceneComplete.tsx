@@ -1,5 +1,8 @@
 import React from "react";
 import { useCurrentFrame, spring, interpolate } from "remotion";
+// Note: `spring` is used for glowIntensity only; no breathe effect (it was a
+// sin wave over 300 frames that SceneComplete never completed — it just slowly
+// shrank the terminal by <2%, causing a visible scale pop at the Seq→CTA cut).
 import { TerminalWindow } from "../Terminal/TerminalWindow";
 import { TuiLayout } from "../Terminal/TuiLayout";
 import { COLORS, SPRING_CONFIGS } from "../../data/brand";
@@ -40,9 +43,7 @@ export const SceneComplete: React.FC<SceneCompleteProps> = ({
       })
     : 0;
 
-  // Breathe out: scale 1.0 → 0.98 → 1.0 (subtle)
-  const breathe = Math.sin((frame / 300) * Math.PI); // 0 → 1 → 0 over 300 frames
-  const cameraScale = zoomOut - breathe * 0.02;
+  const cameraScale = zoomOut;
 
   // Glow: peaks at frame 60, then settles
   const glowPeak = spring({
