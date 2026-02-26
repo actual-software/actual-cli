@@ -28,6 +28,7 @@ Complete catalog of all error types in the actual CLI. Load this when troublesho
 | CreditBalanceTooLow | 3 | Billing/API | Add credits to your account |
 | ApiError | 3 | Billing/API | Check API URL, network, credentials |
 | ApiResponseError | 3 | Billing/API | Check API status page, retry later |
+| ServiceUnavailable | 3 | Billing/API | API is temporarily updating — retry automatically (10s, 30s, 60s), then fails gracefully |
 | RunnerFailed | 1 | Runtime | Check runner output for details |
 | RunnerOutputParse | 1 | Runtime | Check model compatibility with runner |
 | RunnerTimeout | 1 | Runtime | Increase `invocation_timeout_secs` config |
@@ -260,6 +261,16 @@ curl -I <api_url>   # test connectivity
 **Diagnosis**: Run with `--verbose` and `--show-errors` for detailed error output.
 
 **Fix**: Retry. If persistent, check the API provider's status page.
+
+### ServiceUnavailable
+
+**Cause**: The Actual AI API returned HTTP 503, indicating it is temporarily updating or unavailable.
+
+**Behavior**: The CLI automatically retries 3 times with increasing delays (10s, 30s, 60s), showing live TUI messages during each wait ("Actual AI API is updating — retrying in Xs (N/3)..."). If all retries fail, the error is surfaced as a graceful message.
+
+**Display**: "Actual AI API is being updated and will be available shortly"
+
+**Fix**: Wait a few minutes and re-run. This is a transient condition during API deployments.
 
 ## Exit Code 1: General Runtime Errors
 
