@@ -47,6 +47,9 @@ pub(crate) fn zero_adr_context_lines(request: &crate::api::types::MatchRequest) 
 /// and falls back to a raw message for unrecognized errors.
 pub(crate) fn fetch_error_message(e: &ActualError, api_url: &str) -> String {
     match e {
+        ActualError::ServiceUnavailable => {
+            "Actual AI API is being updated and will be available shortly".to_string()
+        }
         ActualError::ApiError(s)
             if s.contains("error trying to connect")
                 || s.contains("Connection refused")

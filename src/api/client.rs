@@ -147,6 +147,9 @@ impl ActualApiClient {
         status: reqwest::StatusCode,
         response: reqwest::Response,
     ) -> ActualError {
+        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return ActualError::ServiceUnavailable;
+        }
         if status.is_client_error() {
             match response.json::<ApiErrorResponse>().await {
                 Ok(error_response) => ActualError::ApiResponseError {
@@ -474,6 +477,27 @@ mod tests {
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("500"))
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_match_service_unavailable() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/adrs/match")
+            .with_status(503)
+            .with_body("Service Unavailable")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let result = client.post_match(&sample_match_request()).await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ServiceUnavailable),
+            "expected ServiceUnavailable for 503 response"
         );
         mock.assert_async().await;
     }
