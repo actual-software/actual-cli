@@ -5,7 +5,7 @@ const BRAND_GRADIENT = "linear-gradient(90deg, #39eba1 0%, #43bdb7 50.483%, #4d9
 
 export default function Hero() {
     return (
-        <section className="relative overflow-hidden bg-[#030301] min-h-[calc(100svh-66px)] flex flex-col items-center justify-center px-6 text-center">
+        <section className="relative overflow-x-hidden bg-[#030301] min-h-[calc(100svh-66px)] flex flex-col items-center justify-center px-6 text-center">
 
             {/* Background — same as actual.ai */}
             <div className="absolute inset-0 -z-10">
@@ -34,7 +34,7 @@ export default function Hero() {
                     AI context for your{" "}
                     <br className="hidden md:block" />
                     <span
-                        className="bg-clip-text text-transparent"
+                        className="bg-clip-text text-transparent inline-block pr-[3px]"
                         style={{ backgroundImage: BRAND_GRADIENT }}
                     >
                         codebase.
