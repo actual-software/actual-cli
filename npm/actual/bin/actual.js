@@ -8,7 +8,6 @@ const PLATFORM_MAP = {
   'darwin-x64':   '@actualai/actual-darwin-x64',
   'linux-x64':    '@actualai/actual-linux-x64',
   'linux-arm64':  '@actualai/actual-linux-arm64',
-  'win32-x64':    '@actualai/actual-win32-x64',
 };
 
 const key = `${os.platform()}-${os.arch()}`;
@@ -18,10 +17,9 @@ if (!pkg) {
   process.exit(1);
 }
 
-const ext = os.platform() === 'win32' ? '.exe' : '';
 let bin;
 try {
-  bin = require.resolve(`${pkg}/bin/actual${ext}`);
+  bin = require.resolve(`${pkg}/bin/actual`);
 } catch {
   console.error(
     `actual: platform package "${pkg}" not installed. Try reinstalling with npm install.`

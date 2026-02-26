@@ -269,42 +269,6 @@ jobs:
           name: actual-linux-arm64
           path: target/aarch64-unknown-linux-gnu/release/actual
 
-  # Windows x86_64
-  build-windows-x64:
-    name: Build (Windows x64)
-    needs: check-stable
-    if: needs.check-stable.outputs.is-stable == 'true'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Cache cargo
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: windows-cargo-x86_64-pc-windows-msvc-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            windows-cargo-x86_64-pc-windows-msvc-
-
-      - name: Build
-        run: cargo build --release --target x86_64-pc-windows-msvc
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        with:
-          name: actual-win32-x64
-          path: target/x86_64-pc-windows-msvc/release/actual.exe
-
   # Publish all npm packages
   publish-npm:
     name: Publish to npm
@@ -314,7 +278,6 @@ jobs:
       - build-macos-x64
       - build-linux-x64
       - build-linux-arm64
-      - build-windows-x64
     if: needs.check-stable.outputs.is-stable == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -350,13 +313,11 @@ jobs:
           cp artifacts/actual-linux-arm64/actual npm/actual-linux-arm64/bin/actual
           chmod +x npm/actual-linux-arm64/bin/actual
 
-          cp artifacts/actual-win32-x64/actual.exe npm/actual-win32-x64/bin/actual.exe
-
       - name: Publish platform packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for pkg in actual-darwin-arm64 actual-darwin-x64 actual-linux-x64 actual-linux-arm64 actual-win32-x64; do
+          for pkg in actual-darwin-arm64 actual-darwin-x64 actual-linux-x64 actual-linux-arm64; do
             echo "Publishing @actualai/$pkg..."
             cd npm/$pkg && npm publish --access public && cd ../..
           done
