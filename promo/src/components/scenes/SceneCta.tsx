@@ -125,7 +125,8 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
   );
 
   // ── Square layout (1:1) ─────────────────────────────────────────────────────
-  // Terminal stays centered. Wordmark appears in top band, tagline+URL in bottom band.
+  // Terminal matches the 1920px-centred position used by the pipeline scenes so
+  // there is no positional jump on the cut. Top/bottom bands fill the canvas.
   if (layout === "square") {
     return (
       <div
@@ -133,21 +134,33 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
           width: "100%",
           height: "100%",
           background: COLORS.background,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
+          position: "relative",
+          overflow: "hidden",
           opacity: fadeOut,
         }}
       >
-        {/* Terminal — centered, no movement */}
-        <TerminalWindow width={1200} height={640} glowIntensity={0.2}>
-          <TuiLayout
-            steps={state.steps}
-            activeStepIndex={state.activeStepIndex}
-            outputLines={state.outputLines}
-            currentFrame={absoluteFrame}
-          />
-        </TerminalWindow>
+        {/* Terminal — 1920px-wide inner container mirrors the pipeline centering */}
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            width: 1920,
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <TerminalWindow width={1200} height={640} glowIntensity={0.2}>
+            <TuiLayout
+              steps={state.steps}
+              activeStepIndex={state.activeStepIndex}
+              outputLines={state.outputLines}
+              currentFrame={absoluteFrame}
+            />
+          </TerminalWindow>
+        </div>
 
         {/* Top band — wordmark */}
         <div
