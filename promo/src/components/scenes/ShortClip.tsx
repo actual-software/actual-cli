@@ -150,7 +150,10 @@ export const ShortClip: React.FC = () => {
       </Sequence>
       <Sequence from={720} durationInFrames={120}>
         <div style={{ width: "100%", height: "100%", ...shiftStyle }}>
-          <SceneComplete />
+          {/* FastPipeline ends at 1.15x (no room to zoom out — confirm widget
+              is present all the way to the last compressed frame). Start
+              SceneComplete zoomed in and let it pull back over 40 frames. */}
+          <SceneComplete initialScale={1.15} />
         </div>
       </Sequence>
       {/* CTA: absolute overlay sized to the actual canvas so square layout centres correctly */}
