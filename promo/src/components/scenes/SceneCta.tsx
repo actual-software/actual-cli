@@ -142,9 +142,16 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
           {COPY.cta.tagline}
         </div>
 
-        {/* URL with animated underline */}
+        {/* URL with animated line extending to the right */}
         <div
-          style={{ opacity: urlOpacity, position: "relative", display: "inline-block" }}
+          style={{
+            opacity: urlOpacity,
+            display: "flex",
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 12,
+            width: "100%",
+          }}
         >
           <span
             style={{
@@ -152,18 +159,18 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
               fontSize: 20,
               color: COLORS.borderGreen,
               letterSpacing: 1,
+              flexShrink: 0,
             }}
           >
             {COPY.cta.url}
           </span>
           <div
             style={{
-              position: "absolute",
-              bottom: -2,
-              left: 0,
+              flex: 1,
               height: 2,
-              width: `${urlUnderlineWidth}%`,
               background: `linear-gradient(90deg, ${COLORS.borderGreen}, ${COLORS.borderTeal})`,
+              transformOrigin: "left center",
+              transform: `scaleX(${urlUnderlineWidth / 100})`,
             }}
           />
         </div>
