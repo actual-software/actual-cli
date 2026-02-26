@@ -6,26 +6,39 @@ import { COLORS, SPRING_CONFIGS } from "../../data/brand";
 import { getStateAtFrame, FRAMES } from "../../data/tui-states";
 
 interface SceneCompleteProps {
-  // When the preceding scene ends zoomed in, pass that scale here so
-  // SceneComplete smoothly zooms out over the first 40 frames instead of
-  // jumping to 1.0. HeroClip doesn't need this (ScenePipeline already
-  // handles the zoom-out). ShortClip passes 1.15 here.
+  // When the preceding scene ends zoomed in/translated, pass the ending
+  // camera state so SceneComplete smoothly transitions over the first 40
+  // frames instead of jumping. HeroClip doesn't need this (ScenePipeline
+  // already completes the zoom-out). ShortClip passes 1.15 / -40.
   initialScale?: number;
+  initialOffsetY?: number;
 }
 
-export const SceneComplete: React.FC<SceneCompleteProps> = ({ initialScale = 1.0 }) => {
+export const SceneComplete: React.FC<SceneCompleteProps> = ({
+  initialScale = 1.0,
+  initialOffsetY = 0,
+}) => {
   const frame = useCurrentFrame();
   const absoluteFrame = FRAMES.WRITE_END + frame;
   const state = getStateAtFrame(absoluteFrame);
 
-  // If the preceding scene ended zoomed in, zoom out over the first 40 frames.
-  const zoomOut =
-    initialScale > 1.0
-      ? interpolate(frame, [0, 40], [initialScale, 1.0], {
-          extrapolateLeft: "clamp",
-          extrapolateRight: "clamp",
-        })
-      : 1.0;
+  const transitioning = initialScale > 1.0 || initialOffsetY !== 0;
+
+  // If the preceding scene ended zoomed in / shifted, ease both back to
+  // neutral over 40 frames.
+  const zoomOut = transitioning
+    ? interpolate(frame, [0, 40], [initialScale, 1.0], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      })
+    : 1.0;
+
+  const cameraY = transitioning
+    ? interpolate(frame, [0, 40], [initialOffsetY, 0], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+      })
+    : 0;
 
   // Breathe out: scale 1.0 → 0.98 → 1.0 (subtle)
   const breathe = Math.sin((frame / 300) * Math.PI); // 0 → 1 → 0 over 300 frames
@@ -51,7 +64,7 @@ export const SceneComplete: React.FC<SceneCompleteProps> = ({ initialScale = 1.0
         justifyContent: "center",
       }}
     >
-      <div style={{ transform: `scale(${cameraScale})` }}>
+      <div style={{ transform: `scale(${cameraScale}) translateY(${cameraY}px)` }}>
         <TerminalWindow width={1200} height={640} glowIntensity={glowIntensity}>
           <TuiLayout
             steps={state.steps}
