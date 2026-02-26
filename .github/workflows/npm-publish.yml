@@ -20,7 +20,7 @@ jobs:
         id: check
         run: |
           TAG="${{ github.ref_name }}"
-          if echo "$TAG" | grep -qE '-(alpha|beta|rc)[.0-9]*$'; then
+          if echo "$TAG" | grep -qE '-(alpha|beta|rc|test)[.0-9]*$'; then
             echo "is-stable=false" >> "$GITHUB_OUTPUT"
             echo "Skipping npm publish for pre-release tag: $TAG"
           else
