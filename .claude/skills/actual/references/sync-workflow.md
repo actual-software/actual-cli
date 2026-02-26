@@ -78,6 +78,8 @@ Fetches ADRs from the API server:
 - Uses the configured `api_url` (default: Actual's hosted API)
 - Sends analysis results to get relevant ADRs
 - Includes retry logic for transient failures
+- On HTTP 503 (Service Unavailable), automatically retries 3 times with delays (10s, 30s, 60s), showing live TUI messages like "Actual AI API is updating — retrying in 10s (1/3)..."
+- After exhausting 503 retries, surfaces: "Actual AI API is being updated and will be available shortly"
 - Respects `batch_size` and `concurrency` settings
 
 ### Step 7: Rejection Filtering
