@@ -84,6 +84,15 @@ async fn check_auth_async(
         .map_err(wait_io_error)?;
 
     if !output.status.success() {
+        // Some claude CLI versions exit non-zero even when the user is
+        // authenticated (e.g. exit 1 on certain subscription types or OS
+        // environments).  Attempt to parse the JSON stdout first; if it
+        // contains `loggedIn: true` we trust that over the exit code.
+        if let Ok(status) = serde_json::from_slice::<ClaudeAuthStatus>(&output.stdout) {
+            if status.logged_in {
+                return Ok(status);
+            }
+        }
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(ActualError::RunnerFailed {
             message: format!(
@@ -265,6 +274,47 @@ mod tests {
             result.unwrap_err(),
             ActualError::RunnerFailed { .. }
         ));
+    }
+
+    /// Some claude CLI versions exit non-zero even when authenticated.
+    /// check_auth_async must accept valid JSON with `loggedIn: true`
+    /// regardless of the exit code.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_nonzero_exit_but_logged_in() {
+        use std::path::Path;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        let content = "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\nexit 1\n";
+        std::fs::write(&script, content).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = check_auth_async(Path::new(&script), std::time::Duration::from_secs(5)).await;
+        assert!(
+            result.is_ok(),
+            "expected Ok(status) when loggedIn:true, got: {result:?}"
+        );
+        assert!(result.unwrap().logged_in);
+    }
+
+    /// Non-zero exit with JSON showing `loggedIn: false` must still fail.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_check_auth_async_nonzero_exit_not_logged_in() {
+        use std::path::Path;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        let content = "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":false}'\nexit 1\n";
+        std::fs::write(&script, content).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = check_auth_async(Path::new(&script), std::time::Duration::from_secs(5)).await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed when loggedIn:false with non-zero exit, got: {result:?}"
+        );
     }
 
     #[cfg(unix)]
