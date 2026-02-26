@@ -17,7 +17,7 @@ fn runner_infos() -> Vec<RunnerInfo> {
         RunnerInfo {
             name: RunnerChoice::ClaudeCli.display_name(),
             requirement: "requires `claude` binary",
-            description: "Claude Code CLI subprocess (default)",
+            description: "Claude Code CLI subprocess",
         },
         RunnerInfo {
             name: RunnerChoice::AnthropicApi.display_name(),
@@ -32,7 +32,7 @@ fn runner_infos() -> Vec<RunnerInfo> {
         RunnerInfo {
             name: RunnerChoice::CodexCli.display_name(),
             requirement: "requires `codex` binary",
-            description: "Codex CLI subprocess",
+            description: "Codex CLI subprocess (default)",
         },
         RunnerInfo {
             name: RunnerChoice::CursorCli.display_name(),
@@ -136,8 +136,8 @@ mod tests {
             "should have openai-api description: {p}"
         );
         assert!(
-            p.contains("Codex CLI subprocess"),
-            "should have codex-cli description: {p}"
+            p.contains("Codex CLI subprocess (default)"),
+            "should have codex-cli description with (default): {p}"
         );
         assert!(
             p.contains("Cursor CLI subprocess"),

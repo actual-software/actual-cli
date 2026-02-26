@@ -124,7 +124,7 @@ impl ActualError {
                 Some(Cow::Borrowed("Set OPENAI_API_KEY or switch to --runner openai-api"))
             }
             Self::NoRunnerAvailable { .. } => Some(Cow::Borrowed(
-                "Install a runner (e.g. `npm install -g @anthropic-ai/claude-code`) or set an API key",
+                "Install codex-cli (`npm install -g @openai/codex`) or set OPENAI_API_KEY",
             )),
             Self::CreditBalanceTooLow { .. } => Some(Cow::Borrowed(
                 "Add credits at your provider's billing page or check your account quota",
@@ -572,14 +572,18 @@ mod tests {
     fn test_hint_no_runner_available() {
         let err = ActualError::NoRunnerAvailable {
             model: "sonnet".to_string(),
-            tried: "  - claude-cli: binary not found".to_string(),
+            tried: "  - codex-cli: binary not found".to_string(),
         };
         let hint = err
             .hint()
             .expect("expected Some hint for NoRunnerAvailable");
         assert!(
-            hint.contains("Install a runner"),
-            "expected install hint in: {hint:?}"
+            hint.contains("codex-cli"),
+            "expected codex-cli install hint in: {hint:?}"
+        );
+        assert!(
+            hint.contains("OPENAI_API_KEY"),
+            "expected OPENAI_API_KEY mention in: {hint:?}"
         );
     }
 
