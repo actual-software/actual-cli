@@ -197,7 +197,10 @@ export const ShortClip: React.FC = () => {
         </Sequence>
         <Sequence from={720} durationInFrames={120}>
           <PortraitSceneWrapper top={PORTRAIT_TERM_TOP} scale={PORTRAIT_SCALE}>
-            <SceneComplete />
+            {/* FastPipeline ends at 1.15x / -40px (no room to zoom out).
+                Pass the ending camera state so SceneComplete eases back
+                to neutral over 40 frames rather than jumping. */}
+            <SceneComplete initialScale={1.15} initialOffsetY={-40} />
           </PortraitSceneWrapper>
         </Sequence>
         {/* CTA: absolute overlay at canvas size so portrait layout centres correctly */}
