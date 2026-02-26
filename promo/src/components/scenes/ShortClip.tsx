@@ -143,16 +143,16 @@ const PORTRAIT_SCENE_SCALE    = 1.8;
 const PORTRAIT_TERM_TOP       = (1920 - 640 * PORTRAIT_SCENE_SCALE) / 2;
 // Horizontal pan: canvas x of the terminal LEFT EDGE.
 //   Start (+20): Steps panel fully visible.
-//   End  (−700): Output panel visible from terminal x≈389 to x≈989 (~75% of Output).
+//   End  (−600): Output panel visible from terminal x≈333 to x≈933 (~68% of Output).
 const PORTRAIT_TERM_LEFT_START =  20;
-const PORTRAIT_TERM_LEFT_END   = -700;
+const PORTRAIT_TERM_LEFT_END   = -600;
 // canvas_coord = scale × block_local_coord + block_tx
 // Terminal left-edge in block: x = (1920−1200)/2 + SQUARE_TERM_OFFSET = 198
 //   block_tx = PORTRAIT_TERM_LEFT − scale × 198
 const _PTX = (termLeft: number) =>
   Math.round(termLeft - PORTRAIT_SCENE_SCALE * ((1920 - 1200) / 2 + SQUARE_TERM_OFFSET));
 const PORTRAIT_BLOCK_TX_START = _PTX(PORTRAIT_TERM_LEFT_START); // −336
-const PORTRAIT_BLOCK_TX_END   = _PTX(PORTRAIT_TERM_LEFT_END);   // −1056
+const PORTRAIT_BLOCK_TX_END   = _PTX(PORTRAIT_TERM_LEFT_END);   // −956
 const PORTRAIT_BLOCK_TY = Math.round(
   PORTRAIT_TERM_TOP - PORTRAIT_SCENE_SCALE * ((1080 - 640) / 2)
 );
