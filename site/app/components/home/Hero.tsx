@@ -62,7 +62,7 @@ export default function Hero() {
                         href="https://actual.ai"
                         className="inline-flex items-center justify-center rounded-full px-[24px] py-[10px] text-[16px] font-medium border border-white/20 text-white hover:bg-white/5 transition-colors"
                     >
-                        Learn more →
+                        More about Actual AI →
                     </Link>
                 </div>
             </div>
