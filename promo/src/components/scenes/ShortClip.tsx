@@ -1,5 +1,5 @@
 import React from "react";
-import { Sequence, useCurrentFrame, useVideoConfig, interpolate } from "remotion";
+import { Sequence, useCurrentFrame, useVideoConfig, interpolate, Easing } from "remotion";
 import { TerminalWindow } from "../Terminal/TerminalWindow";
 import { TuiLayout } from "../Terminal/TuiLayout";
 import { SceneComplete } from "./SceneComplete";
@@ -133,45 +133,59 @@ const FastPipeline: React.FC = () => {
 // 15% of 1080px — shifts the 1920-wide content left to expose the logo+steps panel.
 const SQUARE_TERM_OFFSET = -162;
 
-// Portrait (9:16) — scale-to-fill.
-// Scale 1.8 so the 640px-tall terminal occupies 60% of the 1920px canvas height
-// (640 × 1.8 = 1152px), centred vertically → 384px symmetric top/bottom bands.
-// The same SQUARE_TERM_OFFSET shift is applied inside the block so the left-side
-// TUI panel fills most of the canvas width, matching the ShortClip-11 framing.
-const PORTRAIT_SCENE_SCALE = 1.8;
-const PORTRAIT_TERM_LEFT   = 20;   // canvas-px gap before terminal left border
+// Portrait (9:16) — scale 1.8, horizontal pan from Steps → Output panel.
+// The 640px terminal occupies 60% of the 1920px canvas height (384px bands).
+// Because the terminal (1200px) is wider than the canvas (1080px), we animate
+// the horizontal position: starting on the Steps panel, then panning right to
+// reveal the Output panel (~75% visible at end position).
+const PORTRAIT_SCENE_SCALE    = 1.8;
 // Symmetric vertical centering: (1920 − 640 × 1.8) / 2 = 384
-const PORTRAIT_TERM_TOP    = (1920 - 640 * PORTRAIT_SCENE_SCALE) / 2;
-// CSS transform on the 1920×1080 scene block.
-// canvas_coord = scale × local_coord + (tx, ty)
-// Terminal local position after SQUARE_TERM_OFFSET shift: x=198, y=220
-//   tx = PORTRAIT_TERM_LEFT  − scale × 198  =  20 − 356.4 ≈ −336
-//   ty = PORTRAIT_TERM_TOP   − scale × 220  = 384 − 396   = −12
-const PORTRAIT_BLOCK_TX = Math.round(
-  PORTRAIT_TERM_LEFT - PORTRAIT_SCENE_SCALE * ((1920 - 1200) / 2 + SQUARE_TERM_OFFSET)
-);
+const PORTRAIT_TERM_TOP       = (1920 - 640 * PORTRAIT_SCENE_SCALE) / 2;
+// Horizontal pan: canvas x of the terminal LEFT EDGE.
+//   Start (+20): Steps panel fully visible.
+//   End  (−700): Output panel visible from terminal x≈389 to x≈989 (~75% of Output).
+const PORTRAIT_TERM_LEFT_START =  20;
+const PORTRAIT_TERM_LEFT_END   = -700;
+// canvas_coord = scale × block_local_coord + block_tx
+// Terminal left-edge in block: x = (1920−1200)/2 + SQUARE_TERM_OFFSET = 198
+//   block_tx = PORTRAIT_TERM_LEFT − scale × 198
+const _PTX = (termLeft: number) =>
+  Math.round(termLeft - PORTRAIT_SCENE_SCALE * ((1920 - 1200) / 2 + SQUARE_TERM_OFFSET));
+const PORTRAIT_BLOCK_TX_START = _PTX(PORTRAIT_TERM_LEFT_START); // −336
+const PORTRAIT_BLOCK_TX_END   = _PTX(PORTRAIT_TERM_LEFT_END);   // −1056
 const PORTRAIT_BLOCK_TY = Math.round(
-  PORTRAIT_TERM_TOP  - PORTRAIT_SCENE_SCALE * ((1080 - 640) / 2)
+  PORTRAIT_TERM_TOP - PORTRAIT_SCENE_SCALE * ((1080 - 640) / 2)
 );
 
 export const ShortClip: React.FC = () => {
   const { width, height } = useVideoConfig();
+  // Must be called before any conditional returns (React hooks rule).
+  const frame = useCurrentFrame();
   const isSquare = width === height;
   const isPortrait = height > width; // 9:16 (1080×1920)
 
   // ── Portrait (9:16) layout ─────────────────────────────────────────────────
-  // The entire 1920×1080 scene block (with SQUARE_TERM_OFFSET shift applied
-  // inside) is scaled up via CSS transform so the terminal fills the middle
-  // 60% of the 1920px canvas height. Seq1–3 live inside the transformed block;
-  // SceneCta renders as an absolute overlay at full canvas size.
+  // The entire 1920×1080 scene block is scaled 1.8× and panned horizontally:
+  //   f  0– 60  Hook:     terminal shows Steps panel (left side).
+  //   f 60–180  Pan:      smooth ease-in-out from Steps → Output panel.
+  //   f180–840  Locked:   Output panel (~75%) visible for remainder.
+  //   f840+     CTA:      terminal stays at pan-end position (no jump on cut).
   if (isPortrait) {
+    // Horizontal pan of the scene block (eased over 2 s starting at frame 60).
+    const panBlockTX = Math.round(
+      interpolate(frame, [60, 180], [PORTRAIT_BLOCK_TX_START, PORTRAIT_BLOCK_TX_END], {
+        extrapolateLeft: "clamp",
+        extrapolateRight: "clamp",
+        easing: Easing.inOut(Easing.ease),
+      })
+    );
     const blockStyle: React.CSSProperties = {
       position: "absolute",
       left: 0,
       top: 0,
       width: 1920,
       height: 1080,
-      transform: `translateX(${PORTRAIT_BLOCK_TX}px) translateY(${PORTRAIT_BLOCK_TY}px) scale(${PORTRAIT_SCENE_SCALE})`,
+      transform: `translateX(${panBlockTX}px) translateY(${PORTRAIT_BLOCK_TY}px) scale(${PORTRAIT_SCENE_SCALE})`,
       transformOrigin: "top left",
     };
     const shiftStyle: React.CSSProperties = {
@@ -215,7 +229,7 @@ export const ShortClip: React.FC = () => {
               totalDuration={240}
               layout="portrait"
               portraitTermTop={PORTRAIT_TERM_TOP}
-              portraitTermLeft={PORTRAIT_TERM_LEFT}
+              portraitTermLeft={PORTRAIT_TERM_LEFT_END}
               portraitScale={PORTRAIT_SCENE_SCALE}
             />
           </div>

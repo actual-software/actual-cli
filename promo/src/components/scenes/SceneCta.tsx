@@ -44,7 +44,7 @@ interface SceneCtaProps {
   terminalOffsetX?: number;
   /** Portrait layout: vertical offset from canvas top for the terminal (px). Matches PORTRAIT_TERM_TOP. */
   portraitTermTop?: number;
-  /** Portrait layout: horizontal offset from canvas left for the terminal (px). Matches PORTRAIT_TERM_LEFT. */
+  /** Portrait layout: canvas x of the terminal left edge (pan end position). Matches PORTRAIT_TERM_LEFT_END. */
   portraitTermLeft?: number;
   /** Portrait layout: CSS scale applied to the 1920×1080 block. Matches PORTRAIT_SCENE_SCALE. */
   portraitScale?: number;
@@ -55,7 +55,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
   layout = "wide",
   terminalOffsetX = 0,
   portraitTermTop = 384,
-  portraitTermLeft = 20,
+  portraitTermLeft = -700,
   portraitScale = 1.8,
 }) => {
   const frame = useCurrentFrame();
