@@ -118,63 +118,41 @@ const FastPipeline: React.FC = () => {
   );
 };
 
-// Portrait (9:16) constants.
-// Scale: 1200 × 0.9 = 1080px → fills the canvas width exactly.
-// TermTop: vertical offset from canvas top where the scaled terminal sits.
-// This leaves ~1000px below the terminal for the CTA text block.
-const PORTRAIT_SCALE = 0.9;
-const PORTRAIT_TERM_TOP = 200;
-
-// Wraps a scene component (InstantHook / FastPipeline / SceneComplete) for the
-// portrait canvas. The scene renders into a 1200×640 logical area (matching the
-// TerminalWindow dimensions) which is then CSS-scaled so it fills the 1080px
-// canvas width, anchored at the top-left corner.
-const PortraitSceneWrapper: React.FC<{
-  children: React.ReactNode;
-  top: number;
-  scale: number;
-}> = ({ children, top, scale }) => (
-  <div
-    style={{
-      position: "absolute",
-      left: 0,
-      top: 0,
-      width: 1080,
-      height: 1920,
-      background: COLORS.background,
-      overflow: "hidden",
-    }}
-  >
-    {/* 1200×640 logical area scaled to fit portrait canvas width.
-        transformOrigin: top-left so scale(0.9) → visual 1080×576,
-        anchored cleanly at (0, top). */}
-    <div
-      style={{
-        position: "absolute",
-        left: 0,
-        top,
-        width: 1200,
-        height: 640,
-        transform: `scale(${scale})`,
-        transformOrigin: "top left",
-      }}
-    >
-      {children}
-    </div>
-  </div>
-);
-
 // Short clip: 1080 frames (18s at 60fps)
 // Hook: 60f, FastPipeline: 660f (full pipeline compressed), Complete: 120f, CTA: 240f
 //
 // Three layout modes driven by canvas dimensions:
-//   Wide (16:9, 1920×1080)  — outer container is 1920×1080, terminal centred.
+//   Wide (16:9, 1920×1080)  — 1920×1080 container, terminal centred.
 //   Square (1:1, 1080×1080) — same 1920×1080 container, terminal shifted left
 //                             by SQUARE_TERM_OFFSET to expose the logo+steps panel.
-//   Portrait (9:16, 1080×1920) — native 1080×1920 container; terminal scaled to
-//                             fill canvas width, positioned near top to leave room
-//                             for the CTA text below.
-const SQUARE_TERM_OFFSET = -162; // 15% of 1080px
+//   Portrait (9:16, 1080×1920) — same 1920×1080 scene block as square (same left
+//                             shift), scaled up so the terminal fills the middle 60%
+//                             of the canvas height. Top/bottom 384px bands are used
+//                             by the CTA exactly like the square layout.
+
+// 15% of 1080px — shifts the 1920-wide content left to expose the logo+steps panel.
+const SQUARE_TERM_OFFSET = -162;
+
+// Portrait (9:16) — scale-to-fill.
+// Scale 1.8 so the 640px-tall terminal occupies 60% of the 1920px canvas height
+// (640 × 1.8 = 1152px), centred vertically → 384px symmetric top/bottom bands.
+// The same SQUARE_TERM_OFFSET shift is applied inside the block so the left-side
+// TUI panel fills most of the canvas width, matching the ShortClip-11 framing.
+const PORTRAIT_SCENE_SCALE = 1.8;
+const PORTRAIT_TERM_LEFT   = 20;   // canvas-px gap before terminal left border
+// Symmetric vertical centering: (1920 − 640 × 1.8) / 2 = 384
+const PORTRAIT_TERM_TOP    = (1920 - 640 * PORTRAIT_SCENE_SCALE) / 2;
+// CSS transform on the 1920×1080 scene block.
+// canvas_coord = scale × local_coord + (tx, ty)
+// Terminal local position after SQUARE_TERM_OFFSET shift: x=198, y=220
+//   tx = PORTRAIT_TERM_LEFT  − scale × 198  =  20 − 356.4 ≈ −336
+//   ty = PORTRAIT_TERM_TOP   − scale × 220  = 384 − 396   = −12
+const PORTRAIT_BLOCK_TX = Math.round(
+  PORTRAIT_TERM_LEFT - PORTRAIT_SCENE_SCALE * ((1920 - 1200) / 2 + SQUARE_TERM_OFFSET)
+);
+const PORTRAIT_BLOCK_TY = Math.round(
+  PORTRAIT_TERM_TOP  - PORTRAIT_SCENE_SCALE * ((1080 - 640) / 2)
+);
 
 export const ShortClip: React.FC = () => {
   const { width, height } = useVideoConfig();
@@ -182,35 +160,63 @@ export const ShortClip: React.FC = () => {
   const isPortrait = height > width; // 9:16 (1080×1920)
 
   // ── Portrait (9:16) layout ─────────────────────────────────────────────────
+  // The entire 1920×1080 scene block (with SQUARE_TERM_OFFSET shift applied
+  // inside) is scaled up via CSS transform so the terminal fills the middle
+  // 60% of the 1920px canvas height. Seq1–3 live inside the transformed block;
+  // SceneCta renders as an absolute overlay at full canvas size.
   if (isPortrait) {
+    const blockStyle: React.CSSProperties = {
+      position: "absolute",
+      left: 0,
+      top: 0,
+      width: 1920,
+      height: 1080,
+      transform: `translateX(${PORTRAIT_BLOCK_TX}px) translateY(${PORTRAIT_BLOCK_TY}px) scale(${PORTRAIT_SCENE_SCALE})`,
+      transformOrigin: "top left",
+    };
+    const shiftStyle: React.CSSProperties = {
+      width: "100%",
+      height: "100%",
+      transform: `translateX(${SQUARE_TERM_OFFSET}px)`,
+    };
     return (
-      <div style={{ position: "relative", width: 1080, height: 1920 }}>
+      <div style={{ position: "relative", width: 1080, height: 1920, overflow: "hidden" }}>
+        {/* Seq 1 – Hook */}
         <Sequence from={0} durationInFrames={60}>
-          <PortraitSceneWrapper top={PORTRAIT_TERM_TOP} scale={PORTRAIT_SCALE}>
-            <InstantHook />
-          </PortraitSceneWrapper>
+          <div style={blockStyle}>
+            <div style={shiftStyle}>
+              <InstantHook />
+            </div>
+          </div>
         </Sequence>
+        {/* Seq 2 – Pipeline */}
         <Sequence from={60} durationInFrames={660}>
-          <PortraitSceneWrapper top={PORTRAIT_TERM_TOP} scale={PORTRAIT_SCALE}>
-            <FastPipeline />
-          </PortraitSceneWrapper>
+          <div style={blockStyle}>
+            <div style={shiftStyle}>
+              <FastPipeline />
+            </div>
+          </div>
         </Sequence>
+        {/* Seq 3 – Complete */}
         <Sequence from={720} durationInFrames={120}>
-          <PortraitSceneWrapper top={PORTRAIT_TERM_TOP} scale={PORTRAIT_SCALE}>
-            {/* FastPipeline ends at 1.15x / -40px (no room to zoom out).
-                Pass the ending camera state so SceneComplete eases back
-                to neutral over 40 frames rather than jumping. */}
-            <SceneComplete initialScale={1.15} initialOffsetY={-40} />
-          </PortraitSceneWrapper>
+          <div style={blockStyle}>
+            <div style={shiftStyle}>
+              {/* FastPipeline ends at 1.15x / -40px (no room to zoom out).
+                  Pass the ending camera state so SceneComplete eases back
+                  to neutral over 40 frames rather than jumping. */}
+              <SceneComplete initialScale={1.15} initialOffsetY={-40} />
+            </div>
+          </div>
         </Sequence>
-        {/* CTA: absolute overlay at canvas size so portrait layout centres correctly */}
+        {/* Seq 4 – CTA: absolute overlay at canvas size */}
         <Sequence from={840} durationInFrames={240}>
           <div style={{ position: "absolute", left: 0, top: 0, width, height }}>
             <SceneCta
               totalDuration={240}
               layout="portrait"
               portraitTermTop={PORTRAIT_TERM_TOP}
-              portraitScale={PORTRAIT_SCALE}
+              portraitTermLeft={PORTRAIT_TERM_LEFT}
+              portraitScale={PORTRAIT_SCENE_SCALE}
             />
           </div>
         </Sequence>

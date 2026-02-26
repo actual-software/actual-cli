@@ -37,14 +37,16 @@ interface SceneCtaProps {
   /** Layout variant:
    *  "wide"     = 16:9 — terminal slides left, CTA appears on the right.
    *  "square"   = 1:1  — sandwich: wordmark top band, terminal middle, CTA bottom band.
-   *  "portrait" = 9:16 — terminal scaled at top, CTA text stacked below.
+   *  "portrait" = 9:16 — sandwich: wordmark top band (384px), terminal middle, CTA bottom band (384px).
    */
   layout?: "wide" | "square" | "portrait";
   /** Horizontal offset (px) applied to the terminal in square layout — should match the pipeline scene shift. */
   terminalOffsetX?: number;
-  /** Portrait layout: vertical offset from canvas top for the terminal (px). Should match PortraitSceneWrapper. */
+  /** Portrait layout: vertical offset from canvas top for the terminal (px). Matches PORTRAIT_TERM_TOP. */
   portraitTermTop?: number;
-  /** Portrait layout: CSS scale applied to the 1200×640 terminal area. Should match PortraitSceneWrapper. */
+  /** Portrait layout: horizontal offset from canvas left for the terminal (px). Matches PORTRAIT_TERM_LEFT. */
+  portraitTermLeft?: number;
+  /** Portrait layout: CSS scale applied to the 1920×1080 block. Matches PORTRAIT_SCENE_SCALE. */
   portraitScale?: number;
 }
 
@@ -52,8 +54,9 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
   totalDuration = 180,
   layout = "wide",
   terminalOffsetX = 0,
-  portraitTermTop = 200,
-  portraitScale = 0.9,
+  portraitTermTop = 384,
+  portraitTermLeft = 20,
+  portraitScale = 1.8,
 }) => {
   const frame = useCurrentFrame();
   const absoluteFrame = FRAMES.CTA_START + frame;
@@ -145,15 +148,18 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
   );
 
   // ── Portrait layout (9:16) ─────────────────────────────────────────────────
-  // Terminal stays at the same position used by the pipeline scenes (no jump on cut).
-  // CTA text (wordmark → tagline → URL) fades in below, using the ~1000px of
-  // vertical space beneath the terminal.
+  // Sandwich layout (mirrors square):
+  //   Top band  (portraitTermTop px, default 384): wordmark left-aligned.
+  //   Middle:   terminal at (portraitTermLeft, portraitTermTop) scaled by
+  //             portraitScale with transformOrigin "top left" — exactly matches
+  //             the pipeline scene block position so there is no jump on cut.
+  //             The terminal is rendered from the 1920×1080 block origin, so
+  //             we position the raw 1200×640 TerminalWindow and apply the same
+  //             scale. The pipeline block also applies SQUARE_TERM_OFFSET before
+  //             scaling, which shifts the block origin — the terminal's canvas-px
+  //             left edge is simply portraitTermLeft.
+  //   Bottom band (portraitTermTop px, default 384): tagline + URL row.
   if (layout === "portrait") {
-    // Bottom edge of the scaled terminal in canvas pixels
-    const termBottom = portraitTermTop + 640 * portraitScale;
-    // CTA text block starts 80px below the terminal
-    const ctaTop = termBottom + 80;
-
     return (
       <div
         style={{
@@ -165,12 +171,17 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
           opacity: fadeOut,
         }}
       >
-        {/* Terminal — same scale + position as PortraitSceneWrapper so there is
-            no positional jump when this scene cuts from SceneComplete. */}
+        {/* Terminal — same transform as the pipeline block so there is no
+            positional jump on the Seq3 → Seq4 cut.
+            The block is a 1920×1080 div scaled by portraitScale with origin
+            top-left and offset by (PORTRAIT_BLOCK_TX, PORTRAIT_BLOCK_TY).
+            Inside it the SQUARE_TERM_OFFSET shift positions the terminal.
+            Net canvas position of the terminal's top-left corner:
+              x = portraitTermLeft, y = portraitTermTop  (by construction). */}
         <div
           style={{
             position: "absolute",
-            left: 0,
+            left: portraitTermLeft,
             top: portraitTermTop,
             width: 1200,
             height: 640,
@@ -188,39 +199,50 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
           </TerminalWindow>
         </div>
 
-        {/* CTA text block: stacked vertically below the terminal.
-            With defaults (termTop=200, scale=0.9): ctaTop = 200+576+80 = 856px.
-            ~1064px of canvas remains — generous room for large text + spacing. */}
+        {/* Top band — wordmark (matches square layout) */}
         <div
           style={{
             position: "absolute",
-            left: 60,
-            right: 60,
-            top: ctaTop,
+            top: 0,
+            left: 0,
+            right: 0,
+            height: portraitTermTop,
             display: "flex",
-            flexDirection: "column",
-            gap: 44,
+            alignItems: "center",
+            justifyContent: "flex-start",
+            paddingLeft: 60,
+            opacity: wordmarkOpacity,
           }}
         >
-          {/* Wordmark — larger than other layouts, leveraging portrait real estate */}
-          <div style={{ opacity: wordmarkOpacity }}>
-            <GradientText text={COPY.cta.wordmark} fontSize={86} />
-          </div>
+          <GradientText text={COPY.cta.wordmark} fontSize={72} />
+        </div>
 
-          {/* Tagline */}
+        {/* Bottom band — tagline + URL row (matches square layout) */}
+        <div
+          style={{
+            position: "absolute",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            height: portraitTermTop,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "center",
+            padding: "0 60px",
+            gap: 14,
+          }}
+        >
           <div
             style={{
               opacity: taglineOpacity,
               fontFamily: FONTS.mono,
-              fontSize: 22,
+              fontSize: 16,
               color: COLORS.textPrimary,
-              lineHeight: 1.6,
+              lineHeight: 1.5,
             }}
           >
             {COPY.cta.tagline}
           </div>
-
-          {/* URL + animated underline */}
           {urlRow}
         </div>
       </div>
