@@ -7,10 +7,9 @@
     "@actualai/actual-darwin-arm64": "0.1.0",
     "@actualai/actual-darwin-x64": "0.1.0",
     "@actualai/actual-linux-x64": "0.1.0",
-    "@actualai/actual-linux-arm64": "0.1.0",
-    "@actualai/actual-win32-x64": "0.1.0"
+    "@actualai/actual-linux-arm64": "0.1.0"
   },
-  "os": ["darwin", "linux", "win32"],
+  "os": ["darwin", "linux"],
   "engines": { "node": ">=16" },
   "repository": {
     "type": "git",
