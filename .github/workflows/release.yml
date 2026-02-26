@@ -9,9 +9,11 @@ permissions:
   contents: write
 
 jobs:
-  build-sign-macos:
-    name: Build & Sign (macOS arm64)
+  build-macos-arm64:
+    name: Build (macOS arm64)
     runs-on: macos-latest
+    env:
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
@@ -37,17 +39,16 @@ jobs:
         run: cargo build --release --target aarch64-apple-darwin
 
       - name: Import signing certificate
+        if: env.APPLE_CERTIFICATE_P12 != ''
         env:
           CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
           KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
           KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
           echo "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
           security import "$RUNNER_TEMP/certificate.p12" \
             -P "$CERTIFICATE_PASSWORD" \
@@ -55,6 +56,7 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH"
 
       - name: Sign binary
+        if: env.APPLE_CERTIFICATE_P12 != ''
         env:
           DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
         run: |
@@ -62,30 +64,272 @@ jobs:
             --sign "$DEVELOPER_ID" \
             --options runtime \
             target/aarch64-apple-darwin/release/actual
-
-          # Verify
           codesign --verify --verbose target/aarch64-apple-darwin/release/actual
 
       - name: Notarize
+        if: env.APPLE_CERTIFICATE_P12 != ''
         env:
           APPLE_ID: ${{ secrets.APPLE_NOTARIZATION_APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_NOTARIZATION_TEAM_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
         run: |
-          # Zip for submission (notarytool requires an archive)
           ditto -c -k --keepParent \
             target/aarch64-apple-darwin/release/actual \
-            "$RUNNER_TEMP/actual.zip"
-
-          xcrun notarytool submit "$RUNNER_TEMP/actual.zip" \
+            "$RUNNER_TEMP/actual-arm64.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/actual-arm64.zip" \
             --apple-id "$APPLE_ID" \
             --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_PASSWORD" \
             --wait
 
-      - name: Upload to release
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: actual-darwin-arm64
+          path: target/aarch64-apple-darwin/release/actual
+
+  build-macos-x64:
+    name: Build (macOS x64)
+    runs-on: macos-latest
+    env:
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: macos-cargo-x86_64-apple-darwin-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            macos-cargo-x86_64-apple-darwin-
+
+      - name: Build
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Import signing certificate
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        env:
+          CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      - name: Sign binary
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        env:
+          DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+        run: |
+          codesign --deep --force --verify --verbose \
+            --sign "$DEVELOPER_ID" \
+            --options runtime \
+            target/x86_64-apple-darwin/release/actual
+          codesign --verify --verbose target/x86_64-apple-darwin/release/actual
+
+      - name: Notarize
+        if: env.APPLE_CERTIFICATE_P12 != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_NOTARIZATION_APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_NOTARIZATION_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_NOTARIZATION_PASSWORD }}
+        run: |
+          ditto -c -k --keepParent \
+            target/x86_64-apple-darwin/release/actual \
+            "$RUNNER_TEMP/actual-x64.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/actual-x64.zip" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_PASSWORD" \
+            --wait
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: actual-darwin-x64
+          path: target/x86_64-apple-darwin/release/actual
+
+  build-linux-x64:
+    name: Build (Linux x64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: linux-cargo-x86_64-unknown-linux-gnu-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            linux-cargo-x86_64-unknown-linux-gnu-
+
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: actual-linux-x64
+          path: target/x86_64-unknown-linux-gnu/release/actual
+
+  build-linux-arm64:
+    name: Build (Linux arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7  # stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache cargo
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306  # v5.0.3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: linux-cargo-aarch64-unknown-linux-gnu-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            linux-cargo-aarch64-unknown-linux-gnu-
+
+      - name: Build
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: actual-linux-arm64
+          path: target/aarch64-unknown-linux-gnu/release/actual
+
+  package-and-release:
+    name: Package & Release
+    needs: [build-macos-arm64, build-macos-x64, build-linux-x64, build-linux-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          path: artifacts/
+
+      - name: Create tarballs
+        run: |
+          VERSION="${{ github.ref_name }}"
+          mkdir -p tarballs
+
+          # Make all binaries executable
+          chmod +x artifacts/actual-darwin-arm64/actual
+          chmod +x artifacts/actual-darwin-x64/actual
+          chmod +x artifacts/actual-linux-x64/actual
+          chmod +x artifacts/actual-linux-arm64/actual
+
+          # Package each as a tarball (single file named 'actual' at root, no subdirectory)
+          tar -czf tarballs/actual-darwin-arm64.tar.gz -C artifacts/actual-darwin-arm64 actual
+          tar -czf tarballs/actual-darwin-x64.tar.gz   -C artifacts/actual-darwin-x64   actual
+          tar -czf tarballs/actual-linux-x64.tar.gz    -C artifacts/actual-linux-x64    actual
+          tar -czf tarballs/actual-linux-arm64.tar.gz  -C artifacts/actual-linux-arm64  actual
+
+      - name: Upload tarballs to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp target/aarch64-apple-darwin/release/actual actual
-          gh release upload "${{ github.ref_name }}" actual --clobber
+          VERSION="${{ github.ref_name }}"
+          for tarball in tarballs/*.tar.gz; do
+            gh release upload "$VERSION" "$tarball" --clobber
+          done
+
+      - name: Compute SHA256s
+        id: sha256
+        run: |
+          echo "darwin_arm64=$(shasum -a 256 tarballs/actual-darwin-arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "darwin_x64=$(shasum -a 256 tarballs/actual-darwin-x64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_x64=$(shasum -a 256 tarballs/actual-linux-x64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(shasum -a 256 tarballs/actual-linux-arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      sha256_darwin_arm64: ${{ steps.sha256.outputs.darwin_arm64 }}
+      sha256_darwin_x64: ${{ steps.sha256.outputs.darwin_x64 }}
+      sha256_linux_x64: ${{ steps.sha256.outputs.linux_x64 }}
+      sha256_linux_arm64: ${{ steps.sha256.outputs.linux_arm64 }}
+
+  update-homebrew-tap:
+    name: Update Homebrew Tap
+    needs: package-and-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main repo (for formula template + update script)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          path: src
+
+      - name: Checkout tap repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: actual-software/homebrew-actual
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Set up Python
+        uses: actions/setup-python@v5  # v5
+
+      - name: Update formula
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          python3 src/scripts/update-formula.py \
+            src/Formula/actual.rb \
+            tap/Formula/actual.rb \
+            --version "${VERSION#v}" \
+            --sha-darwin-arm64 "${{ needs.package-and-release.outputs.sha256_darwin_arm64 }}" \
+            --sha-darwin-x64   "${{ needs.package-and-release.outputs.sha256_darwin_x64 }}" \
+            --sha-linux-x64    "${{ needs.package-and-release.outputs.sha256_linux_x64 }}" \
+            --sha-linux-arm64  "${{ needs.package-and-release.outputs.sha256_linux_arm64 }}"
+
+      - name: Commit and push to tap
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/actual.rb
+          git diff --staged --quiet || git commit -m "actual $VERSION"
+          git push

@@ -271,14 +271,22 @@ brew uninstall actual
 brew untap actual-software/actual
 ```
 
-## Work Items
+## Current State and Work Items
 
-1. Create `actual-software/homebrew-actual` GitHub repository with `Formula/actual.rb`
-2. Add `x86_64-apple-darwin` build target to `release.yml`
-3. Promote Linux builds from `build-and-test.yml` into `release.yml`
-4. Change release upload from raw binary to per-platform `.tar.gz` tarballs
-5. Write `scripts/update-formula.py` for precise formula line replacement
-6. Add `update-homebrew-tap` job to `release.yml`
-7. Create `TAP_GITHUB_TOKEN` secret in `actual-software/actual-cli`
-8. Test locally with `brew tap actual-software/actual /local/path` before first publish
-9. Submit to Homebrew core (optional, future) once the tap is established and stable
+### Implemented
+- All CI infrastructure: multi-platform builds, tarball packaging, formula auto-update
+- Conditional codesigning: signing + notarization activate automatically once secrets are configured
+- `Formula/actual.rb` template (in this repo, synced to tap by CI)
+- `scripts/update-formula.py` formula update script
+
+### Remaining manual steps before first release
+1. Create `actual-software/homebrew-actual` on GitHub with a `Formula/` directory
+2. Add `TAP_GITHUB_TOKEN` secret to this repo (fine-grained PAT with `contents: write` on the tap repo)
+3. Tag a release — CI handles everything else
+
+### Pending (blocked on Apple Developer approval)
+- Apple Developer ID certificate + notarization (application under review)
+- Once approved: add `APPLE_CERTIFICATE_P12`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_DEVELOPER_ID`, `APPLE_NOTARIZATION_APPLE_ID`, `APPLE_NOTARIZATION_TEAM_ID`, `APPLE_NOTARIZATION_PASSWORD` secrets — signing activates automatically
+
+### macOS without signing
+Homebrew removes the `com.apple.quarantine` attribute during installation, so unsigned binaries work for most macOS users. The formula includes a `caveats` block with the `xattr` workaround for edge cases.
