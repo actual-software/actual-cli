@@ -1,0 +1,20 @@
+{
+  "name": "@actualai/actual",
+  "version": "0.1.0",
+  "description": "ADR-powered AI context file generator",
+  "bin": { "actual": "./bin/actual.js" },
+  "optionalDependencies": {
+    "@actualai/actual-darwin-arm64": "0.1.0",
+    "@actualai/actual-darwin-x64": "0.1.0",
+    "@actualai/actual-linux-x64": "0.1.0",
+    "@actualai/actual-linux-arm64": "0.1.0",
+    "@actualai/actual-win32-x64": "0.1.0"
+  },
+  "os": ["darwin", "linux", "win32"],
+  "engines": { "node": ">=16" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/actual-software/actual-cli"
+  },
+  "license": "UNLICENSED"
+}
