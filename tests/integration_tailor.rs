@@ -126,7 +126,7 @@ mod tests {
         let env =
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .success();
 
@@ -191,7 +191,7 @@ mod tests {
         let env = TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_MONOREPO, &tailoring_json);
         env.setup_monorepo();
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .success();
 
@@ -247,7 +247,7 @@ mod tests {
         let env =
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .success();
 
@@ -294,7 +294,7 @@ mod tests {
 
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--model",
                 "opus",
@@ -363,7 +363,7 @@ mod tests {
 
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--max-budget-usd",
                 "0.50",
@@ -431,7 +431,7 @@ mod tests {
         let env =
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .failure();
 
@@ -478,7 +478,7 @@ mod tests {
         let env =
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .failure();
 
@@ -525,7 +525,7 @@ mod tests {
         let env =
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .failure();
 
@@ -566,7 +566,7 @@ mod tests {
             TestEnv::new_with_tailoring(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT, &tailoring_json);
 
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .success();
 
@@ -626,7 +626,7 @@ mod tests {
         env.write_file("CLAUDE.md", initial_content);
 
         env.cmd()
-            .args(["sync", "--force", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--api-url", &env.api_url])
             .assert()
             .success();
 

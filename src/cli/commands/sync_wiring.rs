@@ -1,4 +1,4 @@
-//! Production wiring for `actual sync`.
+//! Production wiring for `actual adr-bot`.
 //!
 //! The preamble logic (runner selection, key resolution, timeout) is fully
 //! testable via [`sync_run_inner`], which accepts an injectable auth function.
@@ -187,7 +187,7 @@ fn codex_cli_fallback_if_model_error(
     }
 }
 
-/// Production wiring for `actual sync`.
+/// Production wiring for `actual adr-bot`.
 ///
 /// Thin shim that calls [`sync_run_inner`] with the real
 /// [`check_auth_with_timeout`] function. All logic lives in
@@ -196,7 +196,7 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
     sync_run_inner(args, check_auth_with_timeout)
 }
 
-/// Inner implementation of `actual sync`, parameterised over the auth
+/// Inner implementation of `actual adr-bot`, parameterised over the auth
 /// function so that tests can inject a fake.
 ///
 /// Resolves system dependencies (cwd, terminal, runner) and delegates

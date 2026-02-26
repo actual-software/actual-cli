@@ -320,7 +320,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Analyze repo, fetch ADRs, tailor and write AI context files
-    Sync(SyncArgs),
+    AdrBot(SyncArgs),
     /// Check output file state
     Status(StatusArgs),
     /// Check Claude Code authentication status
@@ -335,7 +335,7 @@ pub enum Command {
     Cache(CacheArgs),
 }
 
-/// Arguments for the `sync` command
+/// Arguments for the `adr-bot` command
 #[derive(Parser, Debug, Clone)]
 pub struct SyncArgs {
     /// Show summary of what would change without writing files
@@ -390,8 +390,8 @@ pub struct SyncArgs {
     ///   cursor-rules — write .cursor/rules/actual-policies.mdc (for Cursor IDE)
     ///
     /// Examples:
-    ///   actual sync --output-format agents-md
-    ///   actual sync --output-format cursor-rules
+    ///   actual adr-bot --output-format agents-md
+    ///   actual adr-bot --output-format cursor-rules
     ///
     /// Can also be set permanently via: actual config set output_format agents-md
     #[arg(long, value_enum, value_name = "FORMAT")]
@@ -473,10 +473,10 @@ mod parse_tests {
     use super::*;
     use clap::Parser;
 
-    /// Extract model from a parsed command; returns None for non-Sync commands.
+    /// Extract model from a parsed command; returns None for non-AdrBot commands.
     fn model_from_command(cmd: Command) -> Option<String> {
         match cmd {
-            Command::Sync(args) => args.model,
+            Command::AdrBot(args) => args.model,
             _ => None,
         }
     }
@@ -490,17 +490,17 @@ mod parse_tests {
 
     // ---- RunnerChoice / --runner flag tests ----
 
-    /// Helper to extract runner from a parsed Sync command.
+    /// Helper to extract runner from a parsed AdrBot command.
     fn runner_from_command(cmd: Command) -> Option<RunnerChoice> {
         match cmd {
-            Command::Sync(args) => args.runner,
+            Command::AdrBot(args) => args.runner,
             _ => None,
         }
     }
 
-    /// Helper: try to parse `actual sync --runner <value>` and return the result.
+    /// Helper: try to parse `actual adr-bot --runner <value>` and return the result.
     fn parse_runner(value: &str) -> Result<Option<RunnerChoice>, clap::Error> {
-        Cli::try_parse_from(["actual", "sync", "--runner", value])
+        Cli::try_parse_from(["actual", "adr-bot", "--runner", value])
             .map(|cli| runner_from_command(cli.command))
     }
 
@@ -571,8 +571,8 @@ mod parse_tests {
 
     #[test]
     fn test_runner_absent_is_none() {
-        let cli =
-            Cli::try_parse_from(["actual", "sync"]).expect("sync without --runner should parse");
+        let cli = Cli::try_parse_from(["actual", "adr-bot"])
+            .expect("adr-bot without --runner should parse");
         assert_eq!(runner_from_command(cli.command), None);
     }
 
@@ -686,7 +686,7 @@ mod parse_tests {
     fn test_cli_rejects_flag_like_model() {
         let result = Cli::try_parse_from([
             "actual",
-            "sync",
+            "adr-bot",
             "--model",
             "--allow-dangerously-skip-permissions",
         ]);
@@ -695,7 +695,7 @@ mod parse_tests {
 
     #[test]
     fn test_cli_accepts_valid_model() {
-        let cli = Cli::try_parse_from(["actual", "sync", "--model", "claude-sonnet-4-6"])
+        let cli = Cli::try_parse_from(["actual", "adr-bot", "--model", "claude-sonnet-4-6"])
             .expect("expected Ok");
         assert_eq!(
             model_from_command(cli.command),
@@ -705,7 +705,7 @@ mod parse_tests {
 
     #[test]
     fn test_cli_rejects_model_with_shell_metacharacters() {
-        let result = Cli::try_parse_from(["actual", "sync", "--model", "model|cmd"]);
+        let result = Cli::try_parse_from(["actual", "adr-bot", "--model", "model|cmd"]);
         assert!(result.is_err(), "expected clap to reject model with '|'");
     }
 
@@ -783,30 +783,30 @@ mod parse_tests {
 
     // ---- --no-tui flag tests ----
 
-    /// Helper to extract no_tui from a parsed Sync command.
+    /// Helper to extract no_tui from a parsed AdrBot command.
     fn no_tui_from_command(cmd: Command) -> bool {
         match cmd {
-            Command::Sync(args) => args.no_tui,
+            Command::AdrBot(args) => args.no_tui,
             _ => false,
         }
     }
 
     #[test]
     fn test_no_tui_flag_absent_is_false() {
-        let cli =
-            Cli::try_parse_from(["actual", "sync"]).expect("sync without --no-tui should parse");
+        let cli = Cli::try_parse_from(["actual", "adr-bot"])
+            .expect("adr-bot without --no-tui should parse");
         assert!(!no_tui_from_command(cli.command));
     }
 
     #[test]
     fn test_no_tui_flag_present_is_true() {
-        let cli = Cli::try_parse_from(["actual", "sync", "--no-tui"])
-            .expect("sync with --no-tui should parse");
+        let cli = Cli::try_parse_from(["actual", "adr-bot", "--no-tui"])
+            .expect("adr-bot with --no-tui should parse");
         assert!(no_tui_from_command(cli.command));
     }
 
     #[test]
-    fn test_no_tui_from_non_sync_command_returns_false() {
+    fn test_no_tui_from_non_adr_bot_command_returns_false() {
         // Exercises the `_ => false` arm of no_tui_from_command.
         let cli = Cli::try_parse_from(["actual", "status"]).unwrap();
         assert!(!no_tui_from_command(cli.command));

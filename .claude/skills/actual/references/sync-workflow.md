@@ -1,6 +1,6 @@
 # Sync Workflow Reference
 
-Complete internals of `actual sync`. Load this when debugging sync failures or when the user asks what sync does.
+Complete internals of `actual adr-bot`. Load this when debugging sync failures or when the user asks what sync does.
 
 ## Table of Contents
 
@@ -15,7 +15,7 @@ Complete internals of `actual sync`. Load this when debugging sync failures or w
 
 ## Overview
 
-`actual sync` is a 13-step pipeline: environment check, analysis, filtering, confirmation, config reload, ADR fetch, rejection filtering, tailoring, diff computation, diff display, dry-run handling, write confirmation, and file write.
+`actual adr-bot` is a 13-step pipeline: environment check, analysis, filtering, confirmation, config reload, ADR fetch, rejection filtering, tailoring, diff computation, diff display, dry-run handling, write confirmation, and file write.
 
 ## Step-by-Step Workflow
 

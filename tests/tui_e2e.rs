@@ -13,10 +13,13 @@ mod tests {
         bin.to_str().unwrap().to_string()
     }
 
-    /// Spawn an `actual sync` TuiSession with the given TestEnv and extra CLI args.
+    /// Spawn an `actual adr-bot` TuiSession with the given TestEnv and extra CLI args.
     fn spawn_sync_session(env: &TestEnv, extra_args: &[&str]) -> TuiSession {
         let bin = actual_binary_path();
-        let mut cmd = format!("{} sync --force --no-tailor --api-url {}", bin, env.api_url);
+        let mut cmd = format!(
+            "{} adr-bot --force --no-tailor --api-url {}",
+            bin, env.api_url
+        );
         for arg in extra_args {
             cmd.push(' ');
             cmd.push_str(arg);
@@ -29,7 +32,7 @@ mod tests {
             .env("NO_COLOR", "1")
             .workdir(env.dir.path())
             .spawn()
-            .expect("Failed to spawn actual sync")
+            .expect("Failed to spawn actual adr-bot")
     }
 
     /// Set up a mockito server with an empty ADR response (zero matched).
@@ -289,7 +292,7 @@ mod tests {
         // Override API URL to an unreachable address; use --no-tui for clean exit
         let bin = actual_binary_path();
         let cmd = format!(
-            "{} sync --force --no-tailor --no-tui --api-url http://127.0.0.1:1",
+            "{} adr-bot --force --no-tailor --no-tui --api-url http://127.0.0.1:1",
             bin
         );
         let mut session = TuiSession::new(&cmd)
@@ -300,7 +303,7 @@ mod tests {
             .env("NO_COLOR", "1")
             .workdir(env.dir.path())
             .spawn()
-            .expect("Failed to spawn actual sync");
+            .expect("Failed to spawn actual adr-bot");
 
         // Should show API error and exit with code 3
         session
@@ -407,7 +410,10 @@ mod tests {
         };
 
         let bin = actual_binary_path();
-        let cmd = format!("{} sync --force --no-tailor --api-url {}", bin, env.api_url);
+        let cmd = format!(
+            "{} adr-bot --force --no-tailor --api-url {}",
+            bin, env.api_url
+        );
         let mut session = TuiSession::new(&cmd)
             .size(120, 40)
             .timeout(Duration::from_secs(30))
@@ -417,7 +423,7 @@ mod tests {
             .workdir(env.dir.path())
             .capture_config(capture_config)
             .spawn()
-            .expect("Failed to spawn actual sync with capture");
+            .expect("Failed to spawn actual adr-bot with capture");
 
         // Wait for all phases to complete
         wait_for_review_mode(&mut session);
@@ -437,7 +443,7 @@ mod tests {
         let content = std::fs::read_to_string(&timeline_path).unwrap();
         let timeline: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(
-            timeline["command"].as_str().unwrap().contains("sync"),
+            timeline["command"].as_str().unwrap().contains("adr-bot"),
             "Timeline command should contain 'sync'"
         );
         assert_eq!(timeline["terminal_size"][0], 120);

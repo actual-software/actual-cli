@@ -16,7 +16,7 @@ Deep reference for all 5 runners. Load this when setting up a runner, troublesho
 
 ## Overview
 
-Runners are the AI backends that power `actual sync`'s tailoring step. Each runner connects to a different AI provider or local CLI tool.
+Runners are the AI backends that power `actual adr-bot`'s tailoring step. Each runner connects to a different AI provider or local CLI tool.
 
 | Runner | Type | Binary | Auth Method | Default Model |
 |--------|------|--------|-------------|---------------|

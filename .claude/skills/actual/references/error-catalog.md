@@ -190,14 +190,14 @@ export OPENAI_API_KEY="sk-..."
 
 ### NoRunnerAvailable
 
-**Cause**: `actual sync` was called without `--runner` or a `runner` config value, and none of the candidate runners for the given model passed their environment probe. The error message lists each candidate and the reason it was skipped.
+**Cause**: `actual adr-bot` was called without `--runner` or a `runner` config value, and none of the candidate runners for the given model passed their environment probe. The error message lists each candidate and the reason it was skipped.
 
 **Hint**: Install a runner (e.g. `npm install -g @anthropic-ai/claude-code`) or set an API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
 **Diagnosis**:
 ```bash
 # See exactly which runners were tried and why each failed:
-actual sync 2>&1          # stderr shows the "Tried:" list
+actual adr-bot 2>&1          # stderr shows the "Tried:" list
 
 # Check which binaries are installed:
 which claude
@@ -222,7 +222,7 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 export OPENAI_API_KEY="sk-..."
 
 # Alternatively, pin a specific runner with --runner to skip auto-detection:
-actual sync --runner anthropic-api
+actual adr-bot --runner anthropic-api
 ```
 
 ## Exit Code 3: Billing and API Errors
@@ -271,7 +271,7 @@ curl -I <api_url>   # test connectivity
 
 **Diagnosis**:
 ```bash
-actual sync --verbose --show-errors  # get detailed output
+actual adr-bot --verbose --show-errors  # get detailed output
 ```
 
 **Fix**: Depends on the runner's error message. Common causes: model not available, rate limiting, context too large.
@@ -345,9 +345,9 @@ git log --oneline -5  # verify repo has commits
 **Fix**:
 ```bash
 # Retry
-actual sync
+actual adr-bot
 # Or skip tailoring
-actual sync --no-tailor
+actual adr-bot --no-tailor
 ```
 
 ### InternalError
