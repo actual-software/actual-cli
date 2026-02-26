@@ -78,6 +78,9 @@ pub enum ActualError {
 
     #[error("Terminal I/O error: {0}")]
     TerminalIOError(String),
+
+    #[error("Actual AI API is being updated and will be available shortly")]
+    ServiceUnavailable,
 }
 
 impl ActualError {
@@ -94,7 +97,7 @@ impl ActualError {
             | Self::CodexCliModelRequiresApiKey { .. }
             | Self::NoRunnerAvailable { .. } => 2,
             Self::CreditBalanceTooLow { .. } => 3,
-            Self::ApiError(_) | Self::ApiResponseError { .. } => 3,
+            Self::ApiError(_) | Self::ApiResponseError { .. } | Self::ServiceUnavailable => 3,
             Self::IoError(_) => 5,
             _ => 1,
         }
@@ -250,6 +253,7 @@ mod tests {
             .exit_code(),
             2
         );
+        assert_eq!(ActualError::ServiceUnavailable.exit_code(), 3);
     }
 
     #[test]
@@ -664,5 +668,28 @@ mod tests {
         assert!(!ActualError::UserCancelled.is_model_error());
         assert!(!ActualError::RunnerTimeout { seconds: 30 }.is_model_error());
         assert!(!ActualError::ConfigError("bad".to_string()).is_model_error());
+    }
+
+    #[test]
+    fn test_service_unavailable_display() {
+        let msg = ActualError::ServiceUnavailable.to_string();
+        assert!(
+            msg.contains("being updated"),
+            "expected 'being updated' in: {msg}"
+        );
+        assert!(
+            msg.contains("available shortly"),
+            "expected 'available shortly' in: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_service_unavailable_hint_is_none() {
+        assert_eq!(ActualError::ServiceUnavailable.hint(), None);
+    }
+
+    #[test]
+    fn test_service_unavailable_is_not_model_error() {
+        assert!(!ActualError::ServiceUnavailable.is_model_error());
     }
 }

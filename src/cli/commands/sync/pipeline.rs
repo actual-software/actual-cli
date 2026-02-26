@@ -375,19 +375,44 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         .unwrap_or_default();
     let output_format_for_fs = output_format.clone();
     let (response, existing_paths) = rt.block_on(async {
-        let api_future = async {
-            let retry_config = RetryConfig::default();
-            tokio::select! {
-                result = with_retry(&retry_config, || client.post_match(&request)) => result,
-                _ = tokio::signal::ctrl_c() => Err(ActualError::UserCancelled),
-            }
-        };
-
+        // Spawn the filesystem discovery immediately so it runs concurrently
+        // with the API call (including any 503 retry waits).
         let fs_future = tokio::task::spawn_blocking(move || {
             find_existing_output_files(&root_dir_owned, &output_format_for_fs)
         });
 
-        tokio::join!(api_future, fs_future)
+        let delays_503: [std::time::Duration; 3] = [
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(60),
+        ];
+        let retry_config = RetryConfig::default();
+        let mut attempt_503 = 0usize;
+        let api_response = loop {
+            let result = tokio::select! {
+                result = with_retry(&retry_config, || client.post_match(&request)) => result,
+                _ = tokio::signal::ctrl_c() => break Err(ActualError::UserCancelled),
+            };
+            match result {
+                Ok(v) => break Ok(v),
+                Err(ActualError::ServiceUnavailable) if attempt_503 < delays_503.len() => {
+                    let delay_secs = delays_503[attempt_503].as_secs();
+                    pipeline.update_message(
+                        SyncPhase::Fetch,
+                        &format!(
+                            "Actual AI API is updating \u{2014} retrying in {delay_secs}s ({}/{})...",
+                            attempt_503 + 1,
+                            delays_503.len()
+                        ),
+                    );
+                    tokio::time::sleep(delays_503[attempt_503]).await;
+                    attempt_503 += 1;
+                }
+                Err(e) => break Err(e),
+            }
+        };
+
+        (api_response, fs_future.await)
     });
 
     // Unwrap the spawn_blocking JoinHandle
@@ -5047,6 +5072,20 @@ mod tests {
         let e = ActualError::UserCancelled;
         let msg = fetch_error_message(&e, "https://api.example.com");
         assert!(msg.contains("API request failed:"), "unexpected msg: {msg}");
+    }
+
+    #[test]
+    fn test_fetch_error_message_service_unavailable() {
+        let e = ActualError::ServiceUnavailable;
+        let msg = fetch_error_message(&e, "https://api.example.com");
+        assert!(
+            msg.contains("being updated"),
+            "expected 'being updated' in: {msg}"
+        );
+        assert!(
+            msg.contains("available shortly"),
+            "expected 'available shortly' in: {msg}"
+        );
     }
 
     // ── format_cache_age unit tests ──
