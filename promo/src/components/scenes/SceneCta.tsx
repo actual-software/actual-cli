@@ -168,6 +168,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({ totalDuration = 180 }) => {
             style={{
               flex: 1,
               height: 2,
+              marginRight: -200,
               background: `linear-gradient(90deg, ${COLORS.borderGreen}, ${COLORS.borderTeal})`,
               transformOrigin: "left center",
               transform: `scaleX(${urlUnderlineWidth / 100})`,
