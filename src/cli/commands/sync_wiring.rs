@@ -65,7 +65,7 @@ fn require_api_key_for_model(
 /// Priority order:
 ///   1. `args_model` (--model CLI flag overrides everything)
 ///   2. `model` (the unified model config field)
-///   3. Default: probe CodexCli first, then OpenAiApi
+///   3. Default: probe ClaudeCli first, then AnthropicApi
 ///
 /// For each model, determines the list of candidate runners in priority order,
 /// then probes each in turn.  Returns the first available runner, or
@@ -80,7 +80,7 @@ fn auto_detect_runner(
     // Resolve candidates in priority order:
     // 1. --model flag overrides everything
     // 2. model config field
-    // 3. No model → default to codex-cli / openai-api candidates
+    // 3. No model → default to claude-cli / anthropic-api candidates
     let (effective_model_display, candidates): (String, Vec<RunnerChoice>) =
         if let Some(m) = args_model {
             let lower = m.to_ascii_lowercase();
@@ -91,12 +91,10 @@ fn auto_detect_runner(
             let c = runner_candidates(&lower);
             (m.to_string(), c)
         } else {
-            // No model set → default candidates: CodexCli first, then OpenAiApi fallback.
-            // Claude/Anthropic runners are only selected when explicitly specified via
-            // --model or the model config field.
+            // No model set → default candidates: ClaudeCli first, AnthropicApi fallback
             (
                 "(default)".to_string(),
-                vec![RunnerChoice::CodexCli, RunnerChoice::OpenAiApi],
+                vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi],
             )
         };
 
@@ -994,10 +992,10 @@ mod tests {
     fn test_preamble_malformed_config_uses_defaults() {
         // A malformed config file should fall back to defaults (eprintln warning).
         // auto_detect_runner is called with (none, none, none) and default config.
-        // It tries CodexCli (not found), then OpenAiApi (no key) → NoRunnerAvailable.
+        // It tries ClaudeCli (not found), then AnthropicApi (no key) → NoRunnerAvailable.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("CODEX_BINARY", "/nonexistent/codex");
-        let _g2 = EnvGuard::remove("OPENAI_API_KEY");
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::remove("ANTHROPIC_API_KEY");
         let dir = tempfile::tempdir().unwrap();
         let _g3 = with_temp_config(&dir, ": this is not valid yaml [\n");
         let args = make_sync_args(None); // no runner → falls through to auto_detect_runner
@@ -1122,50 +1120,33 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn auto_detect_no_model_codex_available_returns_codex_cli() {
-        // Default path (no model): CodexCli is tried first.
-        // A real codex binary + OPENAI_API_KEY → CodexCli selected.
+    fn auto_detect_no_model_claude_available_returns_claude_cli() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let bin_dir = tempfile::tempdir().unwrap();
-        let fake_codex = make_fake_binary(bin_dir.path(), "fake-codex");
-        let _g1 = EnvGuard::set("CODEX_BINARY", fake_codex.to_str().unwrap());
-        let _g2 = EnvGuard::set("OPENAI_API_KEY", "sk-openai-test");
+        let fake_claude = make_fake_claude_logged_in(bin_dir.path());
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", fake_claude.to_str().unwrap());
         let result = auto_detect_runner(None, None, &default_cfg());
-        assert_eq!(result.unwrap(), RunnerChoice::CodexCli);
+        assert_eq!(result.unwrap(), RunnerChoice::ClaudeCli);
     }
 
     #[test]
-    fn auto_detect_no_model_codex_missing_openai_key_returns_openai_api() {
-        // Default path (no model): CodexCli unavailable (binary missing) +
-        // OPENAI_API_KEY set → falls back to OpenAiApi.
+    fn auto_detect_no_model_claude_unavailable_anthropic_key_set_returns_anthropic_api() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("CODEX_BINARY", "/nonexistent/codex");
-        let _g2 = EnvGuard::set("OPENAI_API_KEY", "sk-openai-test");
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
         let result = auto_detect_runner(None, None, &default_cfg());
-        assert_eq!(result.unwrap(), RunnerChoice::OpenAiApi);
+        assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
 
     #[test]
-    fn auto_detect_no_model_nothing_available_returns_no_runner_error_mentions_codex_and_openai() {
-        // Default path (no model): both CodexCli (binary missing) and OpenAiApi
-        // (no key) fail → NoRunnerAvailable, error message names codex-cli and openai-api.
+    fn auto_detect_no_model_no_runner_available_returns_error() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("CODEX_BINARY", "/nonexistent/codex");
-        let _g2 = EnvGuard::remove("OPENAI_API_KEY");
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::remove("ANTHROPIC_API_KEY");
         let result = auto_detect_runner(None, None, &default_cfg());
-        let err = result.expect_err("expected NoRunnerAvailable");
-        let msg = err.to_string();
         assert!(
-            matches!(err, ActualError::NoRunnerAvailable { .. }),
-            "expected NoRunnerAvailable, got: {err:?}"
-        );
-        assert!(
-            msg.contains("codex-cli"),
-            "error must mention codex-cli: {msg}"
-        );
-        assert!(
-            msg.contains("openai-api"),
-            "error must mention openai-api: {msg}"
+            matches!(result, Err(ActualError::NoRunnerAvailable { .. })),
+            "expected NoRunnerAvailable, got: {result:?}"
         );
     }
 
@@ -1285,22 +1266,6 @@ mod tests {
         // Pass an anthropic model so candidates include AnthropicApi
         let result = auto_detect_runner(Some("claude-sonnet-4-6"), None, &cfg);
         assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
-    }
-
-    #[test]
-    fn auto_detect_config_openai_key_used_when_env_absent_default_path() {
-        // Without a model specified, the default path is CodexCli → OpenAiApi.
-        // A config openai_api_key (no env var) should enable OpenAiApi when
-        // CodexCli is unavailable.
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("CODEX_BINARY", "/nonexistent/codex");
-        let _g2 = EnvGuard::remove("OPENAI_API_KEY");
-        let cfg = crate::config::types::Config {
-            openai_api_key: Some("sk-openai-from-config".to_string()),
-            ..Default::default()
-        };
-        let result = auto_detect_runner(None, None, &cfg);
-        assert_eq!(result.unwrap(), RunnerChoice::OpenAiApi);
     }
 
     #[cfg(unix)]

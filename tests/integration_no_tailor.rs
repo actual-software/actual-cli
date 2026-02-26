@@ -30,7 +30,7 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -87,7 +87,7 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -156,7 +156,7 @@ mod tests {
         env.setup_monorepo();
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -216,7 +216,7 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -387,7 +387,7 @@ mod tests {
         env.setup_monorepo();
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",

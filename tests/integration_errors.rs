@@ -139,7 +139,7 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -170,7 +170,7 @@ mod tests {
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -217,7 +217,7 @@ mod tests {
         let server = mockito::Server::new();
         let env = TestEnv::new(&server, AUTH_FAIL, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args(["adr-bot", "--force", "--no-tailor", "--api-url", &env.api_url])
             .env_remove("ANTHROPIC_API_KEY")
             .assert()
             .code(2)
@@ -244,7 +244,7 @@ mod tests {
         // A crash during `claude auth status` produces RunnerFailed (exit code 1).
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--api-url",
@@ -267,7 +267,7 @@ mod tests {
         env.write_file("pnpm-workspace.yaml", "{{invalid yaml content");
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--no-tailor",
                 "--runner",
@@ -307,7 +307,7 @@ mod tests {
 
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--runner",
                 "claude-cli",
@@ -346,7 +346,7 @@ mod tests {
         // (without --runner, the default would try codex-cli first).
         env.cmd()
             .args([
-                "sync",
+                "adr-bot",
                 "--force",
                 "--api-url",
                 &env.api_url,
