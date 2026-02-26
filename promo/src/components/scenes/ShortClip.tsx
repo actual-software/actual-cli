@@ -134,19 +134,21 @@ const FastPipeline: React.FC = () => {
 const SQUARE_TERM_OFFSET = -162;
 
 // Portrait (9:16) — scale-to-fill.
-// Scale 1.8 so the 640px-tall terminal occupies 60% of the 1920px canvas height
-// (640 × 1.8 = 1152px), centred vertically → 384px symmetric top/bottom bands.
+// Scale 1.44 (= 1.8 × 0.8, −20%) so the 640px-tall terminal occupies ~48% of
+// the 1920px canvas height (640 × 1.44 = 921.6px), centred vertically →
+// ~499px symmetric top/bottom bands. Reducing scale by 20% exposes more of the
+// terminal content horizontally within the 1080px canvas width.
 // The same SQUARE_TERM_OFFSET shift is applied inside the block so the left-side
 // TUI panel fills most of the canvas width, matching the ShortClip-11 framing.
-const PORTRAIT_SCENE_SCALE = 1.8;
+const PORTRAIT_SCENE_SCALE = 1.44;
 const PORTRAIT_TERM_LEFT   = 20;   // canvas-px gap before terminal left border
-// Symmetric vertical centering: (1920 − 640 × 1.8) / 2 = 384
+// Symmetric vertical centering: (1920 − 640 × 1.44) / 2 ≈ 499
 const PORTRAIT_TERM_TOP    = (1920 - 640 * PORTRAIT_SCENE_SCALE) / 2;
 // CSS transform on the 1920×1080 scene block.
 // canvas_coord = scale × local_coord + (tx, ty)
 // Terminal local position after SQUARE_TERM_OFFSET shift: x=198, y=220
-//   tx = PORTRAIT_TERM_LEFT  − scale × 198  =  20 − 356.4 ≈ −336
-//   ty = PORTRAIT_TERM_TOP   − scale × 220  = 384 − 396   = −12
+//   tx = PORTRAIT_TERM_LEFT  − scale × 198  =  20 − 285.1 ≈ −265
+//   ty = PORTRAIT_TERM_TOP   − scale × 220  = 499 − 316.8 ≈  182
 const PORTRAIT_BLOCK_TX = Math.round(
   PORTRAIT_TERM_LEFT - PORTRAIT_SCENE_SCALE * ((1920 - 1200) / 2 + SQUARE_TERM_OFFSET)
 );

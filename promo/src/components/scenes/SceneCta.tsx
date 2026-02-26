@@ -54,9 +54,9 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
   totalDuration = 180,
   layout = "wide",
   terminalOffsetX = 0,
-  portraitTermTop = 384,
+  portraitTermTop = 499,
   portraitTermLeft = 20,
-  portraitScale = 1.8,
+  portraitScale = 1.44,
 }) => {
   const frame = useCurrentFrame();
   const absoluteFrame = FRAMES.CTA_START + frame;
@@ -214,7 +214,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
             opacity: wordmarkOpacity,
           }}
         >
-          <GradientText text={COPY.cta.wordmark} fontSize={72} />
+          <GradientText text={COPY.cta.wordmark} fontSize={96} />
         </div>
 
         {/* Bottom band — tagline + URL row (matches square layout) */}
