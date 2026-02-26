@@ -58,7 +58,7 @@ In reference files (things needed for SPECIFIC questions):
 
 **Pattern: Pre-flight → Dry-run → Confirm → Execute → Diagnose → Retry** (Source 2: feedback loops)
 
-For `actual sync`:
+For `actual adr-bot`:
 ```
 1. PRE-FLIGHT (LOW freedom - exact checks):
    - Run: actual runners  (verify runner available)
@@ -67,7 +67,7 @@ For `actual sync`:
    - If any check fails → diagnose and fix before proceeding
 
 2. DRY-RUN (LOW freedom - exact command):
-   - Run: actual sync --dry-run [--full] [user's flags]
+   - Run: actual adr-bot --dry-run [--full] [user's flags]
    - Show the user what would change
 
 3. CONFIRM (HIGH freedom):
@@ -75,7 +75,7 @@ For `actual sync`:
    - If yes → step 4. If no → done.
 
 4. EXECUTE (LOW freedom - exact command):
-   - Run: actual sync [user's flags]
+   - Run: actual adr-bot [user's flags]
    - Monitor for errors
 
 5. DIAGNOSE (if step 4 failed):
@@ -102,12 +102,12 @@ For `actual sync`:
 name: actual
 description: >-
   Feature-complete companion for the actual CLI, an ADR-powered
-  CLAUDE.md/AGENTS.md generator. Runs and troubleshoots actual sync,
+  CLAUDE.md/AGENTS.md generator. Runs and troubleshoots actual adr-bot,
   status, auth, config, runners, and models. Covers all 5 runners
   (claude-cli, anthropic-api, openai-api, codex-cli, cursor-cli),
   all model patterns, all 3 output formats (claude-md, agents-md,
   cursor-rules), and all error types. Use when working with the
-  actual CLI, running actual sync, configuring runners or models,
+  actual CLI, running actual adr-bot, configuring runners or models,
   troubleshooting errors, or managing output files.
 argument-hint: "[question or command] e.g. 'run sync', 'set up anthropic-api', 'fix ClaudeNotFound'"
 ---

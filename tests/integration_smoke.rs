@@ -18,7 +18,13 @@ mod tests {
 
         let env = TestEnv::new(&server, AUTH_OK, ANALYSIS_SINGLE_PROJECT);
         env.cmd()
-            .args(["sync", "--force", "--no-tailor", "--api-url", &env.api_url])
+            .args([
+                "adr-bot",
+                "--force",
+                "--no-tailor",
+                "--api-url",
+                &env.api_url,
+            ])
             .assert()
             .success();
     }

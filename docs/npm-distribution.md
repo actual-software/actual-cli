@@ -37,8 +37,8 @@ Check npm availability before publishing:
 
 | Option | `npx` invocation | Notes |
 |--------|-----------------|-------|
-| `actual` (unscoped) | `npx actual sync` | Cleanest UX, but name may be taken |
-| `@actualai/actual` (scoped) | `npx @actualai/actual sync` | Guaranteed namespace, slightly verbose |
+| `actual` (unscoped) | `npx actual adr-bot` | Cleanest UX, but name may be taken |
+| `@actualai/actual` (scoped) | `npx @actualai/actual adr-bot` | Guaranteed namespace, slightly verbose |
 
 If `actual` is taken on npm, use `@actualai/actual` for the root package and `@actualai/actual-darwin-arm64` etc. for platform packages.
 
@@ -208,13 +208,13 @@ After publishing:
 
 ```bash
 # One-off via npx (no install needed)
-npx actual sync
+npx actual adr-bot
 npx actual status
 npx actual auth
 
 # Or install globally
 npm install -g actual
-actual sync
+actual adr-bot
 ```
 
 ## Work Items

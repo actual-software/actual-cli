@@ -240,7 +240,7 @@ an ADR-powered CLAUDE.md/AGENTS.md generator.
 
 ## What it does
 
-- Runs and troubleshoots `actual sync` with pre-flight → dry-run → execute → diagnose → retry
+- Runs and troubleshoots `actual adr-bot` with pre-flight → dry-run → execute → diagnose → retry
 - Covers all 5 runners (claude-cli, anthropic-api, openai-api, codex-cli, cursor-cli)
 - Covers all 3 output formats (claude-md, agents-md, cursor-rules)
 - Includes error catalog, config reference, runner guide, and diagnostic script

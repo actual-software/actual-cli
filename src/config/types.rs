@@ -95,11 +95,11 @@ pub struct Config {
     /// - `agents-md`    — write `AGENTS.md` (Codex CLI)
     /// - `cursor-rules` — write `.cursor/rules/actual-policies.mdc` (Cursor IDE)
     ///
-    /// Set via CLI: `actual sync --output-format agents-md`
+    /// Set via CLI: `actual adr-bot --output-format agents-md`
     /// Set persistently: `actual config set output_format agents-md`
     ///
-    /// Only one format is active per sync run.  Teams that need multiple output
-    /// files (e.g., both `CLAUDE.md` and `AGENTS.md`) should run `actual sync`
+    /// Only one format is active per run.  Teams that need multiple output
+    /// files (e.g., both `CLAUDE.md` and `AGENTS.md`) should run `actual adr-bot`
     /// twice with different `--output-format` values, or configure separate CI
     /// jobs.  A future `output_formats: Vec<String>` field may be added to
     /// support this natively; if so, `output_format` (singular) will be read

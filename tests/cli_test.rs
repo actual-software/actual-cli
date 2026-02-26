@@ -14,7 +14,7 @@ fn test_help() {
         .stdout(predicate::str::contains(
             "ADR-powered AI context file generator",
         ))
-        .stdout(predicate::str::contains("sync"))
+        .stdout(predicate::str::contains("adr-bot"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("auth"))
         .stdout(predicate::str::contains("config"));
@@ -35,7 +35,7 @@ fn test_sync_without_claude_binary() {
     // Explicitly set --runner to avoid the user's config auto-selecting a
     // different runner (e.g. codex-cli) which would bypass find_claude_binary().
     cmd()
-        .args(["sync", "--dry-run", "--runner", "claude-cli"])
+        .args(["adr-bot", "--dry-run", "--runner", "claude-cli"])
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
         .code(2)
@@ -168,7 +168,7 @@ fn test_sync_with_flags_without_claude() {
     let config_file = tempfile::NamedTempFile::new().unwrap();
     cmd()
         .args([
-            "sync",
+            "adr-bot",
             "--dry-run",
             "--full",
             "--force",
@@ -198,7 +198,7 @@ fn test_sync_with_flags_without_claude() {
 fn test_sync_dry_run_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
-        .args(["sync", "--dry-run", "--runner", "claude-cli"])
+        .args(["adr-bot", "--dry-run", "--runner", "claude-cli"])
         .current_dir(dir.path())
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
@@ -213,7 +213,7 @@ fn test_sync_dry_run_without_claude() {
 fn test_sync_force_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
-        .args(["sync", "--force", "--runner", "claude-cli"])
+        .args(["adr-bot", "--force", "--runner", "claude-cli"])
         .current_dir(dir.path())
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
@@ -225,7 +225,13 @@ fn test_sync_force_without_claude() {
 fn test_sync_no_tailor_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
-        .args(["sync", "--no-tailor", "--force", "--runner", "claude-cli"])
+        .args([
+            "adr-bot",
+            "--no-tailor",
+            "--force",
+            "--runner",
+            "claude-cli",
+        ])
         .current_dir(dir.path())
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
@@ -237,7 +243,7 @@ fn test_sync_no_tailor_without_claude() {
 fn test_sync_force_dry_run_without_claude() {
     let dir = tempfile::tempdir().unwrap();
     cmd()
-        .args(["sync", "--force", "--dry-run", "--runner", "claude-cli"])
+        .args(["adr-bot", "--force", "--dry-run", "--runner", "claude-cli"])
         .current_dir(dir.path())
         .env("CLAUDE_BINARY", "/nonexistent/path/to/claude")
         .assert()
@@ -251,7 +257,7 @@ fn test_sync_force_dry_run_without_claude() {
 #[test]
 fn test_sync_help_shows_all_flags() {
     cmd()
-        .args(["sync", "--help"])
+        .args(["adr-bot", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--dry-run"))
@@ -275,7 +281,7 @@ fn test_sync_help_shows_all_flags() {
 #[test]
 fn test_sync_full_without_dry_run_fails() {
     cmd()
-        .args(["sync", "--full"])
+        .args(["adr-bot", "--full"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("--dry-run"));

@@ -7,7 +7,7 @@
 #   3. Starts a local auth-proxy (scripts/auth-proxy.py) that captures a fresh
 #      OAuth token from the host's `claude` binary and forwards container API
 #      calls to api.anthropic.com with that token
-#   4. Invokes actual sync via the 'actual' skill through Claude Code
+#   4. Invokes actual adr-bot via the 'actual' skill through Claude Code
 #   5. Streams all Claude Code output back to the host
 #
 # Usage:
@@ -17,7 +17,7 @@
 #   --build             Force rebuild of Linux binary even if one already exists
 #   --api-url URL       Override ADR API URL (default: staging)
 #   --output-dir DIR    Host directory for output (default: .container-e2e-output/<timestamp>)
-#   --no-tailor         Pass --no-tailor to actual sync (skip AI tailoring step)
+#   --no-tailor         Pass --no-tailor to actual adr-bot (skip AI tailoring step)
 #   --platform PLAT     Docker platform (default: linux/amd64)
 #   --proxy-port PORT   Port for the local auth proxy (default: 7477)
 #   -h, --help          Show this help and exit
@@ -40,7 +40,7 @@
 #     proxy.log           Auth proxy log (token capture + forwarding)
 #
 # Exit codes:
-#   0  - Claude Code ran actual sync successfully
+#   0  - Claude Code ran actual adr-bot successfully
 #   1  - Test failed (see output logs)
 #   2  - Prerequisite missing (docker, claude not logged in, etc.)
 
@@ -478,7 +478,7 @@ Pre-flight before sync:
 2. `actual auth`    — verify Claude Code is authenticated
 3. `actual config show` — show current config
 
-Then execute: `actual sync --force [--no-tailor] --api-url <URL>`
+Then execute: `actual adr-bot --force [--no-tailor] --api-url <URL>`
 EOF
 
 log "  Skill installed at /home/testuser/.claude/skills/actual/"
@@ -541,9 +541,9 @@ log "  actual auth:"
 su -s /bin/bash testuser -c 'ANTHROPIC_BASE_URL="'"$ANTHROPIC_BASE_URL"'" actual auth 2>&1' | tee /output/actual-auth.log || true
 hr
 
-# ── 7. Invoke actual sync via Claude Code + the 'actual' skill ────────────────
+# ── 7. Invoke actual adr-bot via Claude Code + the 'actual' skill ────────────────
 
-log "Invoking actual sync via Claude Code using the 'actual' skill..."
+log "Invoking actual adr-bot via Claude Code using the 'actual' skill..."
 log "  API URL: $API_URL"
 log "  No-tailor: $NO_TAILOR_FLAG"
 
@@ -566,21 +566,21 @@ ${SKILL_CONTENT}
 
 ## Your Task
 
-Run actual sync on the project at /test-project. 
+Run actual adr-bot on the project at /test-project. 
 
 Exact command to run (use these exact flags, do not modify):
-  cd /test-project && actual sync ${SYNC_FLAGS}
+  cd /test-project && actual adr-bot ${SYNC_FLAGS}
 
 Steps to follow:
 1. Run pre-flight checks as specified in the skill (actual runners, actual auth, actual config show)
-2. Run actual sync with the exact flags above
+2. Run actual adr-bot with the exact flags above
 3. Report what happened — did it succeed? What was written? Were there any errors?
 
 Important:
 - The actual binary is at /usr/local/bin/actual and is already in PATH
 - API calls are routed through the host auth proxy (ANTHROPIC_BASE_URL is set)
 - Run all commands from /test-project
-- If actual sync exits non-zero, report the error and exit code
+- If actual adr-bot exits non-zero, report the error and exit code
 PROMPT
 )"
 
@@ -629,11 +629,11 @@ touch /tmp/results
 # Save the final CLAUDE.md for host inspection regardless of outcome
 [[ -f /test-project/CLAUDE.md ]] && cp /test-project/CLAUDE.md /output/generated-CLAUDE.md
 
-# Check that actual sync appended a managed section to CLAUDE.md
+# Check that actual adr-bot appended a managed section to CLAUDE.md
 if grep -q 'managed:actual-start' /test-project/CLAUDE.md 2>/dev/null; then
-  pass "CLAUDE.md contains managed:actual-start marker (actual sync wrote ADR content)"
+  pass "CLAUDE.md contains managed:actual-start marker (actual adr-bot wrote ADR content)"
 else
-  fail "CLAUDE.md is missing managed:actual-start — actual sync may not have run or produced output"
+  fail "CLAUDE.md is missing managed:actual-start — actual adr-bot may not have run or produced output"
 fi
 
 if grep -q 'managed:actual-end' /test-project/CLAUDE.md 2>/dev/null; then

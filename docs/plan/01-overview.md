@@ -78,7 +78,7 @@ For monorepos, the tool detects sub-projects (e.g., `apps/frontend`, `packages/a
 
 ### 4. Config File at `~/.actualai/actual/config.yaml`
 
-Persistent user preferences stored in YAML. Covers things like preferred categories, excluded ADR types, default behavior for existing `CLAUDE.md` files. Created automatically with defaults on the first `actual sync` run — no separate init step required.
+Persistent user preferences stored in YAML. Covers things like preferred categories, excluded ADR types, default behavior for existing `CLAUDE.md` files. Created automatically with defaults on the first `actual adr-bot` run — no separate init step required.
 
 ## Relationship to sprintreview
 
@@ -105,4 +105,4 @@ Persistent user preferences stored in YAML. Covers things like preferred categor
 - **`actual agent` command**: A command to open `https://app.actual.ai` in the default browser (platform funnel). Deferred until the web app supports CLI-driven onboarding.
 - **Deterministic manifest parsing**: Reading `package.json`, `requirements.txt`, `pyproject.toml`, `Cargo.toml`, `go.mod` directly for zero-auth dependency detection. Deferred — v1 uses Claude Code for all repo analysis.
 - **Zero-auth flow**: v1 requires Claude Code to be installed and authenticated. A future lightweight path (manifest parsing + API, no Claude Code) would enable truly zero-auth ADR suggestions.
-- **`actual init` command**: No separate init step. Config file is created automatically on first `actual sync` run.
+- **`actual init` command**: No separate init step. Config file is created automatically on first `actual adr-bot` run.

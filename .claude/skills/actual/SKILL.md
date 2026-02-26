@@ -2,12 +2,12 @@
 name: actual
 description: >-
   Feature-complete companion for the actual CLI, an ADR-powered
-  CLAUDE.md/AGENTS.md generator. Runs and troubleshoots actual sync,
+  CLAUDE.md/AGENTS.md generator. Runs and troubleshoots actual adr-bot,
   status, auth, config, runners, and models. Covers all 5 runners
   (claude-cli, anthropic-api, openai-api, codex-cli, cursor-cli),
   all model patterns, all 3 output formats (claude-md, agents-md,
   cursor-rules), and all error types. Use when working with the
-  actual CLI, running actual sync, configuring runners or models,
+  actual CLI, running actual adr-bot, configuring runners or models,
   troubleshooting errors, or managing output files.
 argument-hint: "[question or command] e.g. 'run sync', 'set up anthropic-api', 'fix ClaudeNotFound'"
 ---
@@ -20,7 +20,7 @@ Inline knowledge and operational workflows for the actual CLI. Read this file fi
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `actual sync` | Analyze repo, fetch ADRs, tailor, write output | `--dry-run [--full]`, `--force`, `--no-tailor`, `--project PATH`, `--model`, `--runner`, `--verbose`, `--reset-rejections`, `--max-budget-usd`, `--no-tui`, `--output-format`, `--show-errors` |
+| `actual adr-bot` | Analyze repo, fetch ADRs, tailor, write output | `--dry-run [--full]`, `--force`, `--no-tailor`, `--project PATH`, `--model`, `--runner`, `--verbose`, `--reset-rejections`, `--max-budget-usd`, `--no-tui`, `--output-format`, `--show-errors` |
 | `actual status` | Check output file state | `--verbose` |
 | `actual auth` | Check authentication status | (none) |
 | `actual config show` | Display current config | (none) |
@@ -73,28 +73,28 @@ The most common sync patterns:
 
 ```bash
 # Preview what sync would do (safe, no file changes)
-actual sync --dry-run
+actual adr-bot --dry-run
 
 # Preview with full content
-actual sync --dry-run --full
+actual adr-bot --dry-run --full
 
 # Run sync, skip confirmation prompts
-actual sync --force
+actual adr-bot --force
 
 # Sync specific subdirectories only (monorepo)
-actual sync --project services/api --project services/web
+actual adr-bot --project services/api --project services/web
 
 # Use a specific runner/model
-actual sync --runner anthropic-api --model claude-sonnet-4-6
+actual adr-bot --runner anthropic-api --model claude-sonnet-4-6
 
 # Skip AI tailoring (use raw ADRs)
-actual sync --no-tailor
+actual adr-bot --no-tailor
 
 # Re-offer previously rejected ADRs
-actual sync --reset-rejections
+actual adr-bot --reset-rejections
 
 # Set spending cap
-actual sync --max-budget-usd 5.00
+actual adr-bot --max-budget-usd 5.00
 ```
 
 > For the complete 13-step sync internals, see `references/sync-workflow.md`.
@@ -116,7 +116,7 @@ If any check shows a problem, diagnose and fix before proceeding.
 ### 2. Dry-run (LOW freedom -- exact command)
 
 ```bash
-actual sync --dry-run [--full] [user's flags]
+actual adr-bot --dry-run [--full] [user's flags]
 ```
 
 Show the user what would change. Let them review.
@@ -128,7 +128,7 @@ Ask user if they want to proceed. If no, stop.
 ### 4. Execute (LOW freedom -- exact command)
 
 ```bash
-actual sync [user's flags]
+actual adr-bot [user's flags]
 ```
 
 ### 5. On failure: Diagnose

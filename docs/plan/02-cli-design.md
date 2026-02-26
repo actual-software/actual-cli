@@ -6,12 +6,12 @@
 actual [OPTIONS] [COMMAND]
 ```
 
-### Primary Command: `actual sync`
+### Primary Command: `actual adr-bot`
 
 The main workflow. Analyzes the repo, fetches ADRs, tailors them, and writes the output file.
 
 ```
-actual sync [OPTIONS]
+actual adr-bot [OPTIONS]
 
 Options:
   --dry-run                 Show summary of what would change (combine with --full for complete output)
@@ -38,8 +38,8 @@ Options:
 The default is `claude-md`.  To change it for a single run:
 
 ```sh
-actual sync --output-format agents-md
-actual sync --output-format cursor-rules
+actual adr-bot --output-format agents-md
+actual adr-bot --output-format cursor-rules
 ```
 
 To change it permanently (persisted in `~/.actualai/actual/config.yaml`):
@@ -48,8 +48,8 @@ To change it permanently (persisted in `~/.actualai/actual/config.yaml`):
 actual config set output_format agents-md
 ```
 
-Only one format is active per `actual sync` run.  Teams that need multiple output
-files (e.g., both `CLAUDE.md` and `AGENTS.md`) should run `actual sync` twice with
+Only one format is active per `actual adr-bot` run.  Teams that need multiple output
+files (e.g., both `CLAUDE.md` and `AGENTS.md`) should run `actual adr-bot` twice with
 different `--output-format` values, or configure separate CI jobs targeting each format.
 
 ### Utility Commands
@@ -64,7 +64,7 @@ actual config        View/edit configuration
 ```
 
 > **No `actual init` command.** The config file (`~/.actualai/actual/config.yaml`) is created
-> automatically with defaults on the first `actual sync` run if it doesn't exist. Users can
+> automatically with defaults on the first `actual adr-bot` run if it doesn't exist. Users can
 > customize settings afterward via `actual config set`.
 
 ### Global Options
@@ -77,12 +77,12 @@ actual config        View/edit configuration
 --help               Print help
 ```
 
-## UX Flow: `actual sync`
+## UX Flow: `actual adr-bot`
 
 ### Step 1: Environment Check
 
 ```
-$ actual sync
+$ actual adr-bot
 
     ╔═══════════════════════════════════╗
     ║           actual CLI              ║
@@ -175,7 +175,7 @@ Actions:
 - **Reject**: Don't write that file. Not remembered across syncs.
 - **Preview**: Show the full rendered markdown for a specific file
 
-Previously rejected ADRs (by ID) are pre-filtered before tailoring. Use `actual sync --reset-rejections` to clear.
+Previously rejected ADRs (by ID) are pre-filtered before tailoring. Use `actual adr-bot --reset-rejections` to clear.
 
 ### Step 6: Write CLAUDE.md Files
 

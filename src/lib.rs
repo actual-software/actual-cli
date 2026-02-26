@@ -25,7 +25,7 @@ pub use cli::args::{
 
 pub fn run(cli: Cli) -> Result<(), ActualError> {
     match &cli.command {
-        Command::Sync(args) => cli::commands::sync::exec(args),
+        Command::AdrBot(args) => cli::commands::sync::exec(args),
         Command::Status(args) => cli::commands::status::exec(args),
         Command::Auth => cli::commands::auth::exec(),
         Command::Config(args) => cli::commands::config::exec(args),

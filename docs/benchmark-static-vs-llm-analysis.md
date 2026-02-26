@@ -160,7 +160,7 @@ The static analyzer only detects monorepos via explicit workspace config files (
 
 The tailoring phase uses `RepoAnalysis` output to match ADRs and generate CLAUDE.md content. Changes in analysis quality (fewer frameworks, different project decomposition) could affect which ADRs match and how they are tailored.
 
-**Fix**: Run `actual sync --no-tailor --dry-run --force` on several repos and compare the ADR matching results between old and new analysis.
+**Fix**: Run `actual adr-bot --no-tailor --dry-run --force` on several repos and compare the ADR matching results between old and new analysis.
 
 ---
 

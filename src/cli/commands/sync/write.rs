@@ -21,7 +21,7 @@ pub struct SyncResult {
     pub files_rejected: usize,
 }
 
-/// Entry point for `actual sync`.
+/// Entry point for `actual adr-bot`.
 ///
 /// Production wiring (`CliClaudeRunner`, `RealTerminal`) lives in
 /// `sync_wiring.rs` (which is excluded from coverage) so that the only

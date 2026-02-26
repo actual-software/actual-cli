@@ -14,7 +14,7 @@ actual-cli/
 │   │   ├── args.rs              # Argument parsing (clap derive)
 │   │   ├── commands/
 │   │   │   ├── mod.rs
-│   │   │   ├── sync.rs          # `actual sync` command
+│   │   │   ├── sync.rs          # `actual adr-bot` command
 │   │   │   ├── status.rs        # `actual status` command
 │   │   │   ├── auth.rs          # `actual auth` command
 │   │   │   └── config.rs        # `actual config` command
