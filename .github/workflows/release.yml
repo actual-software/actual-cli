@@ -9,8 +9,28 @@ permissions:
   contents: write
 
 jobs:
+  check-stable:
+    name: Check Stable Release
+    runs-on: ubuntu-latest
+    outputs:
+      is-stable: ${{ steps.check.outputs.is-stable }}
+    steps:
+      - name: Check if stable tag
+        id: check
+        run: |
+          TAG="${{ github.ref_name }}"
+          if echo "$TAG" | grep -qE '-(alpha|beta|rc|test)[.0-9]*$'; then
+            echo "is-stable=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping release for pre-release tag: $TAG"
+          else
+            echo "is-stable=true" >> "$GITHUB_OUTPUT"
+            echo "Stable release: $TAG"
+          fi
+
   build-macos-arm64:
     name: Build (macOS arm64)
+    needs: check-stable
+    if: needs.check-stable.outputs.is-stable == 'true'
     runs-on: macos-latest
     env:
       APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
@@ -90,6 +110,8 @@ jobs:
 
   build-macos-x64:
     name: Build (macOS x64)
+    needs: check-stable
+    if: needs.check-stable.outputs.is-stable == 'true'
     runs-on: macos-latest
     env:
       APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
@@ -169,6 +191,8 @@ jobs:
 
   build-linux-x64:
     name: Build (Linux x64)
+    needs: check-stable
+    if: needs.check-stable.outputs.is-stable == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -202,6 +226,8 @@ jobs:
 
   build-linux-arm64:
     name: Build (Linux arm64)
+    needs: check-stable
+    if: needs.check-stable.outputs.is-stable == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -242,7 +268,8 @@ jobs:
 
   package-and-release:
     name: Package & Release
-    needs: [build-macos-arm64, build-macos-x64, build-linux-x64, build-linux-arm64]
+    needs: [check-stable, build-macos-arm64, build-macos-x64, build-linux-x64, build-linux-arm64]
+    if: needs.check-stable.outputs.is-stable == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
