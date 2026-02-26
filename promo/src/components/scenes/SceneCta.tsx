@@ -258,6 +258,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
               style={{
                 fontFamily: FONTS.mono,
                 fontSize: 60,
+                lineHeight: 1,
                 color: COLORS.borderGreen,
                 letterSpacing: 1,
                 flexShrink: 0,
@@ -269,6 +270,7 @@ export const SceneCta: React.FC<SceneCtaProps> = ({
               style={{
                 flex: 1,
                 height: 4,
+                marginRight: -300,
                 background: `linear-gradient(90deg, ${COLORS.borderGreen}, ${COLORS.borderTeal})`,
                 transformOrigin: "left center",
                 transform: `scaleX(${urlUnderlineWidth / 100})`,
