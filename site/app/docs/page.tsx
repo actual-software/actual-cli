@@ -164,8 +164,8 @@ export default function DocsPage() {
             <div className="mx-auto max-w-[1400px] px-6 lg:px-12 xl:px-[100px] flex gap-[60px] py-[60px]">
 
                 {/* Sidebar */}
-                <aside className="hidden lg:block w-[200px] flex-shrink-0">
-                    <nav className="sticky top-[90px] flex flex-col gap-[4px]">
+                <aside className="hidden lg:block w-[200px] flex-shrink-0 self-start sticky top-[90px]">
+                    <nav className="flex flex-col gap-[4px]">
                         {NAV_SECTIONS.map((s) => (
                             <a
                                 key={s.id}
