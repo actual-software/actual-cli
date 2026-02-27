@@ -59,13 +59,8 @@ const DOCS_MD = `# actual CLI — Getting Started & Command Reference
 \`\`\`bash
 # 1. Install
 brew install actual-software/actual/actual
-# or zero-install (no Gatekeeper issues — runs through Node.js):
+# or zero-install (Node required):
 npx @actualai/actual adr-bot
-
-# macOS Gatekeeper: the binary is not codesigned yet (Apple Developer Program application
-# pending). After brew install, remove the quarantine flag once before running:
-xattr -dr com.apple.quarantine $(which actual)
-# Alternatively, use "npx @actualai/actual adr-bot" — it runs through Node.js and bypasses Gatekeeper.
 
 # 2. Authenticate (default runner: Claude Code)
 npm install -g @anthropic-ai/claude-code

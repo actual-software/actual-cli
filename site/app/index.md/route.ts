@@ -9,7 +9,7 @@ const INDEX_MD = `# actual — AI context for your codebase
 1. **Install** — via Homebrew or zero-install with npx:
    \`\`\`bash
    brew install actual-software/actual/actual
-   # or zero-install (no Gatekeeper issues — runs through Node.js):
+   # or zero-install (Node required):
    npx @actualai/actual adr-bot
    \`\`\`
 
