@@ -329,7 +329,7 @@ jobs:
         run: |
           for pkg in actual-darwin-arm64 actual-darwin-x64 actual-linux-x64 actual-linux-arm64; do
             echo "Publishing @actualai/$pkg..."
-            cd npm/$pkg && npm publish --access public && cd ../..
+            (cd npm/$pkg && npm publish --access public)
           done
 
       - name: Publish root package
