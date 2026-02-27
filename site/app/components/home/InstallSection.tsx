@@ -107,15 +107,6 @@ export default function InstallSection() {
                 </div>
             </div>
 
-            {/* Quick-start sequence */}
-            <div className="w-full max-w-[900px] flex flex-col gap-[12px]">
-                <p className="text-white/40 text-[13px] uppercase tracking-[0.08em] font-medium text-center mb-[4px]">
-                    Then run
-                </p>
-                <CodeBlock copyText="actual adr-bot">
-                    {`actual auth        # verify your Claude Code auth\nactual adr-bot     # analyze, fetch ADRs, write CLAUDE.md`}
-                </CodeBlock>
-            </div>
         </section>
     );
 }
