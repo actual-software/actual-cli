@@ -85,6 +85,15 @@ export default function InstallSection() {
                         <code className="font-mono text-white/70">actual adr-bot</code> from
                         any repo.
                     </p>
+                    {/* Then run */}
+                    <div className="flex flex-col gap-[8px]">
+                        <p className="text-white/40 text-[11px] uppercase tracking-[0.08em] font-medium">
+                            Then run
+                        </p>
+                        <CodeBlock copyText="actual adr-bot">
+                            {`actual auth        # verify your Claude Code auth\nactual adr-bot     # analyze, fetch ADRs, write CLAUDE.md`}
+                        </CodeBlock>
+                    </div>
                 </div>
 
                 {/* npx */}
