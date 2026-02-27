@@ -294,14 +294,16 @@ jobs:
           tar -czf tarballs/actual-linux-x64.tar.gz    -C artifacts/actual-linux-x64    actual
           tar -czf tarballs/actual-linux-arm64.tar.gz  -C artifacts/actual-linux-arm64  actual
 
-      - name: Upload tarballs to release
+      - name: Create GitHub Release and upload tarballs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ github.ref_name }}"
-          for tarball in tarballs/*.tar.gz; do
-            gh release upload "$VERSION" "$tarball" --clobber
-          done
+          gh release create "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --title "$VERSION" \
+            --generate-notes \
+            tarballs/*.tar.gz
 
       - name: Compute SHA256s
         id: sha256
