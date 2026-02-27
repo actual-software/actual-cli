@@ -85,22 +85,6 @@ export default function InstallSection() {
                         <code className="font-mono text-white/70">actual adr-bot</code> from
                         any repo.
                     </p>
-                    {/* Gatekeeper notice — macOS only, binary unsigned pending Apple Developer Program */}
-                    <div className="flex flex-col gap-[8px] rounded-[6px] border border-amber-500/20 bg-amber-500/5 px-[14px] py-[12px]">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-amber-400/80">
-                            macOS Gatekeeper
-                        </p>
-                        <p className="text-white/50 text-[12px] leading-[1.65]">
-                            The binary isn&apos;t codesigned yet — our Apple Developer Program
-                            application is pending. On first run, macOS will block it.
-                            Remove the quarantine flag once after install:
-                        </p>
-                        <div className="bg-[#0d0d0d] border border-[#393939] rounded-[6px] px-[16px] py-[12px]">
-                            <code className="font-mono text-[13px] text-white/85 leading-[1.6]">
-                                xattr -dr com.apple.quarantine $(which actual)
-                            </code>
-                        </div>
-                    </div>
                 </div>
 
                 {/* npx */}

@@ -218,19 +218,8 @@ export default function DocsPage() {
                                     <Pre>{`# Homebrew (macOS & Linux)
 brew install actual-software/actual/actual
 
-# Zero-install (Node required — no Gatekeeper issues)
+# Zero-install (Node required)
 npx @actualai/actual adr-bot`}</Pre>
-                                    <div className="flex flex-col gap-[8px] rounded-[6px] border border-amber-500/20 bg-amber-500/5 px-[14px] py-[12px]">
-                                        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-amber-400/80">macOS Gatekeeper</p>
-                                        <p className="text-white/50 text-[13px] leading-[1.7]">
-                                            The binary isn&apos;t codesigned yet — our Apple Developer Program application is pending.
-                                            After <Code>brew install</Code>, macOS will block it on first run. Remove the quarantine flag once:
-                                        </p>
-                                        <Pre>{`xattr -dr com.apple.quarantine $(which actual)`}</Pre>
-                                        <p className="text-white/40 text-[12px] leading-[1.6]">
-                                            Alternatively, use <Code>npx @actualai/actual adr-bot</Code> — it runs through Node.js and isn&apos;t subject to Gatekeeper.
-                                        </p>
-                                    </div>
                                 </div>
                             </div>
 
