@@ -86,7 +86,7 @@ export default function InstallSection() {
                         any repo.
                     </p>
                     {/* Then run */}
-                    <div className="flex flex-col gap-[8px] pt-[4px] border-t border-[#393939]">
+                    <div className="flex flex-col gap-[8px]">
                         <p className="text-white/40 text-[11px] uppercase tracking-[0.08em] font-medium">
                             Then run
                         </p>
