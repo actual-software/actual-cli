@@ -6,22 +6,22 @@ class Actual < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/actual-software/actual-cli/releases/download/v#{version}/actual-darwin-arm64.tar.gz"
+      url "https://github.com/actual-software/actual-releases/releases/download/v#{version}/actual-darwin-arm64.tar.gz"
       sha256 "PLACEHOLDER_SHA256_DARWIN_ARM64"
     end
     on_intel do
-      url "https://github.com/actual-software/actual-cli/releases/download/v#{version}/actual-darwin-x64.tar.gz"
+      url "https://github.com/actual-software/actual-releases/releases/download/v#{version}/actual-darwin-x64.tar.gz"
       sha256 "PLACEHOLDER_SHA256_DARWIN_X64"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/actual-software/actual-cli/releases/download/v#{version}/actual-linux-arm64.tar.gz"
+      url "https://github.com/actual-software/actual-releases/releases/download/v#{version}/actual-linux-arm64.tar.gz"
       sha256 "PLACEHOLDER_SHA256_LINUX_ARM64"
     end
     on_intel do
-      url "https://github.com/actual-software/actual-cli/releases/download/v#{version}/actual-linux-x64.tar.gz"
+      url "https://github.com/actual-software/actual-releases/releases/download/v#{version}/actual-linux-x64.tar.gz"
       sha256 "PLACEHOLDER_SHA256_LINUX_X64"
     end
   end

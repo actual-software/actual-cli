@@ -294,7 +294,7 @@ jobs:
           tar -czf tarballs/actual-linux-x64.tar.gz    -C artifacts/actual-linux-x64    actual
           tar -czf tarballs/actual-linux-arm64.tar.gz  -C artifacts/actual-linux-arm64  actual
 
-      - name: Create GitHub Release and upload tarballs
+      - name: Create private GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -303,6 +303,17 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "$VERSION" \
             --generate-notes \
+            tarballs/*.tar.gz
+
+      - name: Mirror tarballs to public releases repo
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          gh release create "$VERSION" \
+            --repo actual-software/actual-releases \
+            --title "$VERSION" \
+            --notes "Release assets for actual-cli $VERSION. Source: https://github.com/actual-software/actual-cli" \
             tarballs/*.tar.gz
 
       - name: Compute SHA256s
