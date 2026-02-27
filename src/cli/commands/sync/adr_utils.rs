@@ -25,18 +25,25 @@ pub(crate) fn zero_adr_context_lines(request: &crate::api::types::MatchRequest) 
         .collect();
     fws.sort_unstable();
 
+    let support_msg = "  Actual AI is working on adding support for more languages and frameworks, but unfortunately does not support this repository yet. See for more info - https://cli.actual.ai/docs".to_string();
+
     if langs.is_empty() {
-        vec!["  No supported languages detected \u{2014} unable to match ADRs".to_string()]
+        vec![
+            "  No supported languages detected \u{2014} unable to match ADRs".to_string(),
+            support_msg,
+        ]
     } else if fws.is_empty() {
         vec![
             format!("  Languages: {}", langs.join(", ")),
             "  No frameworks detected; only general ADRs were eligible".to_string(),
+            support_msg,
         ]
     } else {
         vec![
             format!("  Languages: {}", langs.join(", ")),
             format!("  Frameworks: {}", fws.join(", ")),
             "  No ADRs available for this stack yet".to_string(),
+            support_msg,
         ]
     }
 }
