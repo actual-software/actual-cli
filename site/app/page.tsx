@@ -2,6 +2,7 @@ import Hero from "./components/home/Hero";
 import DemoVideo from "./components/home/DemoVideo";
 import ProductSection from "./components/home/ProductSection";
 import InstallSection from "./components/home/InstallSection";
+import FrameworksCarousel from "./components/home/FrameworksCarousel";
 
 export default function Home() {
     return (
@@ -10,6 +11,7 @@ export default function Home() {
             <DemoVideo />
             <ProductSection />
             <InstallSection />
+            <FrameworksCarousel />
         </main>
     );
 }
