@@ -6,7 +6,7 @@ import Link from "next/link";
 function JoinNowButton({ className = "" }: { className?: string }) {
     return (
         <Link
-            href="/contact"
+            href="https://forms.gle/7RkKyAHfDHyKVmce7"
             className={`flex items-center justify-center rounded-full px-[16px] py-[4px] text-[16px] font-medium bg-white text-black hover:bg-white/90 transition-colors ${className}`}
         >
             <span className="leading-[1.5]">Join Now</span>
