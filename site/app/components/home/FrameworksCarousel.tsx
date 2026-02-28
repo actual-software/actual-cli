@@ -102,6 +102,7 @@ export default function FrameworksCarousel() {
                                             width={36}
                                             height={36}
                                             className="opacity-80"
+                                            style={framework === "Ratatui" ? { filter: "invert(1)" } : undefined}
                                         />
                                     </div>
                                 )}
