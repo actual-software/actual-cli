@@ -95,7 +95,7 @@ export default function FrameworksCarousel() {
 
                                 {/* Right: logo box */}
                                 {logo && (
-                                    <div className="flex-shrink-0 w-[64px] h-[64px] flex items-center justify-center rounded-[6px] bg-white/5 border border-white/8">
+                                    <div className="flex-shrink-0 w-[64px] h-[64px] flex items-center justify-center">
                                         <Image
                                             src={logo}
                                             alt={`${framework} logo`}
