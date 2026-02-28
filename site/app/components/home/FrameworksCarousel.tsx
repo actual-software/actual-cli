@@ -1,8 +1,18 @@
 "use client";
 
+import Image from "next/image";
 import { LANGUAGES } from "../../../lib/docs-data";
 
 const SECTION_GRADIENT = "linear-gradient(90deg, #39eba1 0%, #43bdb7 50.483%, #4d93c8 100%)";
+
+const LOGO: Record<string, string> = {
+    "Next.js":     "/images/logo-nextjs.svg",
+    "HeroUI":      "/images/logo-heroui.svg",
+    "Ratatui":     "/images/logo-ratatui.svg",
+    "FastAPI":     "/images/logo-fastapi.svg",
+    "Django":      "/images/logo-django.svg",
+    "Spring Boot": "/images/logo-springboot.svg",
+};
 
 const FRAMEWORKS = LANGUAGES.flatMap(({ language, color, frameworks }) =>
     frameworks.map((fw) => ({ language, color, framework: fw }))
@@ -52,34 +62,52 @@ export default function FrameworksCarousel() {
                     style={{ background: "linear-gradient(to left, #030301, transparent)" }}
                 />
 
-                {/* Scrolling cards — inline-flex so the element width = content width,
-                    making translateX(-50%) loop exactly at the halfway point */}
+                {/* Scrolling cards */}
                 <div
                     className="inline-flex gap-[16px]"
                     style={{ animation: "marquee 28s linear infinite" }}
                 >
-                    {DOUBLED.map(({ language, color, framework }, i) => (
-                        <div
-                            key={i}
-                            className="flex-shrink-0 w-[240px] border border-[#393939] rounded-[6px] bg-[#030301] p-[24px] flex flex-col gap-[14px]"
-                        >
-                            <div className="flex items-center gap-[8px]">
-                                <span
-                                    className="size-[8px] rounded-full flex-shrink-0"
-                                    style={{ background: color }}
-                                />
-                                <span
-                                    className="text-[11px] font-semibold uppercase tracking-[0.08em]"
-                                    style={{ color }}
-                                >
-                                    {language}
-                                </span>
+                    {DOUBLED.map(({ language, color, framework }, i) => {
+                        const logo = LOGO[framework];
+                        return (
+                            <div
+                                key={i}
+                                className="flex-shrink-0 w-[240px] border border-[#393939] rounded-[6px] bg-[#030301] p-[20px] flex flex-row items-stretch gap-[12px]"
+                            >
+                                {/* Left: language + framework name */}
+                                <div className="flex flex-col gap-[10px] flex-1 justify-between">
+                                    <div className="flex items-center gap-[8px]">
+                                        <span
+                                            className="size-[8px] rounded-full flex-shrink-0"
+                                            style={{ background: color }}
+                                        />
+                                        <span
+                                            className="text-[11px] font-semibold uppercase tracking-[0.08em]"
+                                            style={{ color }}
+                                        >
+                                            {language}
+                                        </span>
+                                    </div>
+                                    <p className="text-white text-[18px] font-medium leading-[1.3] tracking-[-0.01em]">
+                                        {framework}
+                                    </p>
+                                </div>
+
+                                {/* Right: logo box */}
+                                {logo && (
+                                    <div className="flex-shrink-0 w-[64px] h-[64px] flex items-center justify-center rounded-[6px] bg-white/5 border border-white/8">
+                                        <Image
+                                            src={logo}
+                                            alt={`${framework} logo`}
+                                            width={36}
+                                            height={36}
+                                            className="opacity-80"
+                                        />
+                                    </div>
+                                )}
                             </div>
-                            <p className="text-white text-[20px] font-medium leading-[1.3] tracking-[-0.01em]">
-                                {framework}
-                            </p>
-                        </div>
-                    ))}
+                        );
+                    })}
                 </div>
             </div>
         </section>
