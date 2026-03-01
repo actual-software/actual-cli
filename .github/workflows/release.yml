@@ -348,7 +348,7 @@ jobs:
           path: tap
 
       - name: Set up Python
-        uses: actions/setup-python@v5  # v5
+        uses: actions/setup-python@v6  # v5
 
       - name: Update formula
         env:
