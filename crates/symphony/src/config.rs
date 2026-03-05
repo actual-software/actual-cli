@@ -1,0 +1,474 @@
+use crate::error::{Result, SymphonyError};
+use crate::model::WorkflowDefinition;
+use std::collections::HashMap;
+use std::env;
+use std::path::PathBuf;
+
+/// Typed runtime configuration derived from WorkflowDefinition.config.
+#[derive(Debug, Clone)]
+pub struct ServiceConfig {
+    pub tracker: TrackerConfig,
+    pub polling: PollingConfig,
+    pub workspace: WorkspaceConfig,
+    pub hooks: HooksConfig,
+    pub agent: AgentConfig,
+    pub codex: CodingAgentConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackerConfig {
+    pub kind: String,
+    pub endpoint: String,
+    pub api_key: String,
+    pub project_slug: String,
+    pub active_states: Vec<String>,
+    pub terminal_states: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PollingConfig {
+    pub interval_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceConfig {
+    pub root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct HooksConfig {
+    pub after_create: Option<String>,
+    pub before_run: Option<String>,
+    pub after_run: Option<String>,
+    pub before_remove: Option<String>,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentConfig {
+    pub max_concurrent_agents: u32,
+    pub max_turns: u32,
+    pub max_retry_backoff_ms: u64,
+    pub max_concurrent_agents_by_state: HashMap<String, u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodingAgentConfig {
+    pub command: String,
+    pub permission_mode: String,
+    pub turn_timeout_ms: u64,
+    pub read_timeout_ms: u64,
+    pub stall_timeout_ms: u64,
+}
+
+impl ServiceConfig {
+    /// Build typed config from a parsed workflow definition.
+    pub fn from_workflow(workflow: &WorkflowDefinition) -> Result<Self> {
+        let root = &workflow.config;
+
+        Ok(Self {
+            tracker: parse_tracker_config(root)?,
+            polling: parse_polling_config(root),
+            workspace: parse_workspace_config(root),
+            hooks: parse_hooks_config(root),
+            agent: parse_agent_config(root),
+            codex: parse_codex_config(root),
+        })
+    }
+
+    /// Validate config for dispatch readiness.
+    pub fn validate_for_dispatch(&self) -> Result<()> {
+        if self.tracker.kind.is_empty() {
+            return Err(SymphonyError::MissingRequiredConfig {
+                field: "tracker.kind".to_string(),
+            });
+        }
+
+        if self.tracker.kind != "linear" {
+            return Err(SymphonyError::UnsupportedTrackerKind {
+                kind: self.tracker.kind.clone(),
+            });
+        }
+
+        if self.tracker.api_key.is_empty() {
+            return Err(SymphonyError::MissingTrackerApiKey);
+        }
+
+        if self.tracker.project_slug.is_empty() {
+            return Err(SymphonyError::MissingTrackerProjectSlug);
+        }
+
+        if self.codex.command.is_empty() {
+            return Err(SymphonyError::MissingRequiredConfig {
+                field: "codex.command".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+// --- Internal parsing helpers ---
+
+fn get_yaml_str(root: &serde_yaml::Value, keys: &[&str]) -> Option<String> {
+    let mut current = root;
+    for key in keys {
+        current = current
+            .as_mapping()?
+            .get(serde_yaml::Value::String((*key).to_string()))?;
+    }
+    match current {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn get_yaml_int(root: &serde_yaml::Value, keys: &[&str]) -> Option<i64> {
+    let mut current = root;
+    for key in keys {
+        current = current
+            .as_mapping()?
+            .get(serde_yaml::Value::String((*key).to_string()))?;
+    }
+    match current {
+        serde_yaml::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        serde_yaml::Value::String(s) => s.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+/// Resolve a value that may be `$VAR_NAME` to an environment variable.
+fn resolve_env_var(value: &str) -> String {
+    if let Some(var_name) = value.strip_prefix('$') {
+        env::var(var_name).unwrap_or_default()
+    } else {
+        value.to_string()
+    }
+}
+
+/// Expand ~ to home directory and resolve $VAR in path strings.
+fn expand_path(value: &str) -> PathBuf {
+    let resolved = resolve_env_var(value);
+    if let Some(stripped) = resolved.strip_prefix('~') {
+        if let Some(home) = dirs::home_dir() {
+            let rest = stripped.strip_prefix('/').unwrap_or(stripped);
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(resolved)
+}
+
+/// Parse a list that can be either a YAML list of strings or a comma-separated string.
+fn parse_string_list(root: &serde_yaml::Value, keys: &[&str]) -> Option<Vec<String>> {
+    let mut current = root;
+    for key in keys {
+        current = current
+            .as_mapping()?
+            .get(serde_yaml::Value::String((*key).to_string()))?;
+    }
+
+    match current {
+        serde_yaml::Value::Sequence(seq) => {
+            let items: Vec<String> = seq
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            Some(items)
+        }
+        serde_yaml::Value::String(s) => {
+            let items: Vec<String> = s.split(',').map(|s| s.trim().to_string()).collect();
+            Some(items)
+        }
+        _ => None,
+    }
+}
+
+fn parse_tracker_config(root: &serde_yaml::Value) -> Result<TrackerConfig> {
+    let kind = get_yaml_str(root, &["tracker", "kind"]).unwrap_or_default();
+
+    let default_endpoint = if kind == "linear" {
+        "https://api.linear.app/graphql".to_string()
+    } else {
+        String::new()
+    };
+
+    let endpoint = get_yaml_str(root, &["tracker", "endpoint"]).unwrap_or(default_endpoint);
+
+    // API key: resolve $VAR_NAME, fallback to LINEAR_API_KEY env var for linear
+    let raw_api_key = get_yaml_str(root, &["tracker", "api_key"]).unwrap_or_default();
+    let api_key = if raw_api_key.is_empty() && kind == "linear" {
+        env::var("LINEAR_API_KEY").unwrap_or_default()
+    } else {
+        resolve_env_var(&raw_api_key)
+    };
+
+    let project_slug = get_yaml_str(root, &["tracker", "project_slug"]).unwrap_or_default();
+
+    let active_states = parse_string_list(root, &["tracker", "active_states"])
+        .unwrap_or_else(|| vec!["Todo".to_string(), "In Progress".to_string()]);
+
+    let terminal_states =
+        parse_string_list(root, &["tracker", "terminal_states"]).unwrap_or_else(|| {
+            vec![
+                "Closed".to_string(),
+                "Cancelled".to_string(),
+                "Canceled".to_string(),
+                "Duplicate".to_string(),
+                "Done".to_string(),
+            ]
+        });
+
+    Ok(TrackerConfig {
+        kind,
+        endpoint,
+        api_key,
+        project_slug,
+        active_states,
+        terminal_states,
+    })
+}
+
+fn parse_polling_config(root: &serde_yaml::Value) -> PollingConfig {
+    let interval_ms = get_yaml_int(root, &["polling", "interval_ms"])
+        .map(|v| v.max(0) as u64)
+        .unwrap_or(30_000);
+
+    PollingConfig { interval_ms }
+}
+
+fn parse_workspace_config(root: &serde_yaml::Value) -> WorkspaceConfig {
+    let root_path = get_yaml_str(root, &["workspace", "root"])
+        .map(|s| expand_path(&s))
+        .unwrap_or_else(|| {
+            let tmp = env::temp_dir();
+            tmp.join("symphony_workspaces")
+        });
+
+    WorkspaceConfig { root: root_path }
+}
+
+fn parse_hooks_config(root: &serde_yaml::Value) -> HooksConfig {
+    let after_create = get_yaml_str(root, &["hooks", "after_create"]);
+    let before_run = get_yaml_str(root, &["hooks", "before_run"]);
+    let after_run = get_yaml_str(root, &["hooks", "after_run"]);
+    let before_remove = get_yaml_str(root, &["hooks", "before_remove"]);
+
+    let timeout_ms = get_yaml_int(root, &["hooks", "timeout_ms"])
+        .map(|v| if v > 0 { v as u64 } else { 60_000 })
+        .unwrap_or(60_000);
+
+    HooksConfig {
+        after_create,
+        before_run,
+        after_run,
+        before_remove,
+        timeout_ms,
+    }
+}
+
+fn parse_agent_config(root: &serde_yaml::Value) -> AgentConfig {
+    let max_concurrent_agents = get_yaml_int(root, &["agent", "max_concurrent_agents"])
+        .map(|v| v.max(1) as u32)
+        .unwrap_or(10);
+
+    let max_turns = get_yaml_int(root, &["agent", "max_turns"])
+        .map(|v| v.max(1) as u32)
+        .unwrap_or(20);
+
+    let max_retry_backoff_ms = get_yaml_int(root, &["agent", "max_retry_backoff_ms"])
+        .map(|v| v.max(0) as u64)
+        .unwrap_or(300_000);
+
+    // Parse per-state concurrency map
+    let mut by_state = HashMap::new();
+    if let Some(map_val) = get_yaml_mapping(root, &["agent", "max_concurrent_agents_by_state"]) {
+        if let Some(mapping) = map_val.as_mapping() {
+            for (key, val) in mapping {
+                if let Some(state_name) = key.as_str() {
+                    let normalized = state_name.trim().to_lowercase();
+                    if let Some(limit) = val
+                        .as_i64()
+                        .or_else(|| val.as_str().and_then(|s| s.parse().ok()))
+                    {
+                        if limit > 0 {
+                            by_state.insert(normalized, limit as u32);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    AgentConfig {
+        max_concurrent_agents,
+        max_turns,
+        max_retry_backoff_ms,
+        max_concurrent_agents_by_state: by_state,
+    }
+}
+
+fn get_yaml_mapping<'a>(
+    root: &'a serde_yaml::Value,
+    keys: &[&str],
+) -> Option<&'a serde_yaml::Value> {
+    let mut current = root;
+    for key in keys {
+        current = current
+            .as_mapping()?
+            .get(serde_yaml::Value::String((*key).to_string()))?;
+    }
+    Some(current)
+}
+
+fn parse_codex_config(root: &serde_yaml::Value) -> CodingAgentConfig {
+    let command = get_yaml_str(root, &["codex", "command"])
+        .unwrap_or_else(|| "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 20".to_string());
+
+    let permission_mode = get_yaml_str(root, &["codex", "permission_mode"])
+        .unwrap_or_else(|| "bypassPermissions".to_string());
+
+    let turn_timeout_ms = get_yaml_int(root, &["codex", "turn_timeout_ms"])
+        .map(|v| v.max(0) as u64)
+        .unwrap_or(3_600_000);
+
+    let read_timeout_ms = get_yaml_int(root, &["codex", "read_timeout_ms"])
+        .map(|v| v.max(0) as u64)
+        .unwrap_or(5_000);
+
+    let stall_timeout_ms = get_yaml_int(root, &["codex", "stall_timeout_ms"])
+        .map(|v| v as u64)
+        .unwrap_or(300_000);
+
+    CodingAgentConfig {
+        command,
+        permission_mode,
+        turn_timeout_ms,
+        read_timeout_ms,
+        stall_timeout_ms,
+    }
+}
+
+/// Check if a state is in a list (case-insensitive, trimmed).
+pub fn state_matches(state: &str, list: &[String]) -> bool {
+    let normalized = state.trim().to_lowercase();
+    list.iter().any(|s| s.trim().to_lowercase() == normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflow::parse_workflow;
+
+    #[test]
+    fn test_defaults() {
+        let wf = parse_workflow("").unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.polling.interval_ms, 30_000);
+        assert_eq!(config.agent.max_concurrent_agents, 10);
+        assert_eq!(config.agent.max_turns, 20);
+        assert_eq!(config.agent.max_retry_backoff_ms, 300_000);
+        assert_eq!(config.codex.turn_timeout_ms, 3_600_000);
+        assert_eq!(config.codex.stall_timeout_ms, 300_000);
+        assert_eq!(config.hooks.timeout_ms, 60_000);
+        assert!(config.tracker.active_states.contains(&"Todo".to_string()));
+        assert!(config.tracker.terminal_states.contains(&"Done".to_string()));
+    }
+
+    #[test]
+    fn test_custom_values() {
+        let content = r#"---
+tracker:
+  kind: linear
+  project_slug: test-proj
+  api_key: test-key
+  active_states: "Ready, Working"
+  terminal_states:
+    - Closed
+    - Done
+polling:
+  interval_ms: 5000
+agent:
+  max_concurrent_agents: 5
+  max_turns: 10
+  max_retry_backoff_ms: 60000
+  max_concurrent_agents_by_state:
+    todo: 2
+    in progress: 3
+codex:
+  turn_timeout_ms: 1800000
+  stall_timeout_ms: 120000
+---
+Do the work."#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.tracker.kind, "linear");
+        assert_eq!(config.tracker.project_slug, "test-proj");
+        assert_eq!(config.tracker.api_key, "test-key");
+        assert_eq!(config.tracker.active_states, vec!["Ready", "Working"]);
+        assert_eq!(config.polling.interval_ms, 5_000);
+        assert_eq!(config.agent.max_concurrent_agents, 5);
+        assert_eq!(config.agent.max_turns, 10);
+        assert_eq!(config.agent.max_retry_backoff_ms, 60_000);
+        assert_eq!(
+            config.agent.max_concurrent_agents_by_state.get("todo"),
+            Some(&2)
+        );
+        assert_eq!(
+            config
+                .agent
+                .max_concurrent_agents_by_state
+                .get("in progress"),
+            Some(&3)
+        );
+        assert_eq!(config.codex.turn_timeout_ms, 1_800_000);
+        assert_eq!(config.codex.stall_timeout_ms, 120_000);
+    }
+
+    #[test]
+    fn test_env_var_resolution() {
+        // If $VAR resolves to empty, treat as missing
+        let resolved = resolve_env_var("$NONEXISTENT_SYMPHONY_VAR_12345");
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_state_matches() {
+        let states = vec!["Todo".to_string(), "In Progress".to_string()];
+        assert!(state_matches("todo", &states));
+        assert!(state_matches("TODO", &states));
+        assert!(state_matches("  Todo  ", &states));
+        assert!(state_matches("in progress", &states));
+        assert!(!state_matches("Done", &states));
+    }
+
+    #[test]
+    fn test_validate_for_dispatch_missing_kind() {
+        let wf = parse_workflow("").unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let result = config.validate_for_dispatch();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_for_dispatch_valid() {
+        let content = r#"---
+tracker:
+  kind: linear
+  project_slug: test
+  api_key: test-key-123
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let result = config.validate_for_dispatch();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_path_expansion() {
+        let path = expand_path("/tmp/test");
+        assert_eq!(path, PathBuf::from("/tmp/test"));
+    }
+}
