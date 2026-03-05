@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/tui-test"]
+members = [".", "crates/tui-test", "crates/symphony"]
 
 [package]
 name = "actual-cli"
