@@ -47,3 +47,4 @@ regex = "1"
 tokio = { version = "1", features = ["test-util", "macros"] }
 tempfile = "3"
 mockito = "1"
+tracing-test = "0.2"
