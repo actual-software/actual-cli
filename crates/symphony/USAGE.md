@@ -1,6 +1,7 @@
 # Symphony
 
-Symphony is a long-running service that orchestrates coding agents to work on issues from Linear. It polls your Linear project for active issues, creates isolated workspaces for each one, and runs Claude Code sessions to complete the work.
+Symphony is a long-running service that orchestrates coding agents to work on issues from Linear.
+It polls your Linear project for active issues, creates isolated workspaces for each one, and runs Claude Code sessions to complete the work.
 
 ## Quick Start
 
