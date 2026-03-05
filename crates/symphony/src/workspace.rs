@@ -6,6 +6,7 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 /// Result of workspace preparation.
+#[derive(Debug)]
 pub struct WorkspaceResult {
     pub path: PathBuf,
     pub workspace_key: String,
@@ -217,6 +218,7 @@ async fn run_hook(hook_name: &str, script: &str, cwd: &Path, timeout_ms: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_test::traced_test;
 
     #[test]
     fn test_sanitize_workspace_key() {
@@ -280,6 +282,7 @@ mod tests {
         assert_eq!(r1.path, r2.path);
     }
 
+    #[traced_test]
     #[tokio::test]
     async fn test_create_workspace_with_after_create_hook() {
         let tmp = tempfile::tempdir().unwrap();
@@ -297,6 +300,7 @@ mod tests {
         assert!(result.path.join(".initialized").exists());
     }
 
+    #[traced_test]
     #[tokio::test]
     async fn test_cleanup_workspace() {
         let tmp = tempfile::tempdir().unwrap();
@@ -314,5 +318,338 @@ mod tests {
 
         cleanup_workspace(&ws_path, &hooks).await;
         assert!(!ws_path.exists());
+    }
+
+    #[test]
+    fn test_validate_workspace_path_outside_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let result = validate_workspace_path(outside.path(), root.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("outside root"));
+    }
+
+    #[tokio::test]
+    async fn test_create_workspace_path_is_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspaces");
+        std::fs::create_dir_all(&root).unwrap();
+        // Place a regular file where the workspace directory would be
+        std::fs::write(root.join("PROJ-FILE"), "not a directory").unwrap();
+
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        let result = create_workspace(&root, "PROJ-FILE", &hooks).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not a directory"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_before_run_hook_some() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: Some("touch .before_run_executed".to_string()),
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        run_before_run_hook(tmp.path(), &hooks).await.unwrap();
+        assert!(tmp.path().join(".before_run_executed").exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_before_run_hook_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        // Should return Ok immediately with no hook configured
+        run_before_run_hook(tmp.path(), &hooks).await.unwrap();
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_after_run_hook_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: Some("touch .after_run_ok".to_string()),
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        run_after_run_hook(tmp.path(), &hooks).await;
+        assert!(tmp.path().join(".after_run_ok").exists());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_after_run_hook_failure_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: Some("exit 1".to_string()),
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        // Should return normally even though the hook fails
+        run_after_run_hook(tmp.path(), &hooks).await;
+    }
+
+    #[tokio::test]
+    async fn test_run_after_run_hook_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        // Should return immediately with no hook configured
+        run_after_run_hook(tmp.path(), &hooks).await;
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_cleanup_workspace_with_before_remove_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().join("ws-hook-remove");
+        std::fs::create_dir_all(&ws_path).unwrap();
+        std::fs::write(ws_path.join("data.txt"), "content").unwrap();
+
+        let marker = tmp.path().join("hook_ran");
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: Some(format!("touch {}", marker.display())),
+            timeout_ms: 60_000,
+        };
+
+        cleanup_workspace(&ws_path, &hooks).await;
+        assert!(marker.exists());
+        assert!(!ws_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_workspace_nonexistent_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().join("does-not-exist");
+
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        // Should return immediately without error
+        cleanup_workspace(&ws_path, &hooks).await;
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_hook_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: Some("exit 1".to_string()),
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        let result = run_before_run_hook(tmp.path(), &hooks).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("hook failed"));
+    }
+
+    #[tokio::test]
+    async fn test_run_hook_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: Some("sleep 999".to_string()),
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 100,
+        };
+
+        let result = run_before_run_hook(tmp.path(), &hooks).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("timed out"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_hook_stderr_truncation() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Generate >500 chars of stderr then exit 1
+        let script = "python3 -c \"import sys; sys.stderr.write('X' * 600)\" && exit 1";
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: Some(script.to_string()),
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        let result = run_before_run_hook(tmp.path(), &hooks).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("...(truncated)"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_create_workspace_root_creation_failure() {
+        // Use /dev/null as parent — can't create subdirectories under a device file
+        let root = PathBuf::from("/dev/null/impossible");
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        let result = create_workspace(&root, "PROJ-1", &hooks).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("failed to create workspace root"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_create_workspace_dir_creation_failure() {
+        // Create root then make it read-only so workspace dir creation fails
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspaces");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Make root read-only to prevent creating subdirectory
+        let mut perms = std::fs::metadata(&root).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            perms.set_readonly(true);
+        }
+        std::fs::set_permissions(&root, perms.clone()).unwrap();
+
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        let result = create_workspace(&root, "PROJ-NEW", &hooks).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("failed to create workspace"));
+
+        // Restore permissions for cleanup
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            perms.set_readonly(false);
+        }
+        std::fs::set_permissions(&root, perms).unwrap();
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_cleanup_workspace_with_failing_before_remove_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().join("ws-fail-hook");
+        std::fs::create_dir_all(&ws_path).unwrap();
+
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: Some("exit 1".to_string()),
+            timeout_ms: 60_000,
+        };
+
+        // Should still proceed to remove the directory despite hook failure
+        cleanup_workspace(&ws_path, &hooks).await;
+        assert!(!ws_path.exists());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_cleanup_workspace_remove_dir_all_failure() {
+        // Create a workspace but make it impossible to remove by removing permissions
+        // On macOS: remove write permission from parent to prevent deletion
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_path = tmp.path().join("ws-no-delete");
+        std::fs::create_dir_all(&ws_path).unwrap();
+
+        // Make the directory immutable by removing write from parent
+        let parent = tmp.path();
+        let mut perms = std::fs::metadata(parent).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            perms.set_readonly(true);
+        }
+        std::fs::set_permissions(parent, perms.clone()).unwrap();
+
+        let hooks = HooksConfig {
+            after_create: None,
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        // cleanup should log warning but not panic
+        cleanup_workspace(&ws_path, &hooks).await;
+
+        // Restore permissions for cleanup
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            perms.set_readonly(false);
+        }
+        std::fs::set_permissions(parent, perms).unwrap();
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_hook_spawn_failure() {
+        // Use a non-existent directory as cwd to make bash spawn fail
+        let nonexistent = PathBuf::from("/tmp/symphony_test_nonexistent_dir_12345");
+        // Ensure it really doesn't exist
+        let _ = std::fs::remove_dir_all(&nonexistent);
+
+        let result = run_hook("test_hook", "echo hi", &nonexistent, 60_000).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("failed to execute"));
     }
 }

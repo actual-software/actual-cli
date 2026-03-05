@@ -204,3 +204,196 @@ pub enum WorkerExitReason {
     Stalled,
     Cancelled,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── RunStatus Display ────────────────────────────────────────────
+
+    #[test]
+    fn run_status_display_preparing_workspace() {
+        assert_eq!(
+            RunStatus::PreparingWorkspace.to_string(),
+            "preparing_workspace"
+        );
+    }
+
+    #[test]
+    fn run_status_display_building_prompt() {
+        assert_eq!(RunStatus::BuildingPrompt.to_string(), "building_prompt");
+    }
+
+    #[test]
+    fn run_status_display_launching_agent() {
+        assert_eq!(
+            RunStatus::LaunchingAgentProcess.to_string(),
+            "launching_agent"
+        );
+    }
+
+    #[test]
+    fn run_status_display_initializing_session() {
+        assert_eq!(
+            RunStatus::InitializingSession.to_string(),
+            "initializing_session"
+        );
+    }
+
+    #[test]
+    fn run_status_display_streaming_turn() {
+        assert_eq!(RunStatus::StreamingTurn.to_string(), "streaming_turn");
+    }
+
+    #[test]
+    fn run_status_display_finishing() {
+        assert_eq!(RunStatus::Finishing.to_string(), "finishing");
+    }
+
+    #[test]
+    fn run_status_display_succeeded() {
+        assert_eq!(RunStatus::Succeeded.to_string(), "succeeded");
+    }
+
+    #[test]
+    fn run_status_display_failed() {
+        assert_eq!(RunStatus::Failed.to_string(), "failed");
+    }
+
+    #[test]
+    fn run_status_display_timed_out() {
+        assert_eq!(RunStatus::TimedOut.to_string(), "timed_out");
+    }
+
+    #[test]
+    fn run_status_display_stalled() {
+        assert_eq!(RunStatus::Stalled.to_string(), "stalled");
+    }
+
+    #[test]
+    fn run_status_display_canceled_by_reconciliation() {
+        assert_eq!(
+            RunStatus::CanceledByReconciliation.to_string(),
+            "canceled_by_reconciliation"
+        );
+    }
+
+    // ── OrchestratorState::new ───────────────────────────────────────
+
+    #[test]
+    fn orchestrator_state_new_sets_fields() {
+        let state = OrchestratorState::new(5000, 4);
+        assert_eq!(state.poll_interval_ms, 5000);
+        assert_eq!(state.max_concurrent_agents, 4);
+        assert!(state.running.is_empty());
+        assert!(state.claimed.is_empty());
+        assert!(state.retry_attempts.is_empty());
+        assert!(state.completed.is_empty());
+        assert_eq!(state.agent_totals.input_tokens, 0);
+        assert_eq!(state.agent_totals.output_tokens, 0);
+        assert_eq!(state.agent_totals.total_tokens, 0);
+        assert!(state.rate_limits.is_none());
+    }
+
+    // ── running_count ────────────────────────────────────────────────
+
+    #[test]
+    fn running_count_empty() {
+        let state = OrchestratorState::new(1000, 2);
+        assert_eq!(state.running_count(), 0);
+    }
+
+    // ── available_slots ──────────────────────────────────────────────
+
+    #[test]
+    fn available_slots_all_free() {
+        let state = OrchestratorState::new(1000, 3);
+        assert_eq!(state.available_slots(), 3);
+    }
+
+    #[test]
+    fn available_slots_some_used() {
+        let mut state = OrchestratorState::new(1000, 3);
+        insert_running_entry(&mut state, "a", "in_progress");
+        assert_eq!(state.available_slots(), 2);
+    }
+
+    #[test]
+    fn available_slots_saturates_at_zero() {
+        let mut state = OrchestratorState::new(1000, 1);
+        insert_running_entry(&mut state, "a", "in_progress");
+        insert_running_entry(&mut state, "b", "in_progress");
+        // running (2) > max (1) → saturating_sub returns 0
+        assert_eq!(state.available_slots(), 0);
+    }
+
+    // ── running_count_by_state ───────────────────────────────────────
+
+    #[test]
+    fn running_count_by_state_no_matches() {
+        let mut state = OrchestratorState::new(1000, 5);
+        insert_running_entry(&mut state, "a", "in_progress");
+        assert_eq!(state.running_count_by_state("done"), 0);
+    }
+
+    #[test]
+    fn running_count_by_state_exact_match() {
+        let mut state = OrchestratorState::new(1000, 5);
+        insert_running_entry(&mut state, "a", "in_progress");
+        insert_running_entry(&mut state, "b", "done");
+        insert_running_entry(&mut state, "c", "in_progress");
+        assert_eq!(state.running_count_by_state("in_progress"), 2);
+        assert_eq!(state.running_count_by_state("done"), 1);
+    }
+
+    #[test]
+    fn running_count_by_state_case_insensitive() {
+        let mut state = OrchestratorState::new(1000, 5);
+        insert_running_entry(&mut state, "a", "In_Progress");
+        insert_running_entry(&mut state, "b", "IN_PROGRESS");
+        assert_eq!(state.running_count_by_state("in_progress"), 2);
+        assert_eq!(state.running_count_by_state("IN_PROGRESS"), 2);
+    }
+
+    #[test]
+    fn running_count_by_state_trims_whitespace() {
+        let mut state = OrchestratorState::new(1000, 5);
+        insert_running_entry(&mut state, "a", "  review  ");
+        assert_eq!(state.running_count_by_state(" review "), 1);
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────
+
+    fn make_issue(id: &str, issue_state: &str) -> Issue {
+        Issue {
+            id: id.to_string(),
+            identifier: format!("TST-{id}"),
+            title: format!("Test issue {id}"),
+            description: None,
+            priority: None,
+            state: issue_state.to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    fn insert_running_entry(state: &mut OrchestratorState, id: &str, issue_state: &str) {
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        let issue = make_issue(id, issue_state);
+        state.running.insert(
+            id.to_string(),
+            RunningEntry {
+                identifier: issue.identifier.clone(),
+                issue,
+                session: LiveSession::default(),
+                retry_attempt: None,
+                started_at: Utc::now(),
+                cancel_tx,
+            },
+        );
+    }
+}
