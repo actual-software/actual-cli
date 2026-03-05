@@ -175,4 +175,68 @@ You are working on issue {{ issue.identifier }}: {{ issue.title }}.
         assert!(wf.config.is_mapping());
         assert!(wf.prompt_template.contains("tracker:"));
     }
+
+    #[test]
+    fn test_load_workflow_file_not_found() {
+        let result = load_workflow(Path::new("/nonexistent/WORKFLOW.md"));
+        assert!(
+            matches!(&result, Err(SymphonyError::MissingWorkflowFile { path }) if path.contains("nonexistent"))
+        );
+    }
+
+    #[test]
+    fn test_load_workflow_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("WORKFLOW.md");
+        std::fs::write(
+            &file_path,
+            "---\ntracker:\n  kind: linear\n---\nDo the work on {{ issue.identifier }}",
+        )
+        .unwrap();
+
+        let wf = load_workflow(&file_path).unwrap();
+        assert!(wf.config.is_mapping());
+        assert!(wf.prompt_template.contains("{{ issue.identifier }}"));
+    }
+
+    #[test]
+    fn test_split_front_matter_leading_whitespace() {
+        // Leading whitespace before --- should still detect front matter
+        let content = "  \n---\nkey: value\n---\nBody text";
+        let wf = parse_workflow(content).unwrap();
+        assert!(wf.config.is_mapping());
+        let mapping = wf.config.as_mapping().unwrap();
+        assert!(mapping.contains_key(&serde_yaml::Value::String("key".to_string())));
+        assert_eq!(wf.prompt_template, "Body text");
+    }
+
+    #[test]
+    fn test_parse_workflow_invalid_yaml() {
+        let content = "---\n: :\n  invalid: [unclosed\n---\nBody";
+        let result = parse_workflow(content);
+        assert!(
+            matches!(&result, Err(SymphonyError::WorkflowParseError { reason }) if reason.contains("invalid YAML front matter"))
+        );
+    }
+
+    #[test]
+    fn test_load_workflow_read_error_non_not_found() {
+        // A directory path triggers a read error that is not NotFound
+        let dir = tempfile::tempdir().unwrap();
+        let result = load_workflow(dir.path());
+        assert!(
+            matches!(&result, Err(SymphonyError::WorkflowParseError { reason }) if reason.contains("failed to read"))
+        );
+    }
+
+    #[test]
+    fn test_split_front_matter_starts_with_dashes_but_no_exact_line() {
+        // Content starts with "---" but the line has trailing text,
+        // so line.trim() != "---" and we hit the None => guard on line 82
+        let content = "---extra stuff\nsome body";
+        let wf = parse_workflow(content).unwrap();
+        // Should treat as no front matter
+        assert!(wf.config.is_mapping());
+        assert!(wf.prompt_template.contains("---extra stuff"));
+    }
 }

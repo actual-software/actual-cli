@@ -151,13 +151,15 @@ fn resolve_env_var(value: &str) -> String {
 /// Expand ~ to home directory and resolve $VAR in path strings.
 fn expand_path(value: &str) -> PathBuf {
     let resolved = resolve_env_var(value);
-    if let Some(stripped) = resolved.strip_prefix('~') {
-        if let Some(home) = dirs::home_dir() {
-            let rest = stripped.strip_prefix('/').unwrap_or(stripped);
-            return home.join(rest);
-        }
-    }
-    PathBuf::from(resolved)
+    resolved
+        .strip_prefix('~')
+        .and_then(|stripped| {
+            dirs::home_dir().map(|home| {
+                let rest = stripped.strip_prefix('/').unwrap_or(stripped);
+                home.join(rest)
+            })
+        })
+        .unwrap_or_else(|| PathBuf::from(resolved))
 }
 
 /// Parse a list that can be either a YAML list of strings or a comma-separated string.
@@ -470,5 +472,339 @@ tracker:
     fn test_path_expansion() {
         let path = expand_path("/tmp/test");
         assert_eq!(path, PathBuf::from("/tmp/test"));
+    }
+
+    // --- validate_for_dispatch: uncovered error paths ---
+
+    #[test]
+    fn test_validate_unsupported_tracker_kind() {
+        let content = r#"---
+tracker:
+  kind: jira
+  project_slug: test
+  api_key: key123
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let err = config.validate_for_dispatch().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("jira"), "expected 'jira' in error: {msg}");
+    }
+
+    #[test]
+    fn test_validate_missing_api_key() {
+        let content = r#"---
+tracker:
+  kind: linear
+  project_slug: test
+  api_key: ""
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let err = config.validate_for_dispatch().unwrap_err();
+        assert!(matches!(&err, SymphonyError::MissingTrackerApiKey));
+    }
+
+    #[test]
+    fn test_validate_missing_project_slug() {
+        let content = r#"---
+tracker:
+  kind: linear
+  api_key: some-key
+  project_slug: ""
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let err = config.validate_for_dispatch().unwrap_err();
+        assert!(matches!(&err, SymphonyError::MissingTrackerProjectSlug));
+    }
+
+    #[test]
+    fn test_validate_missing_codex_command() {
+        let content = r#"---
+tracker:
+  kind: linear
+  api_key: some-key
+  project_slug: my-proj
+codex:
+  command: ""
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let err = config.validate_for_dispatch().unwrap_err();
+        assert!(
+            matches!(&err, SymphonyError::MissingRequiredConfig { field } if field == "codex.command")
+        );
+    }
+
+    // --- expand_path: tilde and env var ---
+
+    #[test]
+    fn test_expand_path_tilde() {
+        let path = expand_path("~/foo");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(path, home.join("foo"));
+    }
+
+    #[test]
+    fn test_expand_path_env_var() {
+        unsafe {
+            env::set_var("SYMPHONY_TEST_CONFIG_PATH_1", "/custom/workspace");
+        }
+        let path = expand_path("$SYMPHONY_TEST_CONFIG_PATH_1");
+        assert_eq!(path, PathBuf::from("/custom/workspace"));
+        unsafe {
+            env::remove_var("SYMPHONY_TEST_CONFIG_PATH_1");
+        }
+    }
+
+    // --- resolve_env_var: literal and existing var ---
+
+    #[test]
+    fn test_resolve_env_var_literal() {
+        let result = resolve_env_var("plain-value");
+        assert_eq!(result, "plain-value");
+    }
+
+    #[test]
+    fn test_resolve_env_var_existing() {
+        unsafe {
+            env::set_var("SYMPHONY_TEST_CONFIG_RESOLVE_1", "resolved-value");
+        }
+        let result = resolve_env_var("$SYMPHONY_TEST_CONFIG_RESOLVE_1");
+        assert_eq!(result, "resolved-value");
+        unsafe {
+            env::remove_var("SYMPHONY_TEST_CONFIG_RESOLVE_1");
+        }
+    }
+
+    // --- get_yaml_str: bool and number values ---
+
+    #[test]
+    fn test_get_yaml_str_bool_value() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("flag: true").unwrap();
+        let result = get_yaml_str(&yaml, &["flag"]);
+        assert_eq!(result, Some("true".to_string()));
+    }
+
+    #[test]
+    fn test_get_yaml_str_number_value() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("count: 42").unwrap();
+        let result = get_yaml_str(&yaml, &["count"]);
+        assert_eq!(result, Some("42".to_string()));
+    }
+
+    // --- get_yaml_int: string-encoded int and float ---
+
+    #[test]
+    fn test_get_yaml_int_string_encoded() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("val: \"100\"").unwrap();
+        let result = get_yaml_int(&yaml, &["val"]);
+        assert_eq!(result, Some(100));
+    }
+
+    #[test]
+    fn test_get_yaml_int_float_value() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("val: 3.7").unwrap();
+        let result = get_yaml_int(&yaml, &["val"]);
+        assert_eq!(result, Some(3));
+    }
+
+    // --- parse_string_list: non-string/non-sequence returns None ---
+
+    #[test]
+    fn test_parse_string_list_non_string_non_sequence() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("items: 42").unwrap();
+        let result = parse_string_list(&yaml, &["items"]);
+        assert!(result.is_none());
+    }
+
+    // --- parse_agent_config: by_state with string-encoded limit, zero/negative limit ---
+
+    #[test]
+    fn test_agent_by_state_string_encoded_limit() {
+        let content = r#"---
+agent:
+  max_concurrent_agents_by_state:
+    review: "5"
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(
+            config.agent.max_concurrent_agents_by_state.get("review"),
+            Some(&5)
+        );
+    }
+
+    #[test]
+    fn test_agent_by_state_zero_limit_excluded() {
+        let content = r#"---
+agent:
+  max_concurrent_agents_by_state:
+    blocked: 0
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config
+            .agent
+            .max_concurrent_agents_by_state
+            .get("blocked")
+            .is_none());
+    }
+
+    #[test]
+    fn test_agent_by_state_negative_limit_excluded() {
+        let content = r#"---
+agent:
+  max_concurrent_agents_by_state:
+    wontfix: -1
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config
+            .agent
+            .max_concurrent_agents_by_state
+            .get("wontfix")
+            .is_none());
+    }
+
+    // --- parse_hooks_config: negative timeout falls back to 60000 ---
+
+    #[test]
+    fn test_hooks_negative_timeout_fallback() {
+        let content = r#"---
+hooks:
+  timeout_ms: -500
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.hooks.timeout_ms, 60_000);
+    }
+
+    // --- parse_codex_config: custom command overrides default ---
+
+    #[test]
+    fn test_codex_custom_command() {
+        let content = r#"---
+codex:
+  command: "my-custom-agent --flag"
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.codex.command, "my-custom-agent --flag");
+    }
+
+    // --- parse_tracker_config: LINEAR_API_KEY env var fallback, non-linear kind ---
+
+    #[test]
+    fn test_tracker_linear_api_key_env_fallback() {
+        unsafe {
+            env::set_var("LINEAR_API_KEY", "env-fallback-key");
+        }
+        let content = r#"---
+tracker:
+  kind: linear
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.tracker.api_key, "env-fallback-key");
+        unsafe {
+            env::remove_var("LINEAR_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_tracker_non_linear_kind_empty_endpoint() {
+        let content = r#"---
+tracker:
+  kind: github
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.tracker.kind, "github");
+        assert_eq!(config.tracker.endpoint, "");
+    }
+
+    // --- get_yaml_str: sequence value returns None ---
+
+    #[test]
+    fn test_get_yaml_str_sequence_value() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("items:\n  - a\n  - b").unwrap();
+        let result = get_yaml_str(&yaml, &["items"]);
+        assert!(result.is_none());
+    }
+
+    // --- get_yaml_int: bool value returns None ---
+
+    #[test]
+    fn test_get_yaml_int_bool_value() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("flag: true").unwrap();
+        let result = get_yaml_int(&yaml, &["flag"]);
+        assert!(result.is_none());
+    }
+
+    // --- expand_path: bare tilde ---
+
+    #[test]
+    fn test_expand_path_bare_tilde() {
+        let path = expand_path("~");
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(path, home);
+    }
+
+    // --- parse_agent_config: non-string key in by_state mapping ---
+
+    #[test]
+    fn test_agent_by_state_non_string_key_skipped() {
+        let content = r#"---
+agent:
+  max_concurrent_agents_by_state:
+    123: 5
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        // Numeric key 123 is parsed as integer by YAML, not string — should be skipped
+        assert!(config.agent.max_concurrent_agents_by_state.is_empty());
+    }
+
+    #[test]
+    fn test_agent_by_state_unparseable_value_skipped() {
+        // A YAML sequence value can't be parsed as i64 or string — should be skipped
+        let content = r#"---
+agent:
+  max_concurrent_agents_by_state:
+    todo:
+      - 1
+      - 2
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config.agent.max_concurrent_agents_by_state.is_empty());
+    }
+
+    #[test]
+    fn test_agent_by_state_not_a_mapping() {
+        // max_concurrent_agents_by_state set to a scalar instead of a mapping
+        let content = r#"---
+agent:
+  max_concurrent_agents_by_state: "not a map"
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config.agent.max_concurrent_agents_by_state.is_empty());
     }
 }

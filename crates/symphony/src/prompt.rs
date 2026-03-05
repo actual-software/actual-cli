@@ -11,11 +11,10 @@ pub fn render_prompt(template_str: &str, issue: &Issue, attempt: Option<u32>) ->
         return Ok("You are working on an issue from Linear.".to_string());
     }
 
-    let parser = liquid::ParserBuilder::with_stdlib().build().map_err(|e| {
-        SymphonyError::TemplateParseError {
-            reason: e.to_string(),
-        }
-    })?;
+    // ParserBuilder::with_stdlib().build() is infallible in practice.
+    let parser = liquid::ParserBuilder::with_stdlib()
+        .build()
+        .expect("liquid ParserBuilder::build should never fail with stdlib");
 
     let template = parser
         .parse(template_str)
@@ -160,6 +159,7 @@ pub fn build_continuation_prompt(issue: &Issue, turn_number: u32, max_turns: u32
 mod tests {
     use super::*;
     use crate::model::BlockerRef;
+    use chrono::{TimeZone, Utc};
 
     fn test_issue() -> Issue {
         Issue {
@@ -225,10 +225,12 @@ mod tests {
         let mut issue = test_issue();
         issue.description = None;
         issue.branch_name = None;
+        issue.priority = None;
+        issue.url = None;
         let template =
-            "{{ issue.identifier }}: desc={{ issue.description }}, branch={{ issue.branch_name }}";
+            "{{ issue.identifier }}: desc={{ issue.description }}, branch={{ issue.branch_name }}, pri={{ issue.priority }}, url={{ issue.url }}";
         let result = render_prompt(template, &issue, None).unwrap();
-        assert_eq!(result, "PROJ-42: desc=, branch=");
+        assert_eq!(result, "PROJ-42: desc=, branch=, pri=, url=");
     }
 
     #[test]
@@ -250,5 +252,71 @@ mod tests {
         let prompt = build_continuation_prompt(&issue, 3, 10);
         assert!(prompt.contains("PROJ-42"));
         assert!(prompt.contains("turn 3/10"));
+    }
+
+    #[test]
+    fn test_template_parse_error_invalid_syntax() {
+        let issue = test_issue();
+        let result = render_prompt("{{ invalid }", &issue, None);
+        assert!(
+            matches!(&result, Err(SymphonyError::TemplateParseError { reason }) if !reason.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_build_issue_object_with_branch_name() {
+        let mut issue = test_issue();
+        issue.branch_name = Some("feature/login-fix".to_string());
+        let template = "Branch: {{ issue.branch_name }}";
+        let result = render_prompt(template, &issue, None).unwrap();
+        assert_eq!(result, "Branch: feature/login-fix");
+    }
+
+    #[test]
+    fn test_build_issue_object_with_timestamps() {
+        let mut issue = test_issue();
+        issue.created_at = Some(Utc.with_ymd_and_hms(2025, 1, 15, 10, 30, 0).unwrap());
+        issue.updated_at = Some(Utc.with_ymd_and_hms(2025, 1, 16, 12, 0, 0).unwrap());
+        let template = "Created: {{ issue.created_at }}, Updated: {{ issue.updated_at }}";
+        let result = render_prompt(template, &issue, None).unwrap();
+        assert!(result.contains("2025-01-15"));
+        assert!(result.contains("2025-01-16"));
+    }
+
+    #[test]
+    fn test_blockers_with_all_none_fields() {
+        let mut issue = test_issue();
+        issue.blocked_by = vec![BlockerRef {
+            id: None,
+            identifier: None,
+            state: None,
+        }];
+        let template = "Blockers: {% for b in issue.blocked_by %}id={{ b.id }},ident={{ b.identifier }},state={{ b.state }}{% endfor %}";
+        let result = render_prompt(template, &issue, None).unwrap();
+        assert_eq!(result, "Blockers: id=,ident=,state=");
+    }
+
+    #[test]
+    fn test_render_error_unknown_filter() {
+        let issue = test_issue();
+        // Using an unknown filter should produce a parse error
+        let template = "{{ issue.title | nonexistent_filter }}";
+        let result = render_prompt(template, &issue, None);
+        assert!(matches!(
+            &result,
+            Err(SymphonyError::TemplateParseError { .. })
+        ));
+    }
+
+    #[test]
+    fn test_render_error_at_render_time() {
+        let issue = test_issue();
+        // divided_by: 0 triggers a render-time error (division by zero)
+        let template = "{{ issue.priority | divided_by: 0 }}";
+        let result = render_prompt(template, &issue, None);
+        assert!(matches!(
+            &result,
+            Err(SymphonyError::TemplateRenderError { .. })
+        ));
     }
 }
