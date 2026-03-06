@@ -5,15 +5,14 @@
 **BEFORE doing ANY work in a session, you MUST:**
 
 1. Read `AGENTS.md` completely
-2. Confirm which workflow you'll follow (single bead, epic, or other)
-3. **If a ticket/bead ID was provided**, set the session title to the ticket name (e.g., `actual-cli-abc: Fix the thing`). Use the bead's title as-is from `bd show <id>`.
-4. Only then begin work
+2. Confirm which workflow you'll follow (single issue, parent issue, or other)
+3. Only then begin work
 
 **If you skip this, STOP immediately and do it now.**
 
 ## MANDATORY: Always Use Git Worktrees
 
-**NEVER make code changes directly in the main checkout.** The main checkout is ONLY for orchestration (running `bd` commands, creating worktrees, spawning sub-agents).
+**NEVER make code changes directly in the main checkout.** The main checkout is ONLY for orchestration (creating worktrees, spawning sub-agents).
 
 For ALL code changes, regardless of size or complexity:
 1. Create a worktree: `git worktree add .worktrees/<task> -b <branch-name>`
@@ -45,27 +44,18 @@ For ALL code changes, regardless of size or complexity:
   gh api graphql -f query='mutation { minimizeComment(input: {subjectId: "<node_id>", classifier: OUTDATED}) { minimizedComment { isMinimized } } }'
   ```
 
-## Issue Tracking (Beads)
+## Issue Tracking (Linear)
 
 When you discover a bug, gap, or follow-up work item during any task:
 
-- **Create a bead immediately** — don't just note it mentally or mention it in passing
-- **Write enough context for a cold-start sub-agent** to pick it up. Every bead must include:
+- **Create a Linear issue immediately** — don't just note it mentally or mention it in passing
+- **Write enough context for a cold-start sub-agent** to pick it up. Every issue must include:
   - What the problem is (observed vs expected behavior)
   - How to reproduce it (specific commands, flags, or code paths)
   - Which files/functions are involved
   - A suggested fix approach
-- Use `--description` when creating beads — issues without descriptions lack context
-- Parent the bead under the relevant epic if one exists
-- Set priority based on impact (P0 = broken for users, P1 = wrong but workaround exists, P2 = cleanup)
-
-### Beads Sync Workflow
-
-- **After closing/updating beads, always run `bd sync --full`** to commit changes to the `beads-sync` branch
-- The `beads-sync` branch is parallel to `main` and never merged — it's solely for tracking bead state
-- `.beads/issues.jsonl` is gitignored on `main` to prevent PR conflicts
-- The daemon auto-pulls from `beads-sync` to discover new beads from other agents/CI
-- In worktrees, use `BEADS_NO_DAEMON=1` to prevent daemon from syncing to wrong branch
+- Set priority based on impact (P0/Urgent = broken for users, P1/High = wrong but workaround exists, P2/Medium = cleanup)
+- Parent the issue under the relevant parent issue if one exists
 
 ## Git Worktrees
 
@@ -111,13 +101,12 @@ The `claude-review` CI check may fail or should be considered non-blocking in th
 
 **MANDATORY WORKFLOW:**
 
-1. **File issues for remaining work** - Create beads for anything that needs follow-up
+1. **File issues for remaining work** - Create Linear issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - All gates must pass
-3. **Update issue status** - Close finished work, update in-progress items
+3. **Update issue status** - Move finished work to appropriate state in Linear
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync --full
    git push
    git status  # MUST show "up to date with origin"
    ```

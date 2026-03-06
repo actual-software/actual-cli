@@ -11,27 +11,9 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # === Beads Sync (shared, runs once) ===
-  sync-beads:
-    name: Sync Beads
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: sync
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
   # === Build (release binaries for x86_64 + aarch64) ===
   build:
     name: Build
-    needs: sync-beads
-    if: always() && needs.sync-beads.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -80,49 +62,9 @@ jobs:
           name: actual-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/actual
 
-  # === Build fix-bead jobs ===
-  create-build-fix-bead:
-    name: Create Build Fix Bead
-    if: always() && needs.build.result == 'failure' && github.event_name == 'pull_request'
-    needs: [sync-beads, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: create
-          failure-type: build_error
-          failure-summary: "Build failed - check CI logs"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  cleanup-build-fix-beads:
-    name: Cleanup Build Fix Beads
-    if: always() && needs.build.result == 'success' && github.event_name == 'pull_request'
-    needs: [sync-beads, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: cleanup
-          failure-type: build_error
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
   # === Test (debug mode, unit + integration tests) ===
   test:
     name: Test
-    needs: sync-beads
-    if: always() && needs.sync-beads.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -180,57 +122,13 @@ jobs:
         if: always()
         uses: ./.github/actions/tui-test-report
 
-  # === Test fix-bead jobs ===
-  create-test-fix-bead:
-    name: Create Test Fix Bead
-    if: always() && needs.test.result == 'failure' && github.event_name == 'pull_request'
-    needs: [sync-beads, test]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Download test output
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
-        with:
-          name: test-output
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: create
-          failure-type: test_failure
-          failure-summary: "Tests failed - see artifacts for details"
-          failure-details-file: test-output.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  cleanup-test-fix-beads:
-    name: Cleanup Test Fix Beads
-    if: always() && needs.test.result == 'success' && github.event_name == 'pull_request'
-    needs: [sync-beads, test]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: cleanup
-          failure-type: test_failure
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
   # === Live E2E (uses pre-built binary from build job) ===
   live-e2e:
     name: Live E2E
-    needs: [sync-beads, test, build]
+    needs: [test, build]
     if: >-
       always()
       && github.event_name == 'merge_group'
-      && needs.sync-beads.result != 'cancelled'
       && needs.test.result == 'success'
       && needs.build.result == 'success'
     runs-on: ubuntu-latest
@@ -296,52 +194,3 @@ jobs:
           name: e2e-output
           path: e2e-output.txt
           if-no-files-found: ignore
-
-  # === Live E2E fix-bead jobs ===
-  create-live-e2e-fix-bead:
-    name: Create Live E2E Fix Bead
-    if: always() && needs.live-e2e.result == 'failure' && github.event_name == 'pull_request'
-    needs: [sync-beads, build, test, live-e2e]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Download E2E output
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
-        with:
-          name: e2e-output
-        continue-on-error: true
-      - name: Prepare failure details
-        run: |
-          if [[ ! -f e2e-output.txt ]]; then
-            echo "E2E output not available (job may have failed before producing output)" > e2e-output.txt
-          fi
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: create
-          failure-type: live_e2e_failure
-          failure-summary: "Live E2E failed - see artifacts for details"
-          failure-details-file: e2e-output.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  cleanup-live-e2e-fix-beads:
-    name: Cleanup Live E2E Fix Beads
-    if: always() && needs.live-e2e.result == 'success' && github.event_name == 'pull_request'
-    needs: [sync-beads, build, test, live-e2e]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: cleanup
-          failure-type: live_e2e_failure
-          github-token: ${{ secrets.GITHUB_TOKEN }}

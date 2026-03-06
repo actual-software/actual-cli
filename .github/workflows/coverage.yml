@@ -15,26 +15,8 @@ on:
 permissions: {}
 
 jobs:
-  sync-beads:
-    name: Sync Beads
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: sync
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
   coverage:
     name: Coverage Enforcement
-    needs: sync-beads
-    if: always() && needs.sync-beads.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -181,48 +163,3 @@ jobs:
             lcov.info
             coverage-summary.txt
             coverage-html/
-
-  create-fix-bead:
-    name: Create Fix Bead
-    if: always() && needs.coverage.result == 'failure' && github.event_name == 'pull_request'
-    needs: [sync-beads, coverage]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-
-      - name: Download coverage report
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
-        with:
-          name: coverage-report
-
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: create
-          failure-type: coverage_gap
-          failure-summary: "Coverage below 100%"
-          failure-details-file: coverage-summary.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  cleanup-fix-beads:
-    name: Cleanup Fix Beads
-    if: always() && needs.coverage.result == 'success' && github.event_name == 'pull_request'
-    needs: [sync-beads, coverage]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: cleanup
-          failure-type: coverage_gap
-          github-token: ${{ secrets.GITHUB_TOKEN }}

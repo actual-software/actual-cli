@@ -8,26 +8,8 @@ on:
 permissions: {}
 
 jobs:
-  sync-beads:
-    name: Sync Beads
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: sync
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
   lint:
     name: Lint
-    needs: sync-beads
-    if: always() && needs.sync-beads.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -57,42 +39,3 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy -- -D warnings
-
-  create-fix-bead:
-    name: Create Fix Bead
-    if: always() && needs.lint.result == 'failure' && github.event_name == 'pull_request'
-    needs: [sync-beads, lint]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: create
-          failure-type: lint_error
-          failure-summary: "Lint violations found - check CI logs"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  cleanup-fix-beads:
-    name: Cleanup Fix Beads
-    if: always() && needs.lint.result == 'success' && github.event_name == 'pull_request'
-    needs: [sync-beads, lint]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          fetch-depth: 0
-
-      - uses: poiley/bdgha@4a67819785a8d45505d56e2ff408df60ddbfd0f6  # v2
-        with:
-          mode: cleanup
-          failure-type: lint_error
-          github-token: ${{ secrets.GITHUB_TOKEN }}
