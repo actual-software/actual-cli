@@ -252,10 +252,15 @@ Do the work on {{ issue.identifier }}.
         let (watcher, mut rx) = start_workflow_watch(&path).unwrap();
 
         // Give the watcher time to start, then drain any spurious initial
-        // events (some platforms deliver a Create event for the file that
-        // existed before the watcher started).
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        while rx.try_recv().is_ok() {}
+        // events. On Linux inotify the initial file creation can generate
+        // a delayed Modify event, so we drain in a loop with a timeout
+        // rather than relying on a single try_recv() pass.
+        loop {
+            match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+                Ok(Some(_)) => continue, // drain and retry
+                _ => break,              // timeout = no more spurious events
+            }
+        }
 
         // Write invalid YAML — should log error but not emit event
         let invalid_content = "---\n: :\n  invalid: [unclosed\n---\nBroken.";
