@@ -3892,13 +3892,13 @@ mod tests {
             .create_async()
             .await;
 
-        // State refresh calls (for run_worker after turn + retry checks):
-        // return Done to stop the cycle
+        // State refresh / reconciliation calls: return In Progress (non-terminal)
+        // so reconciliation doesn't kill the worker before it can report failure
         server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(mock_states_response(&[("id1", "PROJ-1", "Done")]))
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Progress")]))
             .expect_at_least(0)
             .create_async()
             .await;
