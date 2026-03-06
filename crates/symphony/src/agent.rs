@@ -9,9 +9,20 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 /// Agent session representing a running Claude Code subprocess.
+///
+/// On drop, a best-effort `SIGKILL` is sent to the child process so that
+/// timeouts or panics never leave orphaned subprocesses.
 pub struct AgentSession {
     child: Child,
     pub pid: Option<u32>,
+}
+
+impl Drop for AgentSession {
+    fn drop(&mut self) {
+        // `Child::start_kill` is non-async and sends SIGKILL immediately.
+        // It returns `Err` if the child has already exited — that is fine.
+        let _ = self.child.start_kill();
+    }
 }
 
 impl AgentSession {
@@ -1074,6 +1085,38 @@ mod tests {
 
         // Wait for the process to finish
         let _ = session.wait_with_timeout(5_000).await;
+    }
+
+    // -- Test: Drop impl kills orphaned child process --
+
+    #[tokio::test]
+    async fn test_agent_drop_kills_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = make_test_config("sleep 999 #-p");
+        let issue = make_test_issue();
+
+        let (session, _event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
+            .await
+            .unwrap();
+
+        let pid = session.pid.expect("should have pid");
+
+        // Drop the session — the Drop impl should send SIGKILL
+        drop(session);
+
+        // Give a moment for the signal to propagate
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify process is no longer running by trying to send signal 0
+        let output = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .output()
+            .expect("kill -0 should run");
+        assert!(
+            !output.status.success(),
+            "process {pid} should be dead after drop"
+        );
     }
 
     // ---- spawn_agent_process tests ----
