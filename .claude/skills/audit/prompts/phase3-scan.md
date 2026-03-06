@@ -95,4 +95,4 @@ Write the following JSON to `.audit/phase3/{{SCAN_CATEGORY}}.json`:
 - Include surrounding context (the full line at minimum).
 - Mark whether each match is in a test file.
 - If a command produces no output, report `total_matches: 0` with empty matches array.
-- Do NOT create beads — just report raw data for the analysis phase.
+- Do NOT create issues — just report raw data for the analysis phase.

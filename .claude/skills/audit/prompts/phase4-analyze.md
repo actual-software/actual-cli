@@ -5,7 +5,7 @@ You are the analysis agent for a codebase audit. Your job is to merge findings f
 ## Inputs
 
 Read ALL files from:
-- `.audit/prep.json` — existing epics and beads (to avoid duplicates)
+- `.audit/prep.json` — existing parent issues and issues (to avoid duplicates)
 - `.audit/phase2/*.json` — source-reading findings
 - `.audit/phase3/*.json` — automated scan results
 
@@ -13,7 +13,7 @@ Read ALL files from:
 
 1. **Merge**: Combine all Phase 2 findings and Phase 3 scan matches into a single list.
 2. **Deduplicate**: Remove findings that point to the same file+line or describe the same issue. Prefer the Phase 2 finding (richer context) over the Phase 3 match.
-3. **Filter existing**: Remove any finding that already has an open bead (check `.audit/prep.json` existing_beads by matching file paths and descriptions).
+3. **Filter existing**: Remove any finding that already has an open issue (check `.audit/prep.json` existing_issues by matching file paths and descriptions).
 4. **Categorize into epics**: Group findings by theme. Map each finding to an epic:
    - **Bugs/Correctness** → "Bug Fixes" epic
    - **Error Handling** → "Error Handling & Robustness Gaps" epic
@@ -29,7 +29,7 @@ Read ALL files from:
 6. **Quality filter**: Drop any finding that is:
    - A style preference, not a real problem
    - Too vague to be actionable
-   - Trivially obvious and not worth a bead
+    - Trivially obvious and not worth filing
 
 ## Output
 
@@ -42,7 +42,7 @@ Write the following JSON to `.audit/phase4-findings.json`:
     "by_category": {"bugs": 3, "error_handling": 8, "test_quality": 5, "refactoring": 4, "cut_corners": 2, "dead_code": 1},
     "by_priority": {"P0": 1, "P1": 5, "P2": 12, "P3": 5},
     "duplicates_removed": 4,
-    "existing_beads_filtered": 2
+    "existing_issues_filtered": 2
   },
   "epics": [
     {
@@ -80,6 +80,6 @@ Write the following JSON to `.audit/phase4-findings.json`:
 
 - Every finding must have all 5 description fields (title, description, impact, suggested_fix, testing).
 - A cold-start agent must be able to pick up any finding and implement the fix without additional research.
-- Do NOT create beads — just produce the consolidated analysis. Phase 5 handles bead creation.
+- Do NOT create issues — just produce the consolidated analysis. Phase 5 handles issue creation.
 - If an epic has 0 findings after dedup/filtering, include it with an empty findings array so the orchestrator knows.
 - Findings should be ordered by priority within each epic (P0 first).
