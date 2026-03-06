@@ -8,9 +8,9 @@ You are a preparation agent for a codebase audit. Your job is to gather project 
 
 ## Tasks
 
-1. Read `AGENTS.md` to understand the project workflow, bd CLI, and conventions.
-2. Run `bd list` to get all existing beads. Record open issue IDs and titles.
-3. Run `bd list | grep epic` to get all existing epics with their IDs.
+1. Read `AGENTS.md` to understand the project workflow and conventions.
+2. Query Linear for existing issues in the `actcli` project. Record open issue identifiers and titles.
+3. Query Linear for parent issues (issues with sub-issues) to identify existing categories.
 4. List all Rust source directories: `find . -name '*.rs' -not -path './.worktrees/*' -not -path './target/*' | sed 's|/[^/]*$||' | sort -u`
 5. Count files per directory to understand codebase shape.
 6. Identify: language (Rust), framework (clap CLI), architecture patterns, config approach.
@@ -31,18 +31,18 @@ Write the following JSON to `.audit/prep.json`:
     {"path": "src/cli/", "file_count": 8, "line_count": 2500},
     {"path": "src/generation/", "file_count": 5, "line_count": 1800}
   ],
-  "existing_epics": [
-    {"id": "actual-cli-xxx", "title": "Epic Title", "status": "open", "child_count": 5}
+  "existing_parent_issues": [
+    {"id": "ACTCLI-10", "title": "Parent Issue Title", "status": "open", "child_count": 5}
   ],
-  "existing_beads": [
-    {"id": "actual-cli-yyy", "title": "Bead Title", "status": "open", "parent": "actual-cli-xxx"}
+  "existing_issues": [
+    {"id": "ACTCLI-11", "title": "Issue Title", "status": "open", "parent": "ACTCLI-10"}
   ]
 }
 ```
 
 ## Rules
 
-- Do NOT create any beads or epics — just gather information.
+- Do NOT create any issues — just gather information.
 - Do NOT read source files — that's Phase 2's job.
 - If FOCUS is set, still gather full project context but note the focus for downstream agents.
 - Keep the output concise — titles and IDs only, no full descriptions.
