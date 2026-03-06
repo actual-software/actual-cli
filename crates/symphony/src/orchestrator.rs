@@ -4034,7 +4034,9 @@ mod tests {
             .create_async()
             .await;
 
-        // Two issues to dispatch
+        // Two issues to dispatch — keep them in "Todo" (active) for all
+        // subsequent requests so reconciliation never removes the workspaces
+        // before the test can verify the identity files.
         server
             .mock("POST", "/")
             .with_status(200)
@@ -4044,19 +4046,6 @@ mod tests {
                 ("id2", "PROJ-2", "Todo"),
             ]))
             .expect_at_least(1)
-            .create_async()
-            .await;
-
-        // State refresh: terminal
-        server
-            .mock("POST", "/")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(mock_states_response(&[
-                ("id1", "PROJ-1", "Done"),
-                ("id2", "PROJ-2", "Done"),
-            ]))
-            .expect_at_least(0)
             .create_async()
             .await;
 
