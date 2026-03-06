@@ -1197,6 +1197,9 @@ mod tests {
     }
 
     /// Build a minimal valid Linear GraphQL response for issue states by IDs.
+    /// Includes `pageInfo` so the response is valid for both
+    /// `fetch_candidate_issues` and `fetch_issue_states_by_ids` — this is
+    /// important for integration tests where mock ordering is non-deterministic.
     fn mock_states_response(issues: &[(&str, &str, &str)]) -> String {
         let nodes: Vec<serde_json::Value> = issues
             .iter()
@@ -1221,7 +1224,11 @@ mod tests {
         serde_json::json!({
             "data": {
                 "issues": {
-                    "nodes": nodes
+                    "nodes": nodes,
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
                 }
             }
         })
