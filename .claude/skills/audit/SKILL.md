@@ -1,15 +1,15 @@
 ---
 name: audit
-description: Comprehensive codebase audit that scans for bugs, dead code, half-implemented features, error handling gaps, cut corners, bad tests, and refactoring opportunities. Files detailed beads organized under epics. Syncs to beads-sync branch.
-compatibility: Requires bd (beads) CLI for issue tracking. Works with Claude Code, OpenCode, and other Agent Skills-compatible tools.
+description: Comprehensive codebase audit that scans for bugs, dead code, half-implemented features, error handling gaps, cut corners, bad tests, and refactoring opportunities. Files detailed Linear issues organized under parent issues.
+compatibility: Requires gh CLI with Linear API access for issue tracking. Works with Claude Code, OpenCode, and other Agent Skills-compatible tools.
 argument-hint: "[focus-area] e.g. 'error handling' or 'src/generation/' or empty for full audit"
 disable-model-invocation: true
 metadata:
   author: actualai
-  version: "3.0"
+  version: "4.0"
 ---
 
-# Codebase Audit v3.0
+# Codebase Audit v4.0
 
 Multi-agent, context-resilient codebase audit with file-based checkpointing.
 
@@ -68,8 +68,8 @@ Spawn **1 general agent** with the prompt from `prompts/phase1-prep.md`.
 Read `.audit/prep.json` to get the directory list. Spawn **one explore agent per directory**, each with the prompt from `prompts/phase2-read.md`.
 
 Split `src/` subdirectories that are large into separate agents for source and tests:
-- Large directories with `FILE_FILTER` = files NOT matching `*_test.rs` or in `tests/` → output `<dir>-src.json`
-- Test files with `FILE_FILTER` = `*_test.rs` or `tests/**/*.rs` → output `<dir>-tests.json`
+- Large directories with `FILE_FILTER` = files NOT matching `*_test.rs` or in `tests/` -> output `<dir>-src.json`
+- Test files with `FILE_FILTER` = `*_test.rs` or `tests/**/*.rs` -> output `<dir>-tests.json`
 
 For smaller directories, use `FILE_FILTER` = `*.rs` (all files).
 
@@ -115,11 +115,11 @@ Spawn **1 general agent** with the prompt from `prompts/phase4-analyze.md`.
 - Agent writes `.audit/phase4-findings.json`.
 - Update checkpoint: `phases.phase4.status = "done"`.
 
-### Phase 5: File Beads (parallel)
+### Phase 5: File Issues (parallel)
 
 Read `.audit/phase4-findings.json` to get the list of epics with findings.
 
-Spawn **one general agent per epic** that has findings, each with the prompt from `prompts/phase5-file-beads.md`.
+Spawn **one general agent per epic** that has findings, each with the prompt from `prompts/phase5-file-issues.md`.
 
 Template replacement: `{{EPIC_KEY}}` = the epic name, `{{EPIC_SLUG}}` = slugified name (e.g. `bug-fixes`).
 
@@ -138,11 +138,11 @@ Spawn **1 general agent** with the prompt from `prompts/phase6-verify.md`.
 - If verification fails, report issues to the user and ask whether to proceed or fix.
 - Update checkpoint: `phases.phase6.status = "done"`.
 
-### Phase 7: Sync & Report
+### Phase 7: Report
 
-Spawn **1 general agent** with the prompt from `prompts/phase7-sync.md`.
+Spawn **1 general agent** with the prompt from `prompts/phase7-report.md`.
 
-- Agent runs `bd sync --full`, generates `.audit/report.json`.
+- Agent generates `.audit/report.json`.
 - Update checkpoint: `phases.phase7.status = "done"`.
 
 ### Final Output
@@ -154,11 +154,11 @@ Read `.audit/report.json` and present the final report to the user:
 
 **Scope**: <scope from report>
 **Files scanned**: <count>
-**Findings**: <count> issues across <count> epics
+**Findings**: <count> issues across <count> parent issues
 
-### Findings by Epic
+### Findings by Category
 
-1. **<epic-name>** (<epic-id>) - <count> findings
+1. **<category-name>** (<parent-issue-id>) - <count> findings
    - <finding-1-title> (P<N>)
    - <finding-2-title> (P<N>)
 
@@ -171,11 +171,9 @@ Read `.audit/report.json` and present the final report to the user:
 
 ### Verification
 
-- [x] All beads organized under epics
+- [x] All issues organized under parent issues
 - [x] No duplicates found
-- [x] Synced to beads-sync branch
-
-Run `bd ready` to see prioritized work.
+- [x] Issues created in Linear (actcli project)
 ```
 
 ### Cleanup
@@ -199,11 +197,11 @@ Each sub-agent stays well within context limits:
 | Phase 4 (merge) | ~3KB prompt | ~50KB findings | ~53KB |
 | Phase 5 (per epic) | ~3KB prompt | ~20KB findings+cmds | ~23KB |
 | Phase 6 (verify) | ~2KB prompt | ~10KB results | ~12KB |
-| Phase 7 (sync) | ~2KB prompt | ~15KB report data | ~17KB |
+| Phase 7 (report) | ~2KB prompt | ~15KB report data | ~17KB |
 
 No single agent exceeds ~65KB. The monolithic v2.0 approach consumed ~1.1MB+.
 
 ## Related
 
-- [AGENTS.md](../../../AGENTS.md) - Beads workflow and epic organization
-- [Check Skill](../check/SKILL.md) - For syncing beads with main
+- [AGENTS.md](../../../AGENTS.md) - Development workflow and issue tracking
+- [WORKFLOW.md](../../../WORKFLOW.md) - Symphony configuration for autonomous orchestration

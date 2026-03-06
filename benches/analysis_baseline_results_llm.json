@@ -272,7 +272,7 @@
               }
             ],
             "package_manager": "go",
-            "description": "Multi-agent orchestration system for Claude Code with persistent work tracking via git-backed hooks, convoy coordination, and beads integration"
+            "description": "Multi-agent orchestration system for Claude Code with persistent work tracking via git-backed hooks, convoy coordination, and Linear integration"
           },
           {
             "path": "npm-package",

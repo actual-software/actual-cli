@@ -1,0 +1,157 @@
+---
+tracker:
+  kind: linear
+  project_slug: actcli
+  api_key: $LINEAR_API_KEY
+  active_states: "To Do, In Progress, Ready for Review"
+  terminal_states: "Merged"
+polling:
+  interval_ms: 30000
+workspace:
+  root: /tmp/actual-cli-workspaces
+agent:
+  max_concurrent_agents: 3
+  max_turns: 30
+  max_retry_backoff_ms: 300000
+  max_concurrent_agents_by_state:
+    to do: 2
+    in progress: 3
+    ready for review: 1
+codex:
+  stall_timeout_ms: 600000
+  turn_timeout_ms: 7200000
+hooks:
+  after_create: |
+    git clone https://github.com/actual-software/actual-cli.git .
+    git checkout main && git pull origin main
+    rustup component add clippy rustfmt llvm-tools-preview
+  before_run: |
+    git fetch origin main
+    git checkout main
+    git pull origin main
+    BRANCH="symphony/{{ issue.identifier | downcase }}"
+    git checkout -B "$BRANCH"
+  after_run: |
+    echo "Agent run completed at $(date)" >> .symphony-log
+  timeout_ms: 120000
+---
+
+You are an expert Rust engineer working on **actual-cli**, an ADR-powered AI context file generator built in Rust. You are working on issue **{{ issue.identifier }}: {{ issue.title }}**.
+
+{% if issue.url %}
+Issue URL: {{ issue.url }}
+{% endif %}
+
+{% if issue.description %}
+## Issue Description
+
+{{ issue.description }}
+{% endif %}
+
+{% if issue.labels.size > 0 %}
+**Labels**: {% for label in issue.labels %}{{ label }}{% unless forloop.last %}, {% endunless %}{% endfor %}
+{% endif %}
+
+{% if issue.blocked_by.size > 0 %}
+**WARNING**: This issue has {{ issue.blocked_by.size }} blockers:
+{% for blocker in issue.blocked_by %}
+- {{ blocker.identifier }} ({{ blocker.state }})
+{% endfor %}
+Check if these are resolved before proceeding.
+{% endif %}
+
+{% if attempt %}
+## Retry Context
+
+This is retry attempt #{{ attempt }}. A previous attempt failed. Before starting fresh:
+1. Check `git log` for any commits from the previous attempt
+2. Run `cargo test` to see the current state
+3. Review what was done previously and continue from where it left off
+{% endif %}
+
+## Repository Overview
+
+- **Language**: Rust (workspace with multiple crates)
+- **Binary**: `actual` — generates CLAUDE.md/AGENTS.md files from ADRs
+- **Crates**: `crates/symphony/` (orchestrator service), `crates/tui-test/` (TUI testing library)
+- **Key directories**: `src/` (main binary), `tests/` (integration tests), `docs/` (planning docs)
+
+## Quality Gates (MANDATORY)
+
+You MUST pass ALL of these before committing. Run them in this order:
+
+```bash
+cargo fmt --check       # Fix: cargo fmt
+cargo clippy -- -D warnings  # Zero warnings allowed
+cargo test --workspace --features integration  # Zero failures
+cargo build --release   # Must compile
+```
+
+If any gate fails, fix it. Do NOT commit or push broken code.
+
+## Coverage Requirement
+
+This project enforces **100% per-file line coverage** via CI. Every source file (except `main.rs` and a few excluded files) must have 100% test coverage. When adding new code:
+
+1. Write tests for every code path, including error branches
+2. Run `cargo llvm-cov --workspace --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs)' --lcov --output-path lcov.info` to check coverage locally
+3. If a line is uncovered, add a test that exercises it
+
+## Git Workflow
+
+All changes MUST go through a PR. Never push directly to `main`.
+
+```bash
+# 1. Create a feature branch (the before_run hook already does this)
+# 2. Make your changes, commit with descriptive messages
+git add .
+git commit -m "{{ issue.identifier }}: <description of what changed>"
+
+# 3. Rebase onto latest main before pushing
+git fetch origin main && git rebase origin/main
+
+# 4. Push and create PR
+git push -u origin "symphony/{{ issue.identifier | downcase }}"
+gh pr create \
+  --title "{{ issue.identifier }}: {{ issue.title }}" \
+  --body "Resolves {{ issue.identifier }}"
+
+# 5. Wait for CI and verify all checks pass
+gh pr checks $(gh pr view --json number -q .number) --watch
+
+# 6. Read and address ALL review comments (from Claude, bots, or humans)
+PR_NUM=$(gh pr view --json number -q .number)
+gh api repos/actual-software/actual-cli/pulls/$PR_NUM/comments --jq '.[] | {user: .user.login, body: .body, path: .path}'
+gh api repos/actual-software/actual-cli/issues/$PR_NUM/comments --jq '.[] | {user: .user.login, body: .body}'
+gh pr view $PR_NUM --json reviews --jq '.reviews[] | select(.body != "") | {user: .author.login, body: .body}'
+
+# 7. If feedback exists: fix, push, re-check CI, re-read comments
+#    Repeat until all checks pass AND all feedback is addressed
+```
+
+## PR Requirements
+
+- **Title format**: `ACTCLI-<N>: <description>` (use the Linear issue identifier)
+- **Branch format**: `symphony/<identifier>` (created by the before_run hook)
+- **All CI checks must be green** before the PR is considered complete
+- **All code review feedback must be addressed** — fix issues, push, re-verify
+- PRs go through a **merge queue** with rebase strategy
+
+## Refactoring for Testability
+
+When code can't be tested due to external dependencies:
+
+1. Create traits for external dependencies
+2. Use dependency injection (accept trait objects or generics)
+3. Use `mockall` for mocks in tests
+4. Test error paths, not just happy paths
+
+## Key Conventions
+
+- Use `thiserror` for error types
+- Use `tracing` for structured logging (not `println!`)
+- Use `serde` for serialization
+- Use `tokio` for async runtime
+- Prefer `anyhow::Result` in binary code, typed errors in library code
+- Tests go in the same file as the code they test (`#[cfg(test)] mod tests`)
+- Integration tests go in `tests/`
