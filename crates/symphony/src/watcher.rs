@@ -251,10 +251,13 @@ Do the work on {{ issue.identifier }}.
 
         let (watcher, mut rx) = start_workflow_watch(&path).unwrap();
 
-        // Give the watcher time to start, then drain any spurious initial
-        // events. On Linux inotify the initial file creation can generate
-        // a delayed Modify event, so we drain in a loop with a timeout
-        // rather than relying on a single try_recv() pass.
+        // Touch the file to generate a guaranteed watcher event, then drain
+        // all pending events (including any spurious initial events from
+        // inotify on Linux).  This ensures the drain branch is always
+        // exercised under code-coverage instrumentation.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let existing = fs::read_to_string(&path).unwrap();
+        fs::write(&path, &existing).unwrap();
         loop {
             match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
                 Ok(Some(_)) => continue, // drain and retry

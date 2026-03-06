@@ -3376,20 +3376,28 @@ mod tests {
             .create_async()
             .await;
 
-        let config = test_config_with_endpoint(&server.url());
+        let mut config = test_config_with_endpoint(&server.url());
+        // Use a short initial interval so multiple ticks fire before shutdown.
+        config.polling.interval_ms = 50;
         let orch = Orchestrator::new(config.clone(), "template".to_string());
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
+        let state_ref = Arc::clone(&orch.state);
         tokio::spawn(async move {
-            // Send a reload with a different poll interval to exercise the
-            // interval-change branch in the tick handler.
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Wait for at least one tick to complete, then send a reload with
+            // a different poll interval to exercise the interval-change branch.
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             let mut changed = config;
             changed.polling.interval_ms = 9999;
             let _ = reload_tx.send((changed, "new template".to_string())).await;
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Wait for a tick to detect the change.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            // Verify the state was updated.
+            let state = state_ref.read().await;
+            assert_eq!(state.poll_interval_ms, 9999);
+            drop(state);
             let _ = shutdown_tx.send(true);
         });
 
@@ -3822,32 +3830,30 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
-        tokio::spawn(async move {
-            // Wait until the issue has been completed and claim released
-            let start = tokio::time::Instant::now();
-            loop {
+        let monitor = tokio::spawn(async move {
+            let mut done = false;
+            while !done {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let state = state_ref.read().await;
                 // Worker has exited normally: completed set has the issue,
                 // claimed does NOT (bug fix #4), and running is empty
-                if state.completed.contains("id1")
+                done = state.completed.contains("id1")
                     && !state.claimed.contains("id1")
-                    && !state.running.contains_key("id1")
-                {
-                    drop(state);
-                    // Give one more tick to verify no re-dispatch
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
-                if start.elapsed() > std::time::Duration::from_secs(10) {
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
+                    && !state.running.contains_key("id1");
+                drop(state);
             }
+            // Give one more tick to verify no re-dispatch
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let _ = shutdown_tx.send(true);
         });
 
-        orch.run(shutdown_rx, reload_rx).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            orch.run(shutdown_rx, reload_rx),
+        )
+        .await
+        .expect("test timed out waiting for poll→dispatch→complete→terminal");
+        monitor.abort();
 
         startup_mock.assert_async().await;
         candidates_mock.assert_async().await;
@@ -3908,28 +3914,31 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
-        tokio::spawn(async move {
-            let start = tokio::time::Instant::now();
-            loop {
+        let monitor = tokio::spawn(async move {
+            let mut done = false;
+            while !done {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let state = state_ref.read().await;
                 // Wait until a retry entry exists (worker failed → scheduled retry)
-                if state.retry_attempts.contains_key("id1") {
-                    let retry = state.retry_attempts.get("id1").unwrap();
-                    assert_eq!(retry.attempt, 1);
-                    assert!(retry.error.is_some());
-                    drop(state);
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
-                if start.elapsed() > std::time::Duration::from_secs(10) {
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
+                done = state.retry_attempts.contains_key("id1");
+                drop(state);
             }
+            // Verify retry entry contents after loop exits
+            let state = state_ref.read().await;
+            let retry = state.retry_attempts.get("id1").unwrap();
+            assert_eq!(retry.attempt, 1);
+            assert!(retry.error.is_some());
+            drop(state);
+            let _ = shutdown_tx.send(true);
         });
 
-        orch.run(shutdown_rx, reload_rx).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            orch.run(shutdown_rx, reload_rx),
+        )
+        .await
+        .expect("test timed out waiting for failed→retry→success");
+        monitor.abort();
     }
 
     /// Integration: concurrent issue dispatch (3 issues in parallel)
@@ -3989,32 +3998,33 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
-        tokio::spawn(async move {
-            let start = tokio::time::Instant::now();
-            loop {
+        let monitor = tokio::spawn(async move {
+            let mut all_completed = false;
+            while !all_completed {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let state = state_ref.read().await;
                 // All 3 issues should be completed
-                let all_completed = state.completed.contains("id1")
+                all_completed = state.completed.contains("id1")
                     && state.completed.contains("id2")
                     && state.completed.contains("id3");
-                if all_completed {
-                    // Verify no claims are held (bug fix #4)
-                    assert!(!state.claimed.contains("id1"));
-                    assert!(!state.claimed.contains("id2"));
-                    assert!(!state.claimed.contains("id3"));
-                    drop(state);
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
-                if start.elapsed() > std::time::Duration::from_secs(10) {
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
+                drop(state);
             }
+            // Verify no claims are held (bug fix #4)
+            let state = state_ref.read().await;
+            assert!(!state.claimed.contains("id1"));
+            assert!(!state.claimed.contains("id2"));
+            assert!(!state.claimed.contains("id3"));
+            drop(state);
+            let _ = shutdown_tx.send(true);
         });
 
-        orch.run(shutdown_rx, reload_rx).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            orch.run(shutdown_rx, reload_rx),
+        )
+        .await
+        .expect("test timed out waiting for concurrent dispatch");
+        monitor.abort();
     }
 
     /// Integration: workspace isolation — each issue gets its own workspace dir
@@ -4066,24 +4076,24 @@ mod tests {
         let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
         let tmp_path = tmp.path().to_path_buf();
-        tokio::spawn(async move {
-            let start = tokio::time::Instant::now();
-            loop {
+        let monitor = tokio::spawn(async move {
+            let mut done = false;
+            while !done {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let state = state_ref.read().await;
-                if state.completed.contains("id1") && state.completed.contains("id2") {
-                    drop(state);
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
-                if start.elapsed() > std::time::Duration::from_secs(10) {
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
+                done = state.completed.contains("id1") && state.completed.contains("id2");
+                drop(state);
             }
+            let _ = shutdown_tx.send(true);
         });
 
-        orch.run(shutdown_rx, reload_rx).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            orch.run(shutdown_rx, reload_rx),
+        )
+        .await
+        .expect("test timed out waiting for workspace isolation");
+        monitor.abort();
 
         // Verify each issue got its own workspace directory
         let ws1 = tmp_path.join("PROJ-1");
@@ -4151,32 +4161,31 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
-        tokio::spawn(async move {
-            let start = tokio::time::Instant::now();
-            loop {
+        let monitor = tokio::spawn(async move {
+            let mut done = false;
+            while !done {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let state = state_ref.read().await;
                 // Wait for retry to be scheduled after timeout
-                if state.retry_attempts.contains_key("id1") {
-                    let retry = state.retry_attempts.get("id1").unwrap();
-                    assert!(retry.error.is_some());
-                    assert!(
-                        retry.error.as_deref() == Some("turn timeout"),
-                        "expected 'turn timeout', got {:?}",
-                        retry.error
-                    );
-                    drop(state);
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
-                if start.elapsed() > std::time::Duration::from_secs(10) {
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
+                done = state.retry_attempts.contains_key("id1");
+                drop(state);
             }
+            // Verify retry entry contents after loop exits
+            let state = state_ref.read().await;
+            let retry = state.retry_attempts.get("id1").unwrap();
+            assert!(retry.error.is_some());
+            assert_eq!(retry.error.as_deref(), Some("turn timeout"));
+            drop(state);
+            let _ = shutdown_tx.send(true);
         });
 
-        orch.run(shutdown_rx, reload_rx).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            orch.run(shutdown_rx, reload_rx),
+        )
+        .await
+        .expect("test timed out waiting for agent timeout retry");
+        monitor.abort();
     }
 
     /// Integration: reconciliation cancels running worker when issue goes terminal
@@ -4240,29 +4249,29 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
-        tokio::spawn(async move {
+        let monitor = tokio::spawn(async move {
             let start = tokio::time::Instant::now();
-            loop {
+            let mut done = false;
+            while !done {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let state = state_ref.read().await;
                 // After reconcile sees terminal, the worker should be removed
                 // and claimed cleared
-                if !state.running.contains_key("id1") && !state.claimed.contains("id1") {
-                    // Only check after the issue was actually dispatched
-                    if start.elapsed() > std::time::Duration::from_millis(300) {
-                        drop(state);
-                        let _ = shutdown_tx.send(true);
-                        return;
-                    }
-                }
-                if start.elapsed() > std::time::Duration::from_secs(10) {
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
+                done = !state.running.contains_key("id1")
+                    && !state.claimed.contains("id1")
+                    && start.elapsed() > std::time::Duration::from_millis(300);
+                drop(state);
             }
+            let _ = shutdown_tx.send(true);
         });
 
-        orch.run(shutdown_rx, reload_rx).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            orch.run(shutdown_rx, reload_rx),
+        )
+        .await
+        .expect("test timed out waiting for reconcile cancellation");
+        monitor.abort();
     }
 
     /// Integration: config reload changes max_concurrent_agents, affecting dispatch
@@ -4404,28 +4413,31 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
-        tokio::spawn(async move {
-            // Wait for the stall detection to fire and terminate the worker
-            let start = tokio::time::Instant::now();
-            loop {
+        let monitor = tokio::spawn(async move {
+            // Stall detection terminates the worker via cancel signal, which
+            // removes it from running. The issue then appears as a candidate
+            // again on the next poll. We detect stall detection by waiting for
+            // the seconds_running counter to increase (meaning the issue was
+            // dispatched, ran, terminated, then dispatched again).
+            let mut done = false;
+            while !done {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let state = state_ref.read().await;
-                // Stall detection should terminate the running worker
-                // Then a retry should be scheduled (Stalled exit)
-                if !state.running.contains_key("id1")
-                    && start.elapsed() > std::time::Duration::from_millis(800)
-                {
-                    drop(state);
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
-                if start.elapsed() > std::time::Duration::from_secs(10) {
-                    let _ = shutdown_tx.send(true);
-                    return;
-                }
+                done = state.agent_totals.seconds_running > 0.0 && !state.running.is_empty();
+                drop(state);
             }
+            let _ = shutdown_tx.send(true);
         });
 
-        orch.run(shutdown_rx, reload_rx).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            orch.run(shutdown_rx, reload_rx),
+        )
+        .await
+        .expect("test timed out waiting for stall detection");
+        monitor.abort();
+
+        // Verify stall was actually detected via tracing output
+        assert!(logs_contain("session stalled"));
     }
 }
