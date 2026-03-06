@@ -1,6 +1,6 @@
 # /actual Skill Design Framework
 
-Research-derived design framework for the `/actual` skill. All implementation beads MUST follow this document.
+Research-derived design framework for the `/actual` skill. All implementation issues MUST follow this document.
 
 ## Sources Consulted
 

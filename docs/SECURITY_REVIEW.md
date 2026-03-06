@@ -403,23 +403,20 @@ let stderr = if stderr_raw.len() > 4096 {
 
 ### 14. Low — CI Actions Pinned by Mutable Tag, Not Commit SHA
 
-**Files:** `.github/workflows/build.yml:20`, `.github/workflows/build.yml:88`, `.github/workflows/claude-code-review.yml:36`
+**Files:** `.github/workflows/claude-code-review.yml:36`
 
 ```yaml
-uses: poiley/bdgha@v2           # mutable tag
 uses: anthropics/claude-code-action@v1  # mutable tag
 ```
 
-Both actions use mutable version tags rather than immutable commit SHAs. If either upstream repository is compromised or if a tag is force-pushed, the next CI run executes attacker-controlled code with the permissions granted to those jobs.
+This action uses a mutable version tag rather than an immutable commit SHA. If the upstream repository is compromised or if a tag is force-pushed, the next CI run executes attacker-controlled code with the permissions granted to the job.
 
 Relevant permissions:
-- `poiley/bdgha`: runs with `contents: write` (can modify repository contents)
 - `anthropics/claude-code-action`: runs with `id-token: write`, `pull-requests: write`, and `contents: read`
 
-**Remediation:** Pin each action to a full commit SHA:
+**Remediation:** Pin the action to a full commit SHA:
 
 ```yaml
-uses: poiley/bdgha@<full-commit-sha>           # e.g., @a1b2c3d4...
 uses: anthropics/claude-code-action@<full-commit-sha>
 ```
 
