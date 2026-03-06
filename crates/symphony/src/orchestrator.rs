@@ -752,6 +752,11 @@ impl Orchestrator {
                     state = %issue.state,
                     "issue is terminal, stopping worker and cleaning workspace"
                 );
+                // Mark as completed before terminating — the tracker says it's done
+                {
+                    let mut state = self.state.write().await;
+                    state.completed.insert(issue.id.clone());
+                }
                 self.terminate_running_issue(&issue.id, true).await;
             } else if state_matches(&issue.state, &config.tracker.active_states) {
                 // Update the issue snapshot
