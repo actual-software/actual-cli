@@ -4,11 +4,11 @@ tracker:
   project_slug: actcli
   api_key: $LINEAR_API_KEY
   active_states: "To Do, In Progress, Ready for Review"
-  terminal_states: "Merged"
+  terminal_states: "Merged, Done, Closed, Cancelled, Canceled, Duplicate"
 polling:
   interval_ms: 30000
 workspace:
-  root: /tmp/actual-cli-workspaces
+  root: /tmp/actual-cli-ws
 agent:
   max_concurrent_agents: 3
   max_turns: 30
@@ -18,22 +18,32 @@ agent:
     in progress: 3
     ready for review: 1
 codex:
+  command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 30"
   stall_timeout_ms: 600000
   turn_timeout_ms: 7200000
 hooks:
+  # NOTE: Hooks are executed as raw shell scripts (bash -lc). They do NOT
+  # support Liquid template syntax. The workspace directory name is the
+  # sanitized issue identifier (e.g., ACTCLI-42), available via $(basename $(pwd)).
   after_create: |
-    git clone https://github.com/actual-software/actual-cli.git .
-    git checkout main && git pull origin main
+    git clone --depth 1 https://github.com/actual-software/actual-cli.git .
+    git fetch --unshallow origin main
     rustup component add clippy rustfmt llvm-tools-preview
   before_run: |
+    ISSUE_KEY=$(basename "$(pwd)")
+    BRANCH="symphony/${ISSUE_KEY,,}"
     git fetch origin main
-    git checkout main
-    git pull origin main
-    BRANCH="symphony/{{ issue.identifier | downcase }}"
-    git checkout -B "$BRANCH"
+    # Preserve existing branch work on retries; only create if new
+    git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" origin/main
+    # Fast-forward to latest main if no local commits yet
+    LOCAL_COMMITS=$(git rev-list "origin/main..$BRANCH" --count 2>/dev/null || echo "0")
+    if [ "$LOCAL_COMMITS" = "0" ]; then
+      git reset --hard origin/main
+    fi
   after_run: |
-    echo "Agent run completed at $(date)" >> .symphony-log
-  timeout_ms: 120000
+    ISSUE_KEY=$(basename "$(pwd)")
+    echo "[$ISSUE_KEY] Agent run completed at $(date)" >> .symphony-log
+  timeout_ms: 300000
 ---
 
 You are an expert Rust engineer working on **actual-cli**, an ADR-powered AI context file generator built in Rust. You are working on issue **{{ issue.identifier }}: {{ issue.title }}**.

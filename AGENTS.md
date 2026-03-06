@@ -6,13 +6,40 @@ This project uses **Linear** for issue tracking and **Symphony** for autonomous 
 
 ```bash
 # Symphony (autonomous orchestration)
-symphony                      # Start the orchestrator (polls Linear, dispatches agents)
-symphony path/to/WORKFLOW.md  # Start with explicit workflow file
+cargo run --release -p symphony              # Start from the workspace
+cargo run --release -p symphony -- WORKFLOW.md  # Start with explicit workflow file
 
-# Linear (issue tracking via gh + GraphQL, or Linear UI)
-# View issues: use Linear UI or `gh api` with Linear's GraphQL endpoint
-# Create issues: use Linear UI or API
+# Environment
+export LINEAR_API_KEY="lin_api_..."   # Required for Symphony and Linear API access
 ```
+
+### Creating Linear Issues from CLI
+
+When you need to file a follow-up issue, use the Linear GraphQL API via `gh api`:
+
+```bash
+# First, find the team ID for Actual AI
+TEAM_ID=$(gh api -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -f query='{ teams { nodes { id name } } }' \
+  --jq '.data.teams.nodes[] | select(.name == "Actual AI") | .id')
+
+# Create an issue
+gh api -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -f query="mutation {
+    issueCreate(input: {
+      teamId: \"$TEAM_ID\"
+      title: \"<issue title>\"
+      description: \"<description with context for a cold-start agent>\"
+      priority: 2
+    }) {
+      issue { identifier title url }
+    }
+  }"
+```
+
+Priority values: 0 = No priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low
 
 ## How Symphony Works
 
@@ -39,7 +66,7 @@ WORKFLOW.md
                    (fetch issues)      (create/cleanup dirs) (launch claude)
                         |                     |                     |
                         v                     v                     v
-                   Linear API          /tmp/actual-cli-ws/     claude -p ...
+                   Linear API          /tmp/actual-cli-ws/    claude -p ...
                                        ACTCLI-42/
 ```
 
@@ -322,35 +349,15 @@ mod tests {
 }
 ```
 
-## CI Auto-Remediation
+## CI Auto-Remediation (Planned)
 
-When CI fails on a PR, a GitHub Actions workflow automatically creates a Linear issue to track the fix.
+> **Note**: This section describes planned functionality that is not yet implemented. Currently, CI failures must be addressed manually by agents during PR review cycles.
 
-### How It Works
+The intended workflow is:
 
-1. **CI Failure Detection**: When any quality gate fails (test, clippy, fmt, build, coverage), the CI workflow detects the failure
-2. **Linear Issue Creation**: A GitHub Action creates a sub-issue in the `actcli` Linear project with:
-   - Structured failure summary and details
-   - Links to the CI run and PR
-   - The PR branch name for pushing fixes
-   - Labels: `ci-failure`, `auto-remediation`, and the specific failure type
-3. **Agent Discovery**: Symphony picks up the new issue on its next poll cycle
+1. **CI Failure Detection**: A GitHub Actions workflow detects quality gate failures (test, clippy, fmt, build, coverage)
+2. **Linear Issue Creation**: The workflow creates a sub-issue in the `actcli` Linear project with failure details, links to the CI run/PR, and the PR branch name
+3. **Agent Discovery**: Symphony picks up the new issue on its next poll cycle and dispatches an agent to fix it
 4. **Auto-close**: When the PR's CI passes, the fix issue is automatically closed
 
-### Agent Workflow for CI Fixes
-
-When Symphony dispatches a CI fix issue:
-
-1. The agent checks out the PR branch (provided in the issue description)
-2. Reads the failure details to understand what broke
-3. Fixes the specific failures
-4. Runs quality gates locally: `cargo fmt --check && cargo clippy -- -D warnings && cargo test && cargo build`
-5. Pushes to the same PR branch
-6. Monitors CI to ensure all checks pass
-
-### CI Fix Issue Labels
-
-Fix issues are created with these Linear labels for filtering:
-- `ci-failure` — All CI auto-remediation issues
-- `auto-remediation` — Created automatically by GitHub Actions
-- `test_failure` | `clippy_warning` | `fmt_error` | `build_error` | `coverage_gap` — Specific failure type
+Until this is implemented, agents must monitor CI results via `gh pr checks <number> --watch` and fix failures in the normal PR review cycle described in the Sub-Agent Instructions Template above.

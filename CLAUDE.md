@@ -28,13 +28,17 @@ For ALL code changes, regardless of size or complexity:
 - **NEVER report a PR as complete** without running `gh pr checks <number> --watch` and confirming ALL checks are green
 - If checks fail: read the failure logs, fix the issue, push again, and re-watch. Repeat until ALL checks pass.
 - A PR is not "created" until CI is confirmed green. Do not separate "create PR" from "verify CI" — they are one atomic step.
-- After CI passes, **always read Claude code review comments (from Anthropic's Claude GitHub App)** and address feedback:
+- After CI passes, **always read ALL review comments** (from any reviewer — Claude, bots, humans) and address feedback:
   ```bash
-  gh pr view <number> --json comments --jq '.comments[].body'
-  gh pr view <number> --json reviews --jq '.reviews[] | select(.body != "") | .body'
+  # Inline review comments (on specific lines of code)
+  gh api repos/actual-software/actual-cli/pulls/<pr-number>/comments --jq '.[] | {user: .user.login, body: .body, path: .path, line: .line}'
+  # General PR comments (not tied to a specific line)
+  gh api repos/actual-software/actual-cli/issues/<pr-number>/comments --jq '.[] | {user: .user.login, body: .body}'
+  # Review summaries
+  gh pr view <pr-number> --json reviews --jq '.reviews[] | select(.body != "") | {user: .author.login, body: .body}'
   ```
 - Fix issues, push, and re-verify CI until all checks pass AND feedback is addressed
-- **Recursive review**: after each push, re-read Claude's comments — each push may trigger new review comments. Repeat the check-fix-push cycle until ALL comments are addressed. Do NOT stop after a single review pass.
+- **Recursive review**: after each push, re-read ALL comments — each push may trigger new review comments. Repeat the check-fix-push cycle until ALL comments are addressed. Do NOT stop after a single review pass.
 - **Recursion limit**: if after 10 review-fix cycles there are still unresolved comments, declare a stalemate and surface the remaining unresolved feedback to the user with the PR URL and a summary of what was addressed vs. what remains.
 - **Resolve outdated comments**: when your push addresses a review comment, resolve/minimize the outdated comment on the PR so the review thread stays clean:
   ```bash
@@ -46,7 +50,7 @@ For ALL code changes, regardless of size or complexity:
 
 ## Issue Tracking (Linear)
 
-When you discover a bug, gap, or follow-up work item during any task:
+Issues live in the **actcli** Linear project. When you discover a bug, gap, or follow-up work item during any task:
 
 - **Create a Linear issue immediately** — don't just note it mentally or mention it in passing
 - **Write enough context for a cold-start sub-agent** to pick it up. Every issue must include:
@@ -56,6 +60,30 @@ When you discover a bug, gap, or follow-up work item during any task:
   - A suggested fix approach
 - Set priority based on impact (P0/Urgent = broken for users, P1/High = wrong but workaround exists, P2/Medium = cleanup)
 - Parent the issue under the relevant parent issue if one exists
+
+### Creating Issues via CLI
+
+```bash
+# Find the team ID (cache this — it doesn't change)
+TEAM_ID=$(gh api -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -f query='{ teams { nodes { id name } } }' \
+  --jq '.data.teams.nodes[] | select(.name == "Actual AI") | .id')
+
+# Create an issue (priority: 1=Urgent, 2=High, 3=Medium, 4=Low)
+gh api -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -f query="mutation {
+    issueCreate(input: {
+      teamId: \"$TEAM_ID\"
+      title: \"<issue title>\"
+      description: \"<description>\"
+      priority: 2
+    }) {
+      issue { identifier title url }
+    }
+  }"
+```
 
 ## Git Worktrees
 
@@ -110,7 +138,9 @@ The `claude-review` CI check may fail or should be considered non-blocking in th
    git push
    git status  # MUST show "up to date with origin"
    ```
-5. **Verify** - All changes committed AND pushed
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
 - Work is NOT complete until `git push` succeeds
