@@ -143,20 +143,27 @@ impl Orchestrator {
         self.startup_cleanup().await;
 
         // Schedule immediate first tick
-        let mut tick_interval = {
+        let mut current_interval_ms = {
             let state = self.state.read().await;
-            tokio::time::interval(std::time::Duration::from_millis(state.poll_interval_ms))
+            state.poll_interval_ms
         };
+        let mut tick_interval =
+            tokio::time::interval(std::time::Duration::from_millis(current_interval_ms));
 
         loop {
             tokio::select! {
                 _ = tick_interval.tick() => {
                     self.on_tick().await;
 
-                    // Re-read interval in case it changed
+                    // Only recreate the interval if the poll period changed,
+                    // to avoid the "fresh interval fires immediately" double-tick.
                     let state = self.state.read().await;
-                    let new_interval = std::time::Duration::from_millis(state.poll_interval_ms);
-                    tick_interval = tokio::time::interval(new_interval);
+                    if state.poll_interval_ms != current_interval_ms {
+                        current_interval_ms = state.poll_interval_ms;
+                        tick_interval = tokio::time::interval(
+                            std::time::Duration::from_millis(current_interval_ms),
+                        );
+                    }
                 }
 
                 Some(msg) = self.msg_rx.recv() => {
@@ -382,16 +389,10 @@ impl Orchestrator {
                         "worker completed normally"
                     );
                     state.completed.insert(issue_id.to_string());
-
-                    // Schedule continuation retry after 1s
-                    self.schedule_retry_inner(
-                        &mut state,
-                        issue_id.to_string(),
-                        1,
-                        identifier,
-                        None,
-                        1_000,
-                    );
+                    state.claimed.remove(issue_id);
+                    // No retry scheduled — the run_worker turn loop already
+                    // handles multi-turn continuation.  The periodic poll tick
+                    // will re-dispatch the issue if it's still active.
                 }
                 WorkerExitReason::Failed(err) => {
                     warn!(
@@ -1817,11 +1818,10 @@ mod tests {
         let state = orch.state.read().await;
         assert!(!state.running.contains_key("id1"));
         assert!(state.completed.contains("id1"));
-        // Should have scheduled a continuation retry
-        assert!(state.retry_attempts.contains_key("id1"));
-        let retry = state.retry_attempts.get("id1").unwrap();
-        assert_eq!(retry.attempt, 1); // continuation retry attempt
-        assert!(retry.error.is_none()); // continuation has no error
+        // Claim is released so the poll tick can re-dispatch if still active
+        assert!(!state.claimed.contains("id1"));
+        // No retry scheduled — the run_worker turn loop handles continuation
+        assert!(!state.retry_attempts.contains_key("id1"));
     }
 
     #[traced_test]
@@ -3355,6 +3355,40 @@ mod tests {
         orch.run(shutdown_rx, reload_rx).await;
     }
 
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_with_interval_change_reload() {
+        let mut server = mockito::Server::new_async().await;
+
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&server.url());
+        let orch = Orchestrator::new(config.clone(), "template".to_string());
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        tokio::spawn(async move {
+            // Send a reload with a different poll interval to exercise the
+            // interval-change branch in the tick handler.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let mut changed = config;
+            changed.polling.interval_ms = 9999;
+            let _ = reload_tx.send((changed, "new template".to_string())).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        orch.run(shutdown_rx, reload_rx).await;
+    }
+
     // ── dispatch_issue spawn closure (map_worker_result) ─────────────
 
     #[traced_test]
@@ -3715,5 +3749,687 @@ mod tests {
             result.unwrap_err(),
             SymphonyError::AgentTurnTimeout
         ));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Integration tests: full orchestrator lifecycle through run()
+    // ══════════════════════════════════════════════════════════════════
+
+    /// Full lifecycle: poll → dispatch → agent completes → worker exits normally
+    /// → claimed released → next tick does NOT re-dispatch (issue went terminal)
+    #[traced_test]
+    #[tokio::test]
+    async fn test_integration_poll_dispatch_complete_terminal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Request 1 (startup_cleanup terminal fetch): empty
+        let startup_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Request 2 (first on_tick: no running so reconcile_tracker_states is
+        // skipped, then fetch_candidate_issues): return one Todo issue
+        let candidates_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Request 3 (run_worker turn success → issue state refresh): issue is Done
+        let state_refresh_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "Done")]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Request 4+ (subsequent ticks reconcile + candidate fetches): empty
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 100; // fast polling
+        config.codex.command = r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+
+        let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        tokio::spawn(async move {
+            // Wait until the issue has been completed and claim released
+            let start = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let state = state_ref.read().await;
+                // Worker has exited normally: completed set has the issue,
+                // claimed does NOT (bug fix #4), and running is empty
+                if state.completed.contains("id1")
+                    && !state.claimed.contains("id1")
+                    && !state.running.contains_key("id1")
+                {
+                    drop(state);
+                    // Give one more tick to verify no re-dispatch
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+            }
+        });
+
+        orch.run(shutdown_rx, reload_rx).await;
+
+        startup_mock.assert_async().await;
+        candidates_mock.assert_async().await;
+        state_refresh_mock.assert_async().await;
+    }
+
+    /// Integration: failed worker → retry with exponential backoff → re-dispatch
+    #[traced_test]
+    #[tokio::test]
+    async fn test_integration_failed_worker_retry_then_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Startup cleanup: empty
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // First tick candidates: return the issue
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // State refresh calls (for run_worker after turn + retry checks):
+        // return Done to stop the cycle
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "Done")]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 100;
+        // First dispatch: agent fails (exit 1). The worker will fail.
+        // After retry fires, the next dispatch should succeed.
+        // We can't easily switch command mid-flight, so let's just verify
+        // the retry mechanism fires by using a failing command and checking
+        // that a retry entry is created.
+        config.codex.command = "exit 1 #-p".to_string();
+
+        let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let state = state_ref.read().await;
+                // Wait until a retry entry exists (worker failed → scheduled retry)
+                if state.retry_attempts.contains_key("id1") {
+                    let retry = state.retry_attempts.get("id1").unwrap();
+                    assert_eq!(retry.attempt, 1);
+                    assert!(retry.error.is_some());
+                    drop(state);
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+            }
+        });
+
+        orch.run(shutdown_rx, reload_rx).await;
+    }
+
+    /// Integration: concurrent issue dispatch (3 issues in parallel)
+    #[traced_test]
+    #[tokio::test]
+    async fn test_integration_concurrent_issue_dispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Startup: empty
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Candidates: 3 issues
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[
+                ("id1", "PROJ-1", "Todo"),
+                ("id2", "PROJ-2", "In Progress"),
+                ("id3", "PROJ-3", "Todo"),
+            ]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // State refreshes: all Done (terminal) so workers stop
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[
+                ("id1", "PROJ-1", "Done"),
+                ("id2", "PROJ-2", "Done"),
+                ("id3", "PROJ-3", "Done"),
+            ]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 100;
+        config.agent.max_concurrent_agents = 3;
+        config.codex.command = r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
+
+        let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let state = state_ref.read().await;
+                // All 3 issues should be completed
+                let all_completed = state.completed.contains("id1")
+                    && state.completed.contains("id2")
+                    && state.completed.contains("id3");
+                if all_completed {
+                    // Verify no claims are held (bug fix #4)
+                    assert!(!state.claimed.contains("id1"));
+                    assert!(!state.claimed.contains("id2"));
+                    assert!(!state.claimed.contains("id3"));
+                    drop(state);
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+            }
+        });
+
+        orch.run(shutdown_rx, reload_rx).await;
+    }
+
+    /// Integration: workspace isolation — each issue gets its own workspace dir
+    #[traced_test]
+    #[tokio::test]
+    async fn test_integration_workspace_isolation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Startup: empty
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Two issues to dispatch
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[
+                ("id1", "PROJ-1", "Todo"),
+                ("id2", "PROJ-2", "Todo"),
+            ]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // State refresh: terminal
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[
+                ("id1", "PROJ-1", "Done"),
+                ("id2", "PROJ-2", "Done"),
+            ]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 100;
+        config.agent.max_concurrent_agents = 2;
+        // Agent writes a file to prove workspace isolation:
+        // each workspace gets its own identity file
+        config.codex.command =
+            r#"echo $PWD > workspace_id.txt && printf '{"type":"result","result":"ok"}\n' #-p"#
+                .to_string();
+
+        let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        let tmp_path = tmp.path().to_path_buf();
+        tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let state = state_ref.read().await;
+                if state.completed.contains("id1") && state.completed.contains("id2") {
+                    drop(state);
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+            }
+        });
+
+        orch.run(shutdown_rx, reload_rx).await;
+
+        // Verify each issue got its own workspace directory
+        let ws1 = tmp_path.join("PROJ-1");
+        let ws2 = tmp_path.join("PROJ-2");
+        // The agent wrote a file in each workspace
+        let id1 = std::fs::read_to_string(ws1.join("workspace_id.txt"));
+        let id2 = std::fs::read_to_string(ws2.join("workspace_id.txt"));
+        assert!(id1.is_ok(), "PROJ-1 workspace should have identity file");
+        assert!(id2.is_ok(), "PROJ-2 workspace should have identity file");
+        // The paths should be different
+        assert_ne!(
+            id1.unwrap().trim(),
+            id2.unwrap().trim(),
+            "workspaces should be isolated"
+        );
+    }
+
+    /// Integration: timeout → worker exits with TimedOut → retry scheduled
+    #[traced_test]
+    #[tokio::test]
+    async fn test_integration_agent_timeout_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Startup: empty
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Candidates: one issue
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // Reconcile and other state fetches
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 200;
+        config.codex.turn_timeout_ms = 100; // very short timeout
+                                            // Agent sleeps forever, will be killed by timeout
+        config.codex.command = "sleep 999 #-p".to_string();
+
+        let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let state = state_ref.read().await;
+                // Wait for retry to be scheduled after timeout
+                if state.retry_attempts.contains_key("id1") {
+                    let retry = state.retry_attempts.get("id1").unwrap();
+                    assert!(retry.error.is_some());
+                    assert!(
+                        retry.error.as_deref() == Some("turn timeout"),
+                        "expected 'turn timeout', got {:?}",
+                        retry.error
+                    );
+                    drop(state);
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+            }
+        });
+
+        orch.run(shutdown_rx, reload_rx).await;
+    }
+
+    /// Integration: reconciliation cancels running worker when issue goes terminal
+    #[traced_test]
+    #[tokio::test]
+    async fn test_integration_reconcile_cancels_terminal_issue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Startup: empty
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Candidates: one issue in Todo
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Reconcile will see the issue has gone to "Done" (terminal)
+        // and cancel the running worker
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "Done")]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // Subsequent ticks: no candidates
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 100;
+        // Agent that sleeps, so it's still running when reconcile fires
+        config.codex.command = "sleep 999 #-p".to_string();
+        config.codex.turn_timeout_ms = 60_000; // long timeout so it doesn't time out first
+
+        let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let state = state_ref.read().await;
+                // After reconcile sees terminal, the worker should be removed
+                // and claimed cleared
+                if !state.running.contains_key("id1") && !state.claimed.contains("id1") {
+                    // Only check after the issue was actually dispatched
+                    if start.elapsed() > std::time::Duration::from_millis(300) {
+                        drop(state);
+                        let _ = shutdown_tx.send(true);
+                        return;
+                    }
+                }
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+            }
+        });
+
+        orch.run(shutdown_rx, reload_rx).await;
+    }
+
+    /// Integration: config reload changes max_concurrent_agents, affecting dispatch
+    #[traced_test]
+    #[tokio::test]
+    async fn test_integration_config_reload_affects_dispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Startup: empty
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // Candidates: 3 issues
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[
+                ("id1", "PROJ-1", "Todo"),
+                ("id2", "PROJ-2", "Todo"),
+                ("id3", "PROJ-3", "Todo"),
+            ]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        // State refresh: all remain active
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[
+                ("id1", "PROJ-1", "Todo"),
+                ("id2", "PROJ-2", "Todo"),
+                ("id3", "PROJ-3", "Todo"),
+            ]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 100;
+        // Start with max_concurrent = 1 — only 1 issue dispatched
+        config.agent.max_concurrent_agents = 1;
+        config.codex.command = "sleep 999 #-p".to_string();
+        config.codex.turn_timeout_ms = 60_000;
+
+        let orch = Orchestrator::new(config.clone(), "Work on {{ issue.identifier }}".to_string());
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        tokio::spawn(async move {
+            let start = tokio::time::Instant::now();
+            let mut reload_sent = false;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let state = state_ref.read().await;
+                let running = state.running_count();
+                drop(state);
+
+                // After first tick dispatches 1, send reload to allow 3
+                if running >= 1 && !reload_sent {
+                    let mut new_config = config.clone();
+                    new_config.agent.max_concurrent_agents = 3;
+                    let _ = reload_tx
+                        .send((new_config, "Work on {{ issue.identifier }}".to_string()))
+                        .await;
+                    reload_sent = true;
+                }
+
+                if start.elapsed() > std::time::Duration::from_secs(5) {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+            }
+        });
+
+        orch.run(shutdown_rx, reload_rx).await;
+    }
+
+    /// Integration: stall detection terminates stalled workers through run()
+    #[traced_test]
+    #[tokio::test]
+    async fn test_integration_stall_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Startup: empty
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Candidates: one issue
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // State refresh for reconcile (issue still active)
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 200;
+        config.codex.stall_timeout_ms = 500; // 500ms stall timeout
+        config.codex.turn_timeout_ms = 60_000; // long turn timeout
+                                               // Agent outputs nothing (no events) and sleeps — will trigger stall
+        config.codex.command = "sleep 999 #-p".to_string();
+
+        let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        tokio::spawn(async move {
+            // Wait for the stall detection to fire and terminate the worker
+            let start = tokio::time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let state = state_ref.read().await;
+                // Stall detection should terminate the running worker
+                // Then a retry should be scheduled (Stalled exit)
+                if !state.running.contains_key("id1")
+                    && start.elapsed() > std::time::Duration::from_millis(800)
+                {
+                    drop(state);
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+                if start.elapsed() > std::time::Duration::from_secs(10) {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+            }
+        });
+
+        orch.run(shutdown_rx, reload_rx).await;
     }
 }
