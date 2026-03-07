@@ -12,6 +12,16 @@ pub struct PrInfo {
     #[serde(default)]
     pub mergeable_state: Option<String>,
     pub state: String,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    #[serde(default)]
+    pub merged: Option<bool>,
+}
+
+/// A single PR review returned by GitHub API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrReview {
+    pub state: String,
 }
 
 /// GitHub API client for checking PR status.
@@ -130,6 +140,132 @@ impl GitHubClient {
         let details = self.get_pr_details(pr.number).await?;
         Ok(details.mergeable)
     }
+
+    /// Get the node_id of a PR (needed for GraphQL mutations).
+    /// Uses `GET /repos/{owner}/{repo}/pulls/{number}` and extracts `node_id`.
+    pub async fn get_pr_node_id(&self, pr_number: u64) -> Result<String> {
+        let details = self.get_pr_details(pr_number).await?;
+        details
+            .node_id
+            .ok_or_else(|| SymphonyError::GitHubApiRequest {
+                reason: format!("PR {pr_number} missing node_id"),
+            })
+    }
+
+    /// Fetch reviews for a PR.
+    /// Uses `GET /repos/{owner}/{repo}/pulls/{number}/reviews`.
+    pub async fn get_pr_reviews(&self, pr_number: u64) -> Result<Vec<PrReview>> {
+        let url = format!(
+            "{}/repos/{}/{}/pulls/{}/reviews",
+            self.api_base, self.repo_owner, self.repo_name, pr_number
+        );
+
+        let response = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "symphony")
+            .send()
+            .await
+            .map_err(|e| SymphonyError::GitHubApiRequest {
+                reason: e.to_string(),
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(SymphonyError::GitHubApiStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| SymphonyError::GitHubApiRequest {
+                reason: e.to_string(),
+            })
+    }
+
+    /// Check if a PR has been approved (at least one APPROVED, no CHANGES_REQUESTED).
+    pub async fn is_pr_approved(&self, pr_number: u64) -> Result<bool> {
+        let reviews = self.get_pr_reviews(pr_number).await?;
+        let has_approved = reviews.iter().any(|r| r.state == "APPROVED");
+        let has_changes_requested = reviews.iter().any(|r| r.state == "CHANGES_REQUESTED");
+        Ok(has_approved && !has_changes_requested)
+    }
+
+    /// Enable auto-merge on a PR using GitHub's GraphQL API.
+    /// This is idempotent — calling it on an already-queued PR is safe.
+    pub async fn add_to_merge_queue(&self, pr_number: u64) -> Result<()> {
+        let node_id = self.get_pr_node_id(pr_number).await?;
+
+        let graphql_url = format!("{}/graphql", self.api_base.trim_end_matches('/'));
+
+        let query = format!(
+            r#"mutation {{ enablePullRequestAutoMerge(input: {{ pullRequestId: "{node_id}" }}) {{ pullRequest {{ autoMergeRequest {{ enabledAt }} }} }} }}"#
+        );
+
+        let body = serde_json::json!({ "query": query });
+
+        let response = self
+            .http
+            .post(&graphql_url)
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "symphony")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| SymphonyError::GitHubApiRequest {
+                reason: e.to_string(),
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(SymphonyError::GitHubApiStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let json: serde_json::Value =
+            response
+                .json()
+                .await
+                .map_err(|e| SymphonyError::GitHubApiRequest {
+                    reason: e.to_string(),
+                })?;
+
+        // Check for GraphQL errors
+        if let Some(errors) = json.get("errors") {
+            if let Some(arr) = errors.as_array() {
+                if !arr.is_empty() {
+                    let msgs: Vec<String> = arr
+                        .iter()
+                        .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                        .map(|s| s.to_string())
+                        .collect();
+                    return Err(SymphonyError::GitHubApiRequest {
+                        reason: format!("GraphQL errors: {}", msgs.join("; ")),
+                    });
+                }
+            }
+        }
+
+        debug!(pr_number = pr_number, "enabled auto-merge on PR");
+        Ok(())
+    }
+
+    /// Check if a PR has been merged.
+    /// Uses `GET /repos/{owner}/{repo}/pulls/{number}`.
+    pub async fn is_pr_merged(&self, pr_number: u64) -> Result<bool> {
+        let details = self.get_pr_details(pr_number).await?;
+        Ok(details.state == "closed" && details.merged == Some(true))
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +279,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: api_base.to_string(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         }
     }
 
@@ -611,11 +748,15 @@ mod tests {
             mergeable: Some(true),
             mergeable_state: Some("clean".to_string()),
             state: "open".to_string(),
+            node_id: Some("PR_abc123".to_string()),
+            merged: Some(false),
         };
         let json = serde_json::to_string(&pr).unwrap();
         assert!(json.contains("\"number\":42"));
         assert!(json.contains("\"mergeable\":true"));
         assert!(json.contains("\"state\":\"open\""));
+        assert!(json.contains("\"node_id\":\"PR_abc123\""));
+        assert!(json.contains("\"merged\":false"));
     }
 
     #[test]
@@ -626,6 +767,18 @@ mod tests {
         assert_eq!(pr.state, "open");
         assert!(pr.mergeable.is_none());
         assert!(pr.mergeable_state.is_none());
+        assert!(pr.node_id.is_none());
+        assert!(pr.merged.is_none());
+    }
+
+    #[test]
+    fn test_pr_info_deserializes_with_all_fields() {
+        let json = r#"{"number": 1, "state": "closed", "node_id": "PR_xyz", "merged": true, "mergeable": null, "mergeable_state": null}"#;
+        let pr: PrInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(pr.number, 1);
+        assert_eq!(pr.state, "closed");
+        assert_eq!(pr.node_id, Some("PR_xyz".to_string()));
+        assert_eq!(pr.merged, Some(true));
     }
 
     #[test]
@@ -635,6 +788,8 @@ mod tests {
             mergeable: Some(false),
             mergeable_state: Some("dirty".to_string()),
             state: "open".to_string(),
+            node_id: None,
+            merged: None,
         };
         let debug = format!("{:?}", pr);
         assert!(debug.contains("PrInfo"));
@@ -648,9 +803,675 @@ mod tests {
             mergeable: Some(true),
             mergeable_state: Some("clean".to_string()),
             state: "open".to_string(),
+            node_id: Some("PR_node".to_string()),
+            merged: Some(false),
         };
         let cloned = pr.clone();
         assert_eq!(cloned.number, 42);
         assert_eq!(cloned.mergeable, Some(true));
+        assert_eq!(cloned.node_id, Some("PR_node".to_string()));
+        assert_eq!(cloned.merged, Some(false));
+    }
+
+    // ── PrReview serialization ────────────────────────────────────
+
+    #[test]
+    fn test_pr_review_serializes() {
+        let review = PrReview {
+            state: "APPROVED".to_string(),
+        };
+        let json = serde_json::to_string(&review).unwrap();
+        assert!(json.contains("\"state\":\"APPROVED\""));
+    }
+
+    #[test]
+    fn test_pr_review_deserializes() {
+        let json = r#"{"state": "CHANGES_REQUESTED"}"#;
+        let review: PrReview = serde_json::from_str(json).unwrap();
+        assert_eq!(review.state, "CHANGES_REQUESTED");
+    }
+
+    #[test]
+    fn test_pr_review_debug_impl() {
+        let review = PrReview {
+            state: "APPROVED".to_string(),
+        };
+        let debug = format!("{:?}", review);
+        assert!(debug.contains("PrReview"));
+        assert!(debug.contains("APPROVED"));
+    }
+
+    #[test]
+    fn test_pr_review_clone() {
+        let review = PrReview {
+            state: "APPROVED".to_string(),
+        };
+        let cloned = review.clone();
+        assert_eq!(cloned.state, "APPROVED");
+    }
+
+    // ── get_pr_node_id ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_pr_node_id_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "node_id": "PR_kwDOTest",
+                    "merged": false
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let node_id = client.get_pr_node_id(42).await.unwrap();
+        assert_eq!(node_id, "PR_kwDOTest");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_pr_node_id_missing() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.get_pr_node_id(42).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubApiRequest { .. }
+        ));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_pr_node_id_api_error() {
+        let config = test_github_config("http://127.0.0.1:1");
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.get_pr_node_id(42).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubApiRequest { .. }
+        ));
+    }
+
+    // ── get_pr_reviews ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_pr_reviews_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .match_header("Authorization", "Bearer test-token-123")
+            .match_header("Accept", "application/vnd.github+json")
+            .match_header("User-Agent", "symphony")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![
+                    serde_json::json!({"state": "APPROVED"}),
+                    serde_json::json!({"state": "COMMENTED"}),
+                ])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let reviews = client.get_pr_reviews(42).await.unwrap();
+        assert_eq!(reviews.len(), 2);
+        assert_eq!(reviews[0].state, "APPROVED");
+        assert_eq!(reviews[1].state, "COMMENTED");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_pr_reviews_empty() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let reviews = client.get_pr_reviews(42).await.unwrap();
+        assert!(reviews.is_empty());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_pr_reviews_api_error() {
+        let config = test_github_config("http://127.0.0.1:1");
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.get_pr_reviews(42).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubApiRequest { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_get_pr_reviews_non_200_status() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(404)
+            .with_body("not found")
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.get_pr_reviews(42).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            SymphonyError::GitHubApiStatus { status: 404, .. }
+        ));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_pr_reviews_invalid_json() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not json")
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.get_pr_reviews(42).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubApiRequest { .. }
+        ));
+        mock.assert_async().await;
+    }
+
+    // ── is_pr_approved ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_is_pr_approved_yes() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({"state": "APPROVED"})]).unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        assert!(client.is_pr_approved(42).await.unwrap());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_is_pr_approved_no_reviews() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        assert!(!client.is_pr_approved(42).await.unwrap());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_is_pr_approved_changes_requested() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![
+                    serde_json::json!({"state": "APPROVED"}),
+                    serde_json::json!({"state": "CHANGES_REQUESTED"}),
+                ])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        assert!(!client.is_pr_approved(42).await.unwrap());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_is_pr_approved_only_commented() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({"state": "COMMENTED"})]).unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        assert!(!client.is_pr_approved(42).await.unwrap());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_is_pr_approved_api_error() {
+        let config = test_github_config("http://127.0.0.1:1");
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.is_pr_approved(42).await;
+        assert!(result.is_err());
+    }
+
+    // ── add_to_merge_queue ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_add_to_merge_queue_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        // First: get PR details to get node_id
+        let details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "node_id": "PR_kwDOTest123"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Second: GraphQL mutation
+        let graphql_mock = server
+            .mock("POST", "/graphql")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "enablePullRequestAutoMerge": {
+                            "pullRequest": {
+                                "autoMergeRequest": {
+                                    "enabledAt": "2025-01-01T00:00:00Z"
+                                }
+                            }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        client.add_to_merge_queue(42).await.unwrap();
+        details_mock.assert_async().await;
+        graphql_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_add_to_merge_queue_graphql_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "node_id": "PR_kwDOTest123"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let graphql_mock = server
+            .mock("POST", "/graphql")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "errors": [
+                        {"message": "Pull request is not in a mergeable state"}
+                    ]
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.add_to_merge_queue(42).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("GraphQL errors"));
+        details_mock.assert_async().await;
+        graphql_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_add_to_merge_queue_missing_node_id() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.add_to_merge_queue(42).await;
+        assert!(result.is_err());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_add_to_merge_queue_http_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "node_id": "PR_kwDOTest123"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let graphql_mock = server
+            .mock("POST", "/graphql")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.add_to_merge_queue(42).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            SymphonyError::GitHubApiStatus { status: 500, .. }
+        ));
+        details_mock.assert_async().await;
+        graphql_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_add_to_merge_queue_invalid_json_response() {
+        let mut server = mockito::Server::new_async().await;
+
+        let details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "node_id": "PR_kwDOTest123"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let graphql_mock = server
+            .mock("POST", "/graphql")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not json")
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.add_to_merge_queue(42).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubApiRequest { .. }
+        ));
+        details_mock.assert_async().await;
+        graphql_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_add_to_merge_queue_api_error() {
+        let config = test_github_config("http://127.0.0.1:1");
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.add_to_merge_queue(42).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_add_to_merge_queue_empty_graphql_errors_array() {
+        let mut server = mockito::Server::new_async().await;
+
+        let details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "node_id": "PR_kwDOTest123"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let graphql_mock = server
+            .mock("POST", "/graphql")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "enablePullRequestAutoMerge": {
+                            "pullRequest": {
+                                "autoMergeRequest": {
+                                    "enabledAt": "2025-01-01T00:00:00Z"
+                                }
+                            }
+                        }
+                    },
+                    "errors": []
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        // Empty errors array should not be treated as an error
+        client.add_to_merge_queue(42).await.unwrap();
+        details_mock.assert_async().await;
+        graphql_mock.assert_async().await;
+    }
+
+    // ── is_pr_merged ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_is_pr_merged_true() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "closed",
+                    "merged": true
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        assert!(client.is_pr_merged(42).await.unwrap());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_is_pr_merged_closed_not_merged() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "closed",
+                    "merged": false
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        assert!(!client.is_pr_merged(42).await.unwrap());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_is_pr_merged_open() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        assert!(!client.is_pr_merged(42).await.unwrap());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_is_pr_merged_no_merged_field() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "closed"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        // merged defaults to None, which is not Some(true), so not merged
+        assert!(!client.is_pr_merged(42).await.unwrap());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_is_pr_merged_api_error() {
+        let config = test_github_config("http://127.0.0.1:1");
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.is_pr_merged(42).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubApiRequest { .. }
+        ));
     }
 }
