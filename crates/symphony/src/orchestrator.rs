@@ -1483,9 +1483,13 @@ impl Orchestrator {
 
 /// Build a map of environment variables to inject into the agent subprocess.
 ///
-/// Currently injects `LINEAR_API_KEY` (and `LINEAR_TEAM_KEY`) from the tracker
-/// config so agents can interact with Linear directly using `curl` or `gh api`.
-fn build_agent_env_vars(config: &ServiceConfig) -> std::collections::HashMap<String, String> {
+/// Injects `LINEAR_API_KEY` (and `LINEAR_TEAM_KEY`) from the tracker config so
+/// agents can interact with Linear directly, and `SYMPHONY_MAX_TURNS` so agents
+/// know their turn budget.
+fn build_agent_env_vars(
+    config: &ServiceConfig,
+    max_turns: u32,
+) -> std::collections::HashMap<String, String> {
     let mut env_vars = std::collections::HashMap::new();
     if !config.tracker.api_key.is_empty() {
         env_vars.insert("LINEAR_API_KEY".to_string(), config.tracker.api_key.clone());
@@ -1496,6 +1500,7 @@ fn build_agent_env_vars(config: &ServiceConfig) -> std::collections::HashMap<Str
             config.tracker.team_key.clone(),
         );
     }
+    env_vars.insert("SYMPHONY_MAX_TURNS".to_string(), max_turns.to_string());
     env_vars
 }
 
@@ -1530,7 +1535,7 @@ async fn run_worker(
     .await?;
 
     // Phase 3: Build env vars for agent subprocess
-    let env_vars = build_agent_env_vars(config);
+    let env_vars = build_agent_env_vars(config, config.agent.max_turns);
 
     // Phase 4: Build prompt and launch agent
     let max_turns = config.agent.max_turns;
@@ -1563,6 +1568,7 @@ async fn run_worker(
             &prompt,
             issue,
             &env_vars,
+            config.agent.max_turns,
         )
         .await?;
 
@@ -6149,7 +6155,7 @@ mod tests {
     #[test]
     fn test_build_agent_env_vars_includes_api_key_and_team_key() {
         let config = test_config();
-        let env_vars = build_agent_env_vars(&config);
+        let env_vars = build_agent_env_vars(&config, config.agent.max_turns);
         assert_eq!(
             env_vars.get("LINEAR_API_KEY"),
             Some(&"test-key".to_string())
@@ -6164,7 +6170,7 @@ mod tests {
     fn test_build_agent_env_vars_skips_empty_api_key() {
         let mut config = test_config();
         config.tracker.api_key = String::new();
-        let env_vars = build_agent_env_vars(&config);
+        let env_vars = build_agent_env_vars(&config, config.agent.max_turns);
         assert!(!env_vars.contains_key("LINEAR_API_KEY"));
         // team_key should still be present
         assert_eq!(
@@ -6177,7 +6183,7 @@ mod tests {
     fn test_build_agent_env_vars_skips_empty_team_key() {
         let mut config = test_config();
         config.tracker.team_key = String::new();
-        let env_vars = build_agent_env_vars(&config);
+        let env_vars = build_agent_env_vars(&config, config.agent.max_turns);
         assert_eq!(
             env_vars.get("LINEAR_API_KEY"),
             Some(&"test-key".to_string())
@@ -6190,8 +6196,17 @@ mod tests {
         let mut config = test_config();
         config.tracker.api_key = String::new();
         config.tracker.team_key = String::new();
-        let env_vars = build_agent_env_vars(&config);
-        assert!(env_vars.is_empty());
+        let env_vars = build_agent_env_vars(&config, config.agent.max_turns);
+        // Should still have SYMPHONY_MAX_TURNS even when tracker keys are empty
+        assert_eq!(env_vars.len(), 1);
+        assert_eq!(env_vars.get("SYMPHONY_MAX_TURNS"), Some(&"5".to_string()));
+    }
+
+    #[test]
+    fn test_build_agent_env_vars_includes_max_turns() {
+        let config = test_config();
+        let env_vars = build_agent_env_vars(&config, 42);
+        assert_eq!(env_vars.get("SYMPHONY_MAX_TURNS"), Some(&"42".to_string()));
     }
 
     #[tokio::test]
