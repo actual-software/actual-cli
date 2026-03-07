@@ -827,14 +827,8 @@ agent:
             terminal_states: vec!["Done".to_string()],
         };
         let debug_output = format!("{:?}", config);
-        assert!(
-            !debug_output.contains("supersecretkey"),
-            "API key should be redacted in Debug output"
-        );
-        assert!(
-            debug_output.contains("[REDACTED]"),
-            "Debug output should show [REDACTED]"
-        );
+        assert_eq!(debug_output.contains("supersecretkey"), false);
+        assert!(debug_output.contains("[REDACTED]"));
     }
 
     #[test]

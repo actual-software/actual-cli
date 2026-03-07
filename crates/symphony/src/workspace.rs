@@ -194,16 +194,34 @@ async fn run_hook(hook_name: &str, script: &str, cwd: &Path, timeout_ms: u64) ->
 
     // Use child.wait() (borrows) instead of child.wait_with_output() (consumes)
     // so we can still call child.kill() on timeout.
-    match tokio::time::timeout(timeout, child.wait()).await {
+    let wait_result = tokio::time::timeout(timeout, child.wait()).await;
+
+    handle_hook_result(hook_name, wait_result, &mut child).await
+}
+
+/// Interpret the result of waiting for a hook process.
+///
+/// Separated from `run_hook` so every branch is directly testable.
+async fn handle_hook_result(
+    hook_name: &str,
+    wait_result: std::result::Result<
+        std::io::Result<std::process::ExitStatus>,
+        tokio::time::error::Elapsed,
+    >,
+    child: &mut tokio::process::Child,
+) -> Result<()> {
+    match wait_result {
         Ok(Ok(status)) => {
             if !status.success() {
-                // Collect stderr for diagnostics after the process exits
-                let stderr_bytes = if let Some(mut stderr) = child.stderr.take() {
-                    let mut buf = Vec::new();
-                    let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
-                    buf
-                } else {
-                    Vec::new()
+                // Collect stderr for diagnostics after the process exits.
+                // stderr is always present because we configure Stdio::piped() above.
+                let stderr_bytes = match child.stderr.take() {
+                    Some(mut handle) => {
+                        let mut buf = Vec::new();
+                        let _ = tokio::io::AsyncReadExt::read_to_end(&mut handle, &mut buf).await;
+                        buf
+                    }
+                    None => Vec::new(),
                 };
                 let stderr = String::from_utf8_lossy(&stderr_bytes);
                 let truncated = if stderr.len() > 500 {
@@ -668,5 +686,41 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("failed to execute"));
+    }
+
+    // ── handle_hook_result unit tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_handle_hook_result_wait_io_error() {
+        // Simulate child.wait() returning an I/O error
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "wait interrupted");
+        let mut child = Command::new("true").spawn().expect("true should spawn");
+        let _ = child.wait().await; // let it finish so we don't leak
+
+        let result = handle_hook_result("test_hook", Ok(Err(io_err)), &mut child).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("failed to wait"));
+        assert!(msg.contains("wait interrupted"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_hook_result_failure_no_stderr_handle() {
+        // Simulate a failed exit status where stderr has already been taken
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(256); // exit code 1
+
+        let mut child = Command::new("true")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("true should spawn");
+        let _ = child.wait().await;
+        // Take stderr so the handle_hook_result hits the None branch
+        let _ = child.stderr.take();
+
+        let result = handle_hook_result("test_hook", Ok(Ok(status)), &mut child).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("exit code"));
     }
 }
