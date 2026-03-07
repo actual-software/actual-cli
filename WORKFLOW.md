@@ -25,6 +25,7 @@ github:
   token: $GITHUB_TOKEN
   repo: actual-software/actual-cli
   branch_prefix: symphony/
+  auto_merge: false
 server:
   port: 7070
 hooks:
