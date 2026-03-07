@@ -13,6 +13,20 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
+/// Log orchestrator start parameters.
+fn log_orchestrator_start(poll_interval_ms: u64, max_concurrent: u32) {
+    info!(poll_interval_ms, max_concurrent, "starting orchestrator");
+}
+
+/// Log terminal workspace cleanup.
+fn log_terminal_cleanup(identifier: &str, workspace: &std::path::Path) {
+    info!(
+        issue_identifier = %identifier,
+        workspace = %workspace.display(),
+        "cleaning terminal workspace"
+    );
+}
+
 /// Map a worker `Result<()>` to its exit reason.
 fn map_worker_result(result: Result<()>) -> WorkerExitReason {
     match result {
@@ -160,10 +174,9 @@ impl Orchestrator {
     ) {
         {
             let config = self.config.read().await;
-            info!(
-                poll_interval_ms = config.polling.interval_ms,
-                max_concurrent = config.agent.max_concurrent_agents,
-                "starting orchestrator"
+            log_orchestrator_start(
+                config.polling.interval_ms,
+                config.agent.max_concurrent_agents,
             );
         }
 
@@ -921,11 +934,7 @@ impl Orchestrator {
             let workspace_key = crate::workspace::sanitize_workspace_key(&issue.identifier);
             let workspace_path = config.workspace.root.join(&workspace_key);
             if workspace_path.exists() {
-                info!(
-                    issue_identifier = %issue.identifier,
-                    workspace = %workspace_path.display(),
-                    "cleaning terminal workspace"
-                );
+                log_terminal_cleanup(&issue.identifier, &workspace_path);
                 workspace::cleanup_workspace(&workspace_path, &config.hooks).await;
             }
         }

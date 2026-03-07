@@ -31,6 +31,7 @@ pub async fn start_server(
     state: Arc<RwLock<OrchestratorState>>,
     config: Arc<RwLock<ServiceConfig>>,
     msg_tx: mpsc::Sender<OrchestratorMessage>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app_state = AppState {
         orchestrator_state: state,
@@ -45,7 +46,9 @@ pub async fn start_server(
     let local_addr = listener.local_addr()?;
     info!(port = local_addr.port(), "HTTP server listening");
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
 
     Ok(())
 }
@@ -358,11 +361,11 @@ async fn handle_issue_detail(
 /// POST /api/v1/refresh — Trigger immediate poll.
 async fn handle_refresh(State(state): State<AppState>) -> impl IntoResponse {
     let now = Utc::now().to_rfc3339();
-    let result = state.msg_tx.try_send(OrchestratorMessage::TriggerRefresh);
-    let coalesced = match result {
-        Ok(()) => None,
-        Err(_) => Some(true),
-    };
+    let send_ok = state
+        .msg_tx
+        .try_send(OrchestratorMessage::TriggerRefresh)
+        .is_ok();
+    let coalesced = if send_ok { None } else { Some(true) };
     let response = RefreshResponse {
         queued: true,
         coalesced,
@@ -546,12 +549,9 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Pretty-print a JSON value, falling back to `{}` on error.
+/// Pretty-print a JSON value. Infallible for valid `serde_json::Value`.
 fn format_json_pretty(value: &serde_json::Value) -> String {
-    match serde_json::to_string_pretty(value) {
-        Ok(s) => s,
-        Err(_) => "{}".to_string(),
-    }
+    serde_json::to_string_pretty(value).expect("serde_json::Value always serializes")
 }
 
 /// Format token counts for display.
@@ -666,6 +666,10 @@ mod tests {
                 cancel_tx,
             },
         );
+    }
+
+    async fn serve_test_app(listener: TcpListener, app: Router) {
+        axum::serve(listener, app).await.unwrap();
     }
 
     async fn get_body(response: axum::response::Response) -> String {
@@ -1315,9 +1319,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
+        tokio::spawn(serve_test_app(listener, app));
 
         // Wait for server to be ready
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1380,15 +1382,28 @@ mod tests {
         let state_arc = Arc::new(RwLock::new(state));
         let config_arc = Arc::new(RwLock::new(config));
 
-        let handle = tokio::spawn(start_server(0, state_arc, config_arc, msg_tx));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown_signal = async move {
+            let _ = shutdown_rx.await;
+        };
+
+        let handle = tokio::spawn(start_server(
+            0,
+            state_arc,
+            config_arc,
+            msg_tx,
+            shutdown_signal,
+        ));
 
         // Give server time to bind
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Abort the server task (start_server runs forever)
-        handle.abort();
-        let result = handle.await;
-        assert!(result.is_err()); // JoinError from abort
+        // Send graceful shutdown signal
+        let _ = shutdown_tx.send(());
+
+        // Server should exit cleanly with Ok(())
+        let result = handle.await.unwrap();
+        assert!(result.is_ok());
     }
 
     // ── running_entry_elapsed_seconds ────────────────────────────────
