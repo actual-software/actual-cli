@@ -2089,6 +2089,250 @@ mod tests {
         mock.assert_async().await;
     }
 
+    // ── set_issue_labels: failure ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_issue_labels_failure() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": false } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .set_issue_labels("issue-1", &["label-1".to_string()])
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("success=false"));
+        mock.assert_async().await;
+    }
+
+    // ── find_or_create_label: create returns missing id ─────────────
+
+    #[tokio::test]
+    async fn test_find_or_create_label_missing_id_in_response() {
+        let mut server = mockito::Server::new_async().await;
+
+        // 1. find_label: no existing labels
+        let _mock_find = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 2. resolve_team_id
+        let _mock_team = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "teams": { "nodes": [{ "id": "team-id-1" }] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 3. create label: missing issueLabel.id
+        let _mock_create = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "issueLabelCreate": {
+                            "issueLabel": null,
+                            "success": false
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.find_or_create_label("symphony-claimed").await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("failed to create label"));
+    }
+
+    // ── find_label: name matches but id is missing ──────────────────
+
+    #[tokio::test]
+    async fn test_find_label_name_match_missing_id() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [
+                        { "name": "symphony-claimed" }
+                    ] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.find_label("symphony-claimed").await;
+
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "should return None when id is missing"
+        );
+        mock.assert_async().await;
+    }
+
+    // ── find_label: name does not match ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_label_name_no_match() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [
+                        { "id": "label-1", "name": "other-label" }
+                    ] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.find_label("symphony-claimed").await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        mock.assert_async().await;
+    }
+
+    // ── find_label: node without name field ──────────────────────────
+
+    #[tokio::test]
+    async fn test_find_label_node_missing_name() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [
+                        { "id": "label-1" }
+                    ] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.find_label("symphony-claimed").await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        mock.assert_async().await;
+    }
+
+    // ── get_issue_label_ids: missing labels path ────────────────────
+
+    #[tokio::test]
+    async fn test_get_issue_label_ids_missing_labels() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issue": {} }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.get_issue_label_ids("issue-1").await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+        mock.assert_async().await;
+    }
+
+    // ── find_or_create_label: label already exists ──────────────────
+
+    #[tokio::test]
+    async fn test_find_or_create_label_already_exists() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [
+                        { "id": "existing-label-id", "name": "symphony-claimed" }
+                    ] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.find_or_create_label("symphony-claimed").await;
+
+        assert_eq!(result.unwrap(), "existing-label-id");
+        mock.assert_async().await;
+    }
+
     #[tokio::test]
     async fn test_resolve_team_id_not_found() {
         let mut server = mockito::Server::new_async().await;
