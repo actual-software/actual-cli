@@ -3,7 +3,7 @@
 //! This module centralizes the types that define the communication contract
 //! between agent workers and the orchestrator, making the protocol explicit.
 
-use crate::model::{AgentTotals, Issue, LogEntry, RetryEntry};
+use crate::model::{AgentTotals, Issue, LogEntry, RetryEntry, WaitingEntry};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -103,6 +103,7 @@ pub enum OrchestratorMessage {
 pub struct OrchestratorSnapshot {
     pub running: Vec<RunningSessionInfo>,
     pub retrying: Vec<RetryEntry>,
+    pub waiting: Vec<WaitingEntry>,
     pub totals: AgentTotals,
     pub rate_limits: Option<serde_json::Value>,
 }
@@ -567,6 +568,13 @@ mod tests {
                 due_at_ms: 12345,
                 error: Some("timeout".to_string()),
             }],
+            waiting: vec![WaitingEntry {
+                issue_id: "id3".to_string(),
+                identifier: "TST-3".to_string(),
+                pr_number: 99,
+                branch: "symphony/tst-3".to_string(),
+                started_waiting_at: Utc::now(),
+            }],
             totals: AgentTotals {
                 input_tokens: 200,
                 output_tokens: 100,
@@ -581,6 +589,9 @@ mod tests {
         assert_eq!(deserialized.running[0].issue_id, "id1");
         assert_eq!(deserialized.retrying.len(), 1);
         assert_eq!(deserialized.retrying[0].issue_id, "id2");
+        assert_eq!(deserialized.waiting.len(), 1);
+        assert_eq!(deserialized.waiting[0].issue_id, "id3");
+        assert_eq!(deserialized.waiting[0].pr_number, 99);
         assert_eq!(deserialized.totals.input_tokens, 200);
         assert_eq!(deserialized.rate_limits.unwrap()["remaining"], 10);
     }
@@ -590,6 +601,7 @@ mod tests {
         let snapshot = OrchestratorSnapshot {
             running: vec![],
             retrying: vec![],
+            waiting: vec![],
             totals: AgentTotals::default(),
             rate_limits: None,
         };
@@ -597,6 +609,7 @@ mod tests {
         let deserialized: OrchestratorSnapshot = serde_json::from_str(&json).unwrap();
         assert!(deserialized.running.is_empty());
         assert!(deserialized.retrying.is_empty());
+        assert!(deserialized.waiting.is_empty());
         assert!(deserialized.rate_limits.is_none());
     }
 
@@ -605,6 +618,7 @@ mod tests {
         let snapshot = OrchestratorSnapshot {
             running: vec![],
             retrying: vec![],
+            waiting: vec![],
             totals: AgentTotals::default(),
             rate_limits: None,
         };
@@ -620,6 +634,7 @@ mod tests {
         let snapshot = OrchestratorSnapshot {
             running: vec![],
             retrying: vec![],
+            waiting: vec![],
             totals: AgentTotals::default(),
             rate_limits: None,
         };
