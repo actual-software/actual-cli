@@ -1,9 +1,9 @@
 ---
 tracker:
   kind: linear
-  project_slug: actcli
+  team_key: ACTCLI
   api_key: $LINEAR_API_KEY
-  active_states: "Todo, In Progress, Ready for Review"
+  active_states: "Todo, In Progress, In Review"
   terminal_states: "Merged, Done, Closed, Cancelled, Canceled, Duplicate"
 polling:
   interval_ms: 30000
@@ -16,7 +16,7 @@ agent:
   max_concurrent_agents_by_state:
     todo: 2
     in progress: 3
-    ready for review: 1
+    in review: 1
 codex:
   command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 30"
   stall_timeout_ms: 600000

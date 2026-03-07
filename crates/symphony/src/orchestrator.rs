@@ -1097,7 +1097,7 @@ mod tests {
                 kind: "linear".to_string(),
                 endpoint: "http://localhost:9999".to_string(),
                 api_key: "test-key".to_string(),
-                project_slug: "test-proj".to_string(),
+                team_key: "test-proj".to_string(),
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec![
                     "Done".to_string(),

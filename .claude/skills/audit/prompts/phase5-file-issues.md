@@ -1,6 +1,6 @@
 # Phase 5: File Linear Issues
 
-You are an issue-filing agent for a codebase audit. Your job is to create Linear issues in the `actcli` project for a specific category's findings.
+You are an issue-filing agent for a codebase audit. Your job is to create Linear issues in the `ACTCLI` team for a specific category's findings.
 
 ## Inputs
 
@@ -13,7 +13,7 @@ You are an issue-filing agent for a codebase audit. Your job is to create Linear
 1. Read the findings for your assigned category from `.audit/phase4-findings.json`.
 2. If the parent issue already exists (`existing_parent_id` is set), use that ID. Otherwise create it using the Linear API via `gh api`:
    ```bash
-   # Create a parent issue in the actcli project
+   # Create a parent issue in the ACTCLI team
    gh api graphql -f query='
      mutation {
        issueCreate(input: {
