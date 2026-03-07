@@ -7,24 +7,35 @@ use tracing::{info, warn};
 
 // ── Logging helpers (single-line to avoid LLVM coverage region splits) ────
 
-fn log_hook(hook_name: &str, workspace: &Path) {
+fn log_hook(hook_name: &str, workspace: &Path, issue_id: &str, issue_identifier: &str) {
     let ws = workspace.display().to_string();
-    info!(workspace = %ws, "running {hook_name} hook");
+    info!(issue_id = %issue_id, issue_identifier = %issue_identifier, workspace = %ws, "running {hook_name} hook");
 }
 
-fn log_hook_failed(hook_name: &str, workspace: &Path, error: &dyn std::fmt::Display) {
+fn log_hook_failed(
+    hook_name: &str,
+    workspace: &Path,
+    issue_id: &str,
+    issue_identifier: &str,
+    error: &dyn std::fmt::Display,
+) {
     let ws = workspace.display().to_string();
-    warn!(workspace = %ws, error = %error, "{hook_name} hook failed (ignored)");
+    warn!(issue_id = %issue_id, issue_identifier = %issue_identifier, workspace = %ws, error = %error, "{hook_name} hook failed (ignored)");
 }
 
-fn log_workspace_removed(workspace: &Path) {
+fn log_workspace_removed(workspace: &Path, issue_id: &str, issue_identifier: &str) {
     let ws = workspace.display().to_string();
-    info!(workspace = %ws, "workspace removed");
+    info!(issue_id = %issue_id, issue_identifier = %issue_identifier, workspace = %ws, "workspace removed");
 }
 
-fn log_workspace_remove_failed(workspace: &Path, error: &dyn std::fmt::Display) {
+fn log_workspace_remove_failed(
+    workspace: &Path,
+    issue_id: &str,
+    issue_identifier: &str,
+    error: &dyn std::fmt::Display,
+) {
     let ws = workspace.display().to_string();
-    warn!(workspace = %ws, error = %error, "failed to remove workspace directory");
+    warn!(issue_id = %issue_id, issue_identifier = %issue_identifier, workspace = %ws, error = %error, "failed to remove workspace directory");
 }
 
 /// Result of workspace preparation.
@@ -72,6 +83,7 @@ pub async fn create_workspace(
     workspace_root: &Path,
     identifier: &str,
     hooks: &HooksConfig,
+    issue_id: &str,
 ) -> Result<WorkspaceResult> {
     let workspace_key = sanitize_workspace_key(identifier);
     let workspace_path = workspace_root.join(&workspace_key);
@@ -116,7 +128,7 @@ pub async fn create_workspace(
     // Run after_create hook if workspace was newly created
     if created_now {
         if let Some(ref script) = hooks.after_create {
-            log_hook("after_create", &workspace_path);
+            log_hook("after_create", &workspace_path, issue_id, identifier);
             run_hook("after_create", script, &workspace_path, hooks.timeout_ms).await?;
         }
     }
@@ -129,43 +141,64 @@ pub async fn create_workspace(
 }
 
 /// Run the before_run hook.
-pub async fn run_before_run_hook(workspace_path: &Path, hooks: &HooksConfig) -> Result<()> {
+pub async fn run_before_run_hook(
+    workspace_path: &Path,
+    hooks: &HooksConfig,
+    issue_id: &str,
+    issue_identifier: &str,
+) -> Result<()> {
     if let Some(ref script) = hooks.before_run {
-        log_hook("before_run", workspace_path);
+        log_hook("before_run", workspace_path, issue_id, issue_identifier);
         run_hook("before_run", script, workspace_path, hooks.timeout_ms).await?;
     }
     Ok(())
 }
 
 /// Run the after_run hook (best-effort, errors logged and ignored).
-pub async fn run_after_run_hook(workspace_path: &Path, hooks: &HooksConfig) {
+pub async fn run_after_run_hook(
+    workspace_path: &Path,
+    hooks: &HooksConfig,
+    issue_id: &str,
+    issue_identifier: &str,
+) {
     if let Some(ref script) = hooks.after_run {
-        log_hook("after_run", workspace_path);
+        log_hook("after_run", workspace_path, issue_id, issue_identifier);
         if let Err(e) = run_hook("after_run", script, workspace_path, hooks.timeout_ms).await {
-            log_hook_failed("after_run", workspace_path, &e);
+            log_hook_failed("after_run", workspace_path, issue_id, issue_identifier, &e);
         }
     }
 }
 
 /// Clean up a workspace directory.
-pub async fn cleanup_workspace(workspace_path: &Path, hooks: &HooksConfig) {
+pub async fn cleanup_workspace(
+    workspace_path: &Path,
+    hooks: &HooksConfig,
+    issue_id: &str,
+    issue_identifier: &str,
+) {
     if !workspace_path.exists() {
         return;
     }
 
     // Run before_remove hook (best-effort)
     if let Some(ref script) = hooks.before_remove {
-        log_hook("before_remove", workspace_path);
+        log_hook("before_remove", workspace_path, issue_id, issue_identifier);
         if let Err(e) = run_hook("before_remove", script, workspace_path, hooks.timeout_ms).await {
-            log_hook_failed("before_remove", workspace_path, &e);
+            log_hook_failed(
+                "before_remove",
+                workspace_path,
+                issue_id,
+                issue_identifier,
+                &e,
+            );
         }
     }
 
     // Remove the workspace directory
     if let Err(e) = std::fs::remove_dir_all(workspace_path) {
-        log_workspace_remove_failed(workspace_path, &e);
+        log_workspace_remove_failed(workspace_path, issue_id, issue_identifier, &e);
     } else {
-        log_workspace_removed(workspace_path);
+        log_workspace_removed(workspace_path, issue_id, issue_identifier);
     }
 }
 
@@ -284,7 +317,9 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        let result = create_workspace(&root, "PROJ-1", &hooks).await.unwrap();
+        let result = create_workspace(&root, "PROJ-1", &hooks, "test-id-1")
+            .await
+            .unwrap();
         assert!(result.created_now);
         assert_eq!(result.workspace_key, "PROJ-1");
         assert!(result.path.exists());
@@ -303,11 +338,15 @@ mod tests {
         };
 
         // Create first time
-        let r1 = create_workspace(&root, "PROJ-2", &hooks).await.unwrap();
+        let r1 = create_workspace(&root, "PROJ-2", &hooks, "test-id-2")
+            .await
+            .unwrap();
         assert!(r1.created_now);
 
         // Reuse
-        let r2 = create_workspace(&root, "PROJ-2", &hooks).await.unwrap();
+        let r2 = create_workspace(&root, "PROJ-2", &hooks, "test-id-2")
+            .await
+            .unwrap();
         assert!(!r2.created_now);
         assert_eq!(r1.path, r2.path);
     }
@@ -325,7 +364,9 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        let result = create_workspace(&root, "PROJ-3", &hooks).await.unwrap();
+        let result = create_workspace(&root, "PROJ-3", &hooks, "test-id-3")
+            .await
+            .unwrap();
         assert!(result.created_now);
         assert!(result.path.join(".initialized").exists());
     }
@@ -346,7 +387,7 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        cleanup_workspace(&ws_path, &hooks).await;
+        cleanup_workspace(&ws_path, &hooks, "test-id", "TEST-1").await;
         assert!(!ws_path.exists());
     }
 
@@ -378,7 +419,7 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        let result = create_workspace(&root, "PROJ-FILE", &hooks).await;
+        let result = create_workspace(&root, "PROJ-FILE", &hooks, "test-id-file").await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("not a directory"));
@@ -396,7 +437,9 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        run_before_run_hook(tmp.path(), &hooks).await.unwrap();
+        run_before_run_hook(tmp.path(), &hooks, "test-id", "TEST-1")
+            .await
+            .unwrap();
         assert!(tmp.path().join(".before_run_executed").exists());
     }
 
@@ -412,7 +455,9 @@ mod tests {
         };
 
         // Should return Ok immediately with no hook configured
-        run_before_run_hook(tmp.path(), &hooks).await.unwrap();
+        run_before_run_hook(tmp.path(), &hooks, "test-id", "TEST-1")
+            .await
+            .unwrap();
     }
 
     #[traced_test]
@@ -427,7 +472,7 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        run_after_run_hook(tmp.path(), &hooks).await;
+        run_after_run_hook(tmp.path(), &hooks, "test-id", "TEST-1").await;
         assert!(tmp.path().join(".after_run_ok").exists());
     }
 
@@ -444,7 +489,7 @@ mod tests {
         };
 
         // Should return normally even though the hook fails
-        run_after_run_hook(tmp.path(), &hooks).await;
+        run_after_run_hook(tmp.path(), &hooks, "test-id", "TEST-1").await;
     }
 
     #[tokio::test]
@@ -459,7 +504,7 @@ mod tests {
         };
 
         // Should return immediately with no hook configured
-        run_after_run_hook(tmp.path(), &hooks).await;
+        run_after_run_hook(tmp.path(), &hooks, "test-id", "TEST-1").await;
     }
 
     #[traced_test]
@@ -479,7 +524,7 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        cleanup_workspace(&ws_path, &hooks).await;
+        cleanup_workspace(&ws_path, &hooks, "test-id", "TEST-1").await;
         assert!(marker.exists());
         assert!(!ws_path.exists());
     }
@@ -498,7 +543,7 @@ mod tests {
         };
 
         // Should return immediately without error
-        cleanup_workspace(&ws_path, &hooks).await;
+        cleanup_workspace(&ws_path, &hooks, "test-id", "TEST-1").await;
     }
 
     #[traced_test]
@@ -513,7 +558,7 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        let result = run_before_run_hook(tmp.path(), &hooks).await;
+        let result = run_before_run_hook(tmp.path(), &hooks, "test-id", "TEST-1").await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("hook failed"));
@@ -530,7 +575,7 @@ mod tests {
             timeout_ms: 100,
         };
 
-        let result = run_before_run_hook(tmp.path(), &hooks).await;
+        let result = run_before_run_hook(tmp.path(), &hooks, "test-id", "TEST-1").await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("timed out"));
@@ -550,7 +595,7 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        let result = run_before_run_hook(tmp.path(), &hooks).await;
+        let result = run_before_run_hook(tmp.path(), &hooks, "test-id", "TEST-1").await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("...(truncated)"));
@@ -569,7 +614,7 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        let result = create_workspace(&root, "PROJ-1", &hooks).await;
+        let result = create_workspace(&root, "PROJ-1", &hooks, "test-id-1").await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("failed to create workspace root"));
@@ -599,7 +644,7 @@ mod tests {
             timeout_ms: 60_000,
         };
 
-        let result = create_workspace(&root, "PROJ-NEW", &hooks).await;
+        let result = create_workspace(&root, "PROJ-NEW", &hooks, "test-id-new").await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("failed to create workspace"));
@@ -628,7 +673,7 @@ mod tests {
         };
 
         // Should still proceed to remove the directory despite hook failure
-        cleanup_workspace(&ws_path, &hooks).await;
+        cleanup_workspace(&ws_path, &hooks, "test-id", "TEST-1").await;
         assert!(!ws_path.exists());
     }
 
@@ -659,7 +704,7 @@ mod tests {
         };
 
         // cleanup should log warning but not panic
-        cleanup_workspace(&ws_path, &hooks).await;
+        cleanup_workspace(&ws_path, &hooks, "test-id", "TEST-1").await;
 
         // Restore permissions for cleanup
         #[allow(clippy::permissions_set_readonly_false)]
