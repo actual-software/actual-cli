@@ -1,4 +1,5 @@
 use clap::Parser;
+use fs2::FileExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use symphony::config::ServiceConfig;
@@ -74,6 +75,24 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
     let workflow = load_workflow(&workflow_path)?;
     let config = ServiceConfig::from_workflow(&workflow)?;
     config.validate_for_dispatch()?;
+
+    // Singleton lock: prevent multiple Symphony processes on the same workspace
+    std::fs::create_dir_all(&config.workspace.root).ok();
+    let lock_path = config.workspace.root.join("symphony.lock");
+    let lock_file = std::fs::File::create(&lock_path).map_err(|e| {
+        SymphonyError::Other(format!(
+            "failed to create lock file at {}: {e}",
+            lock_path.display()
+        ))
+    })?;
+    lock_file.try_lock_exclusive().map_err(|_| {
+        SymphonyError::Other(format!(
+            "another Symphony instance is already running for workspace {}",
+            config.workspace.root.display()
+        ))
+    })?;
+    // Keep lock_file alive for the duration of the process
+    let _lock_file = lock_file;
 
     // Resolve HTTP server port: CLI flag overrides config
     let server_port = cli.port.or(config.server.port);
@@ -164,4 +183,38 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
     orchestrator.run(shutdown_rx, reload_rx).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use fs2::FileExt;
+
+    #[test]
+    fn singleton_lock_second_attempt_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("symphony.lock");
+
+        let f1 = std::fs::File::create(&lock_path).unwrap();
+        f1.try_lock_exclusive().expect("first lock should succeed");
+
+        let f2 = std::fs::File::open(&lock_path).unwrap();
+        let result = f2.try_lock_exclusive();
+        assert!(result.is_err(), "second lock on the same file should fail");
+    }
+
+    #[test]
+    fn singleton_lock_released_after_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("symphony.lock");
+
+        {
+            let f1 = std::fs::File::create(&lock_path).unwrap();
+            f1.try_lock_exclusive().expect("first lock should succeed");
+            // f1 is dropped here, releasing the lock
+        }
+
+        let f2 = std::fs::File::open(&lock_path).unwrap();
+        f2.try_lock_exclusive()
+            .expect("lock should succeed after previous holder is dropped");
+    }
 }
