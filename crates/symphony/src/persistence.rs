@@ -92,13 +92,10 @@ impl SqliteStore {
     }
 
     fn apply_pragmas_and_schema(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA busy_timeout=5000;",
-        )?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")?;
 
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS sessions (
+        let schema = "\
+            CREATE TABLE IF NOT EXISTS sessions (
                 issue_id TEXT PRIMARY KEY,
                 identifier TEXT NOT NULL,
                 session_id TEXT,
@@ -137,8 +134,8 @@ impl SqliteStore {
             CREATE TABLE IF NOT EXISTS completed_issues (
                 issue_id TEXT PRIMARY KEY,
                 completed_at TEXT NOT NULL
-            );",
-        )?;
+            );";
+        conn.execute_batch(schema)?;
 
         Ok(())
     }
@@ -151,25 +148,31 @@ impl SqliteStore {
 impl StateStore for SqliteStore {
     fn save_session(&self, session: &PersistedSession) -> Result<()> {
         let conn = self.lock()?;
-        conn.execute(
-            "INSERT OR REPLACE INTO sessions
+        let input_tokens = session.input_tokens as i64;
+        let output_tokens = session.output_tokens as i64;
+        let total_tokens = session.total_tokens as i64;
+        let turn_count = session.turn_count as i64;
+        let retry_attempt = session.retry_attempt.map(|v| v as i64);
+        let sql = "INSERT OR REPLACE INTO sessions
              (issue_id, identifier, session_id, input_tokens, output_tokens, total_tokens,
               turn_count, started_at, ended_at, last_event, last_event_at, last_message, retry_attempt)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+        conn.execute(
+            sql,
             params![
                 session.issue_id,
                 session.identifier,
                 session.session_id,
-                session.input_tokens as i64,
-                session.output_tokens as i64,
-                session.total_tokens as i64,
-                session.turn_count as i64,
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                turn_count,
                 session.started_at,
                 session.ended_at,
                 session.last_event,
                 session.last_event_at,
                 session.last_message,
-                session.retry_attempt.map(|v| v as i64),
+                retry_attempt,
             ],
         )?;
         Ok(())
@@ -359,22 +362,21 @@ impl StateStore for SqliteStore {
     }
 }
 
-// Ensure SqliteStore is Send + Sync (Mutex<Connection> provides this).
-// The static assertions catch at compile time if we break the contract.
-const _: () = {
-    fn assert_send_sync<T: Send + Sync>() {}
-    fn assert_all() {
-        assert_send_sync::<SqliteStore>();
-    }
-    let _ = assert_all;
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{AgentTotals, LogEntry, TokenSnapshot};
     use chrono::Utc;
     use tempfile::NamedTempFile;
+
+    // ── Send + Sync ─────────────────────────────────────────────────────
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn sqlite_store_is_send_and_sync() {
+        assert_send_sync::<SqliteStore>();
+    }
 
     // ── SqliteStore construction ────────────────────────────────────────
 
@@ -831,6 +833,53 @@ mod tests {
         let loaded = store.load_log_entries("id-1").unwrap();
         assert!(loaded[0].tokens.is_none());
         assert_eq!(loaded[0].message, Some("hello".to_string()));
+    }
+
+    // ── Log entry with bad timestamp fallback ────────────────────────
+
+    #[test]
+    fn log_entry_bad_timestamp_falls_back_to_now() {
+        let store = SqliteStore::in_memory().unwrap();
+        // Insert a log entry with a valid timestamp, then manually corrupt it
+        let entry = make_log_entry(1, "test", None, None);
+        store.save_log_entry("id-1", &entry).unwrap();
+
+        // Overwrite the timestamp with an invalid string
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE event_logs SET timestamp = 'not-a-date' WHERE issue_id = 'id-1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let loaded = store.load_log_entries("id-1").unwrap();
+        assert_eq!(loaded.len(), 1);
+        // Should not panic — falls back to Utc::now()
+        assert!(loaded[0].timestamp <= Utc::now());
+    }
+
+    // ── Log entry with partial token columns ───────────────────────
+
+    #[test]
+    fn log_entry_partial_tokens_returns_none() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry = make_log_entry(1, "test", None, Some((100, 50, 150)));
+        store.save_log_entry("id-1", &entry).unwrap();
+
+        // Null out one of the token columns to test partial match
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE event_logs SET total_tokens = NULL WHERE issue_id = 'id-1'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let loaded = store.load_log_entries("id-1").unwrap();
+        assert_eq!(loaded.len(), 1);
+        // Partial tokens should result in None
+        assert!(loaded[0].tokens.is_none());
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────
