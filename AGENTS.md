@@ -18,11 +18,11 @@ export LINEAR_API_KEY="lin_api_..."   # Required for Symphony and Linear API acc
 When you need to file a follow-up issue, use the Linear GraphQL API via `gh api`:
 
 ```bash
-# First, find the team ID for Actual AI
+# First, find the team ID for actual-cli
 TEAM_ID=$(gh api -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -f query='{ teams { nodes { id name } } }' \
-  --jq '.data.teams.nodes[] | select(.name == "Actual AI") | .id')
+  --jq '.data.teams.nodes[] | select(.name == "actual-cli") | .id')
 
 # Create an issue
 gh api -X POST https://api.linear.app/graphql \
