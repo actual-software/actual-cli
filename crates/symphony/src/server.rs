@@ -1,11 +1,12 @@
 use crate::config::ServiceConfig;
 use crate::model::{LogEntry, OrchestratorState, RetryEntry};
-use crate::protocol::OrchestratorMessage;
+use crate::protocol::{OrchestratorMessage, WorkResult, WorkerEventPayload};
 use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::Json;
 use axum::Router;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,7 @@ pub struct AppState {
     pub orchestrator_state: Arc<RwLock<OrchestratorState>>,
     pub config: Arc<RwLock<ServiceConfig>>,
     pub msg_tx: mpsc::Sender<OrchestratorMessage>,
+    pub job_notify: Arc<tokio::sync::Notify>,
 }
 
 /// Start the HTTP dashboard/API server.
@@ -35,12 +37,14 @@ pub async fn start_server(
     state: Arc<RwLock<OrchestratorState>>,
     config: Arc<RwLock<ServiceConfig>>,
     msg_tx: mpsc::Sender<OrchestratorMessage>,
+    job_notify: Arc<tokio::sync::Notify>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app_state = AppState {
         orchestrator_state: state,
         config,
         msg_tx,
+        job_notify,
     };
 
     let app = build_router(app_state);
@@ -67,12 +71,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(handle_dashboard))
         .route("/api/v1/state", get(handle_state))
         .route("/api/v1/refresh", post(handle_refresh))
+        .route("/api/v1/work", get(handle_claim_work))
         .route(
             "/api/v1/{issue_identifier}/stream",
             get(handle_issue_stream),
         )
         .route("/api/v1/{issue_identifier}/logs", get(handle_issue_logs))
         .route("/api/v1/{issue_identifier}", get(handle_issue_detail))
+        .route("/api/v1/{issue_id}/events", post(handle_worker_event))
+        .route("/api/v1/{issue_id}/complete", post(handle_worker_complete))
         .fallback(handle_fallback)
         .layer(cors)
         .with_state(state)
@@ -173,6 +180,150 @@ pub struct ErrorResponse {
 pub struct ErrorDetail {
     pub code: String,
     pub message: String,
+}
+
+// ── Bearer token auth extractor ──────────────────────────────────────
+
+/// Authenticated worker identity extracted from request headers.
+#[derive(Debug, Clone)]
+pub struct AuthenticatedWorker {
+    pub worker_id: String,
+}
+
+impl axum::extract::FromRequestParts<AppState> for AuthenticatedWorker {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        // Read the expected token from config
+        let config = state.config.read().await;
+        let expected_token = match &config.deployment.auth_token {
+            Some(token) => token.clone(),
+            None => {
+                return Err(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                    "No auth token configured".to_string(),
+                ));
+            }
+        };
+        drop(config);
+
+        // Extract Authorization header
+        let auth_header = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+
+        let token = match auth_header {
+            Some(value) if value.starts_with("Bearer ") => &value[7..],
+            _ => {
+                return Err(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "unauthorized",
+                    "Missing or invalid Authorization header".to_string(),
+                ));
+            }
+        };
+
+        if token != expected_token {
+            return Err(error_response(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Invalid bearer token".to_string(),
+            ));
+        }
+
+        // Extract optional X-Worker-ID header
+        let worker_id = parts
+            .headers
+            .get("X-Worker-ID")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("anonymous")
+            .to_string();
+
+        Ok(AuthenticatedWorker { worker_id })
+    }
+}
+
+// ── Worker API handlers ─────────────────────────────────────────────
+
+/// GET /api/v1/work — Long-poll to claim a work assignment.
+async fn handle_claim_work(State(state): State<AppState>, worker: AuthenticatedWorker) -> Response {
+    info!(worker_id = %worker.worker_id, "worker requesting work");
+
+    let notify = Arc::clone(&state.job_notify);
+
+    // Try to dequeue immediately first
+    {
+        let mut s = state.orchestrator_state.write().await;
+        if let Some(assignment) = s.pending_jobs.pop_front() {
+            return (StatusCode::OK, axum::Json(assignment)).into_response();
+        }
+    }
+
+    // Long-poll: wait for notification or timeout (30s)
+    let timeout = tokio::time::timeout(std::time::Duration::from_secs(30), notify.notified());
+
+    let _ = timeout.await; // Ok = notified, Err = timed out
+
+    // Try again after notification/timeout
+    let mut s = state.orchestrator_state.write().await;
+    if let Some(assignment) = s.pending_jobs.pop_front() {
+        return (StatusCode::OK, axum::Json(assignment)).into_response();
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// POST /api/v1/{issue_id}/events — Receive an event from a remote worker.
+async fn handle_worker_event(
+    State(state): State<AppState>,
+    worker: AuthenticatedWorker,
+    Path(issue_id): Path<String>,
+    Json(payload): Json<WorkerEventPayload>,
+) -> Response {
+    info!(worker_id = %worker.worker_id, issue_id = %issue_id, "worker event received");
+
+    let msg = OrchestratorMessage::AgentUpdate {
+        issue_id,
+        event: payload.event,
+    };
+
+    match state.msg_tx.send(msg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "channel_closed",
+            "Orchestrator message channel closed".to_string(),
+        ),
+    }
+}
+
+/// POST /api/v1/{issue_id}/complete — Receive a completion result from a remote worker.
+async fn handle_worker_complete(
+    State(state): State<AppState>,
+    worker: AuthenticatedWorker,
+    Path(issue_id): Path<String>,
+    Json(payload): Json<WorkResult>,
+) -> Response {
+    info!(worker_id = %worker.worker_id, issue_id = %issue_id, reason = ?payload.reason, "worker completed");
+
+    let msg = OrchestratorMessage::WorkerExited {
+        issue_id,
+        reason: payload.reason,
+    };
+
+    match state.msg_tx.send(msg).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "channel_closed",
+            "Orchestrator message channel closed".to_string(),
+        ),
+    }
 }
 
 // ── Snapshot builder ─────────────────────────────────────────────────
@@ -1041,6 +1192,7 @@ mod tests {
 
     fn test_app_state() -> AppState {
         let state = OrchestratorState::new(5000, 3);
+        let job_notify = Arc::clone(&state.job_notify);
         let config = test_config();
         let (msg_tx, _msg_rx) = mpsc::channel(512);
 
@@ -1048,6 +1200,7 @@ mod tests {
             orchestrator_state: Arc::new(RwLock::new(state)),
             config: Arc::new(RwLock::new(config)),
             msg_tx,
+            job_notify,
         }
     }
 
@@ -1637,6 +1790,7 @@ mod tests {
     async fn test_post_refresh_channel_full() {
         // Create a channel with capacity 1, then fill it
         let state = OrchestratorState::new(5000, 3);
+        let job_notify = Arc::clone(&state.job_notify);
         let config = test_config();
         let (msg_tx, _msg_rx) = mpsc::channel(1);
 
@@ -1649,6 +1803,7 @@ mod tests {
             orchestrator_state: Arc::new(RwLock::new(state)),
             config: Arc::new(RwLock::new(config)),
             msg_tx,
+            job_notify,
         };
 
         let app = build_router(app_state);
@@ -1672,6 +1827,7 @@ mod tests {
     #[tokio::test]
     async fn test_post_refresh_channel_closed() {
         let state = OrchestratorState::new(5000, 3);
+        let job_notify = Arc::clone(&state.job_notify);
         let config = test_config();
         let (msg_tx, msg_rx) = mpsc::channel(512);
 
@@ -1682,6 +1838,7 @@ mod tests {
             orchestrator_state: Arc::new(RwLock::new(state)),
             config: Arc::new(RwLock::new(config)),
             msg_tx,
+            job_notify,
         };
 
         let app = build_router(app_state);
@@ -1811,6 +1968,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_server_binds_and_serves() {
         let state = OrchestratorState::new(5000, 3);
+        let job_notify = Arc::clone(&state.job_notify);
         let config = test_config();
         let (msg_tx, _msg_rx) = mpsc::channel(512);
 
@@ -1827,6 +1985,7 @@ mod tests {
             state_arc,
             config_arc,
             msg_tx,
+            job_notify,
             shutdown_signal,
         ));
 
@@ -2544,5 +2703,361 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    // ── Worker API helpers ──────────────────────────────────────────
+
+    fn test_app_state_with_auth() -> (AppState, mpsc::Receiver<OrchestratorMessage>) {
+        let state = OrchestratorState::new(5000, 3);
+        let job_notify = Arc::clone(&state.job_notify);
+        let mut config = test_config();
+        config.deployment.auth_token = Some("test-secret".to_string());
+        let (msg_tx, msg_rx) = mpsc::channel(512);
+
+        (
+            AppState {
+                orchestrator_state: Arc::new(RwLock::new(state)),
+                config: Arc::new(RwLock::new(config)),
+                msg_tx,
+                job_notify,
+            },
+            msg_rx,
+        )
+    }
+
+    /// Build a request with bearer auth headers for worker API tests.
+    fn worker_request(method: &str, uri: &str, token: &str) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-Worker-ID", "test-worker-1")
+            .header("Content-Type", "application/json")
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    // ── GET /api/v1/work tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_claim_work_no_jobs_returns_204() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        // Notify immediately so the long-poll breaks without waiting 30s
+        app_state.job_notify.notify_one();
+        let app = build_router(app_state);
+
+        let req = worker_request("GET", "/api/v1/work", "test-secret");
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_claim_work_with_job_returns_200() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+
+        // Enqueue a job
+        {
+            let mut s = app_state.orchestrator_state.write().await;
+            s.pending_jobs.push_back(crate::protocol::WorkAssignment {
+                issue_id: "id1".to_string(),
+                issue_identifier: "TST-1".to_string(),
+                prompt: "Do the thing".to_string(),
+                attempt: None,
+                workspace_path: None,
+            });
+        }
+
+        let app = build_router(app_state);
+
+        let req = worker_request("GET", "/api/v1/work", "test-secret");
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["issue_id"], "id1");
+        assert_eq!(json["issue_identifier"], "TST-1");
+        assert_eq!(json["prompt"], "Do the thing");
+    }
+
+    #[tokio::test]
+    async fn test_claim_work_missing_auth_returns_401() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        let app = build_router(app_state);
+
+        let req = axum::http::Request::builder()
+            .uri("/api/v1/work")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_claim_work_wrong_token_returns_401() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        let app = build_router(app_state);
+
+        let req = worker_request("GET", "/api/v1/work", "wrong-token");
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn test_claim_work_no_auth_config_returns_401() {
+        // Use default test_app_state which has auth_token: None
+        let app_state = test_app_state();
+        let app = build_router(app_state);
+
+        let req = worker_request("GET", "/api/v1/work", "any-token");
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_claim_work_non_bearer_scheme_returns_401() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        let app = build_router(app_state);
+
+        let req = axum::http::Request::builder()
+            .uri("/api/v1/work")
+            .header("Authorization", "Basic dXNlcjpwYXNz")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_claim_work_no_worker_id_defaults() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+
+        // Enqueue a job so we get a 200 response (proves auth passed)
+        {
+            let mut s = app_state.orchestrator_state.write().await;
+            s.pending_jobs.push_back(crate::protocol::WorkAssignment {
+                issue_id: "id1".to_string(),
+                issue_identifier: "TST-1".to_string(),
+                prompt: "test".to_string(),
+                attempt: None,
+                workspace_path: None,
+            });
+        }
+
+        let app = build_router(app_state);
+
+        // Request with valid auth but NO X-Worker-ID header
+        let req = axum::http::Request::builder()
+            .uri("/api/v1/work")
+            .header("Authorization", "Bearer test-secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        // Should succeed - worker_id defaults to "anonymous"
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_claim_work_long_poll_notification() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        let notify = Arc::clone(&app_state.job_notify);
+        let orch_state = Arc::clone(&app_state.orchestrator_state);
+
+        let app = build_router(app_state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+
+        // Spawn a request that will long-poll
+        let request_handle = tokio::spawn({
+            let addr = addr;
+            let client = client.clone();
+            async move {
+                client
+                    .get(format!("http://{addr}/api/v1/work"))
+                    .header("Authorization", "Bearer test-secret")
+                    .header("X-Worker-ID", "poll-worker")
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+
+        // Give time for the request to start long-polling
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Enqueue a job and notify
+        {
+            let mut s = orch_state.write().await;
+            s.pending_jobs.push_back(crate::protocol::WorkAssignment {
+                issue_id: "poll-1".to_string(),
+                issue_identifier: "POLL-1".to_string(),
+                prompt: "polled work".to_string(),
+                attempt: Some(1),
+                workspace_path: None,
+            });
+        }
+        notify.notify_one();
+
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(5), request_handle)
+            .await
+            .expect("should not timeout")
+            .expect("task should succeed");
+
+        assert_eq!(resp.status(), 200);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["issue_id"], "poll-1");
+        assert_eq!(json["prompt"], "polled work");
+    }
+
+    // ── POST /api/v1/{issue_id}/events tests ────────────────────────
+
+    #[tokio::test]
+    async fn test_worker_event_valid_auth_returns_200() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        let app = build_router(app_state);
+
+        let payload = serde_json::json!({
+            "event": {
+                "Notification": {
+                    "message": "hello from worker"
+                }
+            }
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/test-issue-1/events")
+            .header("Authorization", "Bearer test-secret")
+            .header("X-Worker-ID", "worker-1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_worker_event_invalid_auth_returns_401() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        let app = build_router(app_state);
+
+        let payload = serde_json::json!({
+            "event": {
+                "Notification": {
+                    "message": "hello"
+                }
+            }
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/test-issue-1/events")
+            .header("Authorization", "Bearer wrong-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── POST /api/v1/{issue_id}/complete tests ──────────────────────
+
+    #[tokio::test]
+    async fn test_worker_complete_valid_auth_returns_200() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        let app = build_router(app_state);
+
+        let payload = serde_json::json!({
+            "reason": "Normal"
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/test-issue-1/complete")
+            .header("Authorization", "Bearer test-secret")
+            .header("X-Worker-ID", "worker-1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_worker_complete_invalid_auth_returns_401() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        let app = build_router(app_state);
+
+        let payload = serde_json::json!({
+            "reason": "Normal"
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/test-issue-1/complete")
+            .header("Authorization", "Bearer wrong")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_worker_complete_failed_reason() {
+        let (app_state, _msg_rx) = test_app_state_with_auth();
+        let app = build_router(app_state);
+
+        let payload = serde_json::json!({
+            "reason": { "Failed": "something broke" }
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/test-issue-1/complete")
+            .header("Authorization", "Bearer test-secret")
+            .header("X-Worker-ID", "worker-1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ── AuthenticatedWorker extractor tests ─────────────────────────
+
+    #[tokio::test]
+    async fn test_authenticated_worker_debug() {
+        let worker = AuthenticatedWorker {
+            worker_id: "w1".to_string(),
+        };
+        let debug = format!("{:?}", worker);
+        assert!(debug.contains("AuthenticatedWorker"));
+        assert!(debug.contains("w1"));
+    }
+
+    #[tokio::test]
+    async fn test_authenticated_worker_clone() {
+        let worker = AuthenticatedWorker {
+            worker_id: "w1".to_string(),
+        };
+        let cloned = worker.clone();
+        assert_eq!(worker.worker_id, cloned.worker_id);
     }
 }

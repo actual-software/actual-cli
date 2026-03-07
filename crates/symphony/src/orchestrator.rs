@@ -4,7 +4,7 @@ use crate::error::{Result, SymphonyError};
 use crate::model::{Issue, OrchestratorState, RetryEntry};
 use crate::prompt::{build_continuation_prompt, render_prompt};
 use crate::protocol::{
-    AgentEvent, LiveSession, RunningEntry, RunningSessionInfo, WorkerExitReason,
+    AgentEvent, LiveSession, RunningEntry, RunningSessionInfo, WorkAssignment, WorkerExitReason,
 };
 use crate::tracker::LinearClient;
 use crate::workspace;
@@ -362,11 +362,32 @@ impl Orchestrator {
 
         match config.deployment.mode {
             DeploymentMode::Distributed => {
+                let prompt_template = self.prompt_template.read().await.clone();
+                let prompt = match crate::prompt::render_prompt(&prompt_template, &issue, attempt) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!(issue_id = %issue_id, error = %e, "failed to render prompt for distributed dispatch");
+                        return;
+                    }
+                };
+
+                let assignment = WorkAssignment {
+                    issue_id: issue_id.clone(),
+                    issue_identifier: identifier.clone(),
+                    prompt,
+                    attempt,
+                    workspace_path: None,
+                };
+
+                let mut state = self.state.write().await;
+                state.pending_jobs.push_back(assignment);
+                state.job_notify.notify_one();
+
                 info!(
                     issue_id = %issue_id,
-                    "issue queued for distributed worker (not yet implemented)"
+                    issue_identifier = %identifier,
+                    "issue queued for distributed worker"
                 );
-                // No local subprocess — a remote worker will pick this up
                 return;
             }
             DeploymentMode::Local => {
@@ -5444,11 +5465,79 @@ mod tests {
         assert!(state.running.contains_key("dist-1"));
         assert!(state.claimed.contains("dist-1"));
 
+        // Job should be enqueued in pending_jobs
+        assert_eq!(state.pending_jobs.len(), 1);
+        let job = &state.pending_jobs[0];
+        assert_eq!(job.issue_id, "dist-1");
+        assert_eq!(job.issue_identifier, "DIST-1");
+        assert!(job.prompt.contains("DIST-1"));
+        assert!(job.attempt.is_none());
+        assert!(job.workspace_path.is_none());
+
         // No worker handle should exist (distributed mode returns early)
+        drop(state);
         let handles = orch.worker_handles.read().await;
         assert!(!handles.contains_key("dist-1"));
 
         // Check the log message
         assert!(logs_contain("issue queued for distributed worker"));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_dispatch_issue_distributed_mode_notifies() {
+        let mut config = test_config();
+        config.deployment = DeploymentConfig {
+            mode: DeploymentMode::Distributed,
+            auth_token: Some("dist-token".to_string()),
+        };
+        let orch = Orchestrator::new(config, "Test prompt {{ issue.identifier }}".to_string());
+
+        // Get notify handle before dispatch
+        let notify = {
+            let state = orch.state.read().await;
+            std::sync::Arc::clone(&state.job_notify)
+        };
+
+        // Spawn a waiter
+        let waiter = tokio::spawn(async move {
+            notify.notified().await;
+            true
+        });
+
+        tokio::task::yield_now().await;
+
+        let issue = make_issue("dist-2", "DIST-2", "Todo");
+        orch.dispatch_issue(issue, None).await;
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("should not timeout")
+            .expect("task should succeed");
+        assert!(result);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_dispatch_issue_distributed_mode_bad_template() {
+        let mut config = test_config();
+        config.deployment = DeploymentConfig {
+            mode: DeploymentMode::Distributed,
+            auth_token: Some("dist-token".to_string()),
+        };
+        // Use an invalid template that will cause render_prompt to fail
+        let orch = Orchestrator::new(config, "{{ invalid | bad_filter }}".to_string());
+        let issue = make_issue("dist-3", "DIST-3", "Todo");
+        orch.dispatch_issue(issue, None).await;
+
+        // Issue is in running state but no job should be enqueued because render failed
+        let state = orch.state.read().await;
+        assert!(state.running.contains_key("dist-3"));
+        assert!(state.pending_jobs.is_empty());
+
+        // Check the warning log message
+        assert!(logs_contain(
+            "failed to render prompt for distributed dispatch"
+        ));
     }
 }

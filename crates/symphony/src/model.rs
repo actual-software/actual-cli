@@ -1,9 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 // Re-export protocol types for backward compatibility.
-pub use crate::protocol::{AgentEvent, LiveSession, RunningEntry, WorkerExitReason};
+pub use crate::protocol::{
+    AgentEvent, LiveSession, RunningEntry, WorkAssignment, WorkerExitReason,
+};
 
 /// Maximum number of log entries to retain per running issue.
 /// Older entries are evicted in FIFO order.
@@ -106,6 +109,10 @@ pub struct OrchestratorState {
     pub rate_limits: Option<serde_json::Value>,
     /// Per-issue broadcast channels for SSE event streaming.
     pub event_broadcasts: HashMap<String, tokio::sync::broadcast::Sender<LogEntry>>,
+    /// Queue of pending work assignments for distributed workers.
+    pub pending_jobs: VecDeque<WorkAssignment>,
+    /// Notification channel to wake long-polling workers when a job is enqueued.
+    pub job_notify: Arc<tokio::sync::Notify>,
 }
 
 impl std::fmt::Debug for OrchestratorState {
@@ -122,6 +129,7 @@ impl std::fmt::Debug for OrchestratorState {
                 "event_broadcasts",
                 &format!("<{} channels>", self.event_broadcasts.len()),
             )
+            .field("pending_jobs", &self.pending_jobs.len())
             .finish()
     }
 }
@@ -139,6 +147,8 @@ impl OrchestratorState {
             agent_totals: AgentTotals::default(),
             rate_limits: None,
             event_broadcasts: HashMap::new(),
+            pending_jobs: VecDeque::new(),
+            job_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -275,6 +285,7 @@ mod tests {
         assert_eq!(state.agent_totals.output_tokens, 0);
         assert_eq!(state.agent_totals.total_tokens, 0);
         assert!(state.rate_limits.is_none());
+        assert!(state.pending_jobs.is_empty());
     }
 
     // ── running_count ────────────────────────────────────────────────
@@ -636,6 +647,51 @@ mod tests {
         let debug = format!("{:?}", state);
         assert!(debug.contains("OrchestratorState"));
         assert!(debug.contains("event_broadcasts"));
+        assert!(debug.contains("pending_jobs"));
+    }
+
+    // ── pending_jobs / job_notify ────────────────────────────────────
+
+    #[test]
+    fn pending_jobs_push_pop() {
+        let mut state = OrchestratorState::new(1000, 2);
+        let assignment = WorkAssignment {
+            issue_id: "id1".to_string(),
+            issue_identifier: "TST-1".to_string(),
+            prompt: "test prompt".to_string(),
+            attempt: None,
+            workspace_path: None,
+        };
+        state.pending_jobs.push_back(assignment);
+        assert_eq!(state.pending_jobs.len(), 1);
+
+        let popped = state.pending_jobs.pop_front().unwrap();
+        assert_eq!(popped.issue_id, "id1");
+        assert!(state.pending_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn job_notify_wakes_waiter() {
+        let state = OrchestratorState::new(1000, 2);
+        let notify = Arc::clone(&state.job_notify);
+
+        // Spawn a task that waits for notification
+        let handle = tokio::spawn(async move {
+            notify.notified().await;
+            true
+        });
+
+        // Give the spawned task a moment to start waiting
+        tokio::task::yield_now().await;
+
+        // Notify
+        state.job_notify.notify_one();
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("should not timeout")
+            .expect("task should succeed");
+        assert!(result);
     }
 
     // ── helpers ──────────────────────────────────────────────────────
