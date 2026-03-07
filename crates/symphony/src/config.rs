@@ -15,6 +15,31 @@ pub struct ServiceConfig {
     pub agent: AgentConfig,
     pub coding_agent: CodingAgentConfig,
     pub server: ServerConfig,
+    pub deployment: DeploymentConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeploymentMode {
+    Local,
+    Distributed,
+}
+
+#[derive(Clone)]
+pub struct DeploymentConfig {
+    pub mode: DeploymentMode,
+    pub auth_token: Option<String>,
+}
+
+impl std::fmt::Debug for DeploymentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeploymentConfig")
+            .field("mode", &self.mode)
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +119,7 @@ impl ServiceConfig {
             agent: parse_agent_config(root),
             coding_agent: parse_coding_agent_config(root),
             server: parse_server_config(root),
+            deployment: parse_deployment_config(root),
         })
     }
 
@@ -123,6 +149,22 @@ impl ServiceConfig {
             return Err(SymphonyError::MissingRequiredConfig {
                 field: "coding_agent.command".to_string(),
             });
+        }
+
+        if self.deployment.mode == DeploymentMode::Distributed {
+            match &self.deployment.auth_token {
+                None => {
+                    return Err(SymphonyError::MissingRequiredConfig {
+                        field: "deployment.auth_token".to_string(),
+                    });
+                }
+                Some(token) if token.is_empty() => {
+                    return Err(SymphonyError::MissingRequiredConfig {
+                        field: "deployment.auth_token".to_string(),
+                    });
+                }
+                _ => {}
+            }
         }
 
         Ok(())
@@ -405,6 +447,17 @@ fn parse_coding_agent_config(root: &serde_yml::Value) -> CodingAgentConfig {
         turn_timeout_ms,
         stall_timeout_ms,
     }
+}
+
+fn parse_deployment_config(root: &serde_yml::Value) -> DeploymentConfig {
+    let mode_str =
+        get_yaml_str(root, &["deployment", "mode"]).unwrap_or_else(|| "local".to_string());
+    let mode = match mode_str.as_str() {
+        "distributed" => DeploymentMode::Distributed,
+        _ => DeploymentMode::Local,
+    };
+    let auth_token = get_yaml_str(root, &["deployment", "auth_token"]).map(|v| resolve_env_var(&v));
+    DeploymentConfig { mode, auth_token }
 }
 
 fn parse_server_config(root: &serde_yml::Value) -> ServerConfig {
@@ -1010,5 +1063,161 @@ server: {}
         let wf = parse_workflow(content).unwrap();
         let config = ServiceConfig::from_workflow(&wf).unwrap();
         assert!(config.server.port.is_none());
+    }
+
+    // --- deployment config tests ---
+
+    #[test]
+    fn test_deployment_defaults() {
+        let wf = parse_workflow("").unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.deployment.mode, DeploymentMode::Local);
+        assert!(config.deployment.auth_token.is_none());
+    }
+
+    #[test]
+    fn test_deployment_local_explicit() {
+        let content = r#"---
+deployment:
+  mode: local
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.deployment.mode, DeploymentMode::Local);
+    }
+
+    #[test]
+    fn test_deployment_distributed() {
+        let content = r#"---
+deployment:
+  mode: distributed
+  auth_token: secret
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.deployment.mode, DeploymentMode::Distributed);
+        assert_eq!(config.deployment.auth_token, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn test_deployment_distributed_env_var() {
+        unsafe {
+            env::set_var("SYMPHONY_TEST_DEPLOY_TOKEN_1", "env-token-value");
+        }
+        let content = r#"---
+deployment:
+  mode: distributed
+  auth_token: $SYMPHONY_TEST_DEPLOY_TOKEN_1
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.deployment.mode, DeploymentMode::Distributed);
+        assert_eq!(
+            config.deployment.auth_token,
+            Some("env-token-value".to_string())
+        );
+        unsafe {
+            env::remove_var("SYMPHONY_TEST_DEPLOY_TOKEN_1");
+        }
+    }
+
+    #[test]
+    fn test_deployment_unknown_mode_defaults_local() {
+        let content = r#"---
+deployment:
+  mode: hybrid
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.deployment.mode, DeploymentMode::Local);
+    }
+
+    #[test]
+    fn test_validate_distributed_missing_auth_token() {
+        let content = r#"---
+tracker:
+  kind: linear
+  api_key: some-key
+  team_key: my-proj
+deployment:
+  mode: distributed
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let err = config.validate_for_dispatch().unwrap_err();
+        assert!(
+            matches!(&err, SymphonyError::MissingRequiredConfig { field } if field == "deployment.auth_token")
+        );
+    }
+
+    #[test]
+    fn test_validate_distributed_empty_auth_token() {
+        let content = r#"---
+tracker:
+  kind: linear
+  api_key: some-key
+  team_key: my-proj
+deployment:
+  mode: distributed
+  auth_token: ""
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let err = config.validate_for_dispatch().unwrap_err();
+        assert!(
+            matches!(&err, SymphonyError::MissingRequiredConfig { field } if field == "deployment.auth_token")
+        );
+    }
+
+    #[test]
+    fn test_validate_distributed_valid() {
+        let content = r#"---
+tracker:
+  kind: linear
+  api_key: some-key
+  team_key: my-proj
+deployment:
+  mode: distributed
+  auth_token: valid-token
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let result = config.validate_for_dispatch();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_local_no_auth_token_ok() {
+        let content = r#"---
+tracker:
+  kind: linear
+  api_key: some-key
+  team_key: my-proj
+deployment:
+  mode: local
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let result = config.validate_for_dispatch();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_deployment_config_debug_redacts_auth_token() {
+        let config = DeploymentConfig {
+            mode: DeploymentMode::Distributed,
+            auth_token: Some("super-secret-token-123".to_string()),
+        };
+        let debug_output = format!("{:?}", config);
+        assert!(!debug_output.contains("super-secret-token-123"));
+        assert!(debug_output.contains("[REDACTED]"));
     }
 }
