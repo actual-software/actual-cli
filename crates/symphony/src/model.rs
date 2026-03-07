@@ -13,7 +13,7 @@ pub const MAX_LOG_ENTRIES: usize = 500;
 pub const BROADCAST_CHANNEL_CAPACITY: usize = 256;
 
 /// A timestamped log entry for per-issue event history.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub seq: u64,
     pub timestamp: DateTime<Utc>,
@@ -23,7 +23,7 @@ pub struct LogEntry {
 }
 
 /// Snapshot of token usage at a point in time.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenSnapshot {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -70,7 +70,7 @@ pub struct WorkflowDefinition {
 }
 
 /// Scheduled retry state for an issue.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryEntry {
     pub issue_id: String,
     pub identifier: String,
@@ -80,7 +80,7 @@ pub struct RetryEntry {
 }
 
 /// Aggregate token totals.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentTotals {
     pub input_tokens: u64,
     pub output_tokens: u64,
