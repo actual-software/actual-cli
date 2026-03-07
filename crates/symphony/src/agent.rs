@@ -8,6 +8,12 @@ use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::debug;
 
+/// Log agent subprocess launch.
+fn log_agent_launch(command: &str, workspace: &Path) {
+    let ws = workspace.display().to_string();
+    debug!(command = %command, workspace = %ws, "launching agent subprocess");
+}
+
 /// Agent session representing a running Claude Code subprocess.
 ///
 /// On drop, a best-effort `SIGKILL` is sent to the child process so that
@@ -46,11 +52,7 @@ impl AgentSession {
         // injection — issue titles/descriptions from Linear are user-controlled.
         let full_command = build_agent_command(&config.command);
 
-        debug!(
-            command = %config.command,
-            workspace = %workspace_path.display(),
-            "launching agent subprocess"
-        );
+        log_agent_launch(&config.command, workspace_path);
 
         let mut child = spawn_agent_process(&full_command, workspace_path)?;
 

@@ -5,6 +5,28 @@ use std::time::Duration;
 use tokio::process::Command;
 use tracing::{info, warn};
 
+// ── Logging helpers (single-line to avoid LLVM coverage region splits) ────
+
+fn log_hook(hook_name: &str, workspace: &Path) {
+    let ws = workspace.display().to_string();
+    info!(workspace = %ws, "running {hook_name} hook");
+}
+
+fn log_hook_failed(hook_name: &str, workspace: &Path, error: &dyn std::fmt::Display) {
+    let ws = workspace.display().to_string();
+    warn!(workspace = %ws, error = %error, "{hook_name} hook failed (ignored)");
+}
+
+fn log_workspace_removed(workspace: &Path) {
+    let ws = workspace.display().to_string();
+    info!(workspace = %ws, "workspace removed");
+}
+
+fn log_workspace_remove_failed(workspace: &Path, error: &dyn std::fmt::Display) {
+    let ws = workspace.display().to_string();
+    warn!(workspace = %ws, error = %error, "failed to remove workspace directory");
+}
+
 /// Result of workspace preparation.
 #[derive(Debug)]
 pub struct WorkspaceResult {
@@ -94,10 +116,7 @@ pub async fn create_workspace(
     // Run after_create hook if workspace was newly created
     if created_now {
         if let Some(ref script) = hooks.after_create {
-            info!(
-                workspace = %workspace_path.display(),
-                "running after_create hook"
-            );
+            log_hook("after_create", &workspace_path);
             run_hook("after_create", script, &workspace_path, hooks.timeout_ms).await?;
         }
     }
@@ -112,10 +131,7 @@ pub async fn create_workspace(
 /// Run the before_run hook.
 pub async fn run_before_run_hook(workspace_path: &Path, hooks: &HooksConfig) -> Result<()> {
     if let Some(ref script) = hooks.before_run {
-        info!(
-            workspace = %workspace_path.display(),
-            "running before_run hook"
-        );
+        log_hook("before_run", workspace_path);
         run_hook("before_run", script, workspace_path, hooks.timeout_ms).await?;
     }
     Ok(())
@@ -124,16 +140,9 @@ pub async fn run_before_run_hook(workspace_path: &Path, hooks: &HooksConfig) -> 
 /// Run the after_run hook (best-effort, errors logged and ignored).
 pub async fn run_after_run_hook(workspace_path: &Path, hooks: &HooksConfig) {
     if let Some(ref script) = hooks.after_run {
-        info!(
-            workspace = %workspace_path.display(),
-            "running after_run hook"
-        );
+        log_hook("after_run", workspace_path);
         if let Err(e) = run_hook("after_run", script, workspace_path, hooks.timeout_ms).await {
-            warn!(
-                workspace = %workspace_path.display(),
-                error = %e,
-                "after_run hook failed (ignored)"
-            );
+            log_hook_failed("after_run", workspace_path, &e);
         }
     }
 }
@@ -146,31 +155,17 @@ pub async fn cleanup_workspace(workspace_path: &Path, hooks: &HooksConfig) {
 
     // Run before_remove hook (best-effort)
     if let Some(ref script) = hooks.before_remove {
-        info!(
-            workspace = %workspace_path.display(),
-            "running before_remove hook"
-        );
+        log_hook("before_remove", workspace_path);
         if let Err(e) = run_hook("before_remove", script, workspace_path, hooks.timeout_ms).await {
-            warn!(
-                workspace = %workspace_path.display(),
-                error = %e,
-                "before_remove hook failed (ignored)"
-            );
+            log_hook_failed("before_remove", workspace_path, &e);
         }
     }
 
     // Remove the workspace directory
     if let Err(e) = std::fs::remove_dir_all(workspace_path) {
-        warn!(
-            workspace = %workspace_path.display(),
-            error = %e,
-            "failed to remove workspace directory"
-        );
+        log_workspace_remove_failed(workspace_path, &e);
     } else {
-        info!(
-            workspace = %workspace_path.display(),
-            "workspace removed"
-        );
+        log_workspace_removed(workspace_path);
     }
 }
 
