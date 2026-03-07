@@ -1,17 +1,20 @@
 use crate::agent::AgentSession;
-use crate::config::{state_matches, ServiceConfig};
+use crate::config::{state_matches, DeploymentMode, ServiceConfig};
 use crate::error::{Result, SymphonyError};
-use crate::model::{
-    AgentEvent, AgentTotals, Issue, LiveSession, OrchestratorState, RetryEntry, RunningEntry,
-    WorkerExitReason,
-};
+use crate::model::{Issue, OrchestratorState, RetryEntry};
 use crate::prompt::{build_continuation_prompt, render_prompt};
+use crate::protocol::{
+    AgentEvent, LiveSession, RunningEntry, RunningSessionInfo, WorkerExitReason,
+};
 use crate::tracker::LinearClient;
 use crate::workspace;
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, warn, Instrument};
+
+// Re-export protocol types for backward compatibility.
+pub use crate::protocol::{OrchestratorMessage, OrchestratorSnapshot};
 
 /// Log orchestrator start parameters.
 fn log_orchestrator_start(poll_interval_ms: u64, max_concurrent: u32) {
@@ -32,23 +35,6 @@ fn map_worker_result(result: Result<()>) -> WorkerExitReason {
         Err(SymphonyError::AgentTurnCancelled) => WorkerExitReason::Cancelled,
         Err(e) => WorkerExitReason::Failed(e.to_string()),
     }
-}
-
-/// Messages from workers back to the orchestrator.
-#[derive(Debug)]
-pub enum OrchestratorMessage {
-    WorkerExited {
-        issue_id: String,
-        reason: WorkerExitReason,
-    },
-    AgentUpdate {
-        issue_id: String,
-        event: AgentEvent,
-    },
-    RetryFired {
-        issue_id: String,
-    },
-    TriggerRefresh,
 }
 
 /// Default timeout for draining workers during shutdown (30 seconds).
@@ -371,8 +357,23 @@ impl Orchestrator {
         // Transition issue to "In Progress" in Linear (best-effort)
         self.transition_to_in_progress(&issue_id, &identifier).await;
 
-        // Spawn worker task
+        // Read config to check deployment mode
         let config = self.config.read().await.clone();
+
+        match config.deployment.mode {
+            DeploymentMode::Distributed => {
+                info!(
+                    issue_id = %issue_id,
+                    "issue queued for distributed worker (not yet implemented)"
+                );
+                // No local subprocess — a remote worker will pick this up
+                return;
+            }
+            DeploymentMode::Local => {
+                // Spawn local worker task below
+            }
+        }
+
         let prompt_template = self.prompt_template.read().await.clone();
         let http = self.http.clone();
         let msg_tx = self.msg_tx.clone();
@@ -555,8 +556,9 @@ impl Orchestrator {
         }
     }
 
-    /// Schedule a retry if the attempt count hasn't exceeded `max_retries`.
-    /// If the cap is reached, the issue is released without further retries.
+    /// Schedule a retry with exponential backoff.
+    /// When `max_retries` is `None`, retries continue indefinitely (§8.2 spec).
+    /// When `max_retries` is `Some(n)`, the issue is released after `n` attempts.
     fn maybe_schedule_retry(
         &self,
         state: &mut OrchestratorState,
@@ -566,16 +568,18 @@ impl Orchestrator {
         identifier: String,
         error: Option<String>,
     ) {
-        if attempt > config.agent.max_retries {
-            error!(
-                issue_id = %issue_id,
-                issue_identifier = %identifier,
-                attempt = attempt,
-                max_retries = config.agent.max_retries,
-                "max retries exceeded, giving up"
-            );
-            state.claimed.remove(issue_id);
-            return;
+        if let Some(max) = config.agent.max_retries {
+            if attempt > max {
+                error!(
+                    issue_id = %issue_id,
+                    issue_identifier = %identifier,
+                    attempt = attempt,
+                    max_retries = max,
+                    "max retries exceeded, giving up"
+                );
+                state.claimed.remove(issue_id);
+                return;
+            }
         }
         let delay = exponential_backoff(attempt, config.agent.max_retry_backoff_ms);
         self.schedule_retry_inner(
@@ -1259,37 +1263,12 @@ fn exponential_backoff(attempt: u32, max_backoff_ms: u64) -> u64 {
     delay.min(max_backoff_ms)
 }
 
-/// Snapshot of orchestrator state for observability.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct OrchestratorSnapshot {
-    pub running: Vec<RunningSessionInfo>,
-    pub retrying: Vec<RetryEntry>,
-    pub totals: AgentTotals,
-    pub rate_limits: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RunningSessionInfo {
-    pub issue_id: String,
-    pub issue_identifier: String,
-    pub state: String,
-    pub session_id: Option<String>,
-    pub turn_count: u32,
-    pub last_event: Option<String>,
-    pub last_message: Option<String>,
-    pub started_at: chrono::DateTime<Utc>,
-    pub last_event_at: Option<chrono::DateTime<Utc>>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, CodingAgentConfig, HooksConfig, PollingConfig, ServerConfig, TrackerConfig,
-        WorkspaceConfig,
+        AgentConfig, CodingAgentConfig, DeploymentConfig, DeploymentMode, HooksConfig,
+        PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
     };
     use crate::model::BlockerRef;
     use chrono::TimeZone;
@@ -1354,7 +1333,7 @@ mod tests {
             agent: AgentConfig {
                 max_concurrent_agents: 3,
                 max_turns: 5,
-                max_retries: 10,
+                max_retries: None,
                 max_retry_backoff_ms: 300_000,
                 max_concurrent_agents_by_state: HashMap::new(),
             },
@@ -1365,6 +1344,10 @@ mod tests {
                 stall_timeout_ms: 300_000,
             },
             server: ServerConfig { port: None },
+            deployment: DeploymentConfig {
+                mode: DeploymentMode::Local,
+                auth_token: None,
+            },
         }
     }
 
@@ -2259,7 +2242,7 @@ mod tests {
         // Configure max_retries = 2, then fail with retry_attempt = Some(2)
         // → next_attempt = 3 > max_retries = 2 → gives up
         let mut config = test_config();
-        config.agent.max_retries = 2;
+        config.agent.max_retries = Some(2);
         let orch = Orchestrator::new(config, "template".to_string());
 
         // Insert with retry_attempt = Some(2) so next_attempt = 3
@@ -2290,6 +2273,81 @@ mod tests {
         assert_eq!(state.retry_attempts.contains_key("id1"), false);
         // Claim should be released
         assert_eq!(state.claimed.contains("id1"), false);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_retries_within_cap() {
+        // max_retries = Some(5), retry_attempt = Some(2) → next_attempt = 3 <= 5 → retry allowed
+        let mut config = test_config();
+        config.agent.max_retries = Some(5);
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        {
+            let mut state = orch.state.write().await;
+            state.running.insert(
+                "id1".to_string(),
+                RunningEntry {
+                    issue: make_issue("id1", "PROJ-1", "Todo"),
+                    identifier: "PROJ-1".to_string(),
+                    session: LiveSession::default(),
+                    retry_attempt: Some(2),
+                    started_at: Utc::now(),
+                    cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
+                },
+            );
+            state.claimed.insert("id1".to_string());
+        }
+
+        orch.on_worker_exit("id1", WorkerExitReason::Failed("err".to_string()))
+            .await;
+
+        let state = orch.state.read().await;
+        // Should have a retry entry — attempt 3 is within cap of 5
+        let retry = state.retry_attempts.get("id1").unwrap();
+        assert_eq!(retry.attempt, 3); // 2 + 1
+        assert!(state.claimed.contains("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_unlimited_retries() {
+        // max_retries = None → retries should always be scheduled, even at high attempt counts
+        let config = test_config(); // max_retries is None by default
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert with retry_attempt = Some(100) so next_attempt = 101
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        {
+            let mut state = orch.state.write().await;
+            state.running.insert(
+                "id1".to_string(),
+                RunningEntry {
+                    issue: make_issue("id1", "PROJ-1", "Todo"),
+                    identifier: "PROJ-1".to_string(),
+                    session: LiveSession::default(),
+                    retry_attempt: Some(100),
+                    started_at: Utc::now(),
+                    cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
+                },
+            );
+            state.claimed.insert("id1".to_string());
+        }
+
+        orch.on_worker_exit("id1", WorkerExitReason::Failed("err".to_string()))
+            .await;
+
+        let state = orch.state.read().await;
+        // Should have a retry entry — unlimited retries never gives up
+        let retry = state.retry_attempts.get("id1").unwrap();
+        assert_eq!(retry.attempt, 101); // 100 + 1
+                                        // Claim should still be held
+        assert!(state.claimed.contains("id1"));
     }
 
     // ── on_agent_update ──────────────────────────────────────────────

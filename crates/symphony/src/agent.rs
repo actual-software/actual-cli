@@ -1,6 +1,7 @@
 use crate::config::CodingAgentConfig;
 use crate::error::{Result, SymphonyError};
-use crate::model::{AgentEvent, Issue};
+use crate::model::Issue;
+use crate::protocol::AgentEvent;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;

@@ -1,6 +1,6 @@
 use crate::config::ServiceConfig;
 use crate::model::{LogEntry, OrchestratorState, RetryEntry};
-use crate::orchestrator::OrchestratorMessage;
+use crate::protocol::OrchestratorMessage;
 use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -981,10 +981,11 @@ fn format_tokens(n: u64) -> String {
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, CodingAgentConfig, HooksConfig, PollingConfig, ServerConfig, TrackerConfig,
-        WorkspaceConfig,
+        AgentConfig, CodingAgentConfig, DeploymentConfig, DeploymentMode, HooksConfig,
+        PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
     };
-    use crate::model::{AgentTotals, LiveSession, OrchestratorState, RetryEntry, RunningEntry};
+    use crate::model::{AgentTotals, OrchestratorState, RetryEntry};
+    use crate::protocol::{LiveSession, RunningEntry};
     use axum::body::Body;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
@@ -1020,7 +1021,7 @@ mod tests {
             agent: AgentConfig {
                 max_concurrent_agents: 3,
                 max_turns: 5,
-                max_retries: 10,
+                max_retries: None,
                 max_retry_backoff_ms: 300_000,
                 max_concurrent_agents_by_state: HashMap::new(),
             },
@@ -1031,6 +1032,10 @@ mod tests {
                 stall_timeout_ms: 300_000,
             },
             server: ServerConfig { port: None },
+            deployment: DeploymentConfig {
+                mode: DeploymentMode::Local,
+                auth_token: None,
+            },
         }
     }
 
