@@ -30,8 +30,8 @@ pub fn parse_workflow(content: &str) -> Result<WorkflowDefinition> {
     let (front_matter_str, prompt_body) = split_front_matter(content);
 
     let config = if let Some(yaml_str) = front_matter_str {
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(&yaml_str).map_err(|e| SymphonyError::WorkflowParseError {
+        let value: serde_yml::Value =
+            serde_yml::from_str(&yaml_str).map_err(|e| SymphonyError::WorkflowParseError {
                 reason: format!("invalid YAML front matter: {e}"),
             })?;
 
@@ -41,12 +41,12 @@ pub fn parse_workflow(content: &str) -> Result<WorkflowDefinition> {
         }
 
         if value.is_null() {
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+            serde_yml::Value::Mapping(serde_yml::Mapping::new())
         } else {
             value
         }
     } else {
-        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        serde_yml::Value::Mapping(serde_yml::Mapping::new())
     };
 
     let prompt_template = prompt_body.trim().to_string();
@@ -143,7 +143,7 @@ You are working on issue {{ issue.identifier }}: {{ issue.title }}.
         assert!(wf.config.is_mapping());
         let mapping = wf.config.as_mapping().unwrap();
         let tracker = mapping
-            .get(serde_yaml::Value::String("tracker".to_string()))
+            .get(serde_yml::Value::String("tracker".to_string()))
             .unwrap();
         assert!(tracker.is_mapping());
         assert!(wf.prompt_template.contains("{{ issue.identifier }}"));
@@ -206,7 +206,7 @@ You are working on issue {{ issue.identifier }}: {{ issue.title }}.
         let wf = parse_workflow(content).unwrap();
         assert!(wf.config.is_mapping());
         let mapping = wf.config.as_mapping().unwrap();
-        assert!(mapping.contains_key(&serde_yaml::Value::String("key".to_string())));
+        assert!(mapping.contains_key(&serde_yml::Value::String("key".to_string())));
         assert_eq!(wf.prompt_template, "Body text");
     }
 
