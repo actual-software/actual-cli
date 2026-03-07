@@ -6276,6 +6276,102 @@ mod tests {
 
     #[tokio::test]
     #[traced_test]
+    async fn test_reconcile_pr_conflicts_non_running_in_review_clean_pr() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Linear: fetch "In Review" issues — returns one issue not currently running
+        let linear_fetch_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("In Review".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "issues": {
+                            "nodes": [{
+                                "id": "issue-clean",
+                                "identifier": "TST-CLEAN",
+                                "title": "Clean non-running issue",
+                                "state": { "name": "In Review" },
+                                "priority": null,
+                                "branchName": null,
+                                "url": "https://linear.app/test/issue/TST-CLEAN",
+                                "labels": { "nodes": [] },
+                                "relations": { "nodes": [] },
+                                "createdAt": "2024-01-01T00:00:00Z",
+                                "updatedAt": "2024-01-01T00:00:00Z"
+                            }],
+                            "pageInfo": { "hasNextPage": false }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // GitHub: find open PR for TST-CLEAN
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/tst-clean".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "open".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 100,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // GitHub: PR details — clean (mergeable = true)
+        let gh_details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/100")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 100,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+        });
+        let orch = Orchestrator::new(config, "Test prompt".to_string());
+
+        // No running issues — the In Review issue comes from the tracker fetch
+        orch.reconcile_pr_conflicts().await;
+
+        // Should NOT log conflict message since PR is clean
+        assert!(!logs_contain("In Review issue has merge conflicts"));
+        linear_fetch_mock.assert_async().await;
+        gh_find_mock.assert_async().await;
+        gh_details_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[traced_test]
     async fn test_reconcile_pr_conflicts_transition_failure_handled() {
         let mut server = mockito::Server::new_async().await;
 
