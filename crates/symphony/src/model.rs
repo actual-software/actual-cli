@@ -196,7 +196,7 @@ pub enum AgentEvent {
 }
 
 /// Worker exit reason reported back to orchestrator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum WorkerExitReason {
     Normal,
     Failed(String),
