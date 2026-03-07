@@ -1,5 +1,5 @@
 use crate::agent::AgentSession;
-use crate::config::{state_matches, ServiceConfig};
+use crate::config::{state_matches, DeploymentMode, ServiceConfig};
 use crate::error::{Result, SymphonyError};
 use crate::model::{
     AgentEvent, AgentTotals, Issue, LiveSession, OrchestratorState, RetryEntry, RunningEntry,
@@ -368,44 +368,57 @@ impl Orchestrator {
             state.retry_attempts.remove(&issue_id);
         }
 
-        // Spawn worker task
+        // Read config to check deployment mode before spawning
         let config = self.config.read().await.clone();
-        let prompt_template = self.prompt_template.read().await.clone();
-        let http = self.http.clone();
-        let msg_tx = self.msg_tx.clone();
-        let worker_handles = Arc::clone(&self.worker_handles);
-        let worker_issue_id = issue_id.clone();
 
-        let handle = tokio::spawn(async move {
-            let result = run_worker(
-                &config,
-                &prompt_template,
-                &issue,
-                attempt,
-                http,
-                msg_tx.clone(),
-                cancel_rx,
-            )
-            .await;
+        // Branch on deployment mode
+        match config.deployment.mode {
+            DeploymentMode::Distributed => {
+                info!(
+                    issue_id = %issue_id,
+                    "issue queued for distributed worker (not yet implemented)"
+                );
+            }
+            DeploymentMode::Local => {
+                // Spawn worker task (existing behavior)
+                let prompt_template = self.prompt_template.read().await.clone();
+                let http = self.http.clone();
+                let msg_tx = self.msg_tx.clone();
+                let worker_handles = Arc::clone(&self.worker_handles);
+                let worker_issue_id = issue_id.clone();
 
-            let reason = map_worker_result(result);
+                let handle = tokio::spawn(async move {
+                    let result = run_worker(
+                        &config,
+                        &prompt_template,
+                        &issue,
+                        attempt,
+                        http,
+                        msg_tx.clone(),
+                        cancel_rx,
+                    )
+                    .await;
 
-            let _ = msg_tx
-                .send(OrchestratorMessage::WorkerExited {
-                    issue_id: issue.id.clone(),
-                    reason,
-                })
-                .await;
+                    let reason = map_worker_result(result);
 
-            // Remove own handle from the map (best-effort cleanup)
-            worker_handles.write().await.remove(&issue.id);
-        });
+                    let _ = msg_tx
+                        .send(OrchestratorMessage::WorkerExited {
+                            issue_id: issue.id.clone(),
+                            reason,
+                        })
+                        .await;
 
-        // Store handle for shutdown draining
-        self.worker_handles
-            .write()
-            .await
-            .insert(worker_issue_id, handle);
+                    // Remove own handle from the map (best-effort cleanup)
+                    worker_handles.write().await.remove(&issue.id);
+                });
+
+                // Store handle for shutdown draining
+                self.worker_handles
+                    .write()
+                    .await
+                    .insert(worker_issue_id, handle);
+            }
+        }
     }
 
     async fn handle_message(&self, msg: OrchestratorMessage) {
@@ -1232,8 +1245,8 @@ pub struct RunningSessionInfo {
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, CodingAgentConfig, HooksConfig, PollingConfig, ServerConfig, TrackerConfig,
-        WorkspaceConfig,
+        AgentConfig, CodingAgentConfig, DeploymentConfig, DeploymentMode, HooksConfig,
+        PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
     };
     use crate::model::BlockerRef;
     use chrono::TimeZone;
@@ -1309,6 +1322,10 @@ mod tests {
                 stall_timeout_ms: 300_000,
             },
             server: ServerConfig { port: None },
+            deployment: DeploymentConfig {
+                mode: DeploymentMode::Local,
+                auth_token: None,
+            },
         }
     }
 
@@ -3555,6 +3572,37 @@ mod tests {
         let state = orch.state.read().await;
         assert!(!state.retry_attempts.contains_key("id1"));
         assert!(state.running.contains_key("id1"));
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_dispatch_issue_distributed_mode() {
+        let mut config = test_config();
+        config.deployment = DeploymentConfig {
+            mode: DeploymentMode::Distributed,
+            auth_token: Some("test-token".to_string()),
+        };
+        let orch = Orchestrator::new(config, "Test prompt".to_string());
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+
+        orch.dispatch_issue(issue, None).await;
+
+        // The running entry should exist (it was added before the mode check)
+        let state = orch.state.read().await;
+        assert!(state.running.contains_key("id1"));
+        assert!(state.claimed.contains("id1"));
+
+        // No worker handle should be stored (distributed mode skips spawn)
+        let handles = orch.worker_handles.read().await;
+        assert!(
+            !handles.contains_key("id1"),
+            "distributed mode should not spawn a worker handle"
+        );
+
+        // Verify the log message was emitted
+        assert!(logs_contain(
+            "issue queued for distributed worker (not yet implemented)"
+        ));
     }
 
     // ── reconcile (integration) ──────────────────────────────────────
