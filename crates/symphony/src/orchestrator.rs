@@ -654,6 +654,7 @@ impl Orchestrator {
             Err(e) => {
                 warn!(
                     issue_id = %issue_id,
+                    issue_identifier = %entry.identifier,
                     error = %e,
                     "retry poll failed, rescheduling"
                 );
@@ -959,7 +960,8 @@ impl Orchestrator {
                         config.hooks.clone(),
                     )
                 };
-                workspace::cleanup_workspace(&workspace_path, &hooks).await;
+                workspace::cleanup_workspace(&workspace_path, &hooks, issue_id, &entry.identifier)
+                    .await;
             }
         }
     }
@@ -988,7 +990,13 @@ impl Orchestrator {
             let workspace_path = config.workspace.root.join(&workspace_key);
             if workspace_path.exists() {
                 log_terminal_cleanup(&issue.identifier, &workspace_path);
-                workspace::cleanup_workspace(&workspace_path, &config.hooks).await;
+                workspace::cleanup_workspace(
+                    &workspace_path,
+                    &config.hooks,
+                    &issue.id,
+                    &issue.identifier,
+                )
+                .await;
             }
         }
     }
@@ -1056,12 +1064,22 @@ async fn run_worker(
     let issue_id = issue.id.clone();
 
     // Phase 1: Prepare workspace
-    let workspace_result =
-        workspace::create_workspace(&config.workspace.root, &issue.identifier, &config.hooks)
-            .await?;
+    let workspace_result = workspace::create_workspace(
+        &config.workspace.root,
+        &issue.identifier,
+        &config.hooks,
+        &issue.id,
+    )
+    .await?;
 
     // Phase 2: Run before_run hook
-    workspace::run_before_run_hook(&workspace_result.path, &config.hooks).await?;
+    workspace::run_before_run_hook(
+        &workspace_result.path,
+        &config.hooks,
+        &issue.id,
+        &issue.identifier,
+    )
+    .await?;
 
     // Phase 3: Build env vars for agent subprocess
     let env_vars = build_agent_env_vars(config);
@@ -1073,7 +1091,13 @@ async fn run_worker(
     loop {
         // Check for cancellation
         if cancel_rx.try_recv().is_ok() {
-            workspace::run_after_run_hook(&workspace_result.path, &config.hooks).await;
+            workspace::run_after_run_hook(
+                &workspace_result.path,
+                &config.hooks,
+                &issue.id,
+                &issue.identifier,
+            )
+            .await;
             return Err(SymphonyError::AgentTurnCancelled);
         }
 
@@ -1118,6 +1142,7 @@ async fn run_worker(
             Ok(_) => {
                 info!(
                     issue_id = %issue_id,
+                    issue_identifier = %issue.identifier,
                     turn = turn_number,
                     "agent turn completed successfully"
                 );
@@ -1131,6 +1156,7 @@ async fn run_worker(
                             {
                                 info!(
                                     issue_id = %issue_id,
+                                    issue_identifier = %issue.identifier,
                                     state = %refreshed_issue.state,
                                     "issue no longer active after turn"
                                 );
@@ -1143,6 +1169,7 @@ async fn run_worker(
                     Err(e) => {
                         warn!(
                             issue_id = %issue_id,
+                            issue_identifier = %issue.identifier,
                             error = %e,
                             "failed to refresh issue state after turn"
                         );
@@ -1153,6 +1180,7 @@ async fn run_worker(
                 if turn_number >= max_turns {
                     info!(
                         issue_id = %issue_id,
+                        issue_identifier = %issue.identifier,
                         turns = turn_number,
                         max_turns = max_turns,
                         "reached max turns"
@@ -1163,13 +1191,25 @@ async fn run_worker(
                 turn_number += 1;
             }
             Err(_) => {
-                workspace::run_after_run_hook(&workspace_result.path, &config.hooks).await;
+                workspace::run_after_run_hook(
+                    &workspace_result.path,
+                    &config.hooks,
+                    &issue.id,
+                    &issue.identifier,
+                )
+                .await;
                 return result.map(|_| ());
             }
         }
     }
 
-    workspace::run_after_run_hook(&workspace_result.path, &config.hooks).await;
+    workspace::run_after_run_hook(
+        &workspace_result.path,
+        &config.hooks,
+        &issue.id,
+        &issue.identifier,
+    )
+    .await;
     Ok(())
 }
 

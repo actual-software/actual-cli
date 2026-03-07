@@ -10,9 +10,9 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 /// Log agent subprocess launch.
-fn log_agent_launch(command: &str, workspace: &Path) {
+fn log_agent_launch(command: &str, workspace: &Path, issue_id: &str, issue_identifier: &str) {
     let ws = workspace.display().to_string();
-    debug!(command = %command, workspace = %ws, "launching agent subprocess");
+    debug!(issue_id = %issue_id, issue_identifier = %issue_identifier, command = %command, workspace = %ws, "launching agent subprocess");
 }
 
 /// Agent session representing a running Claude Code subprocess.
@@ -57,7 +57,12 @@ impl AgentSession {
         // injection — issue titles/descriptions from Linear are user-controlled.
         let full_command = build_agent_command(&config.command);
 
-        log_agent_launch(&config.command, workspace_path);
+        log_agent_launch(
+            &config.command,
+            workspace_path,
+            &issue.id,
+            &issue.identifier,
+        );
 
         let mut child = spawn_agent_process(&full_command, workspace_path, env_vars)?;
 
