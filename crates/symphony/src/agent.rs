@@ -281,6 +281,8 @@ fn parse_agent_message(json: &serde_json::Value) -> Option<AgentEvent> {
                 None
             }
         }
+        // §11.2: Populate rate limits from Claude CLI rate_limit_event messages
+        "rate_limit_event" => Some(AgentEvent::RateLimitUpdate { data: json.clone() }),
         _ => {
             // Check for usage/token events in any message
             if let Some(usage) = json.get("usage").or_else(|| json.get("total_token_usage")) {
@@ -531,6 +533,21 @@ mod tests {
         );
     }
 
+    // §11.2: rate_limit_event parsing
+    #[test]
+    fn test_parse_rate_limit_event() {
+        let json = serde_json::json!({
+            "type": "rate_limit_event",
+            "requests_remaining": 50,
+            "tokens_remaining": 100000,
+            "reset_at": "2025-01-01T00:00:30Z"
+        });
+        let event = parse_agent_message(&json).unwrap();
+        assert!(
+            matches!(&event, AgentEvent::RateLimitUpdate { data } if data["requests_remaining"] == 50)
+        );
+    }
+
     #[test]
     fn test_parse_empty_type_no_usage() {
         let json = serde_json::json!({
@@ -581,7 +598,6 @@ mod tests {
             command: command.to_string(),
             permission_mode: "bypassPermissions".to_string(),
             turn_timeout_ms: 60_000,
-            read_timeout_ms: 5_000,
             stall_timeout_ms: 300_000,
         }
     }

@@ -30,6 +30,9 @@ pub enum OrchestratorMessage {
     TriggerRefresh,
 }
 
+/// Default timeout for draining workers during shutdown (30 seconds).
+const SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 30;
+
 /// The orchestrator owns the poll tick, state, and dispatch logic.
 pub struct Orchestrator {
     state: Arc<RwLock<OrchestratorState>>,
@@ -38,6 +41,8 @@ pub struct Orchestrator {
     http: reqwest::Client,
     msg_tx: mpsc::Sender<OrchestratorMessage>,
     msg_rx: mpsc::Receiver<OrchestratorMessage>,
+    /// JoinHandles for spawned worker tasks, keyed by issue ID.
+    worker_handles: Arc<RwLock<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 impl Orchestrator {
@@ -56,6 +61,7 @@ impl Orchestrator {
             http: reqwest::Client::new(),
             msg_tx,
             msg_rx,
+            worker_handles: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -325,8 +331,10 @@ impl Orchestrator {
         let prompt_template = self.prompt_template.read().await.clone();
         let http = self.http.clone();
         let msg_tx = self.msg_tx.clone();
+        let worker_handles = Arc::clone(&self.worker_handles);
+        let worker_issue_id = issue_id.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let result = run_worker(
                 &config,
                 &prompt_template,
@@ -341,6 +349,7 @@ impl Orchestrator {
             let reason = match result {
                 Ok(()) => WorkerExitReason::Normal,
                 Err(SymphonyError::AgentTurnTimeout) => WorkerExitReason::TimedOut,
+                Err(SymphonyError::AgentTurnCancelled) => WorkerExitReason::Cancelled,
                 Err(e) => WorkerExitReason::Failed(e.to_string()),
             };
 
@@ -350,7 +359,16 @@ impl Orchestrator {
                     reason,
                 })
                 .await;
+
+            // Remove own handle from the map (best-effort cleanup)
+            worker_handles.write().await.remove(&issue.id);
         });
+
+        // Store handle for shutdown draining
+        self.worker_handles
+            .write()
+            .await
+            .insert(worker_issue_id, handle);
     }
 
     async fn handle_message(&self, msg: OrchestratorMessage) {
@@ -393,10 +411,19 @@ impl Orchestrator {
                         "worker completed normally"
                     );
                     state.mark_completed(issue_id.to_string());
-                    state.claimed.remove(issue_id);
-                    // No retry scheduled — the run_worker turn loop already
-                    // handles multi-turn continuation.  The periodic poll tick
-                    // will re-dispatch the issue if it's still active.
+                    // §8.1: Schedule a short continuation retry (1000ms)
+                    // instead of releasing the claim and waiting for the
+                    // next poll tick (~30s). The retry handler will re-check
+                    // if the issue is still active and re-dispatch quickly
+                    // or release the claim if the issue went terminal.
+                    self.schedule_retry_inner(
+                        &mut state,
+                        issue_id.to_string(),
+                        0, // continuation, not a failure retry
+                        identifier,
+                        None,
+                        1_000, // 1 second
+                    );
                 }
                 WorkerExitReason::Failed(err) => {
                     warn!(
@@ -696,6 +723,10 @@ impl Orchestrator {
                         entry.session.last_message = Some(msg.clone());
                     }
                 }
+                AgentEvent::RateLimitUpdate { .. } => {
+                    entry.session.last_event = Some("rate_limit_event".to_string());
+                    entry.session.last_event_at = Some(now);
+                }
             }
         }
 
@@ -704,6 +735,11 @@ impl Orchestrator {
             state.agent_totals.input_tokens += di;
             state.agent_totals.output_tokens += do_;
             state.agent_totals.total_tokens += dt;
+        }
+
+        // §11.2: Store rate limit data in state
+        if let AgentEvent::RateLimitUpdate { data } = &event {
+            state.rate_limits = Some(data.clone());
         }
     }
 
@@ -822,6 +858,11 @@ impl Orchestrator {
             state.agent_totals.seconds_running += elapsed;
             drop(state);
 
+            // Abort and remove the worker handle
+            if let Some(handle) = self.worker_handles.write().await.remove(issue_id) {
+                handle.abort();
+            }
+
             if cleanup_workspace {
                 let config = self.config.read().await;
                 let workspace_key = crate::workspace::sanitize_workspace_key(&entry.identifier);
@@ -875,6 +916,27 @@ impl Orchestrator {
         }
         state.claimed.clear();
         state.retry_attempts.clear();
+        drop(state);
+
+        // §12.2: Drain worker tasks — wait for spawned workers to exit
+        let handles: Vec<tokio::task::JoinHandle<()>> = {
+            let mut map = self.worker_handles.write().await;
+            map.drain().map(|(_, h)| h).collect()
+        };
+
+        if !handles.is_empty() {
+            info!(count = handles.len(), "draining worker tasks");
+            // Abort all worker tasks first, then drain to wait for cleanup
+            for handle in &handles {
+                handle.abort();
+            }
+            let drain_timeout = std::time::Duration::from_secs(SHUTDOWN_DRAIN_TIMEOUT_SECS);
+            let drain_result =
+                tokio::time::timeout(drain_timeout, drain_worker_handles(handles)).await;
+            if drain_result.is_err() {
+                warn!("worker drain timed out after {SHUTDOWN_DRAIN_TIMEOUT_SECS}s");
+            }
+        }
     }
 }
 
@@ -1016,6 +1078,17 @@ fn sort_for_dispatch(mut issues: Vec<Issue>) -> Vec<Issue> {
     issues
 }
 
+/// Wait for all worker handles to complete.
+///
+/// Extracted as a named async function (rather than an inline block) to keep
+/// the shutdown method readable and to allow LLVM coverage instrumentation
+/// to track this code path independently.
+async fn drain_worker_handles(handles: Vec<tokio::task::JoinHandle<()>>) {
+    for handle in handles {
+        let _ = handle.await;
+    }
+}
+
 /// Compute exponential backoff delay.
 /// Formula: min(10000 * 2^(attempt - 1), max_backoff_ms)
 fn exponential_backoff(attempt: u32, max_backoff_ms: u64) -> u64 {
@@ -1127,7 +1200,6 @@ mod tests {
                 command: "echo test".to_string(),
                 permission_mode: "bypassPermissions".to_string(),
                 turn_timeout_ms: 3_600_000,
-                read_timeout_ms: 5_000,
                 stall_timeout_ms: 300_000,
             },
         }
@@ -1860,10 +1932,13 @@ mod tests {
         let state = orch.state.read().await;
         assert!(!state.running.contains_key("id1"));
         assert!(state.is_completed("id1"));
-        // Claim is released so the poll tick can re-dispatch if still active
-        assert!(!state.claimed.contains("id1"));
-        // No retry scheduled — the run_worker turn loop handles continuation
-        assert!(!state.retry_attempts.contains_key("id1"));
+        // §8.1: Normal exit schedules a short continuation retry (1000ms)
+        // so the issue is re-checked quickly instead of waiting for the
+        // next poll tick (~30s).
+        assert!(state.retry_attempts.contains_key("id1"));
+        let retry = state.retry_attempts.get("id1").unwrap();
+        assert_eq!(retry.attempt, 0); // continuation, not failure
+        assert!(retry.error.is_none());
     }
 
     #[traced_test]
@@ -2246,6 +2321,40 @@ mod tests {
         assert_eq!(entry.session.last_event, Some("thinking".to_string()));
         // last_message not updated when message is None
         assert_eq!(entry.session.last_message, Some("previous".to_string()));
+    }
+
+    // §11.2: rate limit update stored in state
+    #[tokio::test]
+    async fn test_on_agent_update_rate_limit() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        let rate_data = serde_json::json!({
+            "type": "rate_limit_event",
+            "requests_remaining": 42,
+            "tokens_remaining": 99999
+        });
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::RateLimitUpdate {
+                data: rate_data.clone(),
+            },
+        )
+        .await;
+
+        let state = orch.state.read().await;
+        assert!(state.rate_limits.is_some());
+        assert_eq!(
+            state.rate_limits.as_ref().unwrap()["requests_remaining"],
+            42
+        );
+        let entry = state.running.get("id1").unwrap();
+        assert_eq!(
+            entry.session.last_event,
+            Some("rate_limit_event".to_string())
+        );
+        assert!(entry.session.last_event_at.is_some());
     }
 
     #[tokio::test]
@@ -4038,7 +4147,7 @@ mod tests {
             .create_async()
             .await;
 
-        // Candidates: 3 issues
+        // Candidates: 3 issues (first poll only)
         server
             .mock("POST", "/")
             .with_status(200)
@@ -4048,11 +4157,15 @@ mod tests {
                 ("id2", "PROJ-2", "In Progress"),
                 ("id3", "PROJ-3", "Todo"),
             ]))
-            .expect_at_least(1)
+            .expect(1)
             .create_async()
             .await;
 
-        // State refreshes: all Done (terminal) so workers stop
+        // State refreshes: all Done (terminal) so workers stop.
+        // Also serves as the response for continuation retry
+        // fetch_candidate_issues calls — returning Done issues
+        // means they won't be in active_states, so the retry
+        // handler releases the claim.
         server
             .mock("POST", "/")
             .with_status(200)
@@ -4062,6 +4175,17 @@ mod tests {
                 ("id2", "PROJ-2", "Done"),
                 ("id3", "PROJ-3", "Done"),
             ]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        // Fallback: empty candidates for any subsequent requests
+        // (continuation retries, reconciliation, etc.)
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
             .expect_at_least(0)
             .create_async()
             .await;
@@ -4079,22 +4203,21 @@ mod tests {
         let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
         let monitor = tokio::spawn(async move {
-            let mut all_completed = false;
-            while !all_completed {
+            let mut all_done = false;
+            while !all_done {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let state = state_ref.read().await;
-                // All 3 issues should be completed
-                all_completed = state.is_completed("id1")
+                // All 3 issues should be completed AND claims released
+                // (§8.1: claims are released after the continuation retry
+                // fires and finds the issue is no longer active)
+                all_done = state.is_completed("id1")
                     && state.is_completed("id2")
-                    && state.is_completed("id3");
+                    && state.is_completed("id3")
+                    && !state.claimed.contains("id1")
+                    && !state.claimed.contains("id2")
+                    && !state.claimed.contains("id3");
                 drop(state);
             }
-            // Verify no claims are held (bug fix #4)
-            let state = state_ref.read().await;
-            assert!(!state.claimed.contains("id1"));
-            assert!(!state.claimed.contains("id2"));
-            assert!(!state.claimed.contains("id3"));
-            drop(state);
             let _ = shutdown_tx.send(true);
         });
 
@@ -4519,5 +4642,68 @@ mod tests {
 
         // Verify stall was actually detected via tracing output
         assert!(logs_contain("session stalled"));
+    }
+
+    // ── drain_worker_handles ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_drain_worker_handles_empty() {
+        // Should complete immediately with no handles
+        drain_worker_handles(vec![]).await;
+    }
+
+    #[tokio::test]
+    async fn test_drain_worker_handles_waits_for_completion() {
+        let h1 =
+            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_millis(10)).await });
+        let h2 =
+            tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_millis(10)).await });
+        drain_worker_handles(vec![h1, h2]).await;
+        // If we got here, both handles completed
+    }
+
+    #[tokio::test]
+    async fn test_drain_worker_handles_panicked_task() {
+        let h = tokio::spawn(async { panic!("test panic") });
+        // Should not panic — JoinError from panicked task is ignored
+        drain_worker_handles(vec![h]).await;
+    }
+
+    // ── shutdown drains workers ──────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_shutdown_drains_worker_handles() {
+        let orch = test_orchestrator();
+        let _c1 = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Add a worker handle that completes after a short delay
+        {
+            let handle = tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            });
+            orch.worker_handles
+                .write()
+                .await
+                .insert("id1".to_string(), handle);
+        }
+
+        orch.shutdown().await;
+
+        let state = orch.state.read().await;
+        assert!(state.running.is_empty());
+        assert!(state.claimed.is_empty());
+        drop(state);
+
+        // Worker handles should be drained
+        let handles = orch.worker_handles.read().await;
+        assert!(handles.is_empty());
+    }
+
+    // ── SHUTDOWN_DRAIN_TIMEOUT_SECS constant ─────────────────────────
+
+    #[test]
+    fn test_shutdown_drain_timeout_constant() {
+        assert_eq!(SHUTDOWN_DRAIN_TIMEOUT_SECS, 30);
     }
 }
