@@ -36,7 +36,7 @@ pub struct BlockerRef {
 #[derive(Debug, Clone)]
 pub struct WorkflowDefinition {
     /// YAML front matter root object.
-    pub config: serde_yaml::Value,
+    pub config: serde_yml::Value,
     /// Markdown body after front matter, trimmed.
     pub prompt_template: String,
 }

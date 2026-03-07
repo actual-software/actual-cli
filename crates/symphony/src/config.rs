@@ -123,31 +123,31 @@ impl ServiceConfig {
 
 // --- Internal parsing helpers ---
 
-fn get_yaml_str(root: &serde_yaml::Value, keys: &[&str]) -> Option<String> {
+fn get_yaml_str(root: &serde_yml::Value, keys: &[&str]) -> Option<String> {
     let mut current = root;
     for key in keys {
         current = current
             .as_mapping()?
-            .get(serde_yaml::Value::String((*key).to_string()))?;
+            .get(serde_yml::Value::String((*key).to_string()))?;
     }
     match current {
-        serde_yaml::Value::String(s) => Some(s.clone()),
-        serde_yaml::Value::Number(n) => Some(n.to_string()),
-        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        serde_yml::Value::String(s) => Some(s.clone()),
+        serde_yml::Value::Number(n) => Some(n.to_string()),
+        serde_yml::Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
 }
 
-fn get_yaml_int(root: &serde_yaml::Value, keys: &[&str]) -> Option<i64> {
+fn get_yaml_int(root: &serde_yml::Value, keys: &[&str]) -> Option<i64> {
     let mut current = root;
     for key in keys {
         current = current
             .as_mapping()?
-            .get(serde_yaml::Value::String((*key).to_string()))?;
+            .get(serde_yml::Value::String((*key).to_string()))?;
     }
     match current {
-        serde_yaml::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
-        serde_yaml::Value::String(s) => s.parse::<i64>().ok(),
+        serde_yml::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        serde_yml::Value::String(s) => s.parse::<i64>().ok(),
         _ => None,
     }
 }
@@ -176,23 +176,23 @@ fn expand_path(value: &str) -> PathBuf {
 }
 
 /// Parse a list that can be either a YAML list of strings or a comma-separated string.
-fn parse_string_list(root: &serde_yaml::Value, keys: &[&str]) -> Option<Vec<String>> {
+fn parse_string_list(root: &serde_yml::Value, keys: &[&str]) -> Option<Vec<String>> {
     let mut current = root;
     for key in keys {
         current = current
             .as_mapping()?
-            .get(serde_yaml::Value::String((*key).to_string()))?;
+            .get(serde_yml::Value::String((*key).to_string()))?;
     }
 
     match current {
-        serde_yaml::Value::Sequence(seq) => {
+        serde_yml::Value::Sequence(seq) => {
             let items: Vec<String> = seq
                 .iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect();
             Some(items)
         }
-        serde_yaml::Value::String(s) => {
+        serde_yml::Value::String(s) => {
             let items: Vec<String> = s.split(',').map(|s| s.trim().to_string()).collect();
             Some(items)
         }
@@ -200,7 +200,7 @@ fn parse_string_list(root: &serde_yaml::Value, keys: &[&str]) -> Option<Vec<Stri
     }
 }
 
-fn parse_tracker_config(root: &serde_yaml::Value) -> Result<TrackerConfig> {
+fn parse_tracker_config(root: &serde_yml::Value) -> Result<TrackerConfig> {
     let kind = get_yaml_str(root, &["tracker", "kind"]).unwrap_or_default();
 
     let default_endpoint = if kind == "linear" {
@@ -245,7 +245,7 @@ fn parse_tracker_config(root: &serde_yaml::Value) -> Result<TrackerConfig> {
     })
 }
 
-fn parse_polling_config(root: &serde_yaml::Value) -> PollingConfig {
+fn parse_polling_config(root: &serde_yml::Value) -> PollingConfig {
     let interval_ms = get_yaml_int(root, &["polling", "interval_ms"])
         .map(|v| v.max(0) as u64)
         .unwrap_or(30_000);
@@ -253,7 +253,7 @@ fn parse_polling_config(root: &serde_yaml::Value) -> PollingConfig {
     PollingConfig { interval_ms }
 }
 
-fn parse_workspace_config(root: &serde_yaml::Value) -> WorkspaceConfig {
+fn parse_workspace_config(root: &serde_yml::Value) -> WorkspaceConfig {
     let root_path = get_yaml_str(root, &["workspace", "root"])
         .map(|s| expand_path(&s))
         .unwrap_or_else(|| {
@@ -264,7 +264,7 @@ fn parse_workspace_config(root: &serde_yaml::Value) -> WorkspaceConfig {
     WorkspaceConfig { root: root_path }
 }
 
-fn parse_hooks_config(root: &serde_yaml::Value) -> HooksConfig {
+fn parse_hooks_config(root: &serde_yml::Value) -> HooksConfig {
     let after_create = get_yaml_str(root, &["hooks", "after_create"]);
     let before_run = get_yaml_str(root, &["hooks", "before_run"]);
     let after_run = get_yaml_str(root, &["hooks", "after_run"]);
@@ -283,7 +283,7 @@ fn parse_hooks_config(root: &serde_yaml::Value) -> HooksConfig {
     }
 }
 
-fn parse_agent_config(root: &serde_yaml::Value) -> AgentConfig {
+fn parse_agent_config(root: &serde_yml::Value) -> AgentConfig {
     let max_concurrent_agents = get_yaml_int(root, &["agent", "max_concurrent_agents"])
         .map(|v| v.max(1) as u32)
         .unwrap_or(10);
@@ -329,20 +329,17 @@ fn parse_agent_config(root: &serde_yaml::Value) -> AgentConfig {
     }
 }
 
-fn get_yaml_mapping<'a>(
-    root: &'a serde_yaml::Value,
-    keys: &[&str],
-) -> Option<&'a serde_yaml::Value> {
+fn get_yaml_mapping<'a>(root: &'a serde_yml::Value, keys: &[&str]) -> Option<&'a serde_yml::Value> {
     let mut current = root;
     for key in keys {
         current = current
             .as_mapping()?
-            .get(serde_yaml::Value::String((*key).to_string()))?;
+            .get(serde_yml::Value::String((*key).to_string()))?;
     }
     Some(current)
 }
 
-fn parse_codex_config(root: &serde_yaml::Value) -> CodingAgentConfig {
+fn parse_codex_config(root: &serde_yml::Value) -> CodingAgentConfig {
     let command = get_yaml_str(root, &["codex", "command"])
         .unwrap_or_else(|| "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 20".to_string());
 
@@ -604,14 +601,14 @@ codex:
 
     #[test]
     fn test_get_yaml_str_bool_value() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("flag: true").unwrap();
+        let yaml: serde_yml::Value = serde_yml::from_str("flag: true").unwrap();
         let result = get_yaml_str(&yaml, &["flag"]);
         assert_eq!(result, Some("true".to_string()));
     }
 
     #[test]
     fn test_get_yaml_str_number_value() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("count: 42").unwrap();
+        let yaml: serde_yml::Value = serde_yml::from_str("count: 42").unwrap();
         let result = get_yaml_str(&yaml, &["count"]);
         assert_eq!(result, Some("42".to_string()));
     }
@@ -620,14 +617,14 @@ codex:
 
     #[test]
     fn test_get_yaml_int_string_encoded() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("val: \"100\"").unwrap();
+        let yaml: serde_yml::Value = serde_yml::from_str("val: \"100\"").unwrap();
         let result = get_yaml_int(&yaml, &["val"]);
         assert_eq!(result, Some(100));
     }
 
     #[test]
     fn test_get_yaml_int_float_value() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("val: 3.7").unwrap();
+        let yaml: serde_yml::Value = serde_yml::from_str("val: 3.7").unwrap();
         let result = get_yaml_int(&yaml, &["val"]);
         assert_eq!(result, Some(3));
     }
@@ -636,7 +633,7 @@ codex:
 
     #[test]
     fn test_parse_string_list_non_string_non_sequence() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("items: 42").unwrap();
+        let yaml: serde_yml::Value = serde_yml::from_str("items: 42").unwrap();
         let result = parse_string_list(&yaml, &["items"]);
         assert!(result.is_none());
     }
@@ -758,7 +755,7 @@ tracker:
 
     #[test]
     fn test_get_yaml_str_sequence_value() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("items:\n  - a\n  - b").unwrap();
+        let yaml: serde_yml::Value = serde_yml::from_str("items:\n  - a\n  - b").unwrap();
         let result = get_yaml_str(&yaml, &["items"]);
         assert!(result.is_none());
     }
@@ -767,7 +764,7 @@ tracker:
 
     #[test]
     fn test_get_yaml_int_bool_value() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("flag: true").unwrap();
+        let yaml: serde_yml::Value = serde_yml::from_str("flag: true").unwrap();
         let result = get_yaml_int(&yaml, &["flag"]);
         assert!(result.is_none());
     }
