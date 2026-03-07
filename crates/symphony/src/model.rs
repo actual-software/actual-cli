@@ -304,6 +304,20 @@ fn extract_log_fields(event: &AgentEvent) -> (String, Option<String>, Option<Tok
     }
 }
 
+/// Check whether a rate-limit event should be logged to the event stream.
+///
+/// Returns `true` only when the event is interesting: the status is NOT
+/// `"allowed"` (i.e. the agent is being rate-limited or throttled).
+/// Routine "allowed" pings are filtered out to reduce dashboard noise.
+pub fn should_log_rate_limit(data: &serde_json::Value) -> bool {
+    let status = data
+        .get("rate_limit_info")
+        .and_then(|info| info.get("status"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    status != "allowed"
+}
+
 /// Append a log entry to the event log with bounded eviction.
 pub fn append_log_entry(event_log: &mut VecDeque<LogEntry>, entry: LogEntry) {
     event_log.push_back(entry);
@@ -586,6 +600,57 @@ mod tests {
         assert_eq!(entry.event_type, "rate_limit_event");
         assert!(entry.message.unwrap().contains("42"));
         assert!(entry.tokens.is_none());
+    }
+
+    // ── should_log_rate_limit ───────────────────────────────────────
+
+    #[test]
+    fn rate_limit_allowed_is_not_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "status": "allowed" },
+            "type": "rate_limit_event"
+        });
+        assert!(!should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_rejected_is_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "status": "rejected" },
+            "type": "rate_limit_event"
+        });
+        assert!(should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_throttled_is_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "status": "throttled" },
+            "type": "rate_limit_event"
+        });
+        assert!(should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_missing_info_is_logged() {
+        let data = serde_json::json!({"requests_remaining": 42});
+        assert!(should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_missing_status_is_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "isUsingOverage": false }
+        });
+        assert!(should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_empty_status_is_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "status": "" }
+        });
+        assert!(should_log_rate_limit(&data));
     }
 
     // ── append_log_entry / bounded eviction ──────────────────────────
