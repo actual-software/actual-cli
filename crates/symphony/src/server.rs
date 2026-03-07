@@ -84,6 +84,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/{issue_identifier}/complete",
             post(handle_worker_complete),
         )
+        .route(
+            "/api/v1/{issue_identifier}/remove-retry",
+            post(handle_remove_retry),
+        )
         .route("/api/v1/{issue_identifier}", get(handle_issue_detail))
         .fallback(handle_fallback)
         .layer(cors)
@@ -173,6 +177,14 @@ pub struct RefreshResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coalesced: Option<bool>,
     pub requested_at: String,
+}
+
+/// Remove-retry response for POST /api/v1/:issue_identifier/remove-retry.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoveRetryResponse {
+    pub removed: bool,
+    pub issue_identifier: String,
+    pub issue_id: Option<String>,
 }
 
 /// Error response body.
@@ -667,6 +679,44 @@ async fn handle_refresh(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::ACCEPTED, axum::Json(response))
 }
 
+/// POST /api/v1/:issue_identifier/remove-retry — Remove from retry queue.
+async fn handle_remove_retry(
+    State(state): State<AppState>,
+    Path(issue_identifier): Path<String>,
+) -> Response {
+    // Look up the retry entry by identifier to get the issue_id
+    let orch_state = state.orchestrator_state.read().await;
+    let retry_entry = find_retry_by_identifier(&orch_state, &issue_identifier).cloned();
+    drop(orch_state);
+
+    let entry = match retry_entry {
+        Some(e) => e,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "issue_not_found",
+                format!("No retrying issue with identifier '{issue_identifier}'"),
+            );
+        }
+    };
+
+    // Send the remove message to the orchestrator
+    let _ = state
+        .msg_tx
+        .send(OrchestratorMessage::RemoveFromRetryQueue {
+            issue_id: entry.issue_id.clone(),
+        })
+        .await;
+
+    let response = RemoveRetryResponse {
+        removed: true,
+        issue_identifier: entry.identifier.clone(),
+        issue_id: Some(entry.issue_id),
+    };
+
+    (StatusCode::OK, axum::Json(response)).into_response()
+}
+
 /// Build a JSON error response with the given status code, code, and message.
 fn error_response(status: StatusCode, code: &str, message: String) -> Response {
     let body = ErrorResponse {
@@ -752,6 +802,8 @@ body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-ser
 .btn {{ background:var(--surface2); border:1px solid var(--border); color:var(--text); padding:6px 14px; border-radius:var(--radius); cursor:pointer; font-size:13px; transition:all 0.15s; }}
 .btn:hover {{ background:var(--border); border-color:var(--accent); }}
 .btn:active {{ transform:scale(0.97); }}
+.btn-danger {{ color:var(--red); border-color:rgba(255,82,82,0.3); }}
+.btn-danger:hover {{ background:rgba(255,82,82,0.15); border-color:var(--red); }}
 .content {{ max-width:1400px; margin:0 auto; padding:24px; }}
 .stats {{ display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }}
 .stat-card {{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:20px; }}
@@ -941,7 +993,7 @@ function renderRetrying(items) {{
     el.innerHTML = '<div class="empty-state"><div class="icon">No retries pending</div><p>Failed or timed-out sessions will appear here with their retry schedule.</p></div>';
     return;
   }}
-  let h = '<table><thead><tr><th>Issue</th><th>Attempt</th><th>Retry In</th><th>Error</th></tr></thead><tbody>';
+  let h = '<table><thead><tr><th>Issue</th><th>Attempt</th><th>Retry In</th><th>Error</th><th></th></tr></thead><tbody>';
   for (const r of items) {{
     const dueIn = Math.max(0, r.due_at_ms - Date.now());
     const dueStr = dueIn > 0 ? fmtTime(dueIn/1000) : 'now';
@@ -950,6 +1002,7 @@ function renderRetrying(items) {{
     h += '<td><span class="state-badge retry">#'+r.attempt+'</span></td>';
     h += '<td>'+dueStr+'</td>';
     h += '<td>'+(r.error ? esc(r.error) : '-')+'</td>';
+    h += '<td><button class="btn btn-danger" onclick="removeRetry(\''+esc(r.identifier)+'\')">Remove</button></td>';
     h += '</tr>';
   }}
   h += '</tbody></table>';
@@ -1004,6 +1057,21 @@ async function triggerRefresh() {{
   }} catch(e) {{}}
   btn.textContent = 'Refresh Now';
   btn.disabled = false;
+}}
+
+async function removeRetry(identifier) {{
+  if (!confirm('Remove ' + identifier + ' from retry queue? It will stop retrying.')) return;
+  try {{
+    const r = await fetch('/api/v1/' + encodeURIComponent(identifier) + '/remove-retry', {{ method: 'POST' }});
+    if (r.ok) {{
+      await poll();
+    }} else {{
+      const data = await r.json().catch(() => ({{}}));
+      alert('Failed to remove: ' + (data.error?.message || r.statusText));
+    }}
+  }} catch(e) {{
+    alert('Failed to remove: ' + e.message);
+  }}
 }}
 
 // Update relative timestamps every second

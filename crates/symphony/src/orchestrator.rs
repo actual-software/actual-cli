@@ -602,6 +602,9 @@ impl Orchestrator {
             OrchestratorMessage::TriggerRefresh => {
                 self.on_tick().await;
             }
+            OrchestratorMessage::RemoveFromRetryQueue { issue_id } => {
+                self.on_remove_from_retry_queue(&issue_id).await;
+            }
         }
     }
 
@@ -852,6 +855,27 @@ impl Orchestrator {
                 self.dispatch_issue(issue.clone(), Some(entry.attempt))
                     .await;
             }
+        }
+    }
+
+    /// Remove an issue from the retry queue permanently.
+    /// This removes the retry entry and releases the claim so the issue
+    /// won't be retried or re-dispatched until it appears again in a
+    /// future poll cycle (if still in an active state in the tracker).
+    async fn on_remove_from_retry_queue(&self, issue_id: &str) {
+        let mut state = self.state.write().await;
+        if let Some(entry) = state.retry_attempts.remove(issue_id) {
+            state.claimed.remove(issue_id);
+            info!(
+                issue_id = %issue_id,
+                issue_identifier = %entry.identifier,
+                "removed from retry queue by user"
+            );
+        } else {
+            debug!(
+                issue_id = %issue_id,
+                "remove-from-retry-queue: issue not in retry queue"
+            );
         }
     }
 
