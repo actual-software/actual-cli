@@ -321,10 +321,11 @@ impl Orchestrator {
 
         let state = self.state.read().await;
 
-        // Not already running, claimed, or waiting for review
+        // Not already running, claimed, waiting for review, or recently completed
         if state.running.contains_key(&issue.id)
             || state.claimed.contains(&issue.id)
             || state.waiting_for_review.contains_key(&issue.id)
+            || state.is_completed(&issue.id)
         {
             return false;
         }
@@ -346,6 +347,12 @@ impl Orchestrator {
             }
         }
 
+        // Label claim: skip if already claimed by another Symphony instance
+        if issue.labels.iter().any(|l| l == "symphony-claimed") {
+            info!(issue_id = %issue.id, issue_identifier = %issue.identifier, "skipping dispatch: issue has symphony-claimed label");
+            return false;
+        }
+
         // Blocker rule for Todo state
         if normalized_state == "todo" {
             let has_non_terminal_blocker = issue.blocked_by.iter().any(|b| {
@@ -357,6 +364,30 @@ impl Orchestrator {
             });
             if has_non_terminal_blocker {
                 return false;
+            }
+        }
+
+        // Drop state lock before async GitHub call
+        drop(state);
+
+        // PR dedup: skip if an open PR already exists for this issue's branch
+        if let Some(ref github_config) = config.github {
+            let branch = format!(
+                "{}{}",
+                github_config.branch_prefix,
+                issue.identifier.to_lowercase()
+            );
+            let github = GitHubClient::new(github_config, self.http.clone());
+            match github.find_open_pr(&branch).await {
+                Ok(Some(_pr)) => {
+                    info!(issue_id = %issue.id, branch = %branch, "skipping dispatch: open PR already exists");
+                    return false;
+                }
+                Ok(None) => {} // No PR, proceed
+                Err(e) => {
+                    warn!(issue_id = %issue.id, error = %e, "failed to check for existing PR, proceeding with dispatch");
+                    // Don't block dispatch on GitHub API errors
+                }
             }
         }
 
@@ -418,6 +449,9 @@ impl Orchestrator {
         if !skip_state_transition {
             self.transition_to_in_progress(&issue_id, &identifier).await;
         }
+
+        // Add "symphony-claimed" label to prevent other instances from dispatching (best-effort)
+        self.add_claim_label(&issue_id, &identifier).await;
 
         // Read config to check deployment mode
         let config = self.config.read().await.clone();
@@ -531,6 +565,44 @@ impl Orchestrator {
             }
             Err(e) => {
                 warn!(issue_identifier = %identifier, error = %e, "failed to transition issue to Merged (continuing cleanup)");
+            }
+        }
+    }
+
+    /// Best-effort add "symphony-claimed" label to a Linear issue on dispatch.
+    async fn add_claim_label(&self, issue_id: &str, identifier: &str) {
+        let config = self.config.read().await;
+        let client = LinearClient::new(&config.tracker, self.http.clone());
+        drop(config);
+
+        match client
+            .add_label_to_issue(issue_id, "symphony-claimed")
+            .await
+        {
+            Ok(()) => {
+                debug!(issue_identifier = %identifier, "added symphony-claimed label");
+            }
+            Err(e) => {
+                warn!(issue_identifier = %identifier, error = %e, "failed to add symphony-claimed label (continuing dispatch)");
+            }
+        }
+    }
+
+    /// Best-effort remove "symphony-claimed" label from a Linear issue on completion.
+    async fn remove_claim_label(&self, issue_id: &str, identifier: &str) {
+        let config = self.config.read().await;
+        let client = LinearClient::new(&config.tracker, self.http.clone());
+        drop(config);
+
+        match client
+            .remove_label_from_issue(issue_id, "symphony-claimed")
+            .await
+        {
+            Ok(()) => {
+                debug!(issue_identifier = %identifier, "removed symphony-claimed label");
+            }
+            Err(e) => {
+                warn!(issue_identifier = %identifier, error = %e, "failed to remove symphony-claimed label");
             }
         }
     }
@@ -707,6 +779,8 @@ impl Orchestrator {
                         drop(state); // Release lock before async GitHub call
                         self.add_to_waiting_for_review(issue_id, &issue_identifier)
                             .await;
+                        // Remove claim label when entering review (best-effort)
+                        self.remove_claim_label(issue_id, &issue_identifier).await;
                     } else {
                         // §8.1: Schedule a short continuation retry (1000ms)
                         self.schedule_retry_inner(
@@ -758,6 +832,11 @@ impl Orchestrator {
                 WorkerExitReason::Cancelled => {
                     info!(issue_id = %issue_id, issue_identifier = %identifier, "worker cancelled by reconciliation");
                     state.claimed.remove(issue_id);
+                    // Remove claim label (best-effort, after releasing lock)
+                    let id = issue_id.to_string();
+                    let ident = identifier.clone();
+                    drop(state);
+                    self.remove_claim_label(&id, &ident).await;
                 }
             }
         }
@@ -1973,8 +2052,8 @@ fn exponential_backoff(attempt: u32, max_backoff_ms: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, CodingAgentConfig, DeploymentConfig, DeploymentMode, HooksConfig,
-        PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
+        AgentConfig, CodingAgentConfig, DeploymentConfig, DeploymentMode, GitHubConfig,
+        HooksConfig, PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
     };
     use crate::model::BlockerRef;
     use chrono::TimeZone;
@@ -2737,6 +2816,200 @@ mod tests {
             ..default_issue()
         };
         assert!(orch.should_dispatch(&issue, &config).await);
+    }
+
+    // ── should_dispatch: completed_set guard (Fix 4) ─────────────────
+
+    #[tokio::test]
+    async fn test_should_dispatch_completed_issue() {
+        let orch = test_orchestrator();
+        {
+            let mut state = orch.state.write().await;
+            state.mark_completed("id1".to_string());
+        }
+
+        let config = orch.config.read().await;
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(
+            !orch.should_dispatch(&issue, &config).await,
+            "should not dispatch a recently completed issue"
+        );
+    }
+
+    // ── should_dispatch: symphony-claimed label guard (Fix 2) ──────
+
+    #[tokio::test]
+    async fn test_should_dispatch_symphony_claimed_label() {
+        let orch = test_orchestrator();
+        let config = orch.config.read().await;
+
+        let issue = Issue {
+            id: "id1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            title: "Title".to_string(),
+            state: "Todo".to_string(),
+            labels: vec!["symphony-claimed".to_string()],
+            ..default_issue()
+        };
+        assert!(
+            !orch.should_dispatch(&issue, &config).await,
+            "should not dispatch an issue with symphony-claimed label"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_other_labels_pass() {
+        let orch = test_orchestrator();
+        let config = orch.config.read().await;
+
+        let issue = Issue {
+            id: "id1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            title: "Title".to_string(),
+            state: "Todo".to_string(),
+            labels: vec!["bug".to_string(), "feature".to_string()],
+            ..default_issue()
+        };
+        assert!(
+            orch.should_dispatch(&issue, &config).await,
+            "should dispatch issue with non-claimed labels"
+        );
+    }
+
+    // ── should_dispatch: PR dedup guard (Fix 3) ────────────────────
+
+    fn test_github_config(endpoint: &str) -> GitHubConfig {
+        GitHubConfig {
+            token: "test-token".to_string(),
+            repo_owner: "test-owner".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: endpoint.to_string(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_open_pr_exists() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock GitHub API returning an open PR
+        let _mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
+                "state".to_string(),
+                "open".to_string(),
+            )]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!([{
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean",
+                    "merged": false
+                }])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(test_github_config(&server.url()));
+        let orch = Orchestrator::new(config.clone(), "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(
+            !orch.should_dispatch(&issue, &config).await,
+            "should not dispatch when an open PR exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_no_open_pr() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock GitHub API returning no PRs
+        let _mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(test_github_config(&server.url()));
+        let orch = Orchestrator::new(config.clone(), "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(
+            orch.should_dispatch(&issue, &config).await,
+            "should dispatch when no open PR exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_github_api_error_proceeds() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock GitHub API returning error
+        let _mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(test_github_config(&server.url()));
+        let orch = Orchestrator::new(config.clone(), "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(
+            orch.should_dispatch(&issue, &config).await,
+            "should proceed with dispatch when GitHub API errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_no_github_config_proceeds() {
+        let orch = test_orchestrator(); // No GitHub config
+        let config = orch.config.read().await;
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(
+            orch.should_dispatch(&issue, &config).await,
+            "should dispatch when no GitHub config is set"
+        );
+    }
+
+    // ── should_dispatch: waiting_for_review guard ──────────────────
+
+    #[tokio::test]
+    async fn test_should_dispatch_waiting_for_review() {
+        let orch = test_orchestrator();
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        let config = orch.config.read().await;
+        let issue = make_issue("id1", "PROJ-1", "In Progress");
+        assert!(
+            !orch.should_dispatch(&issue, &config).await,
+            "should not dispatch an issue waiting for review"
+        );
     }
 
     // ── handle_message ───────────────────────────────────────────────
