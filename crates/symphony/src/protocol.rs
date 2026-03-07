@@ -211,6 +211,12 @@ mod tests {
 
     // ── WorkerEvent ─────────────────────────────────────────────────
 
+    /// Helper: round-trip a WorkerEvent through JSON and return the deserialized copy.
+    fn round_trip_worker_event(event: WorkerEvent) -> WorkerEvent {
+        let json = serde_json::to_string(&event).unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
     #[test]
     fn worker_event_with_session_started() {
         let event = WorkerEvent {
@@ -222,17 +228,16 @@ mod tests {
             timestamp: Utc::now(),
             worker_id: "worker-1".to_string(),
         };
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.issue_id, "issue-1");
-        assert_eq!(deserialized.worker_id, "worker-1");
-        match &deserialized.event {
-            AgentEvent::SessionStarted { session_id, pid } => {
-                assert_eq!(session_id, "sess-abc");
-                assert_eq!(*pid, Some(1234));
-            }
-            _ => panic!("Expected SessionStarted"),
-        }
+        let de = round_trip_worker_event(event);
+        assert_eq!(de.issue_id, "issue-1");
+        assert_eq!(de.worker_id, "worker-1");
+        assert!(matches!(
+            de.event,
+            AgentEvent::SessionStarted {
+                ref session_id,
+                pid: Some(1234),
+            } if session_id == "sess-abc"
+        ));
     }
 
     #[test]
@@ -245,14 +250,13 @@ mod tests {
             timestamp: Utc::now(),
             worker_id: "worker-2".to_string(),
         };
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
-        match &deserialized.event {
-            AgentEvent::TurnCompleted { message } => {
-                assert_eq!(message.as_deref(), Some("finished step"));
-            }
-            _ => panic!("Expected TurnCompleted"),
-        }
+        let de = round_trip_worker_event(event);
+        assert!(matches!(
+            de.event,
+            AgentEvent::TurnCompleted {
+                message: Some(ref m),
+            } if m == "finished step"
+        ));
     }
 
     #[test]
@@ -265,14 +269,11 @@ mod tests {
             timestamp: Utc::now(),
             worker_id: "worker-3".to_string(),
         };
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
-        match &deserialized.event {
-            AgentEvent::TurnFailed { error } => {
-                assert_eq!(error, "something broke");
-            }
-            _ => panic!("Expected TurnFailed"),
-        }
+        let de = round_trip_worker_event(event);
+        assert!(matches!(
+            de.event,
+            AgentEvent::TurnFailed { ref error } if error == "something broke"
+        ));
     }
 
     #[test]
@@ -285,14 +286,11 @@ mod tests {
             timestamp: Utc::now(),
             worker_id: "worker-4".to_string(),
         };
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
-        match &deserialized.event {
-            AgentEvent::Notification { message } => {
-                assert_eq!(message, "heads up");
-            }
-            _ => panic!("Expected Notification"),
-        }
+        let de = round_trip_worker_event(event);
+        assert!(matches!(
+            de.event,
+            AgentEvent::Notification { ref message } if message == "heads up"
+        ));
     }
 
     #[test]
@@ -307,20 +305,15 @@ mod tests {
             timestamp: Utc::now(),
             worker_id: "worker-5".to_string(),
         };
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
-        match &deserialized.event {
+        let de = round_trip_worker_event(event);
+        assert!(matches!(
+            de.event,
             AgentEvent::TokenUsage {
-                input_tokens,
-                output_tokens,
-                total_tokens,
-            } => {
-                assert_eq!(*input_tokens, 100);
-                assert_eq!(*output_tokens, 50);
-                assert_eq!(*total_tokens, 150);
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
             }
-            _ => panic!("Expected TokenUsage"),
-        }
+        ));
     }
 
     #[test]
@@ -334,18 +327,14 @@ mod tests {
             timestamp: Utc::now(),
             worker_id: "worker-6".to_string(),
         };
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
-        match &deserialized.event {
+        let de = round_trip_worker_event(event);
+        assert!(matches!(
+            de.event,
             AgentEvent::AgentMessage {
-                event_type,
-                message,
-            } => {
-                assert_eq!(event_type, "tool_use");
-                assert_eq!(message.as_deref(), Some("using grep"));
-            }
-            _ => panic!("Expected AgentMessage"),
-        }
+                ref event_type,
+                message: Some(ref m),
+            } if event_type == "tool_use" && m == "using grep"
+        ));
     }
 
     #[test]
@@ -357,14 +346,11 @@ mod tests {
             timestamp: Utc::now(),
             worker_id: "worker-7".to_string(),
         };
-        let json = serde_json::to_string(&event).unwrap();
-        let deserialized: WorkerEvent = serde_json::from_str(&json).unwrap();
-        match &deserialized.event {
-            AgentEvent::RateLimitUpdate { data } => {
-                assert_eq!(data["requests_remaining"], 42);
-            }
-            _ => panic!("Expected RateLimitUpdate"),
-        }
+        let de = round_trip_worker_event(event);
+        assert!(matches!(
+            de.event,
+            AgentEvent::RateLimitUpdate { ref data } if data["requests_remaining"] == 42
+        ));
     }
 
     #[test]
