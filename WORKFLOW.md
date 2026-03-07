@@ -3,7 +3,7 @@ tracker:
   kind: linear
   project_slug: actcli
   api_key: $LINEAR_API_KEY
-  active_states: "To Do, In Progress, Ready for Review"
+  active_states: "Todo, In Progress, Ready for Review"
   terminal_states: "Merged, Done, Closed, Cancelled, Canceled, Duplicate"
 polling:
   interval_ms: 30000
@@ -14,7 +14,7 @@ agent:
   max_turns: 30
   max_retry_backoff_ms: 300000
   max_concurrent_agents_by_state:
-    to do: 2
+    todo: 2
     in progress: 3
     ready for review: 1
 codex:
