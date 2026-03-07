@@ -270,13 +270,11 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            AgentEvent::SessionStarted { session_id, pid } => {
-                assert_eq!(session_id, "sess-1");
-                assert_eq!(pid, Some(42));
-            }
-            _ => panic!("expected SessionStarted"),
-        }
+        assert!(matches!(
+            deserialized,
+            AgentEvent::SessionStarted { ref session_id, pid }
+            if session_id == "sess-1" && pid == Some(42)
+        ));
     }
 
     #[test]
@@ -287,10 +285,10 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            AgentEvent::SessionStarted { pid, .. } => assert!(pid.is_none()),
-            _ => panic!("expected SessionStarted"),
-        }
+        assert!(matches!(
+            deserialized,
+            AgentEvent::SessionStarted { pid: None, .. }
+        ));
     }
 
     #[test]
@@ -300,12 +298,11 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            AgentEvent::TurnCompleted { message } => {
-                assert_eq!(message, Some("done".to_string()));
-            }
-            _ => panic!("expected TurnCompleted"),
-        }
+        assert!(matches!(
+            deserialized,
+            AgentEvent::TurnCompleted { ref message }
+            if message.as_deref() == Some("done")
+        ));
     }
 
     #[test]
@@ -313,10 +310,10 @@ mod tests {
         let event = AgentEvent::TurnCompleted { message: None };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            AgentEvent::TurnCompleted { message } => assert!(message.is_none()),
-            _ => panic!("expected TurnCompleted"),
-        }
+        assert!(matches!(
+            deserialized,
+            AgentEvent::TurnCompleted { message: None }
+        ));
     }
 
     #[test]
@@ -326,10 +323,11 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            AgentEvent::TurnFailed { error } => assert_eq!(error, "boom"),
-            _ => panic!("expected TurnFailed"),
-        }
+        assert!(matches!(
+            deserialized,
+            AgentEvent::TurnFailed { ref error }
+            if error == "boom"
+        ));
     }
 
     #[test]
@@ -339,10 +337,11 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            AgentEvent::Notification { message } => assert_eq!(message, "heads up"),
-            _ => panic!("expected Notification"),
-        }
+        assert!(matches!(
+            deserialized,
+            AgentEvent::Notification { ref message }
+            if message == "heads up"
+        ));
     }
 
     #[test]
@@ -354,18 +353,14 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
+        assert!(matches!(
+            deserialized,
             AgentEvent::TokenUsage {
-                input_tokens,
-                output_tokens,
-                total_tokens,
-            } => {
-                assert_eq!(input_tokens, 100);
-                assert_eq!(output_tokens, 50);
-                assert_eq!(total_tokens, 150);
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
             }
-            _ => panic!("expected TokenUsage"),
-        }
+        ));
     }
 
     #[test]
@@ -376,16 +371,11 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            AgentEvent::AgentMessage {
-                event_type,
-                message,
-            } => {
-                assert_eq!(event_type, "tool_use");
-                assert_eq!(message, Some("using grep".to_string()));
-            }
-            _ => panic!("expected AgentMessage"),
-        }
+        assert!(matches!(
+            deserialized,
+            AgentEvent::AgentMessage { ref event_type, ref message }
+            if event_type == "tool_use" && message.as_deref() == Some("using grep")
+        ));
     }
 
     #[test]
@@ -396,10 +386,10 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            AgentEvent::AgentMessage { message, .. } => assert!(message.is_none()),
-            _ => panic!("expected AgentMessage"),
-        }
+        assert!(matches!(
+            deserialized,
+            AgentEvent::AgentMessage { message: None, .. }
+        ));
     }
 
     #[test]
@@ -408,12 +398,11 @@ mod tests {
         let event = AgentEvent::RateLimitUpdate { data };
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: AgentEvent = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            AgentEvent::RateLimitUpdate { data } => {
-                assert_eq!(data["requests_remaining"], 42);
-            }
-            _ => panic!("expected RateLimitUpdate"),
-        }
+        assert!(matches!(
+            deserialized,
+            AgentEvent::RateLimitUpdate { ref data }
+            if data["requests_remaining"] == 42
+        ));
     }
 
     #[test]
