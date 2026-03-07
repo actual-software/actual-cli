@@ -18,7 +18,7 @@ agent:
     in progress: 3
     in review: 1
 codex:
-  command: "claude -p --output-format stream-json --dangerously-skip-permissions --max-turns 30"
+  command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 30"
   stall_timeout_ms: 600000
   turn_timeout_ms: 1800000
 hooks:
