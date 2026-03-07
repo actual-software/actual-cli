@@ -93,21 +93,27 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
     // Create orchestrator
     let orchestrator = Orchestrator::new(config, workflow.prompt_template);
 
+    // Setup shutdown signal
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     // Start HTTP server if port is configured
     if let Some(port) = server_port {
         let state = orchestrator.state_handle();
         let config = orchestrator.config_handle();
         let msg_tx = orchestrator.message_sender();
 
+        let server_shutdown_rx = _shutdown_tx.subscribe();
+        let server_shutdown = async move {
+            let mut rx = server_shutdown_rx;
+            let _ = rx.changed().await;
+        };
         tokio::spawn(async move {
-            if let Err(e) = server::start_server(port, state, config, msg_tx).await {
+            if let Err(e) = server::start_server(port, state, config, msg_tx, server_shutdown).await
+            {
                 error!(error = %e, "HTTP server failed");
             }
         });
     }
-
-    // Setup shutdown signal
-    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Handle SIGINT/SIGTERM (§12.1: Docker/K8s send SIGTERM)
     let shutdown_tx_signal = _shutdown_tx.clone();
