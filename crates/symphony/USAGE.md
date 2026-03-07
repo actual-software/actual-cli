@@ -134,7 +134,7 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_concurrent_agents` | integer | `10` | Maximum parallel agent sessions |
-| `max_turns` | integer | `20` | Maximum agent turns per worker run |
+| `max_turns` | integer | `20` | Maximum agent turns per worker run. Dynamically injected into the agent command (`--max-turns`) and environment (`SYMPHONY_MAX_TURNS`) |
 | `max_retry_backoff_ms` | integer | `300000` (5m) | Cap on exponential retry backoff |
 | `max_concurrent_agents_by_state` | map | `{}` | Per-state concurrency limits (e.g. `todo: 2, in progress: 3`) |
 
