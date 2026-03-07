@@ -191,9 +191,18 @@ async fn read_stderr_lines(stderr: tokio::process::ChildStderr) {
     let reader = BufReader::new(stderr);
     let mut lines = reader.lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        if !line.trim().is_empty() {
-            debug!(line = %line, "agent stderr");
-        }
+        log_stderr_line_if_nonempty(&line);
+    }
+}
+
+/// Log a single stderr line when it is non-empty.
+///
+/// Extracted to a standalone function so that the `if`-body closing brace does
+/// not create a separate LLVM coverage region on Linux (the well-known
+/// split-region flake for single-line branches inside `while let` loops).
+fn log_stderr_line_if_nonempty(line: &str) {
+    if !line.trim().is_empty() {
+        debug!(line = %line, "agent stderr");
     }
 }
 
@@ -1405,5 +1414,22 @@ mod tests {
             stdout.contains("alpha_beta"),
             "multiple env vars should be visible, got: {stdout}"
         );
+    }
+
+    // -- Test: log_stderr_line_if_nonempty coverage --
+
+    #[traced_test]
+    #[test]
+    fn test_log_stderr_line_if_nonempty_logs_nonempty() {
+        log_stderr_line_if_nonempty("real error");
+        assert!(logs_contain("agent stderr"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_log_stderr_line_if_nonempty_skips_empty() {
+        log_stderr_line_if_nonempty("");
+        log_stderr_line_if_nonempty("   ");
+        assert!(!logs_contain("agent stderr"));
     }
 }
