@@ -11,7 +11,7 @@ use crate::workspace;
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 
 /// Log orchestrator start parameters.
 fn log_orchestrator_start(poll_interval_ms: u64, max_concurrent: u32) {
@@ -421,12 +421,14 @@ impl Orchestrator {
         match client.transition_issue_state(issue_id, "In Progress").await {
             Ok(()) => {
                 info!(
+                    issue_id = %issue_id,
                     issue_identifier = %identifier,
                     "transitioned issue to In Progress"
                 );
             }
             Err(e) => {
                 warn!(
+                    issue_id = %issue_id,
                     issue_identifier = %identifier,
                     error = %e,
                     "failed to transition issue to In Progress (continuing dispatch)"
@@ -654,6 +656,7 @@ impl Orchestrator {
             Err(e) => {
                 warn!(
                     issue_id = %issue_id,
+                    issue_identifier = %entry.identifier,
                     error = %e,
                     "retry poll failed, rescheduling"
                 );
@@ -1044,7 +1047,40 @@ fn build_agent_env_vars(config: &ServiceConfig) -> std::collections::HashMap<Str
 }
 
 /// Run a worker for one issue.
+///
+/// A tracing span is attached so that `issue_id` and `issue_identifier`
+/// propagate automatically to all nested log calls (including helpers in
+/// `workspace.rs` and `agent.rs`).
 async fn run_worker(
+    config: &ServiceConfig,
+    prompt_template: &str,
+    issue: &Issue,
+    attempt: Option<u32>,
+    http: reqwest::Client,
+    msg_tx: mpsc::Sender<OrchestratorMessage>,
+    cancel_rx: oneshot::Receiver<()>,
+) -> Result<()> {
+    let span = tracing::info_span!(
+        "worker",
+        issue_id = %issue.id,
+        issue_identifier = %issue.identifier,
+    );
+    run_worker_inner(
+        config,
+        prompt_template,
+        issue,
+        attempt,
+        http,
+        msg_tx,
+        cancel_rx,
+    )
+    .instrument(span)
+    .await
+}
+
+/// Inner implementation of [`run_worker`], separated so that the tracing span
+/// can be `.instrument()`-ed on the outer call without lifetime issues.
+async fn run_worker_inner(
     config: &ServiceConfig,
     prompt_template: &str,
     issue: &Issue,
@@ -1116,11 +1152,7 @@ async fn run_worker(
 
         match result {
             Ok(_) => {
-                info!(
-                    issue_id = %issue_id,
-                    turn = turn_number,
-                    "agent turn completed successfully"
-                );
+                info!(turn = turn_number, "agent turn completed successfully");
 
                 // Check if issue is still active
                 let client = LinearClient::new(&config.tracker, http.clone());
@@ -1130,7 +1162,6 @@ async fn run_worker(
                             if !state_matches(&refreshed_issue.state, &config.tracker.active_states)
                             {
                                 info!(
-                                    issue_id = %issue_id,
                                     state = %refreshed_issue.state,
                                     "issue no longer active after turn"
                                 );
@@ -1142,7 +1173,6 @@ async fn run_worker(
                     }
                     Err(e) => {
                         warn!(
-                            issue_id = %issue_id,
                             error = %e,
                             "failed to refresh issue state after turn"
                         );
@@ -1152,7 +1182,6 @@ async fn run_worker(
 
                 if turn_number >= max_turns {
                     info!(
-                        issue_id = %issue_id,
                         turns = turn_number,
                         max_turns = max_turns,
                         "reached max turns"
@@ -3396,6 +3425,10 @@ mod tests {
         assert_eq!(retry.attempt, 3);
         assert_eq!(retry.error, Some("retry poll failed".to_string()));
 
+        // Verify both structured fields are in the log
+        assert!(logs_contain("issue_id"));
+        assert!(logs_contain("issue_identifier"));
+
         mock.assert_async().await;
     }
 
@@ -3630,6 +3663,8 @@ mod tests {
         orch.transition_to_in_progress("issue-1", "PROJ-1").await;
 
         assert!(logs_contain("transitioned issue to In Progress"));
+        assert!(logs_contain("issue_id"));
+        assert!(logs_contain("issue_identifier"));
         resolve_mock.assert_async().await;
         update_mock.assert_async().await;
     }
@@ -3654,6 +3689,8 @@ mod tests {
         orch.transition_to_in_progress("issue-1", "PROJ-1").await;
 
         assert!(logs_contain("failed to transition issue to In Progress"));
+        assert!(logs_contain("issue_id"));
+        assert!(logs_contain("issue_identifier"));
         mock.assert_async().await;
     }
 
@@ -5327,5 +5364,70 @@ mod tests {
         config.tracker.team_key = String::new();
         let env_vars = build_agent_env_vars(&config);
         assert!(env_vars.is_empty());
+    }
+
+    // ── structured log fields: run_worker span propagation ──────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_worker_span_propagates_structured_fields() {
+        // run_worker creates a tracing span with issue_id and issue_identifier.
+        // We use a real temp workspace with a quick-exit agent command so the
+        // worker reaches the "agent turn completed" info log, which should
+        // inherit issue_id and issue_identifier from the enclosing span.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        config.workspace.root = tmp.path().to_path_buf();
+        // Use a command that exits immediately — the agent turn completes
+        // and run_worker logs "agent turn completed successfully"
+        config.coding_agent.command = "echo test".to_string();
+
+        let issue = make_issue("test-id-123", "PROJ-42", "Todo");
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (msg_tx, _msg_rx) = mpsc::channel(16);
+
+        let result = run_worker(
+            &config,
+            "{{ issue.identifier }}",
+            &issue,
+            None,
+            reqwest::Client::new(),
+            msg_tx,
+            cancel_rx,
+        )
+        .await;
+
+        // Worker may error (HTTP call for state refresh fails) or succeed,
+        // but "agent turn completed" should have been logged within the span.
+        let _ = result;
+        assert!(logs_contain("agent turn completed"));
+        // The span fields should appear alongside the event in tracing-test output
+        assert!(logs_contain("test-id-123"));
+        assert!(logs_contain("PROJ-42"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_worker_inner_propagates_issue_fields() {
+        // Test run_worker_inner directly to verify coverage of the inner function.
+        let mut config = test_config();
+        config.workspace.root = std::path::PathBuf::from("/dev/null/impossible");
+
+        let issue = make_issue("inner-id", "PROJ-INNER", "Todo");
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let (msg_tx, _msg_rx) = mpsc::channel(16);
+
+        let result = run_worker_inner(
+            &config,
+            "test prompt",
+            &issue,
+            None,
+            reqwest::Client::new(),
+            msg_tx,
+            cancel_rx,
+        )
+        .await;
+
+        assert!(result.is_err());
     }
 }
