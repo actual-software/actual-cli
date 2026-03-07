@@ -56,12 +56,9 @@ impl AgentSession {
 
         // Write prompt to stdin to avoid shell interpolation of untrusted data.
         // stdin is always present because we configure Stdio::piped() above.
-        let mut stdin = child.stdin.take().expect("stdin was piped");
+        let stdin = child.stdin.take().expect("stdin was piped");
         let prompt_bytes = prompt.as_bytes().to_vec();
-        tokio::spawn(async move {
-            let _ = stdin.write_all(&prompt_bytes).await;
-            let _ = stdin.shutdown().await;
-        });
+        tokio::spawn(write_prompt_to_stdin(stdin, prompt_bytes));
 
         let pid = child.id();
 
@@ -161,6 +158,16 @@ fn await_child_exit(result: std::io::Result<std::process::ExitStatus>) -> Result
             reason: format!("agent exited with status: {status}"),
         })
     }
+}
+
+/// Write the prompt to the agent's stdin, then close it.
+///
+/// Extracted as a named async function (rather than an inline closure) to avoid
+/// LLVM coverage instrumentation quirks on Linux where the implicit drop region
+/// of a spawned `async move { … }` closure is marked as uncovered.
+async fn write_prompt_to_stdin(mut stdin: tokio::process::ChildStdin, prompt_bytes: Vec<u8>) {
+    let _ = stdin.write_all(&prompt_bytes).await;
+    let _ = stdin.shutdown().await;
 }
 
 /// Build the full shell command to run Claude Code.
@@ -1150,5 +1157,26 @@ mod tests {
         let io_err = std::io::Error::new(std::io::ErrorKind::Other, "wait failed");
         let err = await_child_exit(Err(io_err)).unwrap_err();
         assert!(matches!(err, SymphonyError::AgentProcessExited { .. }));
+    }
+
+    // ---- write_prompt_to_stdin tests ----
+
+    #[tokio::test]
+    async fn test_write_prompt_to_stdin_writes_and_closes() {
+        // Spawn a process that reads stdin and echoes it to stdout
+        let mut child = Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("cat should spawn");
+
+        let stdin = child.stdin.take().expect("stdin was piped");
+        let prompt = b"hello from test".to_vec();
+
+        // Call the function directly (not via tokio::spawn) to ensure coverage
+        write_prompt_to_stdin(stdin, prompt).await;
+
+        let output = child.wait_with_output().await.expect("cat should finish");
+        assert_eq!(output.stdout, b"hello from test");
     }
 }
