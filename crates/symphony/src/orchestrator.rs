@@ -125,6 +125,8 @@ impl Orchestrator {
             .collect();
 
         let retrying: Vec<RetryEntry> = state.retry_attempts.values().cloned().collect();
+        let waiting: Vec<crate::model::WaitingEntry> =
+            state.waiting_for_review.values().cloned().collect();
 
         // Calculate live seconds_running including active sessions
         let active_seconds: f64 = state
@@ -145,6 +147,7 @@ impl Orchestrator {
         OrchestratorSnapshot {
             running,
             retrying,
+            waiting,
             totals,
             rate_limits: state.rate_limits.clone(),
         }
@@ -275,8 +278,11 @@ impl Orchestrator {
 
         let state = self.state.read().await;
 
-        // Not already running or claimed
-        if state.running.contains_key(&issue.id) || state.claimed.contains(&issue.id) {
+        // Not already running, claimed, or waiting for review
+        if state.running.contains_key(&issue.id)
+            || state.claimed.contains(&issue.id)
+            || state.waiting_for_review.contains_key(&issue.id)
+        {
             return false;
         }
 
@@ -437,6 +443,68 @@ impl Orchestrator {
         }
     }
 
+    /// Add an "In Review" issue to waiting_for_review by looking up its PR.
+    async fn add_to_waiting_for_review(&self, issue_id: &str, identifier: &str) {
+        let config = self.config.read().await;
+        let github_config = match &config.github {
+            Some(c) => c.clone(),
+            None => {
+                // No GitHub config — can't track PR, fall back to continuation retry
+                debug!(
+                    issue_id = %issue_id,
+                    "no GitHub config, skipping waiting_for_review"
+                );
+                return;
+            }
+        };
+        drop(config);
+
+        let branch = format!(
+            "{}{}",
+            github_config.branch_prefix,
+            identifier.to_lowercase()
+        );
+        let github = GitHubClient::new(&github_config, self.http.clone());
+
+        let pr_number = match github.find_open_pr(&branch).await {
+            Ok(Some(pr)) => pr.number,
+            Ok(None) => {
+                debug!(
+                    issue_id = %issue_id,
+                    branch = %branch,
+                    "no open PR found for In Review issue"
+                );
+                return;
+            }
+            Err(e) => {
+                debug!(
+                    issue_id = %issue_id,
+                    error = %e,
+                    "failed to find PR for In Review issue"
+                );
+                return;
+            }
+        };
+
+        let mut state = self.state.write().await;
+        state.waiting_for_review.insert(
+            issue_id.to_string(),
+            crate::model::WaitingEntry {
+                issue_id: issue_id.to_string(),
+                identifier: identifier.to_string(),
+                pr_number,
+                branch,
+                started_waiting_at: Utc::now(),
+            },
+        );
+        info!(
+            issue_id = %issue_id,
+            issue_identifier = %identifier,
+            pr_number = pr_number,
+            "added to waiting_for_review"
+        );
+    }
+
     async fn handle_message(&self, msg: OrchestratorMessage) {
         match msg {
             OrchestratorMessage::WorkerExited { issue_id, reason } => {
@@ -480,19 +548,30 @@ impl Orchestrator {
                         "worker completed normally"
                     );
                     state.mark_completed(issue_id.to_string());
-                    // §8.1: Schedule a short continuation retry (1000ms)
-                    // instead of releasing the claim and waiting for the
-                    // next poll tick (~30s). The retry handler will re-check
-                    // if the issue is still active and re-dispatch quickly
-                    // or release the claim if the issue went terminal.
-                    self.schedule_retry_inner(
-                        &mut state,
-                        issue_id.to_string(),
-                        0, // continuation, not a failure retry
-                        identifier,
-                        None,
-                        1_000, // 1 second
-                    );
+
+                    // If the issue is "In Review", add to waiting_for_review
+                    // so the reconciliation loop can handle auto-merge.
+                    let issue_state = entry.issue.state.clone();
+                    let issue_identifier = entry.identifier.clone();
+                    if is_in_review_state(&issue_state) {
+                        drop(state); // Release lock before async GitHub call
+                        self.add_to_waiting_for_review(issue_id, &issue_identifier)
+                            .await;
+                    } else {
+                        // §8.1: Schedule a short continuation retry (1000ms)
+                        // instead of releasing the claim and waiting for the
+                        // next poll tick (~30s). The retry handler will re-check
+                        // if the issue is still active and re-dispatch quickly
+                        // or release the claim if the issue went terminal.
+                        self.schedule_retry_inner(
+                            &mut state,
+                            issue_id.to_string(),
+                            0, // continuation, not a failure retry
+                            identifier,
+                            None,
+                            1_000, // 1 second
+                        );
+                    }
                 }
                 WorkerExitReason::Failed(err) => {
                     warn!(
@@ -824,6 +903,9 @@ impl Orchestrator {
 
         // Part C: PR merge conflict detection
         self.reconcile_pr_conflicts().await;
+
+        // Part D: PR lifecycle management (auto-merge and post-merge cleanup)
+        self.reconcile_pr_lifecycle().await;
     }
 
     async fn reconcile_pr_conflicts(&self) {
@@ -948,6 +1030,221 @@ impl Orchestrator {
                 }
             }
         }
+    }
+
+    /// Reconcile PR lifecycle for issues in waiting_for_review.
+    /// - Check if PRs have been merged → dispatch cleanup agent
+    /// - Check if PRs are approved + mergeable + auto_merge enabled → merge
+    /// - Remove entries where issue left "In Review" (e.g., moved back)
+    async fn reconcile_pr_lifecycle(&self) {
+        let config = self.config.read().await;
+        let github_config = match &config.github {
+            Some(c) => c.clone(),
+            None => return, // GitHub not configured
+        };
+        let tracker_config = config.tracker.clone();
+        drop(config);
+
+        let github = GitHubClient::new(&github_config, self.http.clone());
+        let linear = LinearClient::new(&tracker_config, self.http.clone());
+
+        // Snapshot waiting entries to iterate
+        let state = self.state.read().await;
+        let waiting_entries: Vec<crate::model::WaitingEntry> =
+            state.waiting_for_review.values().cloned().collect();
+        drop(state);
+
+        for entry in &waiting_entries {
+            // 1. Check if PR has been merged
+            match github.is_pr_merged(&entry.branch).await {
+                Ok(Some(true)) => {
+                    info!(
+                        issue_id = %entry.issue_id,
+                        issue_identifier = %entry.identifier,
+                        pr_number = entry.pr_number,
+                        "PR merged — dispatching cleanup"
+                    );
+                    // Remove from waiting_for_review
+                    let mut state = self.state.write().await;
+                    state.waiting_for_review.remove(&entry.issue_id);
+                    drop(state);
+
+                    // Dispatch cleanup agent turn
+                    self.dispatch_cleanup(entry, &tracker_config).await;
+                    continue;
+                }
+                Ok(Some(false)) => {
+                    // Still open — check if we should auto-merge
+                }
+                Ok(None) => {
+                    // No PR found — remove from waiting
+                    debug!(
+                        issue_id = %entry.issue_id,
+                        "no PR found for waiting entry, removing"
+                    );
+                    let mut state = self.state.write().await;
+                    state.waiting_for_review.remove(&entry.issue_id);
+                    continue;
+                }
+                Err(e) => {
+                    debug!(
+                        issue_id = %entry.issue_id,
+                        error = %e,
+                        "failed to check PR merge status"
+                    );
+                    continue;
+                }
+            }
+
+            // 2. Auto-merge if enabled and PR is approved + mergeable
+            if !github_config.auto_merge {
+                continue;
+            }
+
+            // Check if PR is approved
+            let approved = match github.is_pr_approved(entry.pr_number).await {
+                Ok(a) => a,
+                Err(e) => {
+                    debug!(
+                        issue_id = %entry.issue_id,
+                        error = %e,
+                        "failed to check PR approval status"
+                    );
+                    continue;
+                }
+            };
+
+            if !approved {
+                continue;
+            }
+
+            // Check if PR is mergeable (no conflicts)
+            let pr_details = match github.get_pr_details(entry.pr_number).await {
+                Ok(pr) => pr,
+                Err(e) => {
+                    debug!(
+                        issue_id = %entry.issue_id,
+                        error = %e,
+                        "failed to get PR details for auto-merge"
+                    );
+                    continue;
+                }
+            };
+
+            if pr_details.mergeable != Some(true) {
+                continue;
+            }
+
+            // Attempt to merge
+            info!(
+                issue_id = %entry.issue_id,
+                issue_identifier = %entry.identifier,
+                pr_number = entry.pr_number,
+                "PR approved and mergeable — attempting auto-merge"
+            );
+
+            match github.enable_auto_merge(entry.pr_number).await {
+                Ok(true) => {
+                    info!(
+                        issue_id = %entry.issue_id,
+                        issue_identifier = %entry.identifier,
+                        pr_number = entry.pr_number,
+                        "auto-merge succeeded"
+                    );
+                    // PR is now merged — remove from waiting and dispatch cleanup
+                    let mut state = self.state.write().await;
+                    state.waiting_for_review.remove(&entry.issue_id);
+                    drop(state);
+
+                    self.dispatch_cleanup(entry, &tracker_config).await;
+                }
+                Ok(false) => {
+                    debug!(
+                        issue_id = %entry.issue_id,
+                        "auto-merge not ready yet (checks pending or blocked)"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        issue_id = %entry.issue_id,
+                        error = %e,
+                        "auto-merge API call failed"
+                    );
+                }
+            }
+        }
+
+        // 3. Verify issues in waiting_for_review are still "In Review" in Linear
+        // (someone may have moved them back manually)
+        let remaining: Vec<String> = {
+            let state = self.state.read().await;
+            state.waiting_for_review.keys().cloned().collect()
+        };
+
+        if remaining.is_empty() {
+            return;
+        }
+
+        match linear.fetch_issue_states_by_ids(&remaining).await {
+            Ok(refreshed) => {
+                let mut state = self.state.write().await;
+                for issue in &refreshed {
+                    if !is_in_review_state(&issue.state) {
+                        info!(
+                            issue_id = %issue.id,
+                            issue_identifier = %issue.identifier,
+                            state = %issue.state,
+                            "waiting issue no longer In Review, removing from waiting"
+                        );
+                        state.waiting_for_review.remove(&issue.id);
+                        // Release claim so it can be re-dispatched
+                        state.claimed.remove(&issue.id);
+                    }
+                }
+            }
+            Err(e) => {
+                debug!(
+                    error = %e,
+                    "failed to refresh waiting issue states"
+                );
+            }
+        }
+    }
+
+    /// Dispatch a cleanup agent turn for a merged PR.
+    /// Transitions the issue to "Done" after cleanup completes.
+    async fn dispatch_cleanup(
+        &self,
+        entry: &crate::model::WaitingEntry,
+        _tracker_config: &crate::config::TrackerConfig,
+    ) {
+        let issue = Issue {
+            id: entry.issue_id.clone(),
+            identifier: entry.identifier.clone(),
+            title: format!("Cleanup for {}", entry.identifier),
+            description: Some(format!(
+                "PR #{} for issue {} has been merged. \
+                 Delete the remote branch '{}' and transition the Linear issue to Done.",
+                entry.pr_number, entry.identifier, entry.branch
+            )),
+            priority: Some(0), // Highest priority — cleanup is quick
+            state: "In Review".to_string(),
+            branch_name: Some(entry.branch.clone()),
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: Some(Utc::now()),
+            updated_at: Some(Utc::now()),
+        };
+
+        info!(
+            issue_id = %entry.issue_id,
+            issue_identifier = %entry.identifier,
+            "dispatching cleanup agent turn"
+        );
+
+        // Dispatch with attempt=None (cleanup is a fresh single turn)
+        self.dispatch_issue(issue, None).await;
     }
 
     async fn reconcile_stalls(&self) {
@@ -5727,6 +6024,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -5805,6 +6103,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -5884,6 +6183,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -5937,6 +6237,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -5990,6 +6291,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -6113,6 +6415,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -6194,6 +6497,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -6227,6 +6531,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -6361,6 +6666,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -6460,6 +6766,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -6529,6 +6836,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -6623,6 +6931,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -6729,6 +7038,7 @@ mod tests {
             repo_name: "test-repo".to_string(),
             api_base: server.url(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         });
         let orch = Orchestrator::new(config, "Test prompt".to_string());
 
@@ -6846,5 +7156,765 @@ mod tests {
     fn test_all_checks_passing_null_field() {
         let pr = serde_json::json!({ "statusCheckRollup": null });
         assert!(!all_checks_passing(&pr));
+    }
+
+    // ── should_dispatch: waiting_for_review blocks ───────────────────
+
+    #[tokio::test]
+    async fn test_should_dispatch_in_waiting_for_review() {
+        let orch = test_orchestrator();
+        // Add to waiting_for_review
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        let config = orch.config.read().await;
+        let issue = make_issue("id1", "PROJ-1", "In Review");
+        assert!(!orch.should_dispatch(&issue, &config).await);
+    }
+
+    // ── on_worker_exit: In Review → waiting_for_review ──────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_in_review_adds_to_waiting() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock find_open_pr
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert running entry with "In Review" state
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Review").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.is_completed("id1"));
+        // Should be in waiting_for_review
+        assert!(state.waiting_for_review.contains_key("id1"));
+        let entry = state.waiting_for_review.get("id1").unwrap();
+        assert_eq!(entry.pr_number, 42);
+        assert_eq!(entry.identifier, "PROJ-1");
+        assert_eq!(entry.branch, "symphony/proj-1");
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_in_review_no_github_config() {
+        let orch = test_orchestrator(); // no github config
+
+        // Insert running entry with "In Review" state
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Review").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        // Should NOT be in waiting (no github config)
+        assert!(!state.waiting_for_review.contains_key("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_in_review_no_pr_found() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock find_open_pr — empty list
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Review").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        // Not in waiting (no PR found)
+        assert!(!state.waiting_for_review.contains_key("id1"));
+    }
+
+    // ── reconcile_pr_lifecycle ─────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_no_github_config() {
+        let orch = test_orchestrator(); // no github config
+                                        // Should complete without error
+        orch.reconcile_pr_lifecycle().await;
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_no_waiting_entries() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Catch-all mock
+        let _mock = server
+            .mock("GET", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+        orch.reconcile_pr_lifecycle().await;
+        // No errors, no state changes
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_pr_merged() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: returns merged PR
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "closed",
+                    "merged": true
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "Cleanup {{ issue.identifier }}".to_string());
+
+        // Add waiting entry
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should be removed from waiting
+        assert!(!state.waiting_for_review.contains_key("id1"));
+        // Cleanup dispatch should have added it to running
+        assert!(state.running.contains_key("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_no_pr_removes_waiting() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: no PR found
+        let _mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        assert!(!state.waiting_for_review.contains_key("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_auto_merge_approved() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open (not merged)
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // get_pr_reviews: approved
+        let _reviews_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "id": 1,
+                    "state": "APPROVED",
+                    "user": { "login": "reviewer1" }
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // get_pr_details: mergeable
+        let _details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // enable_auto_merge: success
+        let _merge_mock = server
+            .mock("PUT", "/repos/test-org/test-repo/pulls/42/merge")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"sha": "abc123", "merged": true}"#)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: true,
+        });
+        let orch = Orchestrator::new(config, "Cleanup {{ issue.identifier }}".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should be removed from waiting (merged via auto-merge)
+        assert!(!state.waiting_for_review.contains_key("id1"));
+        // Cleanup dispatch should have added it to running
+        assert!(state.running.contains_key("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_auto_merge_disabled_skips() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false, // disabled
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should still be in waiting (auto_merge disabled, PR not merged)
+        assert!(state.waiting_for_review.contains_key("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_api_error_continues() {
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: "http://127.0.0.1:1".to_string(), // unreachable
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        // Should not panic on API errors
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should still be in waiting (API error, no change)
+        assert!(state.waiting_for_review.contains_key("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_auto_merge_not_approved() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Reviews: no approvals
+        let _reviews_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: true,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should still be in waiting (not approved)
+        assert!(state.waiting_for_review.contains_key("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_auto_merge_not_mergeable() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Reviews: approved
+        let _reviews_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "id": 1,
+                    "state": "APPROVED",
+                    "user": { "login": "reviewer1" }
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // get_pr_details: NOT mergeable
+        let _details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": false,
+                    "mergeable_state": "dirty"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: true,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should still be in waiting (not mergeable)
+        assert!(state.waiting_for_review.contains_key("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_auto_merge_405_keeps_waiting() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Reviews: approved
+        let _reviews_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "id": 1,
+                    "state": "APPROVED",
+                    "user": { "login": "reviewer1" }
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // PR details: mergeable
+        let _details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Merge attempt: 405 (not ready)
+        let _merge_mock = server
+            .mock("PUT", "/repos/test-org/test-repo/pulls/42/merge")
+            .with_status(405)
+            .with_body("not mergeable")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: true,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should still be in waiting (merge returned 405)
+        assert!(state.waiting_for_review.contains_key("id1"));
+    }
+
+    // ── dispatch_cleanup ──────────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_dispatch_cleanup_creates_running_entry() {
+        let config = test_config();
+        let orch = Orchestrator::new(config.clone(), "{{ issue.identifier }}".to_string());
+
+        let entry = crate::model::WaitingEntry {
+            issue_id: "id1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+        };
+
+        orch.dispatch_cleanup(&entry, &config.tracker).await;
+
+        let state = orch.state.read().await;
+        assert!(state.running.contains_key("id1"));
+        let running = state.running.get("id1").unwrap();
+        assert!(running.issue.title.contains("Cleanup"));
+        assert!(running
+            .issue
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("merged"));
     }
 }

@@ -50,6 +50,7 @@ pub struct GitHubConfig {
     pub repo_name: String,
     pub api_base: String,
     pub branch_prefix: String,
+    pub auto_merge: bool,
 }
 
 impl std::fmt::Debug for GitHubConfig {
@@ -60,6 +61,7 @@ impl std::fmt::Debug for GitHubConfig {
             .field("repo_name", &self.repo_name)
             .field("api_base", &self.api_base)
             .field("branch_prefix", &self.branch_prefix)
+            .field("auto_merge", &self.auto_merge)
             .finish()
     }
 }
@@ -507,12 +509,17 @@ fn parse_github_config(root: &serde_yml::Value) -> Result<Option<GitHubConfig>> 
     let branch_prefix =
         get_yaml_str(root, &["github", "branch_prefix"]).unwrap_or_else(|| "symphony/".to_string());
 
+    let auto_merge = get_yaml_str(root, &["github", "auto_merge"])
+        .map(|s| s == "true")
+        .unwrap_or(false);
+
     Ok(Some(GitHubConfig {
         token,
         repo_owner,
         repo_name,
         api_base,
         branch_prefix,
+        auto_merge,
     }))
 }
 
@@ -1423,6 +1430,7 @@ github:
             repo_name: "my-repo".to_string(),
             api_base: "https://api.github.com".to_string(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
         };
         let debug_output = format!("{:?}", config);
         assert!(!debug_output.contains("ghp_super_secret_token"));
@@ -1439,11 +1447,13 @@ github:
             repo_name: "repo".to_string(),
             api_base: "https://api.github.com".to_string(),
             branch_prefix: "symphony/".to_string(),
+            auto_merge: true,
         };
         let cloned = config.clone();
         assert_eq!(cloned.token, "ghp_test");
         assert_eq!(cloned.repo_owner, "owner");
         assert_eq!(cloned.repo_name, "repo");
+        assert!(cloned.auto_merge);
     }
 
     #[test]
@@ -1461,5 +1471,51 @@ github:
             result.unwrap_err(),
             SymphonyError::GitHubInvalidRepo { .. }
         ));
+    }
+
+    // --- auto_merge config ---
+
+    #[test]
+    fn test_github_auto_merge_enabled() {
+        let content = r#"---
+github:
+  token: ghp_test
+  repo: owner/name
+  auto_merge: true
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let gh = config.github.unwrap();
+        assert!(gh.auto_merge);
+    }
+
+    #[test]
+    fn test_github_auto_merge_disabled() {
+        let content = r#"---
+github:
+  token: ghp_test
+  repo: owner/name
+  auto_merge: false
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let gh = config.github.unwrap();
+        assert!(!gh.auto_merge);
+    }
+
+    #[test]
+    fn test_github_auto_merge_default_false() {
+        let content = r#"---
+github:
+  token: ghp_test
+  repo: owner/name
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let gh = config.github.unwrap();
+        assert!(!gh.auto_merge);
     }
 }

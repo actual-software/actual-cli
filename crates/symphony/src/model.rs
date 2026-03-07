@@ -88,6 +88,16 @@ pub struct AgentTotals {
     pub seconds_running: f64,
 }
 
+/// An issue waiting for PR review/merge (worker stopped, no slot consumed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitingEntry {
+    pub issue_id: String,
+    pub identifier: String,
+    pub pr_number: u64,
+    pub branch: String,
+    pub started_waiting_at: DateTime<Utc>,
+}
+
 /// Maximum number of completed issue IDs to retain for observability.
 /// Older entries are evicted in FIFO order to prevent unbounded growth.
 const MAX_COMPLETED_ENTRIES: usize = 1000;
@@ -99,6 +109,8 @@ pub struct OrchestratorState {
     pub running: HashMap<String, RunningEntry>,
     pub claimed: HashSet<String>,
     pub retry_attempts: HashMap<String, RetryEntry>,
+    /// Issues waiting for PR review/merge (worker stopped, no slot consumed).
+    pub waiting_for_review: HashMap<String, WaitingEntry>,
     /// Bounded set of recently-completed issue IDs (FIFO eviction).
     completed_set: HashSet<String>,
     completed_order: VecDeque<String>,
@@ -116,6 +128,7 @@ impl std::fmt::Debug for OrchestratorState {
             .field("running", &self.running)
             .field("claimed", &self.claimed)
             .field("retry_attempts", &self.retry_attempts)
+            .field("waiting_for_review", &self.waiting_for_review)
             .field("agent_totals", &self.agent_totals)
             .field("rate_limits", &self.rate_limits)
             .field(
@@ -134,6 +147,7 @@ impl OrchestratorState {
             running: HashMap::new(),
             claimed: HashSet::new(),
             retry_attempts: HashMap::new(),
+            waiting_for_review: HashMap::new(),
             completed_set: HashSet::new(),
             completed_order: VecDeque::new(),
             agent_totals: AgentTotals::default(),
@@ -270,6 +284,7 @@ mod tests {
         assert!(state.running.is_empty());
         assert!(state.claimed.is_empty());
         assert!(state.retry_attempts.is_empty());
+        assert!(state.waiting_for_review.is_empty());
         assert_eq!(state.completed_count(), 0);
         assert_eq!(state.agent_totals.input_tokens, 0);
         assert_eq!(state.agent_totals.output_tokens, 0);
@@ -636,6 +651,62 @@ mod tests {
         let debug = format!("{:?}", state);
         assert!(debug.contains("OrchestratorState"));
         assert!(debug.contains("event_broadcasts"));
+        assert!(debug.contains("waiting_for_review"));
+    }
+
+    // ── WaitingEntry ─────────────────────────────────────────────────
+
+    #[test]
+    fn waiting_entry_serializes() {
+        let entry = WaitingEntry {
+            issue_id: "id1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"issue_id\":\"id1\""));
+        assert!(json.contains("\"pr_number\":42"));
+        assert!(json.contains("\"branch\":\"symphony/proj-1\""));
+    }
+
+    #[test]
+    fn waiting_entry_clone_and_debug() {
+        let entry = WaitingEntry {
+            issue_id: "id1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+        };
+        let cloned = entry.clone();
+        assert_eq!(cloned.issue_id, "id1");
+        assert_eq!(cloned.pr_number, 42);
+        let debug = format!("{:?}", entry);
+        assert!(debug.contains("WaitingEntry"));
+    }
+
+    #[test]
+    fn waiting_for_review_operations() {
+        let mut state = OrchestratorState::new(5000, 4);
+        assert!(state.waiting_for_review.is_empty());
+
+        state.waiting_for_review.insert(
+            "id1".to_string(),
+            WaitingEntry {
+                issue_id: "id1".to_string(),
+                identifier: "PROJ-1".to_string(),
+                pr_number: 42,
+                branch: "symphony/proj-1".to_string(),
+                started_waiting_at: Utc::now(),
+            },
+        );
+        assert_eq!(state.waiting_for_review.len(), 1);
+        assert!(state.waiting_for_review.contains_key("id1"));
+
+        state.waiting_for_review.remove("id1");
+        assert!(state.waiting_for_review.is_empty());
     }
 
     // ── helpers ──────────────────────────────────────────────────────
