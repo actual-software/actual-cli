@@ -15,9 +15,12 @@ pub struct LinearClient {
 }
 
 impl LinearClient {
-    pub fn new(config: &TrackerConfig) -> Self {
+    /// Create a new LinearClient, sharing the given `reqwest::Client` for
+    /// connection pooling. Call sites should create one `reqwest::Client` at
+    /// startup and pass it to every `LinearClient` instance.
+    pub fn new(config: &TrackerConfig, http: reqwest::Client) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http,
             endpoint: config.endpoint.clone(),
             api_key: config.api_key.clone(),
             project_slug: config.project_slug.clone(),
@@ -662,6 +665,10 @@ mod tests {
 
     // ── LinearClient::new ────────────────────────────────────────────
 
+    fn new_http() -> reqwest::Client {
+        reqwest::Client::new()
+    }
+
     #[test]
     fn test_linear_client_new_sets_fields() {
         let config = TrackerConfig {
@@ -672,7 +679,7 @@ mod tests {
             active_states: vec!["Todo".to_string()],
             terminal_states: vec!["Done".to_string()],
         };
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         assert_eq!(client.endpoint, "https://api.linear.app/graphql");
         assert_eq!(client.api_key, "lin_api_test123");
         assert_eq!(client.project_slug, "my-project");
@@ -725,7 +732,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let body = serde_json::json!({"query": "{ viewer { id } }"});
         let result = client.execute_graphql(&body).await;
 
@@ -747,7 +754,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let body = serde_json::json!({"query": "{ foo }"});
         let err = client.execute_graphql(&body).await.unwrap_err();
 
@@ -772,7 +779,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let body = serde_json::json!({"query": "{ ok }"});
         let result = client.execute_graphql(&body).await;
         assert!(result.is_ok());
@@ -790,7 +797,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let body = serde_json::json!({"query": "{ viewer { id } }"});
         let err = client.execute_graphql(&body).await.unwrap_err();
 
@@ -816,7 +823,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let body = serde_json::json!({"query": "{ viewer { id } }"});
         let err = client.execute_graphql(&body).await.unwrap_err();
 
@@ -835,7 +842,7 @@ mod tests {
     async fn test_fetch_candidate_issues_empty_states_returns_empty() {
         // No server needed — short-circuits before HTTP
         let config = mock_tracker_config("http://unused");
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let result = client.fetch_candidate_issues(&[]).await.unwrap();
         assert!(result.is_empty());
     }
@@ -866,7 +873,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let issues = client
             .fetch_candidate_issues(&["Todo".to_string()])
             .await
@@ -926,7 +933,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let issues = client
             .fetch_candidate_issues(&["Todo".to_string()])
             .await
@@ -962,7 +969,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let err = client
             .fetch_candidate_issues(&["Todo".to_string()])
             .await
@@ -977,7 +984,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_issue_states_by_ids_empty_ids_returns_empty() {
         let config = mock_tracker_config("http://unused");
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let result = client.fetch_issue_states_by_ids(&[]).await.unwrap();
         assert!(result.is_empty());
     }
@@ -1004,7 +1011,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let issues = client
             .fetch_issue_states_by_ids(&["id1".to_string(), "id2".to_string()])
             .await
@@ -1021,7 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_issues_by_states_empty_states_returns_empty() {
         let config = mock_tracker_config("http://unused");
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let result = client.fetch_issues_by_states(&[]).await.unwrap();
         assert!(result.is_empty());
     }
@@ -1049,7 +1056,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let issues = client
             .fetch_issues_by_states(&["Done".to_string()])
             .await
@@ -1182,7 +1189,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let err = client
             .fetch_candidate_issues(&["Todo".to_string()])
             .await
@@ -1201,7 +1208,7 @@ mod tests {
     async fn test_execute_graphql_transport_error() {
         // Connect to a port that is not listening to trigger a send error
         let config = mock_tracker_config("http://127.0.0.1:1");
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let body = serde_json::json!({"query": "{ viewer { id } }"});
         let err = client.execute_graphql(&body).await.unwrap_err();
         assert!(matches!(&err, SymphonyError::LinearApiRequest { .. }));
@@ -1222,7 +1229,7 @@ mod tests {
             .await;
 
         let config = mock_tracker_config(&server.url());
-        let client = LinearClient::new(&config);
+        let client = LinearClient::new(&config, new_http());
         let body = serde_json::json!({"query": "{ ok }"});
         let result = client.execute_graphql(&body).await;
         assert!(result.is_ok());

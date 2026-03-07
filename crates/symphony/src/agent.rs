@@ -3,7 +3,7 @@ use crate::error::{Result, SymphonyError};
 use crate::model::{AgentEvent, Issue};
 use std::path::Path;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -40,11 +40,11 @@ impl AgentSession {
             });
         }
 
-        let title = format!("{}: {}", issue.identifier, issue.title);
+        let _title = format!("{}: {}", issue.identifier, issue.title);
 
-        // Build the command. We use `bash -lc` to launch Claude Code in print mode
-        // with stream-json output for structured event streaming.
-        let full_command = build_agent_command(&config.command, prompt, &title);
+        // Build the command. The prompt is passed via stdin to avoid shell
+        // injection — issue titles/descriptions from Linear are user-controlled.
+        let full_command = build_agent_command(&config.command);
 
         debug!(
             command = %config.command,
@@ -53,6 +53,15 @@ impl AgentSession {
         );
 
         let mut child = spawn_agent_process(&full_command, workspace_path)?;
+
+        // Write prompt to stdin to avoid shell interpolation of untrusted data
+        if let Some(mut stdin) = child.stdin.take() {
+            let prompt_bytes = prompt.as_bytes().to_vec();
+            tokio::spawn(async move {
+                let _ = stdin.write_all(&prompt_bytes).await;
+                let _ = stdin.shutdown().await;
+            });
+        }
 
         let pid = child.id();
 
@@ -124,11 +133,14 @@ impl AgentSession {
 }
 
 /// Spawn the agent subprocess via `bash -lc`.
+///
+/// Stdin is piped so the caller can write the prompt without shell interpolation.
 fn spawn_agent_process(full_command: &str, workspace_path: &Path) -> Result<Child> {
     Command::new("bash")
         .arg("-lc")
         .arg(full_command)
         .current_dir(workspace_path)
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -152,21 +164,22 @@ fn await_child_exit(result: std::io::Result<std::process::ExitStatus>) -> Result
 }
 
 /// Build the full shell command to run Claude Code.
-fn build_agent_command(base_command: &str, prompt: &str, _title: &str) -> String {
-    // Escape single quotes in the prompt for shell safety
-    let escaped_prompt = prompt.replace('\'', "'\\''");
-
+///
+/// The prompt is NOT included in the command — it is passed via stdin to
+/// avoid shell injection from untrusted issue data (titles, descriptions).
+fn build_agent_command(base_command: &str) -> String {
     // If the command already includes arguments (like -p, --output-format, etc.),
-    // we just append the prompt. Otherwise, we add the standard flags.
+    // we just use it as-is. Otherwise, we add the standard flags.
+    // The prompt arrives on stdin, so Claude Code reads from stdin in -p mode.
     if base_command.contains("-p")
         || base_command.contains("--print")
         || base_command.contains("app-server")
     {
-        format!("{base_command} '{escaped_prompt}'")
+        base_command.to_string()
     } else {
         // Default: claude -p with stream-json for structured output
         format!(
-            "{base_command} -p --output-format stream-json --dangerously-skip-permissions --max-turns 20 '{escaped_prompt}'"
+            "{base_command} -p --output-format stream-json --dangerously-skip-permissions --max-turns 20"
         )
     }
 }
@@ -305,26 +318,26 @@ mod tests {
     fn test_build_agent_command_with_flags() {
         let cmd = build_agent_command(
             "claude -p --output-format stream-json --dangerously-skip-permissions",
-            "Fix the bug",
-            "PROJ-1: Fix bug",
         );
         assert!(cmd.contains("claude -p"));
-        assert!(cmd.contains("Fix the bug"));
+        // Prompt is passed via stdin, not in the command
+        assert!(!cmd.contains("--max-turns"));
     }
 
     #[test]
     fn test_build_agent_command_bare() {
-        let cmd = build_agent_command("claude", "Fix the bug", "PROJ-1: Fix bug");
+        let cmd = build_agent_command("claude");
         assert!(cmd.contains("claude"));
         assert!(cmd.contains("-p"));
         assert!(cmd.contains("--output-format stream-json"));
-        assert!(cmd.contains("Fix the bug"));
     }
 
     #[test]
-    fn test_build_agent_command_escapes_quotes() {
-        let cmd = build_agent_command("claude -p", "It's a test", "PROJ-1: Test");
-        assert!(cmd.contains("It'\\''s a test"));
+    fn test_build_agent_command_no_prompt_in_command() {
+        // Verify that the prompt is never embedded in the shell command
+        let cmd = build_agent_command("claude -p");
+        // Should just be the base command as-is, no prompt appended
+        assert_eq!(cmd, "claude -p");
     }
 
     #[test]
@@ -521,17 +534,17 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_with_print_flag() {
-        let cmd = build_agent_command("claude --print", "Do stuff", "PROJ-1: Task");
-        // --print matches, so it should just append the prompt
-        assert_eq!(cmd, "claude --print 'Do stuff'");
+        let cmd = build_agent_command("claude --print");
+        // --print matches, so it should use the command as-is
+        assert_eq!(cmd, "claude --print");
         assert!(!cmd.contains("--output-format"));
     }
 
     #[test]
     fn test_build_agent_command_with_app_server() {
-        let cmd = build_agent_command("claude app-server --port 3000", "Do stuff", "PROJ-1: Task");
-        // app-server matches, so it should just append the prompt
-        assert_eq!(cmd, "claude app-server --port 3000 'Do stuff'");
+        let cmd = build_agent_command("claude app-server --port 3000");
+        // app-server matches, so it should use the command as-is
+        assert_eq!(cmd, "claude app-server --port 3000");
         assert!(!cmd.contains("--output-format"));
     }
 
@@ -572,9 +585,10 @@ mod tests {
     #[tokio::test]
     async fn test_agent_launch_and_wait_success() {
         let tmp = tempfile::tempdir().unwrap();
-        // The #-p trick: build_agent_command sees "-p" in the comment, so it
-        // just appends the prompt (which also becomes part of the comment).
-        // bash runs: printf '{"type":"result","result":"done"}\n' #-p 'do work'
+        // The #-p trick: build_agent_command sees "-p" in the command, so it
+        // returns the command as-is (no extra flags added).
+        // bash runs: printf '{"type":"result","result":"done"}\n' #-p
+        // The prompt arrives via stdin (which this script ignores).
         let config = make_test_config(r#"printf '{"type":"result","result":"done"}\n' #-p"#);
         let issue = make_test_issue();
 
