@@ -4418,6 +4418,52 @@ mod tests {
         assert!(state.running.contains_key("id1"));
     }
 
+    #[traced_test]
+    #[tokio::test]
+    async fn test_handle_message_remove_from_retry_queue() {
+        let orch = test_orchestrator();
+
+        // Insert a retry entry and claim
+        {
+            let mut state = orch.state.write().await;
+            state.retry_attempts.insert(
+                "id1".to_string(),
+                RetryEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    attempt: 3,
+                    due_at_ms: 0,
+                    error: Some("timeout".to_string()),
+                },
+            );
+            state.claimed.insert("id1".to_string());
+        }
+
+        orch.handle_message(OrchestratorMessage::RemoveFromRetryQueue {
+            issue_id: "id1".to_string(),
+        })
+        .await;
+
+        let state = orch.state.read().await;
+        assert!(!state.retry_attempts.contains_key("id1"));
+        assert!(!state.claimed.contains("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_handle_message_remove_from_retry_queue_not_found() {
+        let orch = test_orchestrator();
+
+        // Try to remove non-existent entry — should be a no-op
+        orch.handle_message(OrchestratorMessage::RemoveFromRetryQueue {
+            issue_id: "nonexistent".to_string(),
+        })
+        .await;
+
+        let state = orch.state.read().await;
+        assert!(state.retry_attempts.is_empty());
+    }
+
     // ── Edge cases ───────────────────────────────────────────────────
 
     #[tokio::test]

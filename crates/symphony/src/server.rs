@@ -3278,4 +3278,101 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+
+    // ── Remove retry endpoint ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_remove_retry_success() {
+        let app_state = test_app_state();
+
+        // Insert a retry entry
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            state.retry_attempts.insert(
+                "id1".to_string(),
+                RetryEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-R1".to_string(),
+                    attempt: 2,
+                    due_at_ms: 999,
+                    error: Some("timeout".to_string()),
+                },
+            );
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/PROJ-R1/remove-retry")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["removed"], true);
+        assert_eq!(json["issue_identifier"], "PROJ-R1");
+        assert_eq!(json["issue_id"], "id1");
+    }
+
+    #[tokio::test]
+    async fn test_remove_retry_not_found() {
+        let app_state = test_app_state();
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/PROJ-NOPE/remove-retry")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["error"]["code"], "issue_not_found");
+    }
+
+    // ── RemoveRetryResponse serialization ────────────────────────────
+
+    #[test]
+    fn test_remove_retry_response_serialization() {
+        let response = RemoveRetryResponse {
+            removed: true,
+            issue_identifier: "PROJ-1".to_string(),
+            issue_id: Some("id1".to_string()),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"removed\":true"));
+        assert!(json.contains("PROJ-1"));
+        assert!(json.contains("id1"));
+    }
+
+    // ── Dashboard contains remove-retry button ───────────────────────
+
+    #[test]
+    fn test_dashboard_contains_remove_retry_button() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        assert!(html.contains("removeRetry"));
+        assert!(html.contains("remove-retry"));
+        assert!(html.contains("btn-danger"));
+    }
 }
