@@ -105,6 +105,75 @@ impl LinearClient {
         nodes.into_iter().map(normalize_issue).collect()
     }
 
+    /// Transition an issue to a new workflow state by name.
+    ///
+    /// Resolves the target state name to a workflow state ID for the team,
+    /// then calls `issueUpdate` to apply the transition.
+    pub async fn transition_issue_state(
+        &self,
+        issue_id: &str,
+        target_state_name: &str,
+    ) -> Result<()> {
+        let state_id = self.resolve_state_id(target_state_name).await?;
+        self.update_issue_state(issue_id, &state_id).await
+    }
+
+    async fn resolve_state_id(&self, state_name: &str) -> Result<String> {
+        let query = r#"
+            query WorkflowStates($teamKey: String!) {
+                workflowStates(filter: { team: { key: { eq: $teamKey } } }) {
+                    nodes { id name }
+                }
+            }
+        "#;
+        let variables = serde_json::json!({ "teamKey": self.team_key });
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let response = self.execute_graphql(&body).await?;
+
+        let nodes = extract_nodes(&response, &["data", "workflowStates", "nodes"])?;
+        for node in nodes {
+            if let Some(name) = node.get("name").and_then(|n| n.as_str()) {
+                if name.eq_ignore_ascii_case(state_name) {
+                    if let Some(id) = node.get("id").and_then(|i| i.as_str()) {
+                        return Ok(id.to_string());
+                    }
+                }
+            }
+        }
+
+        Err(SymphonyError::LinearUnknownPayload {
+            reason: format!("workflow state '{state_name}' not found for team"),
+        })
+    }
+
+    async fn update_issue_state(&self, issue_id: &str, state_id: &str) -> Result<()> {
+        let query = r#"
+            mutation UpdateIssueState($issueId: String!, $stateId: String!) {
+                issueUpdate(id: $issueId, input: { stateId: $stateId }) {
+                    success
+                }
+            }
+        "#;
+        let variables = serde_json::json!({
+            "issueId": issue_id,
+            "stateId": state_id,
+        });
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let response = self.execute_graphql(&body).await?;
+
+        let success = navigate_json(&response, &["data", "issueUpdate", "success"])
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if success {
+            Ok(())
+        } else {
+            Err(SymphonyError::LinearUnknownPayload {
+                reason: format!("issueUpdate returned success=false for issue {issue_id}"),
+            })
+        }
+    }
+
     /// Fetch issues in specified states (for startup terminal cleanup).
     pub async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>> {
         if states.is_empty() {
@@ -1212,6 +1281,238 @@ mod tests {
         let body = serde_json::json!({"query": "{ viewer { id } }"});
         let err = client.execute_graphql(&body).await.unwrap_err();
         assert!(matches!(&err, SymphonyError::LinearApiRequest { .. }));
+    }
+
+    // ── transition_issue_state ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_transition_issue_state_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        // First call: resolve_state_id queries workflow states
+        let resolve_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-todo", "name": "Todo" },
+                                { "id": "state-in-progress", "name": "In Progress" },
+                                { "id": "state-done", "name": "Done" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Second call: update_issue_state performs the mutation
+        let update_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .transition_issue_state("issue-123", "In Progress")
+            .await;
+        assert!(result.is_ok());
+        resolve_mock.assert_async().await;
+        update_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_transition_issue_state_unknown_state() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-todo", "name": "Todo" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .transition_issue_state("issue-123", "Nonexistent")
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, SymphonyError::LinearUnknownPayload { .. }));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_transition_issue_state_case_insensitive() {
+        let mut server = mockito::Server::new_async().await;
+
+        let resolve_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-ip", "name": "In Progress" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let update_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        // Use different casing — should still match
+        let result = client
+            .transition_issue_state("issue-123", "in progress")
+            .await;
+        assert!(result.is_ok());
+        resolve_mock.assert_async().await;
+        update_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_update_issue_state_returns_false() {
+        let mut server = mockito::Server::new_async().await;
+
+        let resolve_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-ip", "name": "In Progress" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let update_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": false } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .transition_issue_state("issue-123", "In Progress")
+            .await;
+        assert!(result.is_err());
+        resolve_mock.assert_async().await;
+        update_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_resolve_state_id_api_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .transition_issue_state("issue-123", "In Progress")
+            .await;
+        assert!(result.is_err());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_resolve_state_id_node_missing_id() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "name": "In Progress" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .transition_issue_state("issue-123", "In Progress")
+            .await;
+        // Node has name but no id — should fail with not found
+        assert!(result.is_err());
+        mock.assert_async().await;
     }
 
     // ── execute_graphql: errors field is not an array ────────────────
