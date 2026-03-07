@@ -134,7 +134,7 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_concurrent_agents` | integer | `10` | Maximum parallel agent sessions |
-| `max_turns` | integer | `20` | Maximum agent turns per worker run |
+| `max_turns` | integer | `20` | Maximum agent turns per worker run. This value is automatically injected as `--max-turns` into the coding agent command, overriding any `--max-turns` already present in the command string |
 | `max_retries` | integer | `10` | Maximum retry attempts per issue |
 | `max_retry_backoff_ms` | integer | `300000` (5m) | Cap on exponential retry backoff |
 | `max_concurrent_agents_by_state` | map | `{}` | Per-state concurrency limits (e.g. `todo: 2, in progress: 3`) |
@@ -143,7 +143,7 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `command` | shell command | `claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 20` | Command to launch the coding agent |
+| `command` | shell command | `claude -p --output-format stream-json --verbose --dangerously-skip-permissions` | Command to launch the coding agent. Note: `--max-turns` is injected automatically from `agent.max_turns` — do not include it here |
 | `permission_mode` | string | `bypassPermissions` | Permission mode for agent sessions |
 | `turn_timeout_ms` | integer | `3600000` (1h) | Timeout per agent turn |
 | `stall_timeout_ms` | integer | `300000` (5m) | Kill agent if no events for this long. Set `0` to disable |

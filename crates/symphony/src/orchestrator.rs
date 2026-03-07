@@ -1035,6 +1035,7 @@ async fn run_worker(
             &prompt,
             issue,
             &env_vars,
+            config.agent.max_turns,
         )
         .await?;
 

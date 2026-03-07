@@ -18,7 +18,7 @@ agent:
     in progress: 3
     in review: 1
 coding_agent:
-  command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 30"
+  command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions"
   stall_timeout_ms: 600000
   turn_timeout_ms: 1800000
 server:

@@ -380,8 +380,9 @@ fn resolve_coding_agent_key(root: &serde_yml::Value) -> &'static str {
 fn parse_coding_agent_config(root: &serde_yml::Value) -> CodingAgentConfig {
     let key = resolve_coding_agent_key(root);
 
-    let command = get_yaml_str(root, &[key, "command"])
-        .unwrap_or_else(|| "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 20".to_string());
+    let command = get_yaml_str(root, &[key, "command"]).unwrap_or_else(|| {
+        "claude -p --output-format stream-json --verbose --dangerously-skip-permissions".to_string()
+    });
 
     let permission_mode = get_yaml_str(root, &[key, "permission_mode"])
         .unwrap_or_else(|| "bypassPermissions".to_string());
