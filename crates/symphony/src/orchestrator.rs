@@ -3012,6 +3012,122 @@ mod tests {
         );
     }
 
+    // ── add_claim_label / remove_claim_label ───────────────────────
+
+    /// Mock server helper: respond to all label-related GraphQL requests with
+    /// simple success responses, allowing add_claim_label and remove_claim_label
+    /// to complete without error.
+    async fn mock_label_server() -> (mockito::ServerGuard, Vec<mockito::Mock>) {
+        let mut server = mockito::Server::new_async().await;
+        let mut mocks = Vec::new();
+
+        // This mock accepts any POST and returns a response that satisfies
+        // find_label (returns empty labels, so remove_label_from_issue returns Ok early)
+        // For add_label_to_issue, we need more complex multi-step mocking.
+        // Simplest: return a response that makes find_label return the label found,
+        // then get_issue_label_ids returns it already attached → Ok early.
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "issueLabels": { "nodes": [] },
+                        "issue": { "labels": { "nodes": [] } }
+                    }
+                })
+                .to_string(),
+            )
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        mocks.push(mock);
+
+        (server, mocks)
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_remove_claim_label_ok_path() {
+        let (server, _mocks) = mock_label_server().await;
+        let config = test_config_with_endpoint(&server.url());
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // remove_claim_label calls remove_label_from_issue which calls find_label.
+        // If find_label returns None (label not found), remove_label_from_issue returns Ok.
+        orch.remove_claim_label("issue-1", "PROJ-1").await;
+
+        assert!(logs_contain("removed symphony-claimed label"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_add_claim_label_ok_path() {
+        let mut server = mockito::Server::new_async().await;
+
+        // 1. find_label: label already exists
+        let _m1 = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [
+                        { "id": "lbl-1", "name": "symphony-claimed" }
+                    ] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 2. get_issue_label_ids: label already attached
+        let _m2 = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issue": { "labels": { "nodes": [
+                        { "id": "lbl-1" }
+                    ] } } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&server.url());
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        orch.add_claim_label("issue-1", "PROJ-1").await;
+
+        assert!(logs_contain("added symphony-claimed label"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_add_claim_label_err_path() {
+        // Use a config that points to a non-existent server to trigger Err
+        let orch = test_orchestrator();
+
+        orch.add_claim_label("issue-1", "PROJ-1").await;
+
+        assert!(logs_contain("failed to add symphony-claimed label"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_remove_claim_label_err_path() {
+        // Use a config that points to a non-existent server to trigger Err
+        let orch = test_orchestrator();
+
+        orch.remove_claim_label("issue-1", "PROJ-1").await;
+
+        assert!(logs_contain("failed to remove symphony-claimed label"));
+    }
+
     // ── handle_message ───────────────────────────────────────────────
 
     #[tokio::test]
