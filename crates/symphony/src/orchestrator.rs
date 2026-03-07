@@ -761,7 +761,7 @@ impl Orchestrator {
     async fn reconcile_stalls(&self) {
         let stall_timeout_ms = {
             let config = self.config.read().await;
-            config.codex.stall_timeout_ms
+            config.coding_agent.stall_timeout_ms
         };
 
         if stall_timeout_ms == 0 {
@@ -993,7 +993,8 @@ async fn run_worker(
 
         // Launch agent
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config.codex, &workspace_result.path, &prompt, issue).await?;
+            AgentSession::launch(&config.coding_agent, &workspace_result.path, &prompt, issue)
+                .await?;
 
         // Stream events
         let tx = msg_tx.clone();
@@ -1011,7 +1012,7 @@ async fn run_worker(
 
         // Wait for agent to complete
         let result = session
-            .wait_with_timeout(config.codex.turn_timeout_ms)
+            .wait_with_timeout(config.coding_agent.turn_timeout_ms)
             .await;
         event_forwarder.abort();
 
@@ -1229,7 +1230,7 @@ mod tests {
                 max_retry_backoff_ms: 300_000,
                 max_concurrent_agents_by_state: HashMap::new(),
             },
-            codex: CodingAgentConfig {
+            coding_agent: CodingAgentConfig {
                 command: "echo test".to_string(),
                 permission_mode: "bypassPermissions".to_string(),
                 turn_timeout_ms: 3_600_000,
@@ -2746,7 +2747,7 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_stalls_terminates_stalled_entry() {
         let mut config = test_config();
-        config.codex.stall_timeout_ms = 100; // 100ms stall timeout
+        config.coding_agent.stall_timeout_ms = 100; // 100ms stall timeout
         let orch = Orchestrator::new(config, "template".to_string());
 
         // Insert with a started_at far in the past
@@ -2767,7 +2768,7 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_stalls_skips_when_timeout_zero() {
         let mut config = test_config();
-        config.codex.stall_timeout_ms = 0;
+        config.coding_agent.stall_timeout_ms = 0;
         let orch = Orchestrator::new(config, "template".to_string());
 
         let past = Utc::now() - chrono::Duration::seconds(60);
@@ -2782,7 +2783,7 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_stalls_uses_last_event_at() {
         let mut config = test_config();
-        config.codex.stall_timeout_ms = 100;
+        config.coding_agent.stall_timeout_ms = 100;
         let orch = Orchestrator::new(config, "template".to_string());
 
         // Insert with an old started_at but recent last_event_at
@@ -3252,7 +3253,7 @@ mod tests {
             .await;
 
         let mut config = test_config_with_endpoint(&server.url());
-        config.codex.stall_timeout_ms = 100;
+        config.coding_agent.stall_timeout_ms = 100;
         let orch = Orchestrator::new(config, "template".to_string());
 
         // id1: stalled (old started_at)
@@ -3627,7 +3628,7 @@ mod tests {
         let mut config = test_config();
         config.workspace.root = tmp.path().to_path_buf();
         // Use a command that exits immediately with success
-        config.codex.command = "true #-p".to_string();
+        config.coding_agent.command = "true #-p".to_string();
         let orch = Orchestrator::new(config, "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
@@ -3666,7 +3667,8 @@ mod tests {
         let mut config = test_config_with_endpoint(&server.url());
         config.workspace.root = tmp.path().to_path_buf();
         // Agent outputs a result and exits 0
-        config.codex.command = r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
         let (msg_tx, _msg_rx) = mpsc::channel(256);
@@ -3704,7 +3706,8 @@ mod tests {
 
         let mut config = test_config_with_endpoint(&server.url());
         config.workspace.root = tmp.path().to_path_buf();
-        config.codex.command = r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
         let (msg_tx, _msg_rx) = mpsc::channel(256);
@@ -3741,7 +3744,8 @@ mod tests {
 
         let mut config = test_config_with_endpoint(&server.url());
         config.workspace.root = tmp.path().to_path_buf();
-        config.codex.command = r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
         let (msg_tx, _msg_rx) = mpsc::channel(256);
@@ -3780,7 +3784,8 @@ mod tests {
         let mut config = test_config_with_endpoint(&server.url());
         config.workspace.root = tmp.path().to_path_buf();
         config.agent.max_turns = 1;
-        config.codex.command = r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
         let (msg_tx, _msg_rx) = mpsc::channel(256);
@@ -3809,7 +3814,7 @@ mod tests {
         let mut config = test_config();
         config.workspace.root = tmp.path().to_path_buf();
         // Agent exits with non-zero
-        config.codex.command = "exit 1 #-p".to_string();
+        config.coding_agent.command = "exit 1 #-p".to_string();
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
         let (msg_tx, _msg_rx) = mpsc::channel(256);
@@ -3836,7 +3841,8 @@ mod tests {
 
         let mut config = test_config();
         config.workspace.root = tmp.path().to_path_buf();
-        config.codex.command = r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
         let (msg_tx, _msg_rx) = mpsc::channel(256);
@@ -3889,7 +3895,8 @@ mod tests {
         let mut config = test_config_with_endpoint(&server.url());
         config.workspace.root = tmp.path().to_path_buf();
         config.agent.max_turns = 5;
-        config.codex.command = r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
         let (msg_tx, _msg_rx) = mpsc::channel(256);
@@ -3920,8 +3927,8 @@ mod tests {
         let mut config = test_config();
         config.workspace.root = tmp.path().to_path_buf();
         // Command that sleeps (will timeout)
-        config.codex.command = "sleep 999 #-p".to_string();
-        config.codex.turn_timeout_ms = 100; // 100ms timeout
+        config.coding_agent.command = "sleep 999 #-p".to_string();
+        config.coding_agent.turn_timeout_ms = 100; // 100ms timeout
 
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
 
@@ -3943,7 +3950,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut config = test_config();
         config.workspace.root = tmp.path().to_path_buf();
-        config.codex.command = "exit 1 #-p".to_string();
+        config.coding_agent.command = "exit 1 #-p".to_string();
 
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
 
@@ -3963,8 +3970,8 @@ mod tests {
 
         let mut config = test_config();
         config.workspace.root = tmp.path().to_path_buf();
-        config.codex.command = "sleep 999 #-p".to_string();
-        config.codex.turn_timeout_ms = 100;
+        config.coding_agent.command = "sleep 999 #-p".to_string();
+        config.coding_agent.turn_timeout_ms = 100;
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
         let (msg_tx, _msg_rx) = mpsc::channel(256);
@@ -4044,7 +4051,8 @@ mod tests {
         let mut config = test_config_with_endpoint(&server.url());
         config.workspace.root = tmp.path().to_path_buf();
         config.polling.interval_ms = 100; // fast polling
-        config.codex.command = r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
 
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
         let state_ref = Arc::clone(&orch.state);
@@ -4128,7 +4136,7 @@ mod tests {
         // We can't easily switch command mid-flight, so let's just verify
         // the retry mechanism fires by using a failing command and checking
         // that a retry entry is created.
-        config.codex.command = "exit 1 #-p".to_string();
+        config.coding_agent.command = "exit 1 #-p".to_string();
 
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
         let state_ref = Arc::clone(&orch.state);
@@ -4227,7 +4235,8 @@ mod tests {
         config.workspace.root = tmp.path().to_path_buf();
         config.polling.interval_ms = 100;
         config.agent.max_concurrent_agents = 3;
-        config.codex.command = r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"ok"}\n' #-p"#.to_string();
 
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
         let state_ref = Arc::clone(&orch.state);
@@ -4301,7 +4310,7 @@ mod tests {
         config.agent.max_concurrent_agents = 2;
         // Agent writes a file to prove workspace isolation:
         // each workspace gets its own identity file
-        config.codex.command =
+        config.coding_agent.command =
             r#"echo $PWD > workspace_id.txt && printf '{"type":"result","result":"ok"}\n' #-p"#
                 .to_string();
 
@@ -4387,9 +4396,9 @@ mod tests {
         let mut config = test_config_with_endpoint(&server.url());
         config.workspace.root = tmp.path().to_path_buf();
         config.polling.interval_ms = 200;
-        config.codex.turn_timeout_ms = 100; // very short timeout
-                                            // Agent sleeps forever, will be killed by timeout
-        config.codex.command = "sleep 999 #-p".to_string();
+        config.coding_agent.turn_timeout_ms = 100; // very short timeout
+                                                   // Agent sleeps forever, will be killed by timeout
+        config.coding_agent.command = "sleep 999 #-p".to_string();
 
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
         let state_ref = Arc::clone(&orch.state);
@@ -4476,8 +4485,8 @@ mod tests {
         config.workspace.root = tmp.path().to_path_buf();
         config.polling.interval_ms = 100;
         // Agent that sleeps, so it's still running when reconcile fires
-        config.codex.command = "sleep 999 #-p".to_string();
-        config.codex.turn_timeout_ms = 60_000; // long timeout so it doesn't time out first
+        config.coding_agent.command = "sleep 999 #-p".to_string();
+        config.coding_agent.turn_timeout_ms = 60_000; // long timeout so it doesn't time out first
 
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
         let state_ref = Arc::clone(&orch.state);
@@ -4560,8 +4569,8 @@ mod tests {
         config.polling.interval_ms = 100;
         // Start with max_concurrent = 1 — only 1 issue dispatched
         config.agent.max_concurrent_agents = 1;
-        config.codex.command = "sleep 999 #-p".to_string();
-        config.codex.turn_timeout_ms = 60_000;
+        config.coding_agent.command = "sleep 999 #-p".to_string();
+        config.coding_agent.turn_timeout_ms = 60_000;
 
         let orch = Orchestrator::new(config.clone(), "Work on {{ issue.identifier }}".to_string());
         let state_ref = Arc::clone(&orch.state);
@@ -4638,10 +4647,10 @@ mod tests {
         let mut config = test_config_with_endpoint(&server.url());
         config.workspace.root = tmp.path().to_path_buf();
         config.polling.interval_ms = 200;
-        config.codex.stall_timeout_ms = 500; // 500ms stall timeout
-        config.codex.turn_timeout_ms = 60_000; // long turn timeout
-                                               // Agent outputs nothing (no events) and sleeps — will trigger stall
-        config.codex.command = "sleep 999 #-p".to_string();
+        config.coding_agent.stall_timeout_ms = 500; // 500ms stall timeout
+        config.coding_agent.turn_timeout_ms = 60_000; // long turn timeout
+                                                      // Agent outputs nothing (no events) and sleeps — will trigger stall
+        config.coding_agent.command = "sleep 999 #-p".to_string();
 
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
         let state_ref = Arc::clone(&orch.state);

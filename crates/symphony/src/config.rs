@@ -3,6 +3,7 @@ use crate::model::WorkflowDefinition;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use tracing::warn;
 
 /// Typed runtime configuration derived from WorkflowDefinition.config.
 #[derive(Debug, Clone)]
@@ -12,7 +13,7 @@ pub struct ServiceConfig {
     pub workspace: WorkspaceConfig,
     pub hooks: HooksConfig,
     pub agent: AgentConfig,
-    pub codex: CodingAgentConfig,
+    pub coding_agent: CodingAgentConfig,
 }
 
 #[derive(Clone)]
@@ -85,7 +86,7 @@ impl ServiceConfig {
             workspace: parse_workspace_config(root),
             hooks: parse_hooks_config(root),
             agent: parse_agent_config(root),
-            codex: parse_codex_config(root),
+            coding_agent: parse_coding_agent_config(root),
         })
     }
 
@@ -111,9 +112,9 @@ impl ServiceConfig {
             return Err(SymphonyError::MissingTrackerTeamKey);
         }
 
-        if self.codex.command.is_empty() {
+        if self.coding_agent.command.is_empty() {
             return Err(SymphonyError::MissingRequiredConfig {
-                field: "codex.command".to_string(),
+                field: "coding_agent.command".to_string(),
             });
         }
 
@@ -339,14 +340,46 @@ fn get_yaml_mapping<'a>(root: &'a serde_yml::Value, keys: &[&str]) -> Option<&'a
     Some(current)
 }
 
-fn parse_codex_config(root: &serde_yml::Value) -> CodingAgentConfig {
-    let command = get_yaml_str(root, &["codex", "command"])
+/// Determine which YAML key to use for the coding agent config.
+/// Prefers `coding_agent`, falls back to deprecated `codex` with a warning.
+/// Returns the chosen key name.
+fn resolve_coding_agent_key(root: &serde_yml::Value) -> &'static str {
+    let has_coding_agent = root
+        .as_mapping()
+        .and_then(|m| m.get(serde_yml::Value::String("coding_agent".to_string())))
+        .is_some();
+
+    if has_coding_agent {
+        return "coding_agent";
+    }
+
+    let has_codex = root
+        .as_mapping()
+        .and_then(|m| m.get(serde_yml::Value::String("codex".to_string())))
+        .is_some();
+
+    if has_codex {
+        warn!(
+            "config key 'codex' is deprecated and will be removed in a future release; \
+             rename it to 'coding_agent'"
+        );
+        return "codex";
+    }
+
+    // Neither key present — use "coding_agent" (defaults will apply)
+    "coding_agent"
+}
+
+fn parse_coding_agent_config(root: &serde_yml::Value) -> CodingAgentConfig {
+    let key = resolve_coding_agent_key(root);
+
+    let command = get_yaml_str(root, &[key, "command"])
         .unwrap_or_else(|| "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 20".to_string());
 
-    let permission_mode = get_yaml_str(root, &["codex", "permission_mode"])
+    let permission_mode = get_yaml_str(root, &[key, "permission_mode"])
         .unwrap_or_else(|| "bypassPermissions".to_string());
 
-    let turn_timeout_ms = get_yaml_int(root, &["codex", "turn_timeout_ms"])
+    let turn_timeout_ms = get_yaml_int(root, &[key, "turn_timeout_ms"])
         .map(|v| v.max(0) as u64)
         .unwrap_or(3_600_000);
 
@@ -355,7 +388,7 @@ fn parse_codex_config(root: &serde_yml::Value) -> CodingAgentConfig {
 
     // §8.3: Clamp negative values to 0 (disables stall detection)
     // instead of wrapping via `v as u64`.
-    let stall_timeout_ms = get_yaml_int(root, &["codex", "stall_timeout_ms"])
+    let stall_timeout_ms = get_yaml_int(root, &[key, "stall_timeout_ms"])
         .map(|v| v.max(0) as u64)
         .unwrap_or(300_000);
 
@@ -386,8 +419,8 @@ mod tests {
         assert_eq!(config.agent.max_concurrent_agents, 10);
         assert_eq!(config.agent.max_turns, 20);
         assert_eq!(config.agent.max_retry_backoff_ms, 300_000);
-        assert_eq!(config.codex.turn_timeout_ms, 3_600_000);
-        assert_eq!(config.codex.stall_timeout_ms, 300_000);
+        assert_eq!(config.coding_agent.turn_timeout_ms, 3_600_000);
+        assert_eq!(config.coding_agent.stall_timeout_ms, 300_000);
         assert_eq!(config.hooks.timeout_ms, 60_000);
         assert!(config.tracker.active_states.contains(&"Todo".to_string()));
         assert!(config.tracker.terminal_states.contains(&"Done".to_string()));
@@ -413,7 +446,7 @@ agent:
   max_concurrent_agents_by_state:
     todo: 2
     in progress: 3
-codex:
+coding_agent:
   turn_timeout_ms: 1800000
   stall_timeout_ms: 120000
 ---
@@ -439,8 +472,8 @@ Do the work."#;
                 .get("in progress"),
             Some(&3)
         );
-        assert_eq!(config.codex.turn_timeout_ms, 1_800_000);
-        assert_eq!(config.codex.stall_timeout_ms, 120_000);
+        assert_eq!(config.coding_agent.turn_timeout_ms, 1_800_000);
+        assert_eq!(config.coding_agent.stall_timeout_ms, 120_000);
     }
 
     #[test]
@@ -538,13 +571,13 @@ tracker:
     }
 
     #[test]
-    fn test_validate_missing_codex_command() {
+    fn test_validate_missing_coding_agent_command() {
         let content = r#"---
 tracker:
   kind: linear
   api_key: some-key
   team_key: my-proj
-codex:
+coding_agent:
   command: ""
 ---
 "#;
@@ -552,7 +585,7 @@ codex:
         let config = ServiceConfig::from_workflow(&wf).unwrap();
         let err = config.validate_for_dispatch().unwrap_err();
         assert!(
-            matches!(&err, SymphonyError::MissingRequiredConfig { field } if field == "codex.command")
+            matches!(&err, SymphonyError::MissingRequiredConfig { field } if field == "coding_agent.command")
         );
     }
 
@@ -704,18 +737,18 @@ hooks:
         assert_eq!(config.hooks.timeout_ms, 60_000);
     }
 
-    // --- parse_codex_config: custom command overrides default ---
+    // --- parse_coding_agent_config: custom command overrides default ---
 
     #[test]
-    fn test_codex_custom_command() {
+    fn test_coding_agent_custom_command() {
         let content = r#"---
-codex:
+coding_agent:
   command: "my-custom-agent --flag"
 ---
 "#;
         let wf = parse_workflow(content).unwrap();
         let config = ServiceConfig::from_workflow(&wf).unwrap();
-        assert_eq!(config.codex.command, "my-custom-agent --flag");
+        assert_eq!(config.coding_agent.command, "my-custom-agent --flag");
     }
 
     // --- parse_tracker_config: LINEAR_API_KEY env var fallback, non-linear kind ---
@@ -832,13 +865,13 @@ agent:
     #[test]
     fn test_stall_timeout_negative_clamps_to_zero() {
         let content = r#"---
-codex:
+coding_agent:
   stall_timeout_ms: -100
 ---
 "#;
         let wf = parse_workflow(content).unwrap();
         let config = ServiceConfig::from_workflow(&wf).unwrap();
-        assert_eq!(config.codex.stall_timeout_ms, 0);
+        assert_eq!(config.coding_agent.stall_timeout_ms, 0);
     }
 
     #[test]
@@ -852,5 +885,60 @@ agent:
         let wf = parse_workflow(content).unwrap();
         let config = ServiceConfig::from_workflow(&wf).unwrap();
         assert!(config.agent.max_concurrent_agents_by_state.is_empty());
+    }
+
+    // --- deprecated `codex` key falls back correctly ---
+
+    #[test]
+    fn test_deprecated_codex_key_still_works() {
+        let content = r#"---
+codex:
+  command: "my-legacy-agent --flag"
+  turn_timeout_ms: 999000
+  stall_timeout_ms: 42000
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.coding_agent.command, "my-legacy-agent --flag");
+        assert_eq!(config.coding_agent.turn_timeout_ms, 999_000);
+        assert_eq!(config.coding_agent.stall_timeout_ms, 42_000);
+    }
+
+    #[test]
+    fn test_coding_agent_key_preferred_over_codex() {
+        // When both `coding_agent` and `codex` are present, `coding_agent` wins
+        let content = r#"---
+coding_agent:
+  command: "new-agent"
+  turn_timeout_ms: 111000
+codex:
+  command: "old-agent"
+  turn_timeout_ms: 222000
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.coding_agent.command, "new-agent");
+        assert_eq!(config.coding_agent.turn_timeout_ms, 111_000);
+    }
+
+    #[test]
+    fn test_validate_missing_coding_agent_command_via_deprecated_codex() {
+        let content = r#"---
+tracker:
+  kind: linear
+  api_key: some-key
+  team_key: my-proj
+codex:
+  command: ""
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let err = config.validate_for_dispatch().unwrap_err();
+        assert!(
+            matches!(&err, SymphonyError::MissingRequiredConfig { field } if field == "coding_agent.command")
+        );
     }
 }
