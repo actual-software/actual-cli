@@ -6344,4 +6344,207 @@ mod tests {
         gh_details_mock.assert_async().await;
         linear_mock.assert_async().await;
     }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_reconcile_pr_conflicts_non_running_skips_running_issue() {
+        // When a tracker-fetched In Review issue is already running, it should be skipped
+        let mut server = mockito::Server::new_async().await;
+
+        // GitHub: find PR for the running issue (TST-1)
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .expect_at_least(2)
+            .create_async()
+            .await;
+
+        // GitHub: PR details — clean
+        let gh_details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                }))
+                .unwrap(),
+            )
+            .expect_at_least(2)
+            .create_async()
+            .await;
+
+        // Linear: fetch "In Review" issues — returns the SAME issue that is running
+        let linear_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "issues": {
+                            "nodes": [{
+                                "id": "1",
+                                "identifier": "TST-1",
+                                "title": "Running issue",
+                                "state": { "name": "In Review" },
+                                "priority": null,
+                                "branchName": null,
+                                "url": null,
+                                "labels": { "nodes": [] },
+                                "relations": { "nodes": [] },
+                                "createdAt": "2024-01-01T00:00:00Z",
+                                "updatedAt": "2024-01-01T00:00:00Z"
+                            }],
+                            "pageInfo": { "hasNextPage": false }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+        });
+        let orch = Orchestrator::new(config, "Test prompt".to_string());
+
+        // Insert running issue with same ID "1"
+        let _cancel_rx = insert_running(&orch, "1", "TST-1", "In Review").await;
+        orch.reconcile_pr_conflicts().await;
+
+        // The tracker-fetched issue should be skipped (already handled as running)
+        // Only the running-issues section should have logged
+        gh_find_mock.assert_async().await;
+        gh_details_mock.assert_async().await;
+        linear_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_reconcile_pr_conflicts_non_running_transition_failure() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Linear: fetch "In Review" issues — one non-running issue
+        let linear_fetch_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("In Review".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "issues": {
+                            "nodes": [{
+                                "id": "issue-88",
+                                "identifier": "TST-88",
+                                "title": "Issue with conflict",
+                                "state": { "name": "In Review" },
+                                "priority": null,
+                                "branchName": null,
+                                "url": null,
+                                "labels": { "nodes": [] },
+                                "relations": { "nodes": [] },
+                                "createdAt": "2024-01-01T00:00:00Z",
+                                "updatedAt": "2024-01-01T00:00:00Z"
+                            }],
+                            "pageInfo": { "hasNextPage": false }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // GitHub: find open PR for TST-88
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/tst-88".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "open".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 55,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // GitHub: PR details — conflicting
+        let gh_details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/55")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 55,
+                    "state": "open",
+                    "mergeable": false,
+                    "mergeable_state": "dirty"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: resolve state — fails
+        let linear_resolve_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("workflowStates".to_string()))
+            .with_status(500)
+            .with_body("internal error")
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+        });
+        let orch = Orchestrator::new(config, "Test prompt".to_string());
+
+        // No running issues
+        orch.reconcile_pr_conflicts().await;
+
+        // Should log the conflict and the failed transition
+        assert!(logs_contain(
+            "In Review issue has merge conflicts, transitioning to In Progress"
+        ));
+        assert!(logs_contain("failed to transition conflicting issue"));
+
+        linear_fetch_mock.assert_async().await;
+        gh_find_mock.assert_async().await;
+        gh_details_mock.assert_async().await;
+        linear_resolve_mock.assert_async().await;
+    }
 }
