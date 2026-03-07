@@ -953,6 +953,24 @@ impl Orchestrator {
     }
 }
 
+/// Build a map of environment variables to inject into the agent subprocess.
+///
+/// Currently injects `LINEAR_API_KEY` (and `LINEAR_TEAM_KEY`) from the tracker
+/// config so agents can interact with Linear directly using `curl` or `gh api`.
+fn build_agent_env_vars(config: &ServiceConfig) -> std::collections::HashMap<String, String> {
+    let mut env_vars = std::collections::HashMap::new();
+    if !config.tracker.api_key.is_empty() {
+        env_vars.insert("LINEAR_API_KEY".to_string(), config.tracker.api_key.clone());
+    }
+    if !config.tracker.team_key.is_empty() {
+        env_vars.insert(
+            "LINEAR_TEAM_KEY".to_string(),
+            config.tracker.team_key.clone(),
+        );
+    }
+    env_vars
+}
+
 /// Run a worker for one issue.
 async fn run_worker(
     config: &ServiceConfig,
@@ -973,7 +991,10 @@ async fn run_worker(
     // Phase 2: Run before_run hook
     workspace::run_before_run_hook(&workspace_result.path, &config.hooks).await?;
 
-    // Phase 3: Build prompt and launch agent
+    // Phase 3: Build env vars for agent subprocess
+    let env_vars = build_agent_env_vars(config);
+
+    // Phase 4: Build prompt and launch agent
     let max_turns = config.agent.max_turns;
     let mut turn_number: u32 = 1;
 
@@ -992,9 +1013,14 @@ async fn run_worker(
         };
 
         // Launch agent
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config.coding_agent, &workspace_result.path, &prompt, issue)
-                .await?;
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config.coding_agent,
+            &workspace_result.path,
+            &prompt,
+            issue,
+            &env_vars,
+        )
+        .await?;
 
         // Stream events
         let tx = msg_tx.clone();
@@ -4826,5 +4852,55 @@ mod tests {
     #[test]
     fn test_shutdown_drain_timeout_constant() {
         assert_eq!(SHUTDOWN_DRAIN_TIMEOUT_SECS, 30);
+    }
+
+    // ── build_agent_env_vars ─────────────────────────────────────────
+
+    #[test]
+    fn test_build_agent_env_vars_includes_api_key_and_team_key() {
+        let config = test_config();
+        let env_vars = build_agent_env_vars(&config);
+        assert_eq!(
+            env_vars.get("LINEAR_API_KEY"),
+            Some(&"test-key".to_string())
+        );
+        assert_eq!(
+            env_vars.get("LINEAR_TEAM_KEY"),
+            Some(&"test-proj".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_agent_env_vars_skips_empty_api_key() {
+        let mut config = test_config();
+        config.tracker.api_key = String::new();
+        let env_vars = build_agent_env_vars(&config);
+        assert!(!env_vars.contains_key("LINEAR_API_KEY"));
+        // team_key should still be present
+        assert_eq!(
+            env_vars.get("LINEAR_TEAM_KEY"),
+            Some(&"test-proj".to_string())
+        );
+    }
+
+    #[test]
+    fn test_build_agent_env_vars_skips_empty_team_key() {
+        let mut config = test_config();
+        config.tracker.team_key = String::new();
+        let env_vars = build_agent_env_vars(&config);
+        assert_eq!(
+            env_vars.get("LINEAR_API_KEY"),
+            Some(&"test-key".to_string())
+        );
+        assert!(!env_vars.contains_key("LINEAR_TEAM_KEY"));
+    }
+
+    #[test]
+    fn test_build_agent_env_vars_both_empty() {
+        let mut config = test_config();
+        config.tracker.api_key = String::new();
+        config.tracker.team_key = String::new();
+        let env_vars = build_agent_env_vars(&config);
+        assert!(env_vars.is_empty());
     }
 }
