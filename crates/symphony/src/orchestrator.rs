@@ -367,12 +367,7 @@ impl Orchestrator {
         let issue_id = issue.id.clone();
         let identifier = issue.identifier.clone();
 
-        info!(
-            issue_id = %issue_id,
-            issue_identifier = %identifier,
-            attempt = ?attempt,
-            "dispatching issue"
-        );
+        info!(issue_id = %issue_id, issue_identifier = %identifier, attempt = ?attempt, "dispatching issue");
 
         let (cancel_tx, cancel_rx) = oneshot::channel();
 
@@ -424,19 +419,17 @@ impl Orchestrator {
             DeploymentMode::Distributed => {
                 // Render prompt for remote worker
                 let prompt_template = self.prompt_template.read().await.clone();
-                let rendered_prompt =
-                    match crate::prompt::render_prompt(&prompt_template, &issue, attempt) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            error!(
-                                issue_id = %issue_id,
-                                issue_identifier = %identifier,
-                                error = %e,
-                                "failed to render prompt for distributed worker"
-                            );
-                            return;
-                        }
-                    };
+                let rendered_prompt = match crate::prompt::render_prompt(
+                    &prompt_template,
+                    &issue,
+                    attempt,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!(issue_id = %issue_id, issue_identifier = %identifier, error = %e, "failed to render prompt for distributed worker");
+                        return;
+                    }
+                };
 
                 let workspace_key = crate::workspace::sanitize_workspace_key(&identifier);
                 let workspace_path = config.workspace.root.join(&workspace_key);
@@ -455,11 +448,7 @@ impl Orchestrator {
                     state.job_notify.notify_one();
                 }
 
-                info!(
-                    issue_id = %issue_id,
-                    issue_identifier = %identifier,
-                    "issue enqueued for distributed worker"
-                );
+                info!(issue_id = %issue_id, issue_identifier = %identifier, "issue enqueued for distributed worker");
                 return;
             }
             DeploymentMode::Local => {
@@ -514,17 +503,10 @@ impl Orchestrator {
 
         match client.transition_issue_state(issue_id, "In Progress").await {
             Ok(()) => {
-                info!(
-                    issue_identifier = %identifier,
-                    "transitioned issue to In Progress"
-                );
+                info!(issue_identifier = %identifier, "transitioned issue to In Progress");
             }
             Err(e) => {
-                warn!(
-                    issue_identifier = %identifier,
-                    error = %e,
-                    "failed to transition issue to In Progress (continuing dispatch)"
-                );
+                warn!(issue_identifier = %identifier, error = %e, "failed to transition issue to In Progress (continuing dispatch)");
             }
         }
     }
@@ -536,10 +518,7 @@ impl Orchestrator {
             Some(c) => c.clone(),
             None => {
                 // No GitHub config — can't track PR, fall back to continuation retry
-                debug!(
-                    issue_id = %issue_id,
-                    "no GitHub config, skipping waiting_for_review"
-                );
+                debug!(issue_id = %issue_id, "no GitHub config, skipping waiting_for_review");
                 return;
             }
         };
@@ -555,19 +534,11 @@ impl Orchestrator {
         let pr_number = match github.find_open_pr(&branch).await {
             Ok(Some(pr)) => pr.number,
             Ok(None) => {
-                debug!(
-                    issue_id = %issue_id,
-                    branch = %branch,
-                    "no open PR found for In Review issue"
-                );
+                debug!(issue_id = %issue_id, branch = %branch, "no open PR found for In Review issue");
                 return;
             }
             Err(e) => {
-                debug!(
-                    issue_id = %issue_id,
-                    error = %e,
-                    "failed to find PR for In Review issue"
-                );
+                debug!(issue_id = %issue_id, error = %e, "failed to find PR for In Review issue");
                 return;
             }
         };
@@ -583,12 +554,7 @@ impl Orchestrator {
                 started_waiting_at: Utc::now(),
             },
         );
-        info!(
-            issue_id = %issue_id,
-            issue_identifier = %identifier,
-            pr_number = pr_number,
-            "added to waiting_for_review"
-        );
+        info!(issue_id = %issue_id, issue_identifier = %identifier, pr_number = pr_number, "added to waiting_for_review");
     }
 
     /// Best-effort persist a session snapshot to the store.
@@ -685,11 +651,7 @@ impl Orchestrator {
 
             match &reason {
                 WorkerExitReason::Normal => {
-                    info!(
-                        issue_id = %issue_id,
-                        issue_identifier = %identifier,
-                        "worker completed normally"
-                    );
+                    info!(issue_id = %issue_id, issue_identifier = %identifier, "worker completed normally");
                     state.mark_completed(issue_id.to_string());
                     // Persist completed marker (best-effort)
                     if let Some(ref store) = self.store {
@@ -708,10 +670,6 @@ impl Orchestrator {
                             .await;
                     } else {
                         // §8.1: Schedule a short continuation retry (1000ms)
-                        // instead of releasing the claim and waiting for the
-                        // next poll tick (~30s). The retry handler will re-check
-                        // if the issue is still active and re-dispatch quickly
-                        // or release the claim if the issue went terminal.
                         self.schedule_retry_inner(
                             &mut state,
                             issue_id.to_string(),
@@ -723,12 +681,7 @@ impl Orchestrator {
                     }
                 }
                 WorkerExitReason::Failed(err) => {
-                    warn!(
-                        issue_id = %issue_id,
-                        issue_identifier = %identifier,
-                        error = %err,
-                        "worker failed"
-                    );
+                    warn!(issue_id = %issue_id, issue_identifier = %identifier, error = %err, "worker failed");
                     let config = self.config.read().await;
                     self.schedule_retry(
                         &mut state,
@@ -740,11 +693,7 @@ impl Orchestrator {
                     );
                 }
                 WorkerExitReason::TimedOut => {
-                    warn!(
-                        issue_id = %issue_id,
-                        issue_identifier = %identifier,
-                        "worker timed out"
-                    );
+                    warn!(issue_id = %issue_id, issue_identifier = %identifier, "worker timed out");
                     let config = self.config.read().await;
                     self.schedule_retry(
                         &mut state,
@@ -756,11 +705,7 @@ impl Orchestrator {
                     );
                 }
                 WorkerExitReason::Stalled => {
-                    warn!(
-                        issue_id = %issue_id,
-                        issue_identifier = %identifier,
-                        "worker stalled"
-                    );
+                    warn!(issue_id = %issue_id, issue_identifier = %identifier, "worker stalled");
                     let config = self.config.read().await;
                     self.schedule_retry(
                         &mut state,
@@ -772,11 +717,7 @@ impl Orchestrator {
                     );
                 }
                 WorkerExitReason::Cancelled => {
-                    info!(
-                        issue_id = %issue_id,
-                        issue_identifier = %identifier,
-                        "worker cancelled by reconciliation"
-                    );
+                    info!(issue_id = %issue_id, issue_identifier = %identifier, "worker cancelled by reconciliation");
                     state.claimed.remove(issue_id);
                 }
             }
@@ -831,13 +772,7 @@ impl Orchestrator {
 
         state.retry_attempts.insert(issue_id.clone(), entry);
 
-        debug!(
-            issue_id = %issue_id,
-            issue_identifier = %identifier,
-            attempt = attempt,
-            delay_ms = delay_ms,
-            "scheduled retry"
-        );
+        debug!(issue_id = %issue_id, issue_identifier = %identifier, attempt = attempt, delay_ms = delay_ms, "scheduled retry");
 
         // Spawn a timer task
         let msg_tx = self.msg_tx.clone();
@@ -870,12 +805,7 @@ impl Orchestrator {
         {
             Ok(issues) => issues,
             Err(e) => {
-                warn!(
-                    issue_id = %issue_id,
-                    issue_identifier = %entry.identifier,
-                    error = %e,
-                    "retry poll failed, rescheduling"
-                );
+                warn!(issue_id = %issue_id, issue_identifier = %entry.identifier, error = %e, "retry poll failed, rescheduling");
                 let delay =
                     exponential_backoff(entry.attempt + 1, config.agent.max_retry_backoff_ms);
                 let mut state = self.state.write().await;
@@ -896,11 +826,7 @@ impl Orchestrator {
         match issue {
             None => {
                 // Issue no longer in active candidates, release claim
-                info!(
-                    issue_id = %issue_id,
-                    issue_identifier = %entry.identifier,
-                    "issue no longer active, releasing claim"
-                );
+                info!(issue_id = %issue_id, issue_identifier = %entry.identifier, "issue no longer active, releasing claim");
                 let mut state = self.state.write().await;
                 state.claimed.remove(issue_id);
             }
@@ -1112,12 +1038,7 @@ impl Orchestrator {
             );
             match github.is_pr_mergeable(&branch).await {
                 Ok(Some(false)) => {
-                    warn!(
-                        issue_id = %issue_id,
-                        issue_identifier = %identifier,
-                        branch = %branch,
-                        "PR has merge conflicts (worker should resolve via prompt instructions)"
-                    );
+                    warn!(issue_id = %issue_id, issue_identifier = %identifier, branch = %branch, "PR has merge conflicts (worker should resolve via prompt instructions)");
                 }
                 Ok(Some(true)) => {
                     debug!(issue_id = %issue_id, "PR is mergeable");
@@ -1133,25 +1054,16 @@ impl Orchestrator {
             // If issue is "In Review" and has conflicts, transition back
             if issue_state.eq_ignore_ascii_case("in review") {
                 if let Ok(Some(false)) = github.is_pr_mergeable(&branch).await {
-                    warn!(
-                        issue_id = %issue_id,
-                        issue_identifier = %identifier,
-                        "In Review running issue has merge conflicts, transitioning to In Progress"
-                    );
+                    warn!(issue_id = %issue_id, issue_identifier = %identifier, "In Review running issue has merge conflicts, transitioning to In Progress");
                     let client = LinearClient::new(&tracker_config, self.http.clone());
                     if let Err(e) = client.transition_issue_state(issue_id, "In Progress").await {
-                        warn!(
-                            issue_id = %issue_id,
-                            error = %e,
-                            "failed to transition issue back to In Progress"
-                        );
+                        warn!(issue_id = %issue_id, error = %e, "failed to transition issue back to In Progress");
                     }
                 }
             }
         }
 
         // 4. Fetch "In Review" issues from Linear that may NOT be currently running
-        //    (worker already exited). These are the most critical cases.
         let client = LinearClient::new(&tracker_config, self.http.clone());
         let in_review_from_tracker = match client
             .fetch_issues_by_states(&["In Review".to_string()])
@@ -1164,7 +1076,6 @@ impl Orchestrator {
             }
         };
 
-        // Filter to only issues NOT currently running (already handled above)
         let running_ids: std::collections::HashSet<&str> = running_issues
             .iter()
             .map(|(id, _, _)| id.as_str())
@@ -1172,7 +1083,7 @@ impl Orchestrator {
 
         for issue in &in_review_from_tracker {
             if running_ids.contains(issue.id.as_str()) {
-                continue; // Already checked above
+                continue;
             }
 
             let branch = format!(
@@ -1181,20 +1092,12 @@ impl Orchestrator {
                 issue.identifier.to_lowercase()
             );
             if let Ok(Some(false)) = github.is_pr_mergeable(&branch).await {
-                warn!(
-                    issue_id = %issue.id,
-                    issue_identifier = %issue.identifier,
-                    "In Review issue has merge conflicts, transitioning to In Progress"
-                );
+                warn!(issue_id = %issue.id, issue_identifier = %issue.identifier, "In Review issue has merge conflicts, transitioning to In Progress");
                 if let Err(e) = client
                     .transition_issue_state(&issue.id, "In Progress")
                     .await
                 {
-                    warn!(
-                        issue_id = %issue.id,
-                        error = %e,
-                        "failed to transition conflicting issue"
-                    );
+                    warn!(issue_id = %issue.id, error = %e, "failed to transition conflicting issue");
                 }
             }
         }
@@ -1226,18 +1129,10 @@ impl Orchestrator {
             // 1. Check if PR has been merged
             match github.is_pr_merged(&entry.branch).await {
                 Ok(Some(true)) => {
-                    info!(
-                        issue_id = %entry.issue_id,
-                        issue_identifier = %entry.identifier,
-                        pr_number = entry.pr_number,
-                        "PR merged — dispatching cleanup"
-                    );
-                    // Remove from waiting_for_review
+                    info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, pr_number = entry.pr_number, "PR merged — dispatching cleanup");
                     let mut state = self.state.write().await;
                     state.waiting_for_review.remove(&entry.issue_id);
                     drop(state);
-
-                    // Dispatch cleanup agent turn
                     self.dispatch_cleanup(entry, &tracker_config).await;
                     continue;
                 }
@@ -1245,39 +1140,25 @@ impl Orchestrator {
                     // Still open — check if we should auto-merge
                 }
                 Ok(None) => {
-                    // No PR found — remove from waiting
-                    debug!(
-                        issue_id = %entry.issue_id,
-                        "no PR found for waiting entry, removing"
-                    );
+                    debug!(issue_id = %entry.issue_id, "no PR found for waiting entry, removing");
                     let mut state = self.state.write().await;
                     state.waiting_for_review.remove(&entry.issue_id);
                     continue;
                 }
                 Err(e) => {
-                    debug!(
-                        issue_id = %entry.issue_id,
-                        error = %e,
-                        "failed to check PR merge status"
-                    );
+                    debug!(issue_id = %entry.issue_id, error = %e, "failed to check PR merge status");
                     continue;
                 }
             }
 
-            // 2. Auto-merge if enabled and PR is approved + mergeable
             if !github_config.auto_merge {
                 continue;
             }
 
-            // Check if PR is approved
             let approved = match github.is_pr_approved(entry.pr_number).await {
                 Ok(a) => a,
                 Err(e) => {
-                    debug!(
-                        issue_id = %entry.issue_id,
-                        error = %e,
-                        "failed to check PR approval status"
-                    );
+                    debug!(issue_id = %entry.issue_id, error = %e, "failed to check PR approval status");
                     continue;
                 }
             };
@@ -1286,15 +1167,10 @@ impl Orchestrator {
                 continue;
             }
 
-            // Check if PR is mergeable (no conflicts)
             let pr_details = match github.get_pr_details(entry.pr_number).await {
                 Ok(pr) => pr,
                 Err(e) => {
-                    debug!(
-                        issue_id = %entry.issue_id,
-                        error = %e,
-                        "failed to get PR details for auto-merge"
-                    );
+                    debug!(issue_id = %entry.issue_id, error = %e, "failed to get PR details for auto-merge");
                     continue;
                 }
             };
@@ -1303,47 +1179,26 @@ impl Orchestrator {
                 continue;
             }
 
-            // Attempt to merge
-            info!(
-                issue_id = %entry.issue_id,
-                issue_identifier = %entry.identifier,
-                pr_number = entry.pr_number,
-                "PR approved and mergeable — attempting auto-merge"
-            );
+            info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, pr_number = entry.pr_number, "PR approved and mergeable — attempting auto-merge");
 
             match github.enable_auto_merge(entry.pr_number).await {
                 Ok(true) => {
-                    info!(
-                        issue_id = %entry.issue_id,
-                        issue_identifier = %entry.identifier,
-                        pr_number = entry.pr_number,
-                        "auto-merge succeeded"
-                    );
-                    // PR is now merged — remove from waiting and dispatch cleanup
+                    info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, pr_number = entry.pr_number, "auto-merge succeeded");
                     let mut state = self.state.write().await;
                     state.waiting_for_review.remove(&entry.issue_id);
                     drop(state);
-
                     self.dispatch_cleanup(entry, &tracker_config).await;
                 }
                 Ok(false) => {
-                    debug!(
-                        issue_id = %entry.issue_id,
-                        "auto-merge not ready yet (checks pending or blocked)"
-                    );
+                    debug!(issue_id = %entry.issue_id, "auto-merge not ready yet (checks pending or blocked)");
                 }
                 Err(e) => {
-                    warn!(
-                        issue_id = %entry.issue_id,
-                        error = %e,
-                        "auto-merge API call failed"
-                    );
+                    warn!(issue_id = %entry.issue_id, error = %e, "auto-merge API call failed");
                 }
             }
         }
 
-        // 3. Verify issues in waiting_for_review are still "In Review" in Linear
-        // (someone may have moved them back manually)
+        // Verify issues in waiting_for_review are still "In Review" in Linear
         let remaining: Vec<String> = {
             let state = self.state.read().await;
             state.waiting_for_review.keys().cloned().collect()
@@ -1360,22 +1215,13 @@ impl Orchestrator {
                     if is_in_review_state(&issue.state) {
                         continue;
                     }
-                    info!(
-                        issue_id = %issue.id,
-                        issue_identifier = %issue.identifier,
-                        state = %issue.state,
-                        "waiting issue no longer In Review, removing from waiting"
-                    );
+                    info!(issue_id = %issue.id, issue_identifier = %issue.identifier, state = %issue.state, "waiting issue no longer In Review, removing from waiting");
                     state.waiting_for_review.remove(&issue.id);
-                    // Release claim so it can be re-dispatched
                     state.claimed.remove(&issue.id);
                 }
             }
             Err(e) => {
-                debug!(
-                    error = %e,
-                    "failed to refresh waiting issue states"
-                );
+                debug!(error = %e, "failed to refresh waiting issue states");
             }
         }
     }
@@ -1406,11 +1252,7 @@ impl Orchestrator {
             updated_at: Some(Utc::now()),
         };
 
-        info!(
-            issue_id = %entry.issue_id,
-            issue_identifier = %entry.identifier,
-            "dispatching cleanup agent turn"
-        );
+        info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, "dispatching cleanup agent turn");
 
         // Dispatch with attempt=None (cleanup is a fresh single turn)
         self.dispatch_issue(issue, None).await;
@@ -1438,13 +1280,7 @@ impl Orchestrator {
                 .max(0) as u64;
 
             if elapsed_ms > stall_timeout_ms {
-                warn!(
-                    issue_id = %issue_id,
-                    issue_identifier = %entry.identifier,
-                    elapsed_ms = elapsed_ms,
-                    stall_timeout_ms = stall_timeout_ms,
-                    "session stalled"
-                );
+                warn!(issue_id = %issue_id, issue_identifier = %entry.identifier, elapsed_ms = elapsed_ms, stall_timeout_ms = stall_timeout_ms, "session stalled");
                 stalled_ids.push(issue_id.clone());
             }
         }
@@ -1464,11 +1300,9 @@ impl Orchestrator {
             return;
         }
 
-        // Clone config before the async HTTP call to release the lock
         let config = self.config.read().await.clone();
         let client = LinearClient::new(&config.tracker, self.http.clone());
 
-        // No config lock held during HTTP call
         let refreshed = match client.fetch_issue_states_by_ids(&running_ids).await {
             Ok(issues) => issues,
             Err(e) => {
@@ -1479,32 +1313,19 @@ impl Orchestrator {
 
         for issue in &refreshed {
             if state_matches(&issue.state, &config.tracker.terminal_states) {
-                info!(
-                    issue_id = %issue.id,
-                    issue_identifier = %issue.identifier,
-                    state = %issue.state,
-                    "issue is terminal, stopping worker and cleaning workspace"
-                );
-                // Mark as completed before terminating — the tracker says it's done
+                info!(issue_id = %issue.id, issue_identifier = %issue.identifier, state = %issue.state, "issue is terminal, stopping worker and cleaning workspace");
                 {
                     let mut state = self.state.write().await;
                     state.mark_completed(issue.id.clone());
                 }
                 self.terminate_running_issue(&issue.id, true).await;
             } else if state_matches(&issue.state, &config.tracker.active_states) {
-                // Update the issue snapshot
                 let mut state = self.state.write().await;
                 if let Some(entry) = state.running.get_mut(&issue.id) {
                     entry.issue = issue.clone();
                 }
             } else {
-                // Neither active nor terminal - stop without cleanup
-                info!(
-                    issue_id = %issue.id,
-                    issue_identifier = %issue.identifier,
-                    state = %issue.state,
-                    "issue neither active nor terminal, stopping worker"
-                );
+                info!(issue_id = %issue.id, issue_identifier = %issue.identifier, state = %issue.state, "issue neither active nor terminal, stopping worker");
                 self.terminate_running_issue(&issue.id, false).await;
             }
         }
@@ -1729,12 +1550,7 @@ async fn run_worker(
 
         match result {
             Ok(_) => {
-                info!(
-                    issue_id = %issue_id,
-                    issue_identifier = %issue.identifier,
-                    turn = turn_number,
-                    "agent turn completed successfully"
-                );
+                info!(issue_id = %issue_id, issue_identifier = %issue.identifier, turn = turn_number, "agent turn completed successfully");
 
                 // Check if issue is still active or moved to review
                 let client = LinearClient::new(&config.tracker, http.clone());
@@ -1743,21 +1559,11 @@ async fn run_worker(
                         if let Some(refreshed_issue) = refreshed.first() {
                             if !state_matches(&refreshed_issue.state, &config.tracker.active_states)
                             {
-                                info!(
-                                    issue_id = %issue_id,
-                                    issue_identifier = %issue.identifier,
-                                    state = %refreshed_issue.state,
-                                    "issue no longer active after turn"
-                                );
+                                info!(issue_id = %issue_id, issue_identifier = %issue.identifier, state = %refreshed_issue.state, "issue no longer active after turn");
                                 break;
                             }
-                            // Stop if agent moved issue to "In Review"
                             if is_in_review_state(&refreshed_issue.state) {
-                                info!(
-                                    issue_id = %issue_id,
-                                    issue_identifier = %issue.identifier,
-                                    "issue moved to In Review, stopping worker"
-                                );
+                                info!(issue_id = %issue_id, issue_identifier = %issue.identifier, "issue moved to In Review, stopping worker");
                                 break;
                             }
                         } else {
@@ -1765,18 +1571,11 @@ async fn run_worker(
                         }
                     }
                     Err(e) => {
-                        warn!(
-                            issue_id = %issue_id,
-                            issue_identifier = %issue.identifier,
-                            error = %e,
-                            "failed to refresh issue state after turn"
-                        );
+                        warn!(issue_id = %issue_id, issue_identifier = %issue.identifier, error = %e, "failed to refresh issue state after turn");
                         break;
                     }
                 }
 
-                // Check if a PR exists with passing CI (agent may not have
-                // transitioned the issue). If so, transition and stop.
                 if check_pr_ready_and_transition(
                     &workspace_result.path,
                     &issue.id,
@@ -1790,13 +1589,7 @@ async fn run_worker(
                 }
 
                 if turn_number >= max_turns {
-                    info!(
-                        issue_id = %issue_id,
-                        issue_identifier = %issue.identifier,
-                        turns = turn_number,
-                        max_turns = max_turns,
-                        "reached max turns"
-                    );
+                    info!(issue_id = %issue_id, issue_identifier = %issue.identifier, turns = turn_number, max_turns = max_turns, "reached max turns");
                     break;
                 }
 
@@ -1904,12 +1697,7 @@ async fn check_pr_ready_via_api(
         return false;
     }
 
-    info!(
-        issue_id = %issue_id,
-        issue_identifier = %issue_identifier,
-        pr_number = pr_info.number,
-        "PR is ready (mergeable, no conflicts) — transitioning to In Review"
-    );
+    info!(issue_id = %issue_id, issue_identifier = %issue_identifier, pr_number = pr_info.number, "PR is ready (mergeable, no conflicts) — transitioning to In Review");
 
     // Transition issue to "In Review"
     transition_to_in_review(issue_id, issue_identifier, &config.tracker, http).await;
@@ -2008,11 +1796,7 @@ async fn handle_gh_pr_output(
         return false;
     }
 
-    info!(
-        issue_id = %issue_id,
-        issue_identifier = %issue_identifier,
-        "PR is ready (CI green, no conflicts) — transitioning to In Review"
-    );
+    info!(issue_id = %issue_id, issue_identifier = %issue_identifier, "PR is ready (CI green, no conflicts) — transitioning to In Review");
 
     transition_to_in_review(issue_id, issue_identifier, tracker_config, http).await;
 
@@ -6167,10 +5951,7 @@ mod tests {
         let r = map_worker_result(Err(SymphonyError::MissingRequiredConfig {
             field: "test".into(),
         }));
-        assert!(
-            matches!(&r, WorkerExitReason::Failed(msg) if msg.contains("test")),
-            "expected Failed containing 'test', got {r:?}"
-        );
+        assert!(matches!(&r, WorkerExitReason::Failed(msg) if msg.contains("test")));
     }
 
     // ── drain_worker_handles ─────────────────────────────────────────
@@ -9736,7 +9517,6 @@ mod tests {
         assert!(logs_contain("failed to transition issue to In Review"));
     }
 
-
     #[tokio::test]
     #[traced_test]
     async fn test_dispatch_issue_distributed_mode_prompt_render_failure() {
@@ -10270,7 +10050,6 @@ mod tests {
 
         assert!(!store.saved_log_entries().is_empty());
         assert!(!store.saved_sessions().is_empty());
-
     }
 
     // ── persistence error paths (best-effort, should not panic) ─────
