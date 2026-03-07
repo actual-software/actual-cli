@@ -344,6 +344,13 @@ impl Orchestrator {
         {
             let mut state = self.state.write().await;
 
+            // Create broadcast channel for SSE streaming
+            let (broadcast_tx, _) =
+                tokio::sync::broadcast::channel(crate::model::BROADCAST_CHANNEL_CAPACITY);
+            state
+                .event_broadcasts
+                .insert(issue_id.clone(), broadcast_tx);
+
             state.running.insert(
                 issue_id.clone(),
                 RunningEntry {
@@ -353,6 +360,8 @@ impl Orchestrator {
                     retry_attempt: attempt,
                     started_at: Utc::now(),
                     cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
                 },
             );
             state.claimed.insert(issue_id.clone());
@@ -418,6 +427,9 @@ impl Orchestrator {
 
     async fn on_worker_exit(&self, issue_id: &str, reason: WorkerExitReason) {
         let mut state = self.state.write().await;
+
+        // Remove broadcast sender (dropping it closes all receivers)
+        state.event_broadcasts.remove(issue_id);
 
         if let Some(entry) = state.running.remove(issue_id) {
             // Add runtime seconds to totals
@@ -755,6 +767,16 @@ impl Orchestrator {
                     entry.session.last_event_at = Some(now);
                 }
             }
+
+            // Create log entry and append to event log
+            entry.log_seq += 1;
+            let log_entry = crate::model::create_log_entry(entry.log_seq, &event);
+            crate::model::append_log_entry(&mut entry.event_log, log_entry.clone());
+
+            // Broadcast to SSE subscribers (ignore error if no receivers)
+            if let Some(tx) = state.event_broadcasts.get(issue_id) {
+                let _ = tx.send(log_entry);
+            }
         }
 
         // Update aggregate totals outside the running entry borrow
@@ -874,6 +896,8 @@ impl Orchestrator {
 
     async fn terminate_running_issue(&self, issue_id: &str, cleanup_workspace: bool) {
         let mut state = self.state.write().await;
+        // Remove broadcast sender (dropping it closes all receivers)
+        state.event_broadcasts.remove(issue_id);
         if let Some(entry) = state.running.remove(issue_id) {
             // Signal cancellation
             let _ = entry.cancel_tx.send(());
@@ -1314,6 +1338,8 @@ mod tests {
                 retry_attempt: None,
                 started_at: Utc::now(),
                 cancel_tx,
+                event_log: std::collections::VecDeque::new(),
+                log_seq: 0,
             },
         );
         s.claimed.insert(id.to_string());
@@ -1339,6 +1365,8 @@ mod tests {
                 retry_attempt: None,
                 started_at,
                 cancel_tx,
+                event_log: std::collections::VecDeque::new(),
+                log_seq: 0,
             },
         );
         s.claimed.insert(id.to_string());
@@ -2149,6 +2177,8 @@ mod tests {
                     retry_attempt: Some(3),
                     started_at: Utc::now(),
                     cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -2184,6 +2214,8 @@ mod tests {
                     retry_attempt: Some(2),
                     started_at: Utc::now(),
                     cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -2493,6 +2525,157 @@ mod tests {
         assert_eq!(state.agent_totals.input_tokens, 0);
         assert_eq!(state.agent_totals.output_tokens, 0);
         assert_eq!(state.agent_totals.total_tokens, 0);
+    }
+
+    // ── on_agent_update: event log and broadcast ───────────────────
+
+    #[tokio::test]
+    async fn test_on_agent_update_appends_to_event_log() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::SessionStarted {
+                session_id: "sess-1".to_string(),
+                pid: Some(42),
+            },
+        )
+        .await;
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::TurnCompleted {
+                message: Some("done".to_string()),
+            },
+        )
+        .await;
+
+        let state = orch.state.read().await;
+        let entry = state.running.get("id1").unwrap();
+        assert_eq!(entry.log_seq, 2);
+        assert_eq!(entry.event_log.len(), 2);
+        assert_eq!(entry.event_log[0].seq, 1);
+        assert_eq!(entry.event_log[0].event_type, "session_started");
+        assert_eq!(entry.event_log[1].seq, 2);
+        assert_eq!(entry.event_log[1].event_type, "turn_completed");
+    }
+
+    #[tokio::test]
+    async fn test_on_agent_update_broadcasts_log_entry() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Create a broadcast channel and subscribe
+        let mut rx = {
+            let mut state = orch.state.write().await;
+            let (tx, rx) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+            rx
+        };
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::Notification {
+                message: "hello".to_string(),
+            },
+        )
+        .await;
+
+        // Receiver should get the broadcast
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.seq, 1);
+        assert_eq!(received.event_type, "notification");
+        assert_eq!(received.message, Some("hello".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_on_agent_update_broadcast_no_subscribers_ok() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Create broadcast channel with no subscribers (receiver dropped)
+        {
+            let mut state = orch.state.write().await;
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+        }
+
+        // Should not panic even with no subscribers
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::TurnCompleted {
+                message: Some("test".to_string()),
+            },
+        )
+        .await;
+
+        let state = orch.state.read().await;
+        let entry = state.running.get("id1").unwrap();
+        assert_eq!(entry.event_log.len(), 1);
+    }
+
+    // ── dispatch_issue: broadcast channel creation ───────────────────
+
+    #[tokio::test]
+    async fn test_dispatch_creates_broadcast_channel() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&server.url());
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        orch.dispatch_issue(issue, None).await;
+
+        let state = orch.state.read().await;
+        assert!(state.event_broadcasts.contains_key("id1"));
+    }
+
+    // ── on_worker_exit: broadcast channel removal ────────────────────
+
+    #[tokio::test]
+    async fn test_on_worker_exit_removes_broadcast_channel() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Add a broadcast channel
+        {
+            let mut state = orch.state.write().await;
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+        }
+
+        orch.on_worker_exit("id1", WorkerExitReason::Cancelled)
+            .await;
+
+        let state = orch.state.read().await;
+        assert!(!state.event_broadcasts.contains_key("id1"));
+    }
+
+    // ── terminate_running_issue: broadcast channel removal ───────────
+
+    #[tokio::test]
+    async fn test_terminate_removes_broadcast_channel() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        {
+            let mut state = orch.state.write().await;
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+        }
+
+        orch.terminate_running_issue("id1", false).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.event_broadcasts.contains_key("id1"));
     }
 
     // ── schedule_retry_inner ─────────────────────────────────────────
