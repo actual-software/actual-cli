@@ -1264,7 +1264,7 @@ async fn run_worker(
                     "agent turn completed successfully"
                 );
 
-                // Check if issue is still active
+                // Check if issue is still active or moved to review
                 let client = LinearClient::new(&config.tracker, http.clone());
                 match client.fetch_issue_states_by_ids(&[issue.id.clone()]).await {
                     Ok(refreshed) => {
@@ -1276,6 +1276,15 @@ async fn run_worker(
                                     issue_identifier = %issue.identifier,
                                     state = %refreshed_issue.state,
                                     "issue no longer active after turn"
+                                );
+                                break;
+                            }
+                            // Stop if agent moved issue to "In Review"
+                            if is_in_review_state(&refreshed_issue.state) {
+                                info!(
+                                    issue_id = %issue_id,
+                                    issue_identifier = %issue.identifier,
+                                    "issue moved to In Review, stopping worker"
                                 );
                                 break;
                             }
@@ -1292,6 +1301,20 @@ async fn run_worker(
                         );
                         break;
                     }
+                }
+
+                // Check if a PR exists with passing CI (agent may not have
+                // transitioned the issue). If so, transition and stop.
+                if check_pr_ready_and_transition(
+                    &workspace_result.path,
+                    &issue.id,
+                    &issue.identifier,
+                    config,
+                    &http,
+                )
+                .await
+                {
+                    break;
                 }
 
                 if turn_number >= max_turns {
@@ -1328,6 +1351,178 @@ async fn run_worker(
     )
     .await;
     Ok(())
+}
+
+/// Check if an issue state is "In Review" (case-insensitive).
+fn is_in_review_state(state: &str) -> bool {
+    state.trim().eq_ignore_ascii_case("in review")
+}
+
+/// Check if the worker's branch has an open PR with green CI.
+/// If so, transition the issue to "In Review" and return true to stop the worker.
+/// Uses the GitHub API client when configured, falls back to `gh` CLI.
+async fn check_pr_ready_and_transition(
+    workspace_path: &std::path::Path,
+    issue_id: &str,
+    issue_identifier: &str,
+    config: &ServiceConfig,
+    http: &reqwest::Client,
+) -> bool {
+    // Try GitHub API first if configured
+    if let Some(github_config) = &config.github {
+        let branch = format!(
+            "{}{}",
+            github_config.branch_prefix,
+            issue_identifier.to_lowercase()
+        );
+        let github = GitHubClient::new(github_config, http.clone());
+        return check_pr_ready_via_api(&github, &branch, issue_id, issue_identifier, config, http)
+            .await;
+    }
+
+    // Fall back to gh CLI from workspace
+    check_pr_ready_via_gh(
+        workspace_path,
+        issue_id,
+        issue_identifier,
+        &config.tracker,
+        http,
+    )
+    .await
+}
+
+/// Check PR readiness using the GitHub API client.
+async fn check_pr_ready_via_api(
+    github: &GitHubClient,
+    branch: &str,
+    issue_id: &str,
+    issue_identifier: &str,
+    config: &ServiceConfig,
+    http: &reqwest::Client,
+) -> bool {
+    // Check if there's an open PR for this branch
+    let pr_info = match github.find_open_pr(branch).await {
+        Ok(Some(pr)) => pr,
+        Ok(None) => return false, // No PR yet
+        Err(e) => {
+            debug!(issue_identifier = %issue_identifier, error = %e, "failed to check PR via API");
+            return false;
+        }
+    };
+
+    // PR must be open
+    if pr_info.state != "open" {
+        return false;
+    }
+
+    // PR must be mergeable (no conflicts)
+    if pr_info.mergeable == Some(false) {
+        return false;
+    }
+
+    // Get full details to check mergeable_state
+    if let Some(ref ms) = pr_info.mergeable_state {
+        if ms == "dirty" || ms == "blocked" {
+            return false;
+        }
+    }
+
+    // If mergeable is still None (not yet computed), skip this check
+    if pr_info.mergeable.is_none() {
+        return false;
+    }
+
+    info!(
+        issue_id = %issue_id,
+        issue_identifier = %issue_identifier,
+        pr_number = pr_info.number,
+        "PR is ready (mergeable, no conflicts) — transitioning to In Review"
+    );
+
+    // Transition issue to "In Review"
+    let client = LinearClient::new(&config.tracker, http.clone());
+    if let Err(e) = client.transition_issue_state(issue_id, "In Review").await {
+        warn!(
+            issue_identifier = %issue_identifier,
+            error = %e,
+            "failed to transition issue to In Review"
+        );
+    }
+
+    true
+}
+
+/// Fallback: check PR readiness using `gh` CLI from workspace.
+async fn check_pr_ready_via_gh(
+    workspace_path: &std::path::Path,
+    issue_id: &str,
+    issue_identifier: &str,
+    tracker_config: &crate::config::TrackerConfig,
+    http: &reqwest::Client,
+) -> bool {
+    let output = match tokio::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            "--json",
+            "number,state,mergeable,statusCheckRollup",
+        ])
+        .current_dir(workspace_path)
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+
+    let json: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    if json.get("state").and_then(|v| v.as_str()) != Some("OPEN") {
+        return false;
+    }
+
+    if json.get("mergeable").and_then(|v| v.as_str()) == Some("CONFLICTING") {
+        return false;
+    }
+
+    if !all_checks_passing(&json) {
+        return false;
+    }
+
+    info!(
+        issue_id = %issue_id,
+        issue_identifier = %issue_identifier,
+        "PR is ready (CI green, no conflicts) — transitioning to In Review"
+    );
+
+    let client = LinearClient::new(tracker_config, http.clone());
+    if let Err(e) = client.transition_issue_state(issue_id, "In Review").await {
+        warn!(
+            issue_identifier = %issue_identifier,
+            error = %e,
+            "failed to transition issue to In Review"
+        );
+    }
+
+    true
+}
+
+/// Check if all CI status checks are passing on a PR.
+fn all_checks_passing(pr_json: &serde_json::Value) -> bool {
+    let checks = match pr_json.get("statusCheckRollup").and_then(|v| v.as_array()) {
+        Some(arr) if !arr.is_empty() => arr,
+        _ => return false, // No checks = not ready
+    };
+
+    checks.iter().all(|check| {
+        let conclusion = check.get("conclusion").and_then(|v| v.as_str());
+        // A check passes if conclusion is SUCCESS, NEUTRAL, or SKIPPED.
+        // Pending/queued/failed checks mean not ready.
+        matches!(conclusion, Some("SUCCESS" | "NEUTRAL" | "SKIPPED"))
+    })
 }
 
 /// Sort issues for dispatch per spec:
@@ -6550,5 +6745,106 @@ mod tests {
         gh_find_mock.assert_async().await;
         gh_details_mock.assert_async().await;
         linear_resolve_mock.assert_async().await;
+    }
+
+    // ── is_in_review_state ───────────────────────────────────────────
+
+    #[test]
+    fn test_is_in_review_state_exact() {
+        assert!(is_in_review_state("In Review"));
+    }
+
+    #[test]
+    fn test_is_in_review_state_case_insensitive() {
+        assert!(is_in_review_state("in review"));
+        assert!(is_in_review_state("IN REVIEW"));
+        assert!(is_in_review_state("In review"));
+    }
+
+    #[test]
+    fn test_is_in_review_state_with_whitespace() {
+        assert!(is_in_review_state("  In Review  "));
+    }
+
+    #[test]
+    fn test_is_in_review_state_false() {
+        assert!(!is_in_review_state("In Progress"));
+        assert!(!is_in_review_state("Todo"));
+        assert!(!is_in_review_state("Done"));
+    }
+
+    // ── all_checks_passing ───────────────────────────────────────────
+
+    #[test]
+    fn test_all_checks_passing_all_success() {
+        let pr = serde_json::json!({
+            "statusCheckRollup": [
+                { "conclusion": "SUCCESS", "status": "COMPLETED" },
+                { "conclusion": "SUCCESS", "status": "COMPLETED" }
+            ]
+        });
+        assert!(all_checks_passing(&pr));
+    }
+
+    #[test]
+    fn test_all_checks_passing_with_skipped() {
+        let pr = serde_json::json!({
+            "statusCheckRollup": [
+                { "conclusion": "SUCCESS", "status": "COMPLETED" },
+                { "conclusion": "SKIPPED", "status": "COMPLETED" }
+            ]
+        });
+        assert!(all_checks_passing(&pr));
+    }
+
+    #[test]
+    fn test_all_checks_passing_with_neutral() {
+        let pr = serde_json::json!({
+            "statusCheckRollup": [
+                { "conclusion": "SUCCESS", "status": "COMPLETED" },
+                { "conclusion": "NEUTRAL", "status": "COMPLETED" }
+            ]
+        });
+        assert!(all_checks_passing(&pr));
+    }
+
+    #[test]
+    fn test_all_checks_passing_with_failure() {
+        let pr = serde_json::json!({
+            "statusCheckRollup": [
+                { "conclusion": "SUCCESS", "status": "COMPLETED" },
+                { "conclusion": "FAILURE", "status": "COMPLETED" }
+            ]
+        });
+        assert!(!all_checks_passing(&pr));
+    }
+
+    #[test]
+    fn test_all_checks_passing_with_pending() {
+        let pr = serde_json::json!({
+            "statusCheckRollup": [
+                { "conclusion": "SUCCESS", "status": "COMPLETED" },
+                { "conclusion": null, "status": "IN_PROGRESS" }
+            ]
+        });
+        assert!(!all_checks_passing(&pr));
+    }
+
+    #[test]
+    fn test_all_checks_passing_empty_checks() {
+        let pr = serde_json::json!({ "statusCheckRollup": [] });
+        assert!(!all_checks_passing(&pr));
+    }
+
+    #[test]
+    fn test_all_checks_passing_missing_field() {
+        let pr = serde_json::json!({});
+        assert!(!all_checks_passing(&pr));
+    }
+
+    #[test]
+    fn test_all_checks_passing_null_field() {
+        let pr = serde_json::json!({ "statusCheckRollup": null });
+        assert!(!all_checks_passing(&pr));
     }
 }
