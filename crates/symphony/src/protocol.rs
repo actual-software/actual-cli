@@ -96,6 +96,10 @@ pub enum OrchestratorMessage {
         issue_id: String,
     },
     TriggerRefresh,
+    /// Remove an issue from the retry queue permanently (stop retrying).
+    RemoveFromRetryQueue {
+        issue_id: String,
+    },
 }
 
 /// Assignment payload sent to a remote worker via GET /api/v1/work.
