@@ -132,12 +132,8 @@ impl LinearClient {
 
         let nodes = extract_nodes(&response, &["data", "workflowStates", "nodes"])?;
         for node in nodes {
-            if let Some(name) = node.get("name").and_then(|n| n.as_str()) {
-                if name.eq_ignore_ascii_case(state_name) {
-                    if let Some(id) = node.get("id").and_then(|i| i.as_str()) {
-                        return Ok(id.to_string());
-                    }
-                }
+            if let Some(id) = extract_matching_state_id(&node, state_name) {
+                return Ok(id);
             }
         }
 
@@ -162,7 +158,7 @@ impl LinearClient {
         let response = self.execute_graphql(&body).await?;
 
         let success = navigate_json(&response, &["data", "issueUpdate", "success"])
-            .and_then(|v| v.as_bool())
+            .and_then(Value::as_bool)
             .unwrap_or(false);
 
         if success {
@@ -314,6 +310,18 @@ impl LinearClient {
 struct PageInfo {
     has_next_page: bool,
     end_cursor: Option<String>,
+}
+
+/// Extract a workflow state ID from a node if its name matches (case-insensitive).
+///
+/// Extracted as a named function to avoid LLVM coverage splits on nested
+/// `if let` / `.and_then()` closures that differ between macOS and Linux.
+fn extract_matching_state_id(node: &Value, target_name: &str) -> Option<String> {
+    let name = node.get("name").and_then(Value::as_str)?;
+    if !name.eq_ignore_ascii_case(target_name) {
+        return None;
+    }
+    node.get("id").and_then(Value::as_str).map(String::from)
 }
 
 fn navigate_json<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -1513,6 +1521,44 @@ mod tests {
         // Node has name but no id — should fail with not found
         assert!(result.is_err());
         mock.assert_async().await;
+    }
+
+    // ── extract_matching_state_id ──────────────────────────────────
+
+    #[test]
+    fn test_extract_matching_state_id_match() {
+        let node = serde_json::json!({ "id": "s1", "name": "In Progress" });
+        assert_eq!(
+            extract_matching_state_id(&node, "In Progress"),
+            Some("s1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_matching_state_id_case_insensitive() {
+        let node = serde_json::json!({ "id": "s1", "name": "in progress" });
+        assert_eq!(
+            extract_matching_state_id(&node, "In Progress"),
+            Some("s1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_matching_state_id_no_match() {
+        let node = serde_json::json!({ "id": "s1", "name": "Todo" });
+        assert_eq!(extract_matching_state_id(&node, "In Progress"), None);
+    }
+
+    #[test]
+    fn test_extract_matching_state_id_missing_name() {
+        let node = serde_json::json!({ "id": "s1" });
+        assert_eq!(extract_matching_state_id(&node, "In Progress"), None);
+    }
+
+    #[test]
+    fn test_extract_matching_state_id_missing_id() {
+        let node = serde_json::json!({ "name": "In Progress" });
+        assert_eq!(extract_matching_state_id(&node, "In Progress"), None);
     }
 
     // ── execute_graphql: errors field is not an array ────────────────
