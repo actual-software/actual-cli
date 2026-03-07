@@ -3,6 +3,7 @@ use crate::config::{state_matches, DeploymentMode, ServiceConfig};
 use crate::error::{Result, SymphonyError};
 use crate::github::GitHubClient;
 use crate::model::{Issue, OrchestratorState, RetryEntry};
+use crate::persistence::{PersistedSession, StateStore};
 use crate::prompt::{build_continuation_prompt, render_prompt};
 use crate::protocol::{
     AgentEvent, LiveSession, RunningEntry, RunningSessionInfo, WorkAssignment, WorkerExitReason,
@@ -51,6 +52,8 @@ pub struct Orchestrator {
     msg_rx: mpsc::Receiver<OrchestratorMessage>,
     /// JoinHandles for spawned worker tasks, keyed by issue ID.
     worker_handles: Arc<RwLock<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Optional persistence store for session metrics.
+    store: Option<Arc<dyn StateStore>>,
 }
 
 impl Orchestrator {
@@ -70,7 +73,52 @@ impl Orchestrator {
             msg_tx,
             msg_rx,
             worker_handles: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            store: None,
         }
+    }
+
+    /// Attach a persistence store and load persisted state into memory.
+    pub async fn with_store(mut self, store: Arc<dyn StateStore>) -> Self {
+        // Load persisted agent totals
+        match store.load_agent_totals() {
+            Ok(totals) => {
+                let mut state = self.state.write().await;
+                state.agent_totals = totals;
+                info!(
+                    input_tokens = state.agent_totals.input_tokens,
+                    output_tokens = state.agent_totals.output_tokens,
+                    total_tokens = state.agent_totals.total_tokens,
+                    seconds_running = state.agent_totals.seconds_running,
+                    "restored persisted agent totals"
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to load persisted agent totals");
+            }
+        }
+
+        // Load persisted completed set
+        match store.load_completed_ids() {
+            Ok(ids) => {
+                let count = ids.len();
+                let mut state = self.state.write().await;
+                for id in ids {
+                    state.mark_completed(id);
+                }
+                info!(count, "restored persisted completed issues");
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to load persisted completed issues");
+            }
+        }
+
+        self.store = Some(store);
+        self
+    }
+
+    /// Get a handle to the persistence store (for the HTTP server or other components).
+    pub fn store_handle(&self) -> Option<Arc<dyn StateStore>> {
+        self.store.clone()
     }
 
     /// Update the configuration dynamically (for workflow reload).
@@ -361,6 +409,10 @@ impl Orchestrator {
             state.retry_attempts.remove(&issue_id);
         }
 
+        // Persist new session (best-effort)
+        self.persist_session(&issue_id, &identifier, &LiveSession::default(), attempt)
+            .await;
+
         // Transition issue to "In Progress" in Linear (best-effort)
         self.transition_to_in_progress(&issue_id, &identifier).await;
 
@@ -538,6 +590,36 @@ impl Orchestrator {
         );
     }
 
+    /// Best-effort persist a session snapshot to the store.
+    async fn persist_session(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        session: &LiveSession,
+        retry_attempt: Option<u32>,
+    ) {
+        if let Some(ref store) = self.store {
+            let persisted = PersistedSession {
+                issue_id: issue_id.to_string(),
+                identifier: identifier.to_string(),
+                session_id: session.session_id.clone(),
+                input_tokens: session.input_tokens,
+                output_tokens: session.output_tokens,
+                total_tokens: session.total_tokens,
+                turn_count: session.turn_count,
+                started_at: Utc::now().to_rfc3339(),
+                ended_at: None,
+                last_event: session.last_event.clone(),
+                last_event_at: session.last_event_at.map(|t| t.to_rfc3339()),
+                last_message: session.last_message.clone(),
+                retry_attempt,
+            };
+            if let Err(e) = store.save_session(&persisted) {
+                debug!(error = %e, issue_id = %issue_id, "failed to persist session");
+            }
+        }
+    }
+
     async fn handle_message(&self, msg: OrchestratorMessage) {
         match msg {
             OrchestratorMessage::WorkerExited { issue_id, reason } => {
@@ -570,6 +652,32 @@ impl Orchestrator {
                 / 1000.0;
             state.agent_totals.seconds_running += elapsed;
 
+            // Persist updated agent totals and finalize session (best-effort)
+            if let Some(ref store) = self.store {
+                if let Err(e) = store.save_agent_totals(&state.agent_totals) {
+                    debug!(error = %e, "failed to persist agent totals on worker exit");
+                }
+                // Finalize the session record with ended_at
+                let ended = PersistedSession {
+                    issue_id: issue_id.to_string(),
+                    identifier: entry.identifier.clone(),
+                    session_id: entry.session.session_id.clone(),
+                    input_tokens: entry.session.input_tokens,
+                    output_tokens: entry.session.output_tokens,
+                    total_tokens: entry.session.total_tokens,
+                    turn_count: entry.session.turn_count,
+                    started_at: entry.started_at.to_rfc3339(),
+                    ended_at: Some(Utc::now().to_rfc3339()),
+                    last_event: entry.session.last_event.clone(),
+                    last_event_at: entry.session.last_event_at.map(|t| t.to_rfc3339()),
+                    last_message: entry.session.last_message.clone(),
+                    retry_attempt: entry.retry_attempt,
+                };
+                if let Err(e) = store.save_session(&ended) {
+                    debug!(error = %e, "failed to finalize persisted session on worker exit");
+                }
+            }
+
             let identifier = entry.identifier.clone();
             let next_attempt = entry.retry_attempt.unwrap_or(0) + 1;
 
@@ -581,6 +689,12 @@ impl Orchestrator {
                         "worker completed normally"
                     );
                     state.mark_completed(issue_id.to_string());
+                    // Persist completed marker (best-effort)
+                    if let Some(ref store) = self.store {
+                        if let Err(e) = store.mark_completed(issue_id) {
+                            debug!(error = %e, "failed to persist completed marker");
+                        }
+                    }
 
                     // If the issue is "In Review", add to waiting_for_review
                     // so the reconciliation loop can handle auto-merge.
@@ -907,6 +1021,13 @@ impl Orchestrator {
                 let log_entry = crate::model::create_log_entry(entry.log_seq, &event);
                 crate::model::append_log_entry(&mut entry.event_log, log_entry.clone());
 
+                // Persist log entry (best-effort)
+                if let Some(ref store) = self.store {
+                    if let Err(e) = store.save_log_entry(issue_id, &log_entry) {
+                        debug!(error = %e, issue_id = %issue_id, "failed to persist log entry");
+                    }
+                }
+
                 // Broadcast to SSE subscribers (ignore error if no receivers)
                 if let Some(tx) = state.event_broadcasts.get(issue_id) {
                     let _ = tx.send(log_entry);
@@ -924,6 +1045,17 @@ impl Orchestrator {
         // §11.2: Store rate limit data in state
         if let AgentEvent::RateLimitUpdate { data } = &event {
             state.rate_limits = Some(data.clone());
+        }
+
+        // Persist updated session snapshot (best-effort)
+        if let Some(entry) = state.running.get(issue_id) {
+            self.persist_session(
+                issue_id,
+                &entry.identifier,
+                &entry.session,
+                entry.retry_attempt,
+            )
+            .await;
         }
     }
 
