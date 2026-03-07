@@ -95,6 +95,16 @@ pub enum SymphonyError {
     #[error("linear missing end cursor")]
     LinearMissingEndCursor,
 
+    // GitHub errors
+    #[error("github API request error: {reason}")]
+    GitHubApiRequest { reason: String },
+
+    #[error("github API status error: status={status}, body={body}")]
+    GitHubApiStatus { status: u16, body: String },
+
+    #[error("github invalid repo format: {repo}")]
+    GitHubInvalidRepo { repo: String },
+
     // Dispatch errors
     #[error("dispatch validation failed: {reason}")]
     DispatchValidationFailed { reason: String },
@@ -111,3 +121,49 @@ pub enum SymphonyError {
 }
 
 pub type Result<T> = std::result::Result<T, SymphonyError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_github_api_request_display() {
+        let err = SymphonyError::GitHubApiRequest {
+            reason: "connection refused".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("github API request error"));
+        assert!(msg.contains("connection refused"));
+    }
+
+    #[test]
+    fn test_github_api_status_display() {
+        let err = SymphonyError::GitHubApiStatus {
+            status: 403,
+            body: "forbidden".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("github API status error"));
+        assert!(msg.contains("403"));
+        assert!(msg.contains("forbidden"));
+    }
+
+    #[test]
+    fn test_github_invalid_repo_display() {
+        let err = SymphonyError::GitHubInvalidRepo {
+            repo: "bad-format".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("github invalid repo format"));
+        assert!(msg.contains("bad-format"));
+    }
+
+    #[test]
+    fn test_github_errors_are_debug() {
+        let err = SymphonyError::GitHubApiRequest {
+            reason: "test".to_string(),
+        };
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("GitHubApiRequest"));
+    }
+}
