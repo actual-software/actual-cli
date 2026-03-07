@@ -4735,6 +4735,14 @@ mod tests {
         let _ = rx.await;
     }
 
+    #[tokio::test]
+    async fn test_block_until_signal_completes_normally() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let h = tokio::spawn(block_until_signal(rx));
+        let _ = tx.send(());
+        let _ = h.await;
+    }
+
     #[traced_test]
     #[tokio::test]
     async fn test_abort_and_drain_with_timeout_fires_warn() {
