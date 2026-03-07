@@ -1189,17 +1189,18 @@ impl Orchestrator {
             Ok(refreshed) => {
                 let mut state = self.state.write().await;
                 for issue in &refreshed {
-                    if !is_in_review_state(&issue.state) {
-                        info!(
-                            issue_id = %issue.id,
-                            issue_identifier = %issue.identifier,
-                            state = %issue.state,
-                            "waiting issue no longer In Review, removing from waiting"
-                        );
-                        state.waiting_for_review.remove(&issue.id);
-                        // Release claim so it can be re-dispatched
-                        state.claimed.remove(&issue.id);
+                    if is_in_review_state(&issue.state) {
+                        continue;
                     }
+                    info!(
+                        issue_id = %issue.id,
+                        issue_identifier = %issue.identifier,
+                        state = %issue.state,
+                        "waiting issue no longer In Review, removing from waiting"
+                    );
+                    state.waiting_for_review.remove(&issue.id);
+                    // Release claim so it can be re-dispatched
+                    state.claimed.remove(&issue.id);
                 }
             }
             Err(e) => {
@@ -1737,16 +1738,23 @@ async fn check_pr_ready_via_api(
     );
 
     // Transition issue to "In Review"
-    let client = LinearClient::new(&config.tracker, http.clone());
-    if let Err(e) = client.transition_issue_state(issue_id, "In Review").await {
-        warn!(
-            issue_identifier = %issue_identifier,
-            error = %e,
-            "failed to transition issue to In Review"
-        );
-    }
+    transition_to_in_review(issue_id, issue_identifier, &config.tracker, http).await;
 
     true
+}
+
+/// Transition an issue to "In Review" via Linear. Logs a warning on failure.
+async fn transition_to_in_review(
+    issue_id: &str,
+    issue_identifier: &str,
+    tracker_config: &crate::config::TrackerConfig,
+    http: &reqwest::Client,
+) {
+    let client = LinearClient::new(tracker_config, http.clone());
+    let result = client.transition_issue_state(issue_id, "In Review").await;
+    if let Err(e) = result {
+        warn!(issue_identifier = %issue_identifier, error = %e, "failed to transition issue to In Review");
+    }
 }
 
 /// Fallback: check PR readiness using `gh` CLI from workspace.
@@ -1777,15 +1785,7 @@ async fn check_pr_ready_via_gh(
         Err(_) => return false,
     };
 
-    if json.get("state").and_then(|v| v.as_str()) != Some("OPEN") {
-        return false;
-    }
-
-    if json.get("mergeable").and_then(|v| v.as_str()) == Some("CONFLICTING") {
-        return false;
-    }
-
-    if !all_checks_passing(&json) {
+    if !is_gh_pr_ready(&json) {
         return false;
     }
 
@@ -1795,16 +1795,22 @@ async fn check_pr_ready_via_gh(
         "PR is ready (CI green, no conflicts) — transitioning to In Review"
     );
 
-    let client = LinearClient::new(tracker_config, http.clone());
-    if let Err(e) = client.transition_issue_state(issue_id, "In Review").await {
-        warn!(
-            issue_identifier = %issue_identifier,
-            error = %e,
-            "failed to transition issue to In Review"
-        );
-    }
+    transition_to_in_review(issue_id, issue_identifier, tracker_config, http).await;
 
     true
+}
+
+/// Validate the JSON output from `gh pr view` to determine if a PR is ready.
+///
+/// Returns `true` if the PR is open, not conflicting, and all checks pass.
+fn is_gh_pr_ready(json: &serde_json::Value) -> bool {
+    if json.get("state").and_then(|v| v.as_str()) != Some("OPEN") {
+        return false;
+    }
+    if json.get("mergeable").and_then(|v| v.as_str()) == Some("CONFLICTING") {
+        return false;
+    }
+    all_checks_passing(json)
 }
 
 /// Check if all CI status checks are passing on a PR.
@@ -8830,5 +8836,109 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("merged"));
+    }
+
+    // ── is_gh_pr_ready ────────────────────────────────────────────
+
+    #[test]
+    fn test_is_gh_pr_ready_open_and_clean() {
+        let json = serde_json::json!({
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                { "conclusion": "SUCCESS" }
+            ]
+        });
+        assert!(is_gh_pr_ready(&json));
+    }
+
+    #[test]
+    fn test_is_gh_pr_ready_not_open() {
+        let json = serde_json::json!({
+            "state": "CLOSED",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                { "conclusion": "SUCCESS" }
+            ]
+        });
+        assert!(!is_gh_pr_ready(&json));
+    }
+
+    #[test]
+    fn test_is_gh_pr_ready_conflicting() {
+        let json = serde_json::json!({
+            "state": "OPEN",
+            "mergeable": "CONFLICTING",
+            "statusCheckRollup": [
+                { "conclusion": "SUCCESS" }
+            ]
+        });
+        assert!(!is_gh_pr_ready(&json));
+    }
+
+    #[test]
+    fn test_is_gh_pr_ready_checks_failing() {
+        let json = serde_json::json!({
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                { "conclusion": "FAILURE" }
+            ]
+        });
+        assert!(!is_gh_pr_ready(&json));
+    }
+
+    #[test]
+    fn test_is_gh_pr_ready_no_checks() {
+        let json = serde_json::json!({
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": []
+        });
+        assert!(!is_gh_pr_ready(&json));
+    }
+
+    // ── transition_to_in_review ───────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_transition_to_in_review_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"issueUpdate":{"issue":{"id":"id1"}}}}"#)
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&server.url());
+        let http = reqwest::Client::new();
+
+        transition_to_in_review("id1", "PROJ-1", &config.tracker, &http).await;
+        // No panic = success
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_transition_to_in_review_error_logs_warning() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&server.url());
+        let http = reqwest::Client::new();
+
+        // Should not panic, just logs a warning
+        transition_to_in_review("id1", "PROJ-1", &config.tracker, &http).await;
+        assert!(logs_contain("failed to transition issue to In Review"));
     }
 }
