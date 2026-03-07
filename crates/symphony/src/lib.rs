@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod config;
 pub mod error;
+pub mod github;
 pub mod model;
 pub mod orchestrator;
 pub mod prompt;

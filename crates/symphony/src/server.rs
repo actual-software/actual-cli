@@ -1036,6 +1036,7 @@ mod tests {
                 mode: DeploymentMode::Local,
                 auth_token: None,
             },
+            github: None,
         }
     }
 

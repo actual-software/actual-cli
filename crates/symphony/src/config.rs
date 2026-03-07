@@ -16,6 +16,7 @@ pub struct ServiceConfig {
     pub coding_agent: CodingAgentConfig,
     pub server: ServerConfig,
     pub deployment: DeploymentConfig,
+    pub github: Option<GitHubConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +39,27 @@ impl std::fmt::Debug for DeploymentConfig {
                 "auth_token",
                 &self.auth_token.as_ref().map(|_| "[REDACTED]"),
             )
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct GitHubConfig {
+    pub token: String,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub api_base: String,
+    pub branch_prefix: String,
+}
+
+impl std::fmt::Debug for GitHubConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubConfig")
+            .field("token", &"[REDACTED]")
+            .field("repo_owner", &self.repo_owner)
+            .field("repo_name", &self.repo_name)
+            .field("api_base", &self.api_base)
+            .field("branch_prefix", &self.branch_prefix)
             .finish()
     }
 }
@@ -120,6 +142,7 @@ impl ServiceConfig {
             coding_agent: parse_coding_agent_config(root),
             server: parse_server_config(root),
             deployment: parse_deployment_config(root),
+            github: parse_github_config(root)?,
         })
     }
 
@@ -456,6 +479,45 @@ fn parse_deployment_config(root: &serde_yml::Value) -> DeploymentConfig {
     };
     let auth_token = get_yaml_str(root, &["deployment", "auth_token"]).map(|v| resolve_env_var(&v));
     DeploymentConfig { mode, auth_token }
+}
+
+fn parse_github_config(root: &serde_yml::Value) -> Result<Option<GitHubConfig>> {
+    // Check if the `github` section exists at all
+    let has_github = root
+        .as_mapping()
+        .and_then(|m| m.get(serde_yml::Value::String("github".to_string())))
+        .is_some();
+
+    if !has_github {
+        return Ok(None);
+    }
+
+    let raw_token = get_yaml_str(root, &["github", "token"]).unwrap_or_default();
+    let token = resolve_env_var(&raw_token);
+
+    let repo = get_yaml_str(root, &["github", "repo"]).unwrap_or_default();
+    let (repo_owner, repo_name) = match repo.split_once('/') {
+        Some((owner, name)) if !owner.is_empty() && !name.is_empty() => {
+            (owner.to_string(), name.to_string())
+        }
+        _ => {
+            return Err(SymphonyError::GitHubInvalidRepo { repo });
+        }
+    };
+
+    let api_base = get_yaml_str(root, &["github", "api_base"])
+        .unwrap_or_else(|| "https://api.github.com".to_string());
+
+    let branch_prefix =
+        get_yaml_str(root, &["github", "branch_prefix"]).unwrap_or_else(|| "symphony/".to_string());
+
+    Ok(Some(GitHubConfig {
+        token,
+        repo_owner,
+        repo_name,
+        api_base,
+        branch_prefix,
+    }))
 }
 
 fn parse_server_config(root: &serde_yml::Value) -> ServerConfig {
@@ -1220,5 +1282,191 @@ deployment:
         let debug_output = format!("{:?}", config);
         assert!(!debug_output.contains("super-secret-token-123"));
         assert!(debug_output.contains("[REDACTED]"));
+    }
+
+    // --- GitHub config tests ---
+
+    #[test]
+    fn test_github_config_parsed() {
+        let content = r#"---
+github:
+  token: ghp_test123
+  repo: my-org/my-repo
+  api_base: https://api.example.com
+  branch_prefix: feature/
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let gh = config.github.unwrap();
+        assert_eq!(gh.token, "ghp_test123");
+        assert_eq!(gh.repo_owner, "my-org");
+        assert_eq!(gh.repo_name, "my-repo");
+        assert_eq!(gh.api_base, "https://api.example.com");
+        assert_eq!(gh.branch_prefix, "feature/");
+    }
+
+    #[test]
+    fn test_github_config_missing_section() {
+        let content = r#"---
+tracker:
+  kind: linear
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config.github.is_none());
+    }
+
+    #[test]
+    fn test_github_config_defaults() {
+        let content = r#"---
+github:
+  token: ghp_test
+  repo: owner/name
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let gh = config.github.unwrap();
+        assert_eq!(gh.api_base, "https://api.github.com");
+        assert_eq!(gh.branch_prefix, "symphony/");
+    }
+
+    #[test]
+    fn test_github_config_env_var_token() {
+        unsafe {
+            env::set_var("SYMPHONY_TEST_GH_TOKEN_1", "env-gh-token-value");
+        }
+        let content = r#"---
+github:
+  token: $SYMPHONY_TEST_GH_TOKEN_1
+  repo: owner/name
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        let gh = config.github.unwrap();
+        assert_eq!(gh.token, "env-gh-token-value");
+        unsafe {
+            env::remove_var("SYMPHONY_TEST_GH_TOKEN_1");
+        }
+    }
+
+    #[test]
+    fn test_github_config_invalid_repo_no_slash() {
+        let content = r#"---
+github:
+  token: ghp_test
+  repo: invalid-repo
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let result = ServiceConfig::from_workflow(&wf);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            SymphonyError::GitHubInvalidRepo { ref repo } if repo == "invalid-repo"
+        ));
+    }
+
+    #[test]
+    fn test_github_config_invalid_repo_empty_owner() {
+        let content = r#"---
+github:
+  token: ghp_test
+  repo: /name
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let result = ServiceConfig::from_workflow(&wf);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubInvalidRepo { .. }
+        ));
+    }
+
+    #[test]
+    fn test_github_config_invalid_repo_empty_name() {
+        let content = r#"---
+github:
+  token: ghp_test
+  repo: owner/
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let result = ServiceConfig::from_workflow(&wf);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubInvalidRepo { .. }
+        ));
+    }
+
+    #[test]
+    fn test_github_config_invalid_repo_empty_string() {
+        let content = r#"---
+github:
+  token: ghp_test
+  repo: ""
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let result = ServiceConfig::from_workflow(&wf);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubInvalidRepo { .. }
+        ));
+    }
+
+    #[test]
+    fn test_github_config_debug_redacts_token() {
+        let config = GitHubConfig {
+            token: "ghp_super_secret_token".to_string(),
+            repo_owner: "my-org".to_string(),
+            repo_name: "my-repo".to_string(),
+            api_base: "https://api.github.com".to_string(),
+            branch_prefix: "symphony/".to_string(),
+        };
+        let debug_output = format!("{:?}", config);
+        assert!(!debug_output.contains("ghp_super_secret_token"));
+        assert!(debug_output.contains("[REDACTED]"));
+        assert!(debug_output.contains("my-org"));
+        assert!(debug_output.contains("my-repo"));
+    }
+
+    #[test]
+    fn test_github_config_clone() {
+        let config = GitHubConfig {
+            token: "ghp_test".to_string(),
+            repo_owner: "owner".to_string(),
+            repo_name: "repo".to_string(),
+            api_base: "https://api.github.com".to_string(),
+            branch_prefix: "symphony/".to_string(),
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.token, "ghp_test");
+        assert_eq!(cloned.repo_owner, "owner");
+        assert_eq!(cloned.repo_name, "repo");
+    }
+
+    #[test]
+    fn test_github_config_missing_repo_field() {
+        // github section exists but repo field is missing
+        let content = r#"---
+github:
+  token: ghp_test
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let result = ServiceConfig::from_workflow(&wf);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubInvalidRepo { .. }
+        ));
     }
 }
