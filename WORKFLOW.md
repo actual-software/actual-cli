@@ -21,6 +21,10 @@ coding_agent:
   command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 30"
   stall_timeout_ms: 600000
   turn_timeout_ms: 1800000
+github:
+  token: $GITHUB_TOKEN
+  repo: actual-software/actual-cli
+  branch_prefix: symphony/
 server:
   port: 7070
 hooks:
