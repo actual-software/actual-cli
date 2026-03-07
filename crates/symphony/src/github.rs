@@ -1474,4 +1474,103 @@ mod tests {
             SymphonyError::GitHubApiRequest { .. }
         ));
     }
+
+    // ── add_to_merge_queue: send() error on graphql POST ─────────────
+
+    #[tokio::test]
+    async fn test_add_to_merge_queue_graphql_send_error() {
+        // Spin up a raw TCP server that serves a valid GET response (for
+        // get_pr_node_id) then immediately resets the next connection
+        // (the POST /graphql), triggering a .send() error.
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base_url = format!("http://{addr}");
+
+        let server_handle = tokio::spawn(async move {
+            // Connection 1: GET /repos/.../pulls/42 → return valid JSON with node_id
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            let body = r#"{"number":42,"state":"open","node_id":"PR_kwDOTest123"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.ok();
+
+            // Connection 2: POST /graphql → accept then immediately reset
+            if let Ok((socket, _)) = listener.accept().await {
+                drop(socket); // RST the connection
+            }
+        });
+
+        let config = test_github_config(&base_url);
+        let client = GitHubClient::new(&config, new_http());
+        let result = client.add_to_merge_queue(42).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            SymphonyError::GitHubApiRequest { .. }
+        ));
+
+        server_handle.abort();
+    }
+
+    // ── add_to_merge_queue: non-array graphql errors ─────────────────
+
+    #[tokio::test]
+    async fn test_add_to_merge_queue_non_array_graphql_errors() {
+        let mut server = mockito::Server::new_async().await;
+
+        // GET /repos/.../pulls/42 → valid node_id
+        let details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "node_id": "PR_kwDOTest123"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // POST /graphql → errors field is a string, not an array
+        let graphql_mock = server
+            .mock("POST", "/graphql")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "enablePullRequestAutoMerge": {
+                            "pullRequest": {
+                                "autoMergeRequest": {
+                                    "enabledAt": "2025-01-01T00:00:00Z"
+                                }
+                            }
+                        }
+                    },
+                    "errors": "some non-array error"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = test_github_config(&server.url());
+        let client = GitHubClient::new(&config, new_http());
+        // Should succeed — non-array errors field is ignored (fallthrough)
+        client.add_to_merge_queue(42).await.unwrap();
+        details_mock.assert_async().await;
+        graphql_mock.assert_async().await;
+    }
 }

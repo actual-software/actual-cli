@@ -8008,4 +8008,1078 @@ mod tests {
         linear_state_mock.assert_async().await;
         linear_transition_mock.assert_async().await;
     }
+
+    // ── Non-running merged issue with workspace cleanup ──────────────
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_lifecycle_non_running_merged_issue_cleans_workspace() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Create a temp workspace directory that should be cleaned up
+        let ws_root = tempfile::tempdir().unwrap();
+        let ws_key = crate::workspace::sanitize_workspace_key("TST-1");
+        let ws_path = ws_root.path().join(&ws_key);
+        std::fs::create_dir_all(&ws_path).unwrap();
+        assert!(ws_path.exists());
+
+        // Linear: fetch "In Review" issues
+        let linear_fetch_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("In Review".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("nr-1", "TST-1", "In Review")]))
+            .create_async()
+            .await;
+
+        // GitHub: find open PR
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/tst-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "open".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 99,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // GitHub: get PR details — merged
+        let gh_details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/99")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 99,
+                    "state": "closed",
+                    "merged": true
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: resolve "Done" state and transition
+        let linear_state_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("workflowStates".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-done", "name": "Done" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let linear_transition_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("issueUpdate".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = ws_root.path().to_path_buf();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "Test prompt".to_string());
+
+        // Issue is NOT in the running map (no insert_running call)
+        orch.reconcile_in_review_lifecycle().await;
+
+        assert!(logs_contain("PR merged"));
+        // Workspace directory should have been cleaned up
+        assert!(!ws_path.exists(), "workspace directory should be removed");
+
+        let state = orch.state.read().await;
+        assert!(state.is_completed("nr-1"));
+
+        linear_fetch_mock.assert_async().await;
+        gh_find_mock.assert_async().await;
+        gh_details_mock.assert_async().await;
+        linear_state_mock.assert_async().await;
+        linear_transition_mock.assert_async().await;
+    }
+
+    // ── check_pr_ready_via_api tests ─────────────────────────────────
+
+    fn test_github_config(api_base: &str) -> crate::config::GitHubConfig {
+        crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: api_base.to_string(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        }
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_check_pr_ready_via_api_open_mergeable() {
+        let mut server = mockito::Server::new_async().await;
+
+        // GitHub: find open PR
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/tst-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "open".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 10,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: workflowStates → "In Review" state ID
+        let linear_state_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("workflowStates".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-in-review", "name": "In Review" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: issueUpdate → success
+        let linear_transition_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("issueUpdate".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = test_github_config(&server.url());
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(gh_config);
+
+        let result = check_pr_ready_via_api(
+            &github,
+            "symphony/tst-1",
+            "issue-1",
+            "TST-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        assert!(result);
+        assert!(logs_contain("PR is ready"));
+        gh_find_mock.assert_async().await;
+        linear_state_mock.assert_async().await;
+        linear_transition_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_check_pr_ready_via_api_no_pr() {
+        let mut server = mockito::Server::new_async().await;
+
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let gh_config = test_github_config(&server.url());
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(gh_config);
+
+        let result = check_pr_ready_via_api(
+            &github,
+            "symphony/tst-1",
+            "issue-1",
+            "TST-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+        gh_find_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_check_pr_ready_via_api_find_error() {
+        let gh_config = test_github_config("http://127.0.0.1:1");
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let mut config = test_config();
+        config.github = Some(gh_config);
+
+        let result = check_pr_ready_via_api(
+            &github,
+            "symphony/tst-1",
+            "issue-1",
+            "TST-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+        assert!(logs_contain("failed to check PR via API"));
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_not_open() {
+        let mut server = mockito::Server::new_async().await;
+
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 10,
+                    "state": "closed",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = test_github_config(&server.url());
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(gh_config);
+
+        let result = check_pr_ready_via_api(
+            &github,
+            "symphony/tst-1",
+            "issue-1",
+            "TST-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+        gh_find_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_mergeable_false() {
+        let mut server = mockito::Server::new_async().await;
+
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 10,
+                    "state": "open",
+                    "mergeable": false,
+                    "mergeable_state": "dirty"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = test_github_config(&server.url());
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(gh_config);
+
+        let result = check_pr_ready_via_api(
+            &github,
+            "symphony/tst-1",
+            "issue-1",
+            "TST-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+        gh_find_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_mergeable_state_dirty() {
+        let mut server = mockito::Server::new_async().await;
+
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 10,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "dirty"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = test_github_config(&server.url());
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(gh_config);
+
+        let result = check_pr_ready_via_api(
+            &github,
+            "symphony/tst-1",
+            "issue-1",
+            "TST-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+        gh_find_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_mergeable_state_blocked() {
+        let mut server = mockito::Server::new_async().await;
+
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 10,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "blocked"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = test_github_config(&server.url());
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(gh_config);
+
+        let result = check_pr_ready_via_api(
+            &github,
+            "symphony/tst-1",
+            "issue-1",
+            "TST-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+        gh_find_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_mergeable_none() {
+        let mut server = mockito::Server::new_async().await;
+
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 10,
+                    "state": "open",
+                    "mergeable_state": "unknown"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = test_github_config(&server.url());
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(gh_config);
+
+        let result = check_pr_ready_via_api(
+            &github,
+            "symphony/tst-1",
+            "issue-1",
+            "TST-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+        gh_find_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_check_pr_ready_via_api_transition_error_still_returns_true() {
+        let mut server = mockito::Server::new_async().await;
+
+        // GitHub: find open PR — mergeable
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 10,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: transition fails
+        let linear_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("workflowStates".to_string()))
+            .with_status(500)
+            .with_body("internal error")
+            .create_async()
+            .await;
+
+        let gh_config = test_github_config(&server.url());
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(gh_config);
+
+        let result = check_pr_ready_via_api(
+            &github,
+            "symphony/tst-1",
+            "issue-1",
+            "TST-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        // Should still return true even though transition failed
+        assert!(result);
+        assert!(logs_contain("failed to transition issue to In Review"));
+        gh_find_mock.assert_async().await;
+        linear_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_check_pr_ready_and_transition_with_github_config() {
+        let mut server = mockito::Server::new_async().await;
+
+        // GitHub: find open PR — mergeable
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 10,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: workflowStates + issueUpdate
+        let linear_state_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("workflowStates".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-in-review", "name": "In Review" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let linear_transition_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("issueUpdate".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let http = reqwest::Client::new();
+        let tmp = tempfile::tempdir().unwrap();
+
+        let result =
+            check_pr_ready_and_transition(tmp.path(), "issue-1", "TST-1", &config, &http).await;
+
+        assert!(result);
+        gh_find_mock.assert_async().await;
+        linear_state_mock.assert_async().await;
+        linear_transition_mock.assert_async().await;
+    }
+
+    // ── check_pr_ready_via_gh tests ──────────────────────────────────
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_check_pr_ready_via_gh_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Linear: workflowStates + issueUpdate for transition
+        let linear_state_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("workflowStates".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-in-review", "name": "In Review" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let linear_transition_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("issueUpdate".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Create fake gh script that outputs valid JSON
+        let tmp = tempfile::tempdir().unwrap();
+        let gh_script = tmp.path().join("gh");
+        std::fs::write(
+            &gh_script,
+            r#"#!/bin/sh
+echo '{"number":10,"state":"OPEN","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS"}]}'
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Create workspace dir (gh needs a cwd)
+        let ws = tempfile::tempdir().unwrap();
+
+        let tracker_config = test_config_with_endpoint(&server.url()).tracker;
+        let http = reqwest::Client::new();
+
+        // Prepend fake gh dir to PATH
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result =
+            check_pr_ready_via_gh(ws.path(), "issue-1", "TST-1", &tracker_config, &http).await;
+
+        // Restore PATH
+        std::env::set_var("PATH", &original_path);
+
+        assert!(result);
+        assert!(logs_contain("PR is ready"));
+        linear_state_mock.assert_async().await;
+        linear_transition_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_gh_command_fails() {
+        // Create fake gh script that exits with error
+        let tmp = tempfile::tempdir().unwrap();
+        let gh_script = tmp.path().join("gh");
+        std::fs::write(&gh_script, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let ws = tempfile::tempdir().unwrap();
+        let tracker_config = test_config().tracker;
+        let http = reqwest::Client::new();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result =
+            check_pr_ready_via_gh(ws.path(), "issue-1", "TST-1", &tracker_config, &http).await;
+
+        std::env::set_var("PATH", &original_path);
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_gh_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh_script = tmp.path().join("gh");
+        std::fs::write(&gh_script, "#!/bin/sh\necho 'not valid json'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let ws = tempfile::tempdir().unwrap();
+        let tracker_config = test_config().tracker;
+        let http = reqwest::Client::new();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result =
+            check_pr_ready_via_gh(ws.path(), "issue-1", "TST-1", &tracker_config, &http).await;
+
+        std::env::set_var("PATH", &original_path);
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_gh_state_not_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh_script = tmp.path().join("gh");
+        std::fs::write(
+            &gh_script,
+            r#"#!/bin/sh
+echo '{"number":10,"state":"CLOSED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS"}]}'
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let ws = tempfile::tempdir().unwrap();
+        let tracker_config = test_config().tracker;
+        let http = reqwest::Client::new();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result =
+            check_pr_ready_via_gh(ws.path(), "issue-1", "TST-1", &tracker_config, &http).await;
+
+        std::env::set_var("PATH", &original_path);
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_gh_conflicting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh_script = tmp.path().join("gh");
+        std::fs::write(
+            &gh_script,
+            r#"#!/bin/sh
+echo '{"number":10,"state":"OPEN","mergeable":"CONFLICTING","statusCheckRollup":[{"conclusion":"SUCCESS"}]}'
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let ws = tempfile::tempdir().unwrap();
+        let tracker_config = test_config().tracker;
+        let http = reqwest::Client::new();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result =
+            check_pr_ready_via_gh(ws.path(), "issue-1", "TST-1", &tracker_config, &http).await;
+
+        std::env::set_var("PATH", &original_path);
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_check_pr_ready_via_gh_checks_failing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh_script = tmp.path().join("gh");
+        std::fs::write(
+            &gh_script,
+            r#"#!/bin/sh
+echo '{"number":10,"state":"OPEN","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"FAILURE"}]}'
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let ws = tempfile::tempdir().unwrap();
+        let tracker_config = test_config().tracker;
+        let http = reqwest::Client::new();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result =
+            check_pr_ready_via_gh(ws.path(), "issue-1", "TST-1", &tracker_config, &http).await;
+
+        std::env::set_var("PATH", &original_path);
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_check_pr_ready_via_gh_transition_error_still_returns_true() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Linear: transition fails
+        let linear_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("workflowStates".to_string()))
+            .with_status(500)
+            .with_body("internal error")
+            .create_async()
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let gh_script = tmp.path().join("gh");
+        std::fs::write(
+            &gh_script,
+            r#"#!/bin/sh
+echo '{"number":10,"state":"OPEN","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS"}]}'
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let ws = tempfile::tempdir().unwrap();
+        let tracker_config = test_config_with_endpoint(&server.url()).tracker;
+        let http = reqwest::Client::new();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result =
+            check_pr_ready_via_gh(ws.path(), "issue-1", "TST-1", &tracker_config, &http).await;
+
+        std::env::set_var("PATH", &original_path);
+
+        assert!(result);
+        assert!(logs_contain("failed to transition issue to In Review"));
+        linear_mock.assert_async().await;
+    }
+
+    // ── run_worker: In Review detection after turn ───────────────────
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_worker_breaks_on_in_review_state() {
+        let mut server = mockito::Server::new_async().await;
+
+        // After the agent turn, run_worker calls fetch_issue_states_by_ids.
+        // Return the issue with "In Review" state so the worker breaks.
+        let linear_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("w-1", "TST-1", "In Review")]))
+            .create_async()
+            .await;
+
+        let ws_root = tempfile::tempdir().unwrap();
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = ws_root.path().to_path_buf();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+        config.agent.max_turns = 5;
+        // "In Review" must be in active_states so the first check
+        // (!state_matches) does NOT break early, allowing the
+        // is_in_review_state check on line 1467 to execute.
+        config.tracker.active_states.push("In Review".to_string());
+
+        let issue = Issue {
+            id: "w-1".to_string(),
+            identifier: "TST-1".to_string(),
+            title: "Test issue".to_string(),
+            state: "In Progress".to_string(),
+            ..default_issue()
+        };
+
+        let (msg_tx, mut msg_rx) = mpsc::channel(64);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+
+        // Drain messages in background
+        tokio::spawn(async move { while msg_rx.recv().await.is_some() {} });
+
+        let result = run_worker(
+            &config,
+            "Test {{ issue.identifier }}",
+            &issue,
+            None,
+            reqwest::Client::new(),
+            msg_tx,
+            cancel_rx,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(logs_contain("issue moved to In Review, stopping worker"));
+        linear_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_worker_breaks_on_pr_ready() {
+        let mut server = mockito::Server::new_async().await;
+
+        // After the agent turn, run_worker calls fetch_issue_states_by_ids.
+        // Return the issue still in active state so we reach check_pr_ready.
+        let linear_state_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("w-2", "TST-2", "In Progress")]))
+            .create_async()
+            .await;
+
+        // GitHub: find open PR — mergeable
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 10,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: workflowStates + issueUpdate for transition to In Review
+        let linear_ws_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("workflowStates".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-in-review", "name": "In Review" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let linear_transition_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("issueUpdate".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let ws_root = tempfile::tempdir().unwrap();
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = ws_root.path().to_path_buf();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+        config.agent.max_turns = 5;
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+
+        let issue = Issue {
+            id: "w-2".to_string(),
+            identifier: "TST-2".to_string(),
+            title: "Test issue".to_string(),
+            state: "In Progress".to_string(),
+            ..default_issue()
+        };
+
+        let (msg_tx, mut msg_rx) = mpsc::channel(64);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+
+        tokio::spawn(async move { while msg_rx.recv().await.is_some() {} });
+
+        let result = run_worker(
+            &config,
+            "Test {{ issue.identifier }}",
+            &issue,
+            None,
+            reqwest::Client::new(),
+            msg_tx,
+            cancel_rx,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(logs_contain("PR is ready"));
+        linear_state_mock.assert_async().await;
+        gh_find_mock.assert_async().await;
+        linear_ws_mock.assert_async().await;
+        linear_transition_mock.assert_async().await;
+    }
 }
