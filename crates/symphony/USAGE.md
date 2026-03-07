@@ -120,7 +120,7 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 | `max_retry_backoff_ms` | integer | `300000` (5m) | Cap on exponential retry backoff |
 | `max_concurrent_agents_by_state` | map | `{}` | Per-state concurrency limits (e.g., `todo: 2`) |
 
-### codex
+### coding_agent
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -128,6 +128,8 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 | `permission_mode` | string | `bypassPermissions` | Permission mode for agent sessions |
 | `turn_timeout_ms` | integer | `3600000` (1h) | Timeout per agent turn |
 | `stall_timeout_ms` | integer | `300000` (5m) | Kill agent if no activity for this long. Set `0` or negative to disable |
+
+> **Deprecated**: The `codex` key is still accepted as a fallback but will be removed in a future release. Rename it to `coding_agent`.
 
 ## Prompt Template
 
@@ -288,7 +290,7 @@ This implementation runs in high-trust mode:
 - Agent cwd is always the per-issue workspace path
 - Workspace paths are validated to stay under the configured root
 
-For stricter environments, customize `codex.command` to remove `--dangerously-skip-permissions` and add appropriate permission controls.
+For stricter environments, customize `coding_agent.command` to remove `--dangerously-skip-permissions` and add appropriate permission controls.
 
 ## Architecture
 
