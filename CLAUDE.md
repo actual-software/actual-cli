@@ -68,7 +68,7 @@ Issues live in the **ACTCLI** Linear team. When you discover a bug, gap, or foll
 TEAM_ID=$(gh api -X POST https://api.linear.app/graphql \
   -H "Authorization: $LINEAR_API_KEY" \
   -f query='{ teams { nodes { id name } } }' \
-  --jq '.data.teams.nodes[] | select(.name == "Actual AI") | .id')
+  --jq '.data.teams.nodes[] | select(.name == "actual-cli") | .id')
 
 # Create an issue (priority: 1=Urgent, 2=High, 3=Medium, 4=Low)
 gh api -X POST https://api.linear.app/graphql \
