@@ -44,7 +44,7 @@ Priority values: 0 = No priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low
 ## How Symphony Works
 
 Symphony is a long-running service that:
-1. **Polls** the Linear `actcli` project for issues in active states (`To Do`, `In Progress`, `Ready for Review`)
+1. **Polls** the Linear `actcli` project for issues in active states (`Todo`, `In Progress`, `Ready for Review`)
 2. **Creates isolated workspaces** for each issue (clones the repo, sets up toolchains)
 3. **Runs Claude Code sessions** to complete the work (implements, tests, creates PRs)
 4. **Retries** on failure with exponential backoff
