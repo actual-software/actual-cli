@@ -69,39 +69,10 @@ impl AgentSession {
 
         // Spawn stdout reader
         let tx_stdout = event_tx.clone();
-        tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<serde_json::Value>(&line) {
-                    Ok(json) => {
-                        if let Some(event) = parse_agent_message(&json) {
-                            if tx_stdout.send(event).await.is_err() {
-                                break;
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Non-JSON stdout line, log as notification
-                        debug!(line = %line, "non-json agent stdout");
-                    }
-                }
-            }
-        });
+        tokio::spawn(read_stdout_lines(stdout, tx_stdout));
 
         // Spawn stderr reader (diagnostic only, not protocol)
-        tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if !line.trim().is_empty() {
-                    debug!(line = %line, "agent stderr");
-                }
-            }
-        });
+        tokio::spawn(read_stderr_lines(stderr));
 
         // Emit session_started event
         let _ = event_tx
@@ -170,6 +141,49 @@ async fn write_prompt_to_stdin(mut stdin: tokio::process::ChildStdin, prompt_byt
     let _ = stdin.shutdown().await;
 }
 
+/// Read JSON lines from the agent's stdout and send parsed events to the channel.
+///
+/// Extracted as a named async function (rather than an inline closure) to avoid
+/// LLVM coverage instrumentation quirks on Linux where the implicit drop region
+/// of a spawned `async move { … }` closure is marked as uncovered.
+async fn read_stdout_lines(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<AgentEvent>) {
+    let reader = BufReader::new(stdout);
+    let mut lines = reader.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(json) => {
+                for event in parse_agent_message(&json) {
+                    if tx.send(event).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(_) => {
+                // Non-JSON stdout line, log as notification
+                debug!(line = %line, "non-json agent stdout");
+            }
+        }
+    }
+}
+
+/// Read diagnostic lines from the agent's stderr.
+///
+/// Extracted as a named async function (rather than an inline closure) to avoid
+/// LLVM coverage instrumentation quirks on Linux where the implicit drop region
+/// of a spawned `async move { … }` closure is marked as uncovered.
+async fn read_stderr_lines(stderr: tokio::process::ChildStderr) {
+    let reader = BufReader::new(stderr);
+    let mut lines = reader.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if !line.trim().is_empty() {
+            debug!(line = %line, "agent stderr");
+        }
+    }
+}
+
 /// Build the full shell command to run Claude Code.
 ///
 /// The prompt is NOT included in the command — it is passed via stdin to
@@ -197,124 +211,146 @@ fn build_agent_command(base_command: &str) -> String {
 /// - system messages (init, result)
 /// - assistant messages (text, tool_use)
 /// - tool results
-fn parse_agent_message(json: &serde_json::Value) -> Option<AgentEvent> {
+///
+/// Returns a `Vec<AgentEvent>` because a single message (e.g. a "result"
+/// message with both text and usage data) can produce multiple events.
+fn parse_agent_message(json: &serde_json::Value) -> Vec<AgentEvent> {
     let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match msg_type {
-        "system" => {
-            let subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
-
-            match subtype {
-                "init" => {
-                    let session_id = json
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    Some(AgentEvent::SessionStarted {
-                        session_id,
-                        pid: None,
-                    })
-                }
-                _ => None,
-            }
-        }
-        "result" => {
-            // Final result message
-            let result_text = json
-                .get("result")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            // Check for token usage in the result
-            if let Some(usage) = json.get("usage") {
-                let input = usage
-                    .get("input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let output = usage
-                    .get("output_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                Some(AgentEvent::TokenUsage {
-                    input_tokens: input,
-                    output_tokens: output,
-                    total_tokens: input + output,
-                })
-            } else {
-                Some(AgentEvent::TurnCompleted {
-                    message: if result_text.is_empty() {
-                        None
-                    } else {
-                        Some(result_text)
-                    },
-                })
-            }
-        }
-        "assistant" => {
-            let message = json
-                .get("message")
-                .and_then(|v| {
-                    // Could be a string or an object with content
-                    v.as_str().map(|s| s.to_string()).or_else(|| {
-                        v.get("content").and_then(|c| c.as_array()).and_then(|arr| {
-                            arr.iter()
-                                .filter_map(|item| {
-                                    if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                        item.get("text")
-                                            .and_then(|t| t.as_str())
-                                            .map(|s| s.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .next()
-                        })
-                    })
-                })
-                .unwrap_or_default();
-
-            if !message.is_empty() {
-                Some(AgentEvent::Notification { message })
-            } else {
-                None
-            }
-        }
+        "system" => parse_system_message(json),
+        "result" => parse_result_message(json),
+        "assistant" => parse_assistant_message(json),
         // §11.2: Populate rate limits from Claude CLI rate_limit_event messages
-        "rate_limit_event" => Some(AgentEvent::RateLimitUpdate { data: json.clone() }),
-        _ => {
-            // Check for usage/token events in any message
-            if let Some(usage) = json.get("usage").or_else(|| json.get("total_token_usage")) {
-                let input = usage
-                    .get("input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                let output = usage
-                    .get("output_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                if input > 0 || output > 0 {
-                    return Some(AgentEvent::TokenUsage {
-                        input_tokens: input,
-                        output_tokens: output,
-                        total_tokens: input + output,
-                    });
-                }
-            }
+        "rate_limit_event" => vec![AgentEvent::RateLimitUpdate { data: json.clone() }],
+        _ => parse_fallback_message(json, msg_type),
+    }
+}
 
-            if !msg_type.is_empty() {
-                Some(AgentEvent::AgentMessage {
-                    event_type: msg_type.to_string(),
-                    message: json
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                })
-            } else {
-                None
-            }
+/// Parse a "system" type message.
+fn parse_system_message(json: &serde_json::Value) -> Vec<AgentEvent> {
+    let subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
+
+    match subtype {
+        "init" => {
+            let session_id = json
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            vec![AgentEvent::SessionStarted {
+                session_id,
+                pid: None,
+            }]
         }
+        _ => vec![],
+    }
+}
+
+/// Parse a "result" type message.
+///
+/// Emits both a `TurnCompleted` event (with result text) and a `TokenUsage`
+/// event when usage data is present, so neither is dropped.
+fn parse_result_message(json: &serde_json::Value) -> Vec<AgentEvent> {
+    let result_text = json
+        .get("result")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut events = Vec::new();
+
+    // Always emit TurnCompleted for result messages
+    events.push(AgentEvent::TurnCompleted {
+        message: if result_text.is_empty() {
+            None
+        } else {
+            Some(result_text)
+        },
+    });
+
+    // Also emit TokenUsage if usage data is present
+    if let Some(usage) = json.get("usage") {
+        let input = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        events.push(AgentEvent::TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+        });
+    }
+
+    events
+}
+
+/// Parse an "assistant" type message.
+fn parse_assistant_message(json: &serde_json::Value) -> Vec<AgentEvent> {
+    let message = json
+        .get("message")
+        .and_then(|v| {
+            // Could be a string or an object with content
+            v.as_str().map(|s| s.to_string()).or_else(|| {
+                v.get("content").and_then(|c| c.as_array()).and_then(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                item.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .next()
+                })
+            })
+        })
+        .unwrap_or_default();
+
+    if !message.is_empty() {
+        vec![AgentEvent::Notification { message }]
+    } else {
+        vec![]
+    }
+}
+
+/// Parse a message with an unrecognised type, checking for usage data.
+fn parse_fallback_message(json: &serde_json::Value, msg_type: &str) -> Vec<AgentEvent> {
+    // Check for usage/token events in any message
+    if let Some(usage) = json.get("usage").or_else(|| json.get("total_token_usage")) {
+        let input = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if input > 0 || output > 0 {
+            return vec![AgentEvent::TokenUsage {
+                input_tokens: input,
+                output_tokens: output,
+                total_tokens: input + output,
+            }];
+        }
+    }
+
+    if !msg_type.is_empty() {
+        vec![AgentEvent::AgentMessage {
+            event_type: msg_type.to_string(),
+            message: json
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        }]
+    } else {
+        vec![]
     }
 }
 
@@ -356,9 +392,10 @@ mod tests {
             "subtype": "init",
             "session_id": "abc-123"
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         assert!(
-            matches!(&event, AgentEvent::SessionStarted { session_id, .. } if session_id == "abc-123")
+            matches!(&events[0], AgentEvent::SessionStarted { session_id, .. } if session_id == "abc-123")
         );
     }
 
@@ -368,9 +405,10 @@ mod tests {
             "type": "result",
             "result": "Done fixing the bug"
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         assert!(
-            matches!(&event, AgentEvent::TurnCompleted { message } if message.as_deref() == Some("Done fixing the bug"))
+            matches!(&events[0], AgentEvent::TurnCompleted { message } if message.as_deref() == Some("Done fixing the bug"))
         );
     }
 
@@ -384,13 +422,48 @@ mod tests {
                 "output_tokens": 500
             }
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(
+            events.len(),
+            2,
+            "should emit both TurnCompleted and TokenUsage"
+        );
+        assert!(
+            matches!(&events[0], AgentEvent::TurnCompleted { message } if message.as_deref() == Some("Done"))
+        );
         assert!(matches!(
-            &event,
+            &events[1],
             AgentEvent::TokenUsage {
                 input_tokens: 1000,
                 output_tokens: 500,
                 total_tokens: 1500
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_result_with_usage_and_empty_text() {
+        let json = serde_json::json!({
+            "type": "result",
+            "result": "",
+            "usage": {
+                "input_tokens": 400,
+                "output_tokens": 200
+            }
+        });
+        let events = parse_agent_message(&json);
+        assert_eq!(
+            events.len(),
+            2,
+            "should emit both TurnCompleted and TokenUsage even with empty text"
+        );
+        assert!(matches!(&events[0], AgentEvent::TurnCompleted { message } if message.is_none()));
+        assert!(matches!(
+            &events[1],
+            AgentEvent::TokenUsage {
+                input_tokens: 400,
+                output_tokens: 200,
+                total_tokens: 600
             }
         ));
     }
@@ -401,7 +474,7 @@ mod tests {
             "type": "system",
             "subtype": "shutdown"
         });
-        assert!(parse_agent_message(&json).is_none());
+        assert!(parse_agent_message(&json).is_empty());
     }
 
     #[test]
@@ -410,9 +483,10 @@ mod tests {
             "type": "system",
             "subtype": "init"
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         assert!(
-            matches!(&event, AgentEvent::SessionStarted { session_id, pid } if session_id == "unknown" && pid.is_none())
+            matches!(&events[0], AgentEvent::SessionStarted { session_id, pid } if session_id == "unknown" && pid.is_none())
         );
     }
 
@@ -422,8 +496,9 @@ mod tests {
             "type": "result",
             "result": ""
         });
-        let event = parse_agent_message(&json).unwrap();
-        assert!(matches!(&event, AgentEvent::TurnCompleted { message } if message.is_none()));
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], AgentEvent::TurnCompleted { message } if message.is_none()));
     }
 
     #[test]
@@ -432,9 +507,10 @@ mod tests {
             "type": "assistant",
             "message": "Hello, I'm working on it"
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         assert!(
-            matches!(&event, AgentEvent::Notification { message } if message == "Hello, I'm working on it")
+            matches!(&events[0], AgentEvent::Notification { message } if message == "Hello, I'm working on it")
         );
     }
 
@@ -449,9 +525,10 @@ mod tests {
                 ]
             }
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         assert!(
-            matches!(&event, AgentEvent::Notification { message } if message == "Here is the result")
+            matches!(&events[0], AgentEvent::Notification { message } if message == "Here is the result")
         );
     }
 
@@ -461,7 +538,7 @@ mod tests {
             "type": "assistant",
             "message": ""
         });
-        assert!(parse_agent_message(&json).is_none());
+        assert!(parse_agent_message(&json).is_empty());
     }
 
     #[test]
@@ -473,9 +550,10 @@ mod tests {
                 "output_tokens": 100
             }
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         assert!(matches!(
-            &event,
+            &events[0],
             AgentEvent::TokenUsage {
                 input_tokens: 200,
                 output_tokens: 100,
@@ -493,9 +571,10 @@ mod tests {
                 "output_tokens": 3000
             }
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         assert!(matches!(
-            &event,
+            &events[0],
             AgentEvent::TokenUsage {
                 input_tokens: 5000,
                 output_tokens: 3000,
@@ -513,10 +592,11 @@ mod tests {
                 "output_tokens": 0
             }
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         // Zero tokens should skip TokenUsage, fall through to AgentMessage
         assert!(
-            matches!(&event, AgentEvent::AgentMessage { event_type, .. } if event_type == "heartbeat")
+            matches!(&events[0], AgentEvent::AgentMessage { event_type, .. } if event_type == "heartbeat")
         );
     }
 
@@ -526,9 +606,10 @@ mod tests {
             "type": "tool_result",
             "message": "file written"
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         assert!(
-            matches!(&event, AgentEvent::AgentMessage { event_type, message }
+            matches!(&events[0], AgentEvent::AgentMessage { event_type, message }
             if event_type == "tool_result" && message.as_deref() == Some("file written"))
         );
     }
@@ -542,9 +623,10 @@ mod tests {
             "tokens_remaining": 100000,
             "reset_at": "2025-01-01T00:00:30Z"
         });
-        let event = parse_agent_message(&json).unwrap();
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
         assert!(
-            matches!(&event, AgentEvent::RateLimitUpdate { data } if data["requests_remaining"] == 50)
+            matches!(&events[0], AgentEvent::RateLimitUpdate { data } if data["requests_remaining"] == 50)
         );
     }
 
@@ -553,7 +635,7 @@ mod tests {
         let json = serde_json::json!({
             "something": "else"
         });
-        assert!(parse_agent_message(&json).is_none());
+        assert!(parse_agent_message(&json).is_empty());
     }
 
     #[test]
@@ -959,6 +1041,18 @@ mod tests {
             )
         });
         assert!(has_usage, "should have TokenUsage event, got: {events:?}");
+
+        // Result messages with usage should also emit TurnCompleted (the fix)
+        let has_turn = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::TurnCompleted { message } if message.as_deref() == Some("done")
+            )
+        });
+        assert!(
+            has_turn,
+            "should have TurnCompleted event alongside TokenUsage, got: {events:?}"
+        );
     }
 
     // -- Test 13: assistant message event from stdout --
@@ -1011,8 +1105,8 @@ mod tests {
                 ]
             }
         });
-        // All items are non-text, so filter_map yields nothing → message is empty → None
-        assert!(parse_agent_message(&json).is_none());
+        // All items are non-text, so filter_map yields nothing → message is empty → empty Vec
+        assert!(parse_agent_message(&json).is_empty());
     }
 
     // -- Test: spawn error when command fails --
