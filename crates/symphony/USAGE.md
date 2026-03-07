@@ -51,7 +51,13 @@ This is retry attempt #{{ attempt }}. Review what was done previously and contin
 
 ### 2. Set your Linear API key
 
+Symphony automatically loads `.env.local` and `.env` files at startup (via `dotenvy`). You can also export the key directly:
+
 ```bash
+# Option A: .env.local file (recommended)
+echo 'LINEAR_API_KEY=lin_api_xxxxxxxxxxxxx' >> .env.local
+
+# Option B: Environment variable
 export LINEAR_API_KEY=lin_api_xxxxxxxxxxxxx
 ```
 

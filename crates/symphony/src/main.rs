@@ -20,6 +20,10 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    // Load .env.local / .env files (best-effort — missing files are fine)
+    let _ = dotenvy::from_filename(".env.local");
+    let _ = dotenvy::dotenv();
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
