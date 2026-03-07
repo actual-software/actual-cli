@@ -222,11 +222,13 @@ pub(crate) fn load_config_with_fallback(cfg_path: &std::path::Path) -> crate::co
     match load_from(cfg_path) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(
-                "failed to load config from {}: {e} — using defaults",
-                cfg_path.display()
-            );
+            log_config_load_fallback(cfg_path, &e);
             Default::default()
         }
     }
+}
+
+fn log_config_load_fallback(cfg_path: &std::path::Path, e: &dyn std::fmt::Display) {
+    let p = cfg_path.display();
+    tracing::warn!("failed to load config from {p}: {e} — using defaults");
 }

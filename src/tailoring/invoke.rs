@@ -219,16 +219,7 @@ pub(crate) fn validate_and_filter_output(
             .map(|s| s.adr_id.clone())
             .collect();
         if !invalid_ids.is_empty() {
-            tracing::warn!(
-                "filtered {} hallucinated ADR ID(s) from '{}': {}",
-                invalid_ids.len(),
-                console::strip_ansi_codes(&file.path),
-                invalid_ids
-                    .iter()
-                    .map(|id| console::strip_ansi_codes(id).into_owned())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            log_hallucinated_adr_ids(&file.path, &invalid_ids);
             file.sections
                 .retain(|s| valid_ids.contains(s.adr_id.as_str()));
         }
@@ -244,6 +235,17 @@ pub(crate) fn validate_and_filter_output(
         file.sections = deduped;
     }
     Ok(output)
+}
+
+fn log_hallucinated_adr_ids(path: &str, invalid_ids: &[String]) {
+    let count = invalid_ids.len();
+    let clean_path = console::strip_ansi_codes(path);
+    let ids = invalid_ids
+        .iter()
+        .map(|id| console::strip_ansi_codes(id).into_owned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::warn!("filtered {count} hallucinated ADR ID(s) from '{clean_path}': {ids}");
 }
 
 #[cfg(test)]
