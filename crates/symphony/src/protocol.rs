@@ -568,6 +568,16 @@ mod tests {
         assert!(debug.contains("TriggerRefresh"));
     }
 
+    #[test]
+    fn orchestrator_message_remove_from_retry_queue_debug() {
+        let msg = OrchestratorMessage::RemoveFromRetryQueue {
+            issue_id: "id5".to_string(),
+        };
+        let debug = format!("{:?}", msg);
+        assert!(debug.contains("RemoveFromRetryQueue"));
+        assert!(debug.contains("id5"));
+    }
+
     // ── OrchestratorSnapshot ─────────────────────────────────────────
 
     #[test]
