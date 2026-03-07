@@ -7888,6 +7888,920 @@ mod tests {
         assert!(state.waiting_for_review.contains_key("id1"));
     }
 
+    // ── add_to_waiting_for_review error path ─────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_in_review_github_api_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock find_open_pr — returns 500 error
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Review").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        // Should NOT be in waiting (API error)
+        assert!(!state.waiting_for_review.contains_key("id1"));
+    }
+
+    // ── reconcile_pr_lifecycle: is_pr_approved error ──────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_auto_merge_approval_check_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Reviews endpoint: returns 500
+        let _reviews_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: true,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should still be in waiting (approval check failed)
+        assert!(state.waiting_for_review.contains_key("id1"));
+    }
+
+    // ── reconcile_pr_lifecycle: get_pr_details error ──────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_auto_merge_pr_details_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Reviews: approved
+        let _reviews_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "id": 1,
+                    "state": "APPROVED",
+                    "user": { "login": "reviewer1" }
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // PR details: returns 500
+        let _details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: true,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should still be in waiting (details fetch failed)
+        assert!(state.waiting_for_review.contains_key("id1"));
+    }
+
+    // ── reconcile_pr_lifecycle: auto-merge API error ──────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_auto_merge_api_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Reviews: approved
+        let _reviews_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42/reviews")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "id": 1,
+                    "state": "APPROVED",
+                    "user": { "login": "reviewer1" }
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // PR details: mergeable
+        let _details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Merge attempt: 500 (API error, not 405)
+        let _merge_mock = server
+            .mock("PUT", "/repos/test-org/test-repo/pulls/42/merge")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: true,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should still be in waiting (merge API error)
+        assert!(state.waiting_for_review.contains_key("id1"));
+    }
+
+    // ── reconcile_pr_lifecycle: Linear state verification ─────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_removes_stale_waiting_entry() {
+        let mut gh_server = mockito::Server::new_async().await;
+        let mut linear_server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open (not merged, not closed)
+        let _merged_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: issue moved back to "In Progress" (no longer "In Review")
+        let _linear_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&mock_states_response(&[("id1", "PROJ-1", "In Progress")]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.claimed.insert("id1".to_string());
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Issue moved back to "In Progress" — should be removed from waiting
+        assert!(!state.waiting_for_review.contains_key("id1"));
+        // Claim should also be released so it can be re-dispatched
+        assert!(!state.claimed.contains("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_linear_state_check_error() {
+        let mut gh_server = mockito::Server::new_async().await;
+        let mut linear_server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open
+        let _merged_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: returns error
+        let _linear_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Should still be in waiting (Linear check failed, but entry is kept)
+        assert!(state.waiting_for_review.contains_key("id1"));
+    }
+
+    // ── check_pr_ready_and_transition ─────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_and_transition_with_github_config_delegates_to_api() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock find_open_pr: returns a PR that's ready
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Mock Linear transition (will fail but we don't care — just need it not to hang)
+        let _linear_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"issueUpdate":{"issue":{"id":"id1"}}}}"#)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+
+        let http = reqwest::Client::new();
+        let result = check_pr_ready_and_transition(
+            std::path::Path::new("/tmp"),
+            "id1",
+            "PROJ-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        assert!(result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_and_transition_no_github_falls_back_to_gh() {
+        let config = test_config(); // no github config
+        let http = reqwest::Client::new();
+
+        // Falls back to `gh pr view` which will fail (no git repo at /tmp/nonexistent)
+        let result = check_pr_ready_and_transition(
+            std::path::Path::new("/tmp/nonexistent-symphony-test"),
+            "id1",
+            "PROJ-1",
+            &config,
+            &http,
+        )
+        .await;
+
+        // gh CLI will fail -> returns false
+        assert!(!result);
+    }
+
+    // ── check_pr_ready_via_api ────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_no_pr() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let gh_config = crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        };
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let config = test_config();
+
+        let result =
+            check_pr_ready_via_api(&github, "symphony/proj-1", "id1", "PROJ-1", &config, &http)
+                .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body("error")
+            .create_async()
+            .await;
+
+        let gh_config = crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        };
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let config = test_config();
+
+        let result =
+            check_pr_ready_via_api(&github, "symphony/proj-1", "id1", "PROJ-1", &config, &http)
+                .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_not_open() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "closed",
+                    "mergeable": true
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        };
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let config = test_config();
+
+        let result =
+            check_pr_ready_via_api(&github, "symphony/proj-1", "id1", "PROJ-1", &config, &http)
+                .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_not_mergeable() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        };
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let config = test_config();
+
+        let result =
+            check_pr_ready_via_api(&github, "symphony/proj-1", "id1", "PROJ-1", &config, &http)
+                .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_dirty_state() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "dirty"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        };
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let config = test_config();
+
+        let result =
+            check_pr_ready_via_api(&github, "symphony/proj-1", "id1", "PROJ-1", &config, &http)
+                .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_blocked_state() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "blocked"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        };
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let config = test_config();
+
+        let result =
+            check_pr_ready_via_api(&github, "symphony/proj-1", "id1", "PROJ-1", &config, &http)
+                .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_mergeable_none() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open"
+                    // mergeable is absent (None)
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let gh_config = crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        };
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let config = test_config();
+
+        let result =
+            check_pr_ready_via_api(&github, "symphony/proj-1", "id1", "PROJ-1", &config, &http)
+                .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_ready_transitions_to_in_review() {
+        let mut server = mockito::Server::new_async().await;
+
+        // PR is ready
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear transition mock
+        let _linear_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"issueUpdate":{"issue":{"id":"id1"}}}}"#)
+            .create_async()
+            .await;
+
+        let gh_config = crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        };
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let config = test_config_with_endpoint(&server.url());
+
+        let result =
+            check_pr_ready_via_api(&github, "symphony/proj-1", "id1", "PROJ-1", &config, &http)
+                .await;
+
+        assert!(result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_api_transition_error_still_returns_true() {
+        let mut server = mockito::Server::new_async().await;
+
+        // PR is ready
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear transition fails
+        let _linear_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let gh_config = crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        };
+        let http = reqwest::Client::new();
+        let github = GitHubClient::new(&gh_config, http.clone());
+        let config = test_config_with_endpoint(&server.url());
+
+        let result =
+            check_pr_ready_via_api(&github, "symphony/proj-1", "id1", "PROJ-1", &config, &http)
+                .await;
+
+        // Still returns true (PR is ready even if transition failed)
+        assert!(result);
+    }
+
+    // ── check_pr_ready_via_gh ─────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_gh_nonexistent_workspace() {
+        let config = test_config();
+        let http = reqwest::Client::new();
+
+        let result = check_pr_ready_via_gh(
+            std::path::Path::new("/tmp/nonexistent-symphony-test-workspace"),
+            "id1",
+            "PROJ-1",
+            &config.tracker,
+            &http,
+        )
+        .await;
+
+        // gh CLI will fail in nonexistent dir -> returns false
+        assert!(!result);
+    }
+
     // ── dispatch_cleanup ──────────────────────────────────────────
 
     #[traced_test]
