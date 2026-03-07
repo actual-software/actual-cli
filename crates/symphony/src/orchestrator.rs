@@ -2268,6 +2268,43 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
+    async fn test_on_worker_exit_retries_within_cap() {
+        // max_retries = Some(5), retry_attempt = Some(2) → next_attempt = 3 <= 5 → retry allowed
+        let mut config = test_config();
+        config.agent.max_retries = Some(5);
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        {
+            let mut state = orch.state.write().await;
+            state.running.insert(
+                "id1".to_string(),
+                RunningEntry {
+                    issue: make_issue("id1", "PROJ-1", "Todo"),
+                    identifier: "PROJ-1".to_string(),
+                    session: LiveSession::default(),
+                    retry_attempt: Some(2),
+                    started_at: Utc::now(),
+                    cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
+                },
+            );
+            state.claimed.insert("id1".to_string());
+        }
+
+        orch.on_worker_exit("id1", WorkerExitReason::Failed("err".to_string()))
+            .await;
+
+        let state = orch.state.read().await;
+        // Should have a retry entry — attempt 3 is within cap of 5
+        let retry = state.retry_attempts.get("id1").unwrap();
+        assert_eq!(retry.attempt, 3); // 2 + 1
+        assert!(state.claimed.contains("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
     async fn test_on_worker_exit_unlimited_retries() {
         // max_retries = None → retries should always be scheduled, even at high attempt counts
         let config = test_config(); // max_retries is None by default
