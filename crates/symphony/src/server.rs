@@ -1,6 +1,6 @@
 use crate::config::ServiceConfig;
 use crate::model::{LogEntry, OrchestratorState, RetryEntry};
-use crate::orchestrator::OrchestratorMessage;
+use crate::protocol::OrchestratorMessage;
 use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -984,7 +984,8 @@ mod tests {
         AgentConfig, CodingAgentConfig, DeploymentConfig, DeploymentMode, HooksConfig,
         PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
     };
-    use crate::model::{AgentTotals, LiveSession, OrchestratorState, RetryEntry, RunningEntry};
+    use crate::model::{AgentTotals, OrchestratorState, RetryEntry};
+    use crate::protocol::{LiveSession, RunningEntry};
     use axum::body::Body;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
