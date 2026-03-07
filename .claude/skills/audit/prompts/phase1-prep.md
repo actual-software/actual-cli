@@ -9,7 +9,7 @@ You are a preparation agent for a codebase audit. Your job is to gather project 
 ## Tasks
 
 1. Read `AGENTS.md` to understand the project workflow and conventions.
-2. Query Linear for existing issues in the `actcli` project. Record open issue identifiers and titles.
+2. Query Linear for existing issues in the `ACTCLI` team. Record open issue identifiers and titles.
 3. Query Linear for parent issues (issues with sub-issues) to identify existing categories.
 4. List all Rust source directories: `find . -name '*.rs' -not -path './.worktrees/*' -not -path './target/*' | sed 's|/[^/]*$||' | sort -u`
 5. Count files per directory to understand codebase shape.

@@ -1,6 +1,6 @@
 # Agent Instructions
 
-This project uses **Linear** for issue tracking and **Symphony** for autonomous agent orchestration. Issues live in the **actcli** Linear project.
+This project uses **Linear** for issue tracking and **Symphony** for autonomous agent orchestration. Issues live in the **ACTCLI** Linear team.
 
 ## Quick Reference
 
@@ -44,7 +44,7 @@ Priority values: 0 = No priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low
 ## How Symphony Works
 
 Symphony is a long-running service that:
-1. **Polls** the Linear `actcli` project for issues in active states (`Todo`, `In Progress`, `Ready for Review`)
+1. **Polls** the Linear `ACTCLI` team for issues in active states (`Todo`, `In Progress`, `In Review`)
 2. **Creates isolated workspaces** for each issue (clones the repo, sets up toolchains)
 3. **Runs Claude Code sessions** to complete the work (implements, tests, creates PRs)
 4. **Retries** on failure with exponential backoff
@@ -356,7 +356,7 @@ mod tests {
 The intended workflow is:
 
 1. **CI Failure Detection**: A GitHub Actions workflow detects quality gate failures (test, clippy, fmt, build, coverage)
-2. **Linear Issue Creation**: The workflow creates a sub-issue in the `actcli` Linear project with failure details, links to the CI run/PR, and the PR branch name
+2. **Linear Issue Creation**: The workflow creates a sub-issue in the `ACTCLI` Linear team with failure details, links to the CI run/PR, and the PR branch name
 3. **Agent Discovery**: Symphony picks up the new issue on its next poll cycle and dispatches an agent to fix it
 4. **Auto-close**: When the PR's CI passes, the fix issue is automatically closed
 

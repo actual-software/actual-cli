@@ -9,7 +9,7 @@ pub struct LinearClient {
     http: reqwest::Client,
     endpoint: String,
     api_key: String,
-    project_slug: String,
+    team_key: String,
     page_size: u32,
     timeout_ms: u64,
 }
@@ -23,7 +23,7 @@ impl LinearClient {
             http,
             endpoint: config.endpoint.clone(),
             api_key: config.api_key.clone(),
-            project_slug: config.project_slug.clone(),
+            team_key: config.team_key.clone(),
             page_size: 50,
             timeout_ms: 30_000,
         }
@@ -120,10 +120,10 @@ impl LinearClient {
         after: Option<&str>,
     ) -> Result<(Vec<Issue>, PageInfo)> {
         let query = r#"
-            query CandidateIssues($projectSlug: String!, $states: [String!]!, $first: Int!, $after: String) {
+            query CandidateIssues($teamKey: String!, $states: [String!]!, $first: Int!, $after: String) {
                 issues(
                     filter: {
-                        project: { slugId: { eq: $projectSlug } }
+                        team: { key: { eq: $teamKey } }
                         state: { name: { in: $states } }
                     }
                     first: $first
@@ -162,7 +162,7 @@ impl LinearClient {
         "#;
 
         let mut variables = serde_json::json!({
-            "projectSlug": self.project_slug,
+            "teamKey": self.team_key,
             "states": active_states,
             "first": self.page_size,
         });
@@ -675,14 +675,14 @@ mod tests {
             kind: "linear".to_string(),
             endpoint: "https://api.linear.app/graphql".to_string(),
             api_key: "lin_api_test123".to_string(),
-            project_slug: "my-project".to_string(),
+            team_key: "my-project".to_string(),
             active_states: vec!["Todo".to_string()],
             terminal_states: vec!["Done".to_string()],
         };
         let client = LinearClient::new(&config, new_http());
         assert_eq!(client.endpoint, "https://api.linear.app/graphql");
         assert_eq!(client.api_key, "lin_api_test123");
-        assert_eq!(client.project_slug, "my-project");
+        assert_eq!(client.team_key, "my-project");
         assert_eq!(client.page_size, 50);
         assert_eq!(client.timeout_ms, 30_000);
     }
@@ -694,7 +694,7 @@ mod tests {
             kind: "linear".to_string(),
             endpoint: server_url.to_string(),
             api_key: "test-api-key".to_string(),
-            project_slug: "test-project".to_string(),
+            team_key: "test-project".to_string(),
             active_states: vec!["Todo".to_string(), "In Progress".to_string()],
             terminal_states: vec!["Done".to_string()],
         }
@@ -1119,7 +1119,7 @@ mod tests {
             kind: "linear".to_string(),
             endpoint: "http://127.0.0.1:1".to_string(),
             api_key: "key".to_string(),
-            project_slug: "proj".to_string(),
+            team_key: "proj".to_string(),
             active_states: vec![],
             terminal_states: vec![],
         };

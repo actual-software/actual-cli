@@ -67,7 +67,7 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
     info!(
         workflow = %workflow_path.display(),
         tracker_kind = %config.tracker.kind,
-        project_slug = %config.tracker.project_slug,
+        team_key = %config.tracker.team_key,
         poll_interval_ms = config.polling.interval_ms,
         max_concurrent = config.agent.max_concurrent_agents,
         workspace_root = %config.workspace.root.display(),

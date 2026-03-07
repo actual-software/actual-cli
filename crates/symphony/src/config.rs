@@ -20,7 +20,7 @@ pub struct TrackerConfig {
     pub kind: String,
     pub endpoint: String,
     pub api_key: String,
-    pub project_slug: String,
+    pub team_key: String,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
 }
@@ -31,7 +31,7 @@ impl std::fmt::Debug for TrackerConfig {
             .field("kind", &self.kind)
             .field("endpoint", &self.endpoint)
             .field("api_key", &"[REDACTED]")
-            .field("project_slug", &self.project_slug)
+            .field("team_key", &self.team_key)
             .field("active_states", &self.active_states)
             .field("terminal_states", &self.terminal_states)
             .finish()
@@ -108,8 +108,8 @@ impl ServiceConfig {
             return Err(SymphonyError::MissingTrackerApiKey);
         }
 
-        if self.tracker.project_slug.is_empty() {
-            return Err(SymphonyError::MissingTrackerProjectSlug);
+        if self.tracker.team_key.is_empty() {
+            return Err(SymphonyError::MissingTrackerTeamKey);
         }
 
         if self.codex.command.is_empty() {
@@ -220,7 +220,7 @@ fn parse_tracker_config(root: &serde_yaml::Value) -> Result<TrackerConfig> {
         resolve_env_var(&raw_api_key)
     };
 
-    let project_slug = get_yaml_str(root, &["tracker", "project_slug"]).unwrap_or_default();
+    let team_key = get_yaml_str(root, &["tracker", "team_key"]).unwrap_or_default();
 
     let active_states = parse_string_list(root, &["tracker", "active_states"])
         .unwrap_or_else(|| vec!["Todo".to_string(), "In Progress".to_string()]);
@@ -240,7 +240,7 @@ fn parse_tracker_config(root: &serde_yaml::Value) -> Result<TrackerConfig> {
         kind,
         endpoint,
         api_key,
-        project_slug,
+        team_key,
         active_states,
         terminal_states,
     })
@@ -402,7 +402,7 @@ mod tests {
         let content = r#"---
 tracker:
   kind: linear
-  project_slug: test-proj
+  team_key: test-proj
   api_key: test-key
   active_states: "Ready, Working"
   terminal_states:
@@ -425,7 +425,7 @@ Do the work."#;
         let wf = parse_workflow(content).unwrap();
         let config = ServiceConfig::from_workflow(&wf).unwrap();
         assert_eq!(config.tracker.kind, "linear");
-        assert_eq!(config.tracker.project_slug, "test-proj");
+        assert_eq!(config.tracker.team_key, "test-proj");
         assert_eq!(config.tracker.api_key, "test-key");
         assert_eq!(config.tracker.active_states, vec!["Ready", "Working"]);
         assert_eq!(config.polling.interval_ms, 5_000);
@@ -477,7 +477,7 @@ Do the work."#;
         let content = r#"---
 tracker:
   kind: linear
-  project_slug: test
+  team_key: test
   api_key: test-key-123
 ---
 "#;
@@ -500,7 +500,7 @@ tracker:
         let content = r#"---
 tracker:
   kind: jira
-  project_slug: test
+  team_key: test
   api_key: key123
 ---
 "#;
@@ -516,7 +516,7 @@ tracker:
         let content = r#"---
 tracker:
   kind: linear
-  project_slug: test
+  team_key: test
   api_key: ""
 ---
 "#;
@@ -527,18 +527,18 @@ tracker:
     }
 
     #[test]
-    fn test_validate_missing_project_slug() {
+    fn test_validate_missing_team_key() {
         let content = r#"---
 tracker:
   kind: linear
   api_key: some-key
-  project_slug: ""
+  team_key: ""
 ---
 "#;
         let wf = parse_workflow(content).unwrap();
         let config = ServiceConfig::from_workflow(&wf).unwrap();
         let err = config.validate_for_dispatch().unwrap_err();
-        assert!(matches!(&err, SymphonyError::MissingTrackerProjectSlug));
+        assert!(matches!(&err, SymphonyError::MissingTrackerTeamKey));
     }
 
     #[test]
@@ -547,7 +547,7 @@ tracker:
 tracker:
   kind: linear
   api_key: some-key
-  project_slug: my-proj
+  team_key: my-proj
 codex:
   command: ""
 ---
@@ -822,7 +822,7 @@ agent:
             kind: "linear".to_string(),
             endpoint: "https://api.linear.app/graphql".to_string(),
             api_key: "lin_api_supersecretkey123".to_string(),
-            project_slug: "my-project".to_string(),
+            team_key: "my-project".to_string(),
             active_states: vec!["Todo".to_string()],
             terminal_states: vec!["Done".to_string()],
         };

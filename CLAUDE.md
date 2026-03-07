@@ -50,7 +50,7 @@ For ALL code changes, regardless of size or complexity:
 
 ## Issue Tracking (Linear)
 
-Issues live in the **actcli** Linear project. When you discover a bug, gap, or follow-up work item during any task:
+Issues live in the **ACTCLI** Linear team. When you discover a bug, gap, or follow-up work item during any task:
 
 - **Create a Linear issue immediately** — don't just note it mentally or mention it in passing
 - **Write enough context for a cold-start sub-agent** to pick it up. Every issue must include:

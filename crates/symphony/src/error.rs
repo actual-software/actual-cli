@@ -77,8 +77,8 @@ pub enum SymphonyError {
     #[error("missing tracker API key")]
     MissingTrackerApiKey,
 
-    #[error("missing tracker project slug")]
-    MissingTrackerProjectSlug,
+    #[error("missing tracker team key")]
+    MissingTrackerTeamKey,
 
     #[error("linear API request error: {reason}")]
     LinearApiRequest { reason: String },

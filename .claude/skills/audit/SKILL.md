@@ -173,7 +173,7 @@ Read `.audit/report.json` and present the final report to the user:
 
 - [x] All issues organized under parent issues
 - [x] No duplicates found
-- [x] Issues created in Linear (actcli project)
+- [x] Issues created in Linear (ACTCLI team)
 ```
 
 ### Cleanup
