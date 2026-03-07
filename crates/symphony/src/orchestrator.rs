@@ -208,14 +208,17 @@ impl Orchestrator {
         // Phase 1: Reconcile running issues
         self.reconcile().await;
 
-        // Phase 2: Validate config
-        let config = self.config.read().await;
-        if let Err(e) = config.validate_for_dispatch() {
-            error!(error = %e, "dispatch validation failed, skipping dispatch");
-            return;
-        }
+        // Phase 2: Validate config and clone what we need, then drop the lock
+        let config = {
+            let cfg = self.config.read().await;
+            if let Err(e) = cfg.validate_for_dispatch() {
+                error!(error = %e, "dispatch validation failed, skipping dispatch");
+                return;
+            }
+            cfg.clone()
+        };
 
-        // Phase 3: Fetch candidates
+        // Phase 3: Fetch candidates (no lock held during HTTP call)
         let client = LinearClient::new(&config.tracker, self.http.clone());
         let candidates = match client
             .fetch_candidate_issues(&config.tracker.active_states)
@@ -578,10 +581,12 @@ impl Orchestrator {
         };
         drop(state);
 
-        let config = self.config.read().await;
+        // Clone config values before the async HTTP call to release the lock
+        let config = self.config.read().await.clone();
         let client = LinearClient::new(&config.tracker, self.http.clone());
 
         // Fetch active candidates to check if issue is still eligible
+        // (no config lock held during HTTP call)
         let candidates = match client
             .fetch_candidate_issues(&config.tracker.active_states)
             .await
@@ -593,9 +598,8 @@ impl Orchestrator {
                     error = %e,
                     "retry poll failed, rescheduling"
                 );
-                let max_backoff = config.agent.max_retry_backoff_ms;
-                drop(config);
-                let delay = exponential_backoff(entry.attempt + 1, max_backoff);
+                let delay =
+                    exponential_backoff(entry.attempt + 1, config.agent.max_retry_backoff_ms);
                 let mut state = self.state.write().await;
                 self.schedule_retry_inner(
                     &mut state,
@@ -625,10 +629,9 @@ impl Orchestrator {
             Some(issue) => {
                 let state = self.state.read().await;
                 if state.available_slots() == 0 {
-                    let max_backoff = config.agent.max_retry_backoff_ms;
                     drop(state);
-                    drop(config);
-                    let delay = exponential_backoff(entry.attempt + 1, max_backoff);
+                    let delay =
+                        exponential_backoff(entry.attempt + 1, config.agent.max_retry_backoff_ms);
                     let mut state = self.state.write().await;
                     self.schedule_retry_inner(
                         &mut state,
@@ -641,7 +644,6 @@ impl Orchestrator {
                     return;
                 }
                 drop(state);
-                drop(config);
 
                 self.dispatch_issue(issue.clone(), Some(entry.attempt))
                     .await;
@@ -757,8 +759,10 @@ impl Orchestrator {
     }
 
     async fn reconcile_stalls(&self) {
-        let config = self.config.read().await;
-        let stall_timeout_ms = config.codex.stall_timeout_ms;
+        let stall_timeout_ms = {
+            let config = self.config.read().await;
+            config.codex.stall_timeout_ms
+        };
 
         if stall_timeout_ms == 0 {
             return;
@@ -802,9 +806,11 @@ impl Orchestrator {
             return;
         }
 
-        let config = self.config.read().await;
+        // Clone config before the async HTTP call to release the lock
+        let config = self.config.read().await.clone();
         let client = LinearClient::new(&config.tracker, self.http.clone());
 
+        // No config lock held during HTTP call
         let refreshed = match client.fetch_issue_states_by_ids(&running_ids).await {
             Ok(issues) => issues,
             Err(e) => {
@@ -869,20 +875,27 @@ impl Orchestrator {
             }
 
             if cleanup_workspace {
-                let config = self.config.read().await;
-                let workspace_key = crate::workspace::sanitize_workspace_key(&entry.identifier);
-                let workspace_path = config.workspace.root.join(&workspace_key);
-                workspace::cleanup_workspace(&workspace_path, &config.hooks).await;
+                let (workspace_path, hooks) = {
+                    let config = self.config.read().await;
+                    let workspace_key = crate::workspace::sanitize_workspace_key(&entry.identifier);
+                    (
+                        config.workspace.root.join(&workspace_key),
+                        config.hooks.clone(),
+                    )
+                };
+                workspace::cleanup_workspace(&workspace_path, &hooks).await;
             }
         }
     }
 
     async fn startup_cleanup(&self) {
-        let config = self.config.read().await;
+        // Clone config before the async HTTP call to release the lock
+        let config = self.config.read().await.clone();
         let client = LinearClient::new(&config.tracker, self.http.clone());
 
         info!("running startup terminal workspace cleanup");
 
+        // No config lock held during HTTP call
         let terminal_issues = match client
             .fetch_issues_by_states(&config.tracker.terminal_states)
             .await
