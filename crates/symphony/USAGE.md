@@ -282,6 +282,33 @@ Symphony watches `WORKFLOW.md` for changes. When the file is modified:
 - In-flight agent sessions are not interrupted
 - If the reload fails, the last known good configuration is preserved
 
+## Agent Environment Variables
+
+Symphony automatically injects the following environment variables into each agent subprocess so that agents can interact with Linear directly (e.g. via `curl` or `gh api`):
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `LINEAR_API_KEY` | `tracker.api_key` | Linear API key for GraphQL requests |
+| `LINEAR_TEAM_KEY` | `tracker.team_key` | Linear team key (e.g. `ACTCLI`) |
+
+These are only set when the corresponding config value is non-empty.
+
+### Example: Agent creates a Linear issue
+
+With `LINEAR_API_KEY` available, an agent can create follow-up issues:
+
+```bash
+gh api -X POST https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -f query='mutation {
+    issueCreate(input: {
+      teamId: "...",
+      title: "Follow-up task",
+      description: "Details here"
+    }) { issue { identifier url } }
+  }'
+```
+
 ## Trust Model
 
 This implementation runs in high-trust mode:
@@ -289,6 +316,7 @@ This implementation runs in high-trust mode:
 - Workspace isolation is the primary safety boundary
 - Agent cwd is always the per-issue workspace path
 - Workspace paths are validated to stay under the configured root
+- `LINEAR_API_KEY` is passed to agent subprocesses for Linear API access
 
 For stricter environments, customize `coding_agent.command` to remove `--dangerously-skip-permissions` and add appropriate permission controls.
 

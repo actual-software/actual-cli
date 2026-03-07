@@ -1,6 +1,7 @@
 use crate::config::CodingAgentConfig;
 use crate::error::{Result, SymphonyError};
 use crate::model::{AgentEvent, Issue};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -27,11 +28,15 @@ impl Drop for AgentSession {
 
 impl AgentSession {
     /// Launch a Claude Code subprocess in the given workspace directory.
+    ///
+    /// `env_vars` are injected into the subprocess environment (e.g.
+    /// `LINEAR_API_KEY`) so the agent can interact with external services.
     pub async fn launch(
         config: &CodingAgentConfig,
         workspace_path: &Path,
         prompt: &str,
         issue: &Issue,
+        env_vars: &HashMap<String, String>,
     ) -> Result<(Self, mpsc::Receiver<AgentEvent>)> {
         // Validate workspace path
         if !workspace_path.is_dir() {
@@ -52,7 +57,7 @@ impl AgentSession {
             "launching agent subprocess"
         );
 
-        let mut child = spawn_agent_process(&full_command, workspace_path)?;
+        let mut child = spawn_agent_process(&full_command, workspace_path, env_vars)?;
 
         // Write prompt to stdin to avoid shell interpolation of untrusted data.
         // stdin is always present because we configure Stdio::piped() above.
@@ -103,11 +108,17 @@ impl AgentSession {
 /// Spawn the agent subprocess via `bash -lc`.
 ///
 /// Stdin is piped so the caller can write the prompt without shell interpolation.
-fn spawn_agent_process(full_command: &str, workspace_path: &Path) -> Result<Child> {
+/// `env_vars` are injected into the child process environment.
+fn spawn_agent_process(
+    full_command: &str,
+    workspace_path: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Result<Child> {
     Command::new("bash")
         .arg("-lc")
         .arg(full_command)
         .current_dir(workspace_path)
+        .envs(env_vars)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -697,9 +708,10 @@ mod tests {
         let config = make_test_config(r#"printf '{"type":"result","result":"done"}\n' #-p"#);
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) = AgentSession::launch(&config, tmp.path(), "do work", &issue)
-            .await
-            .unwrap();
+        let (mut session, _event_rx) =
+            AgentSession::launch(&config, tmp.path(), "do work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         assert!(session.pid.is_some());
 
@@ -720,6 +732,7 @@ mod tests {
             Path::new("/nonexistent/path/xyz"),
             "do work",
             &issue,
+            &HashMap::new(),
         )
         .await;
         assert!(
@@ -736,9 +749,10 @@ mod tests {
         let config = make_test_config("exit 1 #-p");
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) = AgentSession::launch(&config, tmp.path(), "do work", &issue)
-            .await
-            .unwrap();
+        let (mut session, _event_rx) =
+            AgentSession::launch(&config, tmp.path(), "do work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         let result = session.wait_with_timeout(10_000).await;
         assert!(
@@ -755,9 +769,10 @@ mod tests {
         let config = make_test_config("sleep 999 #-p");
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, _event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         let result = session.wait_with_timeout(100).await; // 100ms timeout
         assert!(matches!(&result, Err(SymphonyError::AgentTurnTimeout)));
@@ -773,9 +788,10 @@ mod tests {
         let config = make_test_config("sleep 999 #-p");
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, _event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         // kill() should not panic
         session.kill().await;
@@ -798,9 +814,10 @@ mod tests {
         let config = make_test_config("true #-p");
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, _event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         // Wait for the process to finish
         let _ = session.wait_with_timeout(5_000).await;
@@ -818,9 +835,10 @@ mod tests {
         let config = make_test_config("true #-p");
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, mut event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         // The launch itself sends SessionStarted
         let event = event_rx
@@ -849,9 +867,10 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, mut event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -902,9 +921,10 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, mut event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -942,9 +962,10 @@ mod tests {
         );
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, mut event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         let result = session.wait_with_timeout(10_000).await;
         assert!(result.is_ok());
@@ -982,9 +1003,10 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, mut event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -1017,9 +1039,10 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, mut event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -1067,9 +1090,10 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, mut event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         // The process exits immediately after printf (exit 0)
         session.wait_with_timeout(10_000).await.unwrap();
@@ -1130,9 +1154,10 @@ mod tests {
         let issue = make_test_issue();
 
         // This exercises the debug! at lines 38-42 with a tracing subscriber
-        let (mut session, _rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, _rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
         let _ = session.wait_with_timeout(5_000).await;
     }
 
@@ -1151,9 +1176,10 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, mut event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -1184,9 +1210,10 @@ mod tests {
         );
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, _event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         let result = session.wait_with_timeout(10_000).await;
         assert!(result.is_ok());
@@ -1207,9 +1234,10 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (mut session, event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         // Drop the receiver immediately — the stdout reader should break on send error
         drop(event_rx);
@@ -1226,9 +1254,10 @@ mod tests {
         let config = make_test_config("sleep 999 #-p");
         let issue = make_test_issue();
 
-        let (session, _event_rx) = AgentSession::launch(&config, tmp.path(), "work", &issue)
-            .await
-            .unwrap();
+        let (session, _event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+                .await
+                .unwrap();
 
         let pid = session.pid.expect("should have pid");
 
@@ -1256,7 +1285,7 @@ mod tests {
     fn test_spawn_agent_process_nonexistent_dir() {
         // Using a nonexistent current_dir causes spawn to fail
         let bad_dir = std::path::Path::new("/nonexistent_dir_for_test_29384729");
-        let err = spawn_agent_process("echo hello", bad_dir).unwrap_err();
+        let err = spawn_agent_process("echo hello", bad_dir, &HashMap::new()).unwrap_err();
         assert!(matches!(err, SymphonyError::AgentStartupFailed { .. }));
     }
 
@@ -1288,5 +1317,91 @@ mod tests {
 
         let output = child.wait_with_output().await.expect("cat should finish");
         assert_eq!(output.stdout, b"hello from test");
+    }
+
+    // ---- env var injection tests ----
+
+    #[tokio::test]
+    async fn test_spawn_agent_process_with_env_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "SYMPHONY_TEST_ENV_VAR".to_string(),
+            "test_value_12345".to_string(),
+        );
+
+        let child =
+            spawn_agent_process("echo $SYMPHONY_TEST_ENV_VAR", tmp.path(), &env_vars).unwrap();
+        let output = child.wait_with_output().await.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test_value_12345"),
+            "env var should be visible in child process, got: {stdout}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_agent_process_with_empty_env_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env_vars = HashMap::new();
+
+        let child = spawn_agent_process("echo hello", tmp.path(), &env_vars).unwrap();
+        let output = child.wait_with_output().await.unwrap();
+        assert!(output.status.success());
+    }
+
+    #[tokio::test]
+    async fn test_agent_launch_with_env_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Script echoes the env var as a JSON result so we can verify via events
+        let config = make_test_config(
+            r#"printf "{\"type\":\"result\",\"result\":\"$SYMPHONY_TEST_KEY\"}\n" #-p"#,
+        );
+        let issue = make_test_issue();
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "SYMPHONY_TEST_KEY".to_string(),
+            "injected_value".to_string(),
+        );
+
+        let (mut session, mut event_rx) =
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &env_vars)
+                .await
+                .unwrap();
+
+        session.wait_with_timeout(10_000).await.unwrap();
+
+        let mut events = vec![];
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(500), event_rx.recv()).await
+        {
+            events.push(event);
+        }
+
+        let has_injected = events.iter().any(|e| {
+            matches!(e,
+                AgentEvent::TurnCompleted { message } if message.as_deref() == Some("injected_value")
+            )
+        });
+        assert!(
+            has_injected,
+            "agent should receive env var via subprocess, got events: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_agent_process_with_multiple_env_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env_vars = HashMap::new();
+        env_vars.insert("VAR_A".to_string(), "alpha".to_string());
+        env_vars.insert("VAR_B".to_string(), "beta".to_string());
+
+        let child = spawn_agent_process("echo ${VAR_A}_${VAR_B}", tmp.path(), &env_vars).unwrap();
+        let output = child.wait_with_output().await.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("alpha_beta"),
+            "multiple env vars should be visible, got: {stdout}"
+        );
     }
 }
