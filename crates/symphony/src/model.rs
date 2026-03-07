@@ -214,7 +214,7 @@ impl OrchestratorState {
 }
 
 /// Events emitted by the agent runner to the orchestrator.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentEvent {
     SessionStarted {
         session_id: String,
