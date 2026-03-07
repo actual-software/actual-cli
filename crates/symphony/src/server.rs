@@ -381,6 +381,20 @@ pub struct LogsResponse {
     pub logs: Vec<LogEntry>,
 }
 
+/// Convert a broadcast stream result into an optional SSE event.
+///
+/// Returns `Some` for successfully received entries and `None` for
+/// lagged/closed errors, which are expected in normal operation.
+/// Extracted as a named function so LLVM coverage can track both arms.
+fn broadcast_result_to_sse(
+    result: Result<LogEntry, tokio_stream::wrappers::errors::BroadcastStreamRecvError>,
+) -> Option<Result<Event, Infallible>> {
+    match result {
+        Ok(entry) => Some(format_sse_event(&entry)),
+        Err(_) => None,
+    }
+}
+
 /// Format a single SSE event from a log entry.
 fn format_sse_event(entry: &LogEntry) -> Result<Event, Infallible> {
     let data = serde_json::to_string(entry).unwrap_or_default();
@@ -436,10 +450,7 @@ async fn handle_issue_stream(
     let catchup_stream =
         tokio_stream::iter(catchup_entries.into_iter().map(|e| format_sse_event(&e)));
 
-    let live_stream = BroadcastStream::new(broadcast_rx).filter_map(|result| match result {
-        Ok(entry) => Some(format_sse_event(&entry)),
-        Err(_) => None, // Lagged or closed — skip
-    });
+    let live_stream = BroadcastStream::new(broadcast_rx).filter_map(broadcast_result_to_sse);
 
     let combined = catchup_stream.chain(live_stream);
 
@@ -2076,6 +2087,28 @@ mod tests {
         };
         let result = format_sse_event(&entry);
         assert!(result.is_ok());
+    }
+
+    // ── broadcast_result_to_sse ──────────────────────────────────────
+
+    #[test]
+    fn test_broadcast_result_to_sse_ok() {
+        let entry = crate::model::LogEntry {
+            seq: 1,
+            timestamp: Utc::now(),
+            event_type: "test".to_string(),
+            message: Some("hi".to_string()),
+            tokens: None,
+        };
+        let result = broadcast_result_to_sse(Ok(entry));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_broadcast_result_to_sse_err() {
+        use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+        let result = broadcast_result_to_sse(Err(BroadcastStreamRecvError::Lagged(5)));
+        assert!(result.is_none());
     }
 
     // ── SSE stream endpoint ──────────────────────────────────────────
