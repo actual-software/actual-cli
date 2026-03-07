@@ -1773,7 +1773,36 @@ async fn check_pr_ready_via_gh(
     tracker_config: &crate::config::TrackerConfig,
     http: &reqwest::Client,
 ) -> bool {
-    let output = match tokio::process::Command::new("gh")
+    check_pr_ready_via_command(
+        "gh",
+        workspace_path,
+        issue_id,
+        issue_identifier,
+        tracker_config,
+        http,
+    )
+    .await
+}
+
+/// Check PR readiness by running a command that outputs `gh pr view`-compatible JSON.
+async fn check_pr_ready_via_command(
+    command: &str,
+    workspace_path: &std::path::Path,
+    issue_id: &str,
+    issue_identifier: &str,
+    tracker_config: &crate::config::TrackerConfig,
+    http: &reqwest::Client,
+) -> bool {
+    let stdout = match run_pr_view_command(command, workspace_path).await {
+        Some(bytes) => bytes,
+        None => return false,
+    };
+    handle_gh_pr_output(&stdout, issue_id, issue_identifier, tracker_config, http).await
+}
+
+/// Run `<command> pr view --json ...` in the workspace and return stdout on success.
+async fn run_pr_view_command(command: &str, workspace_path: &std::path::Path) -> Option<Vec<u8>> {
+    let output = tokio::process::Command::new(command)
         .args([
             "pr",
             "view",
@@ -1783,19 +1812,12 @@ async fn check_pr_ready_via_gh(
         .current_dir(workspace_path)
         .output()
         .await
-    {
-        Ok(output) if output.status.success() => output,
-        _ => return false,
-    };
-
-    handle_gh_pr_output(
-        &output.stdout,
-        issue_id,
-        issue_identifier,
-        tracker_config,
-        http,
-    )
-    .await
+        .ok()?;
+    if output.status.success() {
+        Some(output.stdout)
+    } else {
+        None
+    }
 }
 
 /// Process `gh pr view` output: parse, check readiness, and transition if ready.
@@ -9056,6 +9078,208 @@ mod tests {
 
         // gh CLI will fail in nonexistent dir -> returns false
         assert!(!result);
+    }
+
+    // ── check_pr_ready_via_command / run_pr_view_command ───────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_command_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut linear_server = mockito::Server::new_async().await;
+
+        // Create a mock script that outputs valid PR JSON
+        let mock_script = tmp.path().join("mock-gh");
+        std::fs::write(
+            &mock_script,
+            "#!/bin/sh\necho '{\"number\":42,\"state\":\"OPEN\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[{\"conclusion\":\"SUCCESS\",\"__typename\":\"CheckRun\"}]}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Linear mocks for transition_to_in_review
+        let _wf_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("WorkflowStates".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"data":{"workflowStates":{"nodes":[{"id":"state-ir","name":"In Review"}]}}}"#,
+            )
+            .create_async()
+            .await;
+
+        let _update_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("issueUpdate".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"issueUpdate":{"success":true}}}"#)
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&linear_server.url());
+        let http = reqwest::Client::new();
+
+        let result = check_pr_ready_via_command(
+            mock_script.to_str().unwrap(),
+            tmp.path(),
+            "id1",
+            "PROJ-1",
+            &config.tracker,
+            &http,
+        )
+        .await;
+
+        assert!(result);
+        assert!(logs_contain(
+            "PR is ready (CI green, no conflicts) — transitioning to In Review"
+        ));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_command_not_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create a mock script that outputs JSON for a closed PR
+        let mock_script = tmp.path().join("mock-gh");
+        std::fs::write(
+            &mock_script,
+            "#!/bin/sh\necho '{\"number\":42,\"state\":\"CLOSED\",\"mergeable\":\"MERGEABLE\",\"statusCheckRollup\":[{\"conclusion\":\"SUCCESS\",\"__typename\":\"CheckRun\"}]}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = test_config();
+        let http = reqwest::Client::new();
+
+        let result = check_pr_ready_via_command(
+            mock_script.to_str().unwrap(),
+            tmp.path(),
+            "id1",
+            "PROJ-1",
+            &config.tracker,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_command_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create a mock script that outputs invalid JSON
+        let mock_script = tmp.path().join("mock-gh");
+        std::fs::write(&mock_script, "#!/bin/sh\necho 'not json'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = test_config();
+        let http = reqwest::Client::new();
+
+        let result = check_pr_ready_via_command(
+            mock_script.to_str().unwrap(),
+            tmp.path(),
+            "id1",
+            "PROJ-1",
+            &config.tracker,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_pr_ready_via_command_script_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create a mock script that exits with non-zero
+        let mock_script = tmp.path().join("mock-gh");
+        std::fs::write(&mock_script, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let config = test_config();
+        let http = reqwest::Client::new();
+
+        let result = check_pr_ready_via_command(
+            mock_script.to_str().unwrap(),
+            tmp.path(),
+            "id1",
+            "PROJ-1",
+            &config.tracker,
+            &http,
+        )
+        .await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_pr_view_command_success() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mock_script = tmp.path().join("mock-gh");
+        std::fs::write(&mock_script, "#!/bin/sh\necho '{\"ok\":true}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let result = run_pr_view_command(mock_script.to_str().unwrap(), tmp.path()).await;
+        assert!(result.is_some());
+        let stdout = result.unwrap();
+        assert!(String::from_utf8_lossy(&stdout).contains("ok"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_pr_view_command_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mock_script = tmp.path().join("mock-gh");
+        std::fs::write(&mock_script, "#!/bin/sh\nexit 1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mock_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let result = run_pr_view_command(mock_script.to_str().unwrap(), tmp.path()).await;
+        assert!(result.is_none());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_pr_view_command_nonexistent() {
+        let result = run_pr_view_command(
+            "/tmp/nonexistent-symphony-test-binary",
+            std::path::Path::new("/tmp"),
+        )
+        .await;
+        assert!(result.is_none());
     }
 
     // ── parse_gh_output_ready ─────────────────────────────────────
