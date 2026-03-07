@@ -501,7 +501,7 @@ impl Orchestrator {
                         "worker failed"
                     );
                     let config = self.config.read().await;
-                    self.maybe_schedule_retry(
+                    self.schedule_retry(
                         &mut state,
                         &config,
                         issue_id,
@@ -517,7 +517,7 @@ impl Orchestrator {
                         "worker timed out"
                     );
                     let config = self.config.read().await;
-                    self.maybe_schedule_retry(
+                    self.schedule_retry(
                         &mut state,
                         &config,
                         issue_id,
@@ -533,7 +533,7 @@ impl Orchestrator {
                         "worker stalled"
                     );
                     let config = self.config.read().await;
-                    self.maybe_schedule_retry(
+                    self.schedule_retry(
                         &mut state,
                         &config,
                         issue_id,
@@ -554,10 +554,8 @@ impl Orchestrator {
         }
     }
 
-    /// Schedule a retry with exponential backoff.
-    /// When `max_retries` is `None`, retries continue indefinitely (§8.2 spec).
-    /// When `max_retries` is `Some(n)`, the issue is released after `n` attempts.
-    fn maybe_schedule_retry(
+    /// Schedule a retry with exponential backoff (§8.2: always retries, no cap).
+    fn schedule_retry(
         &self,
         state: &mut OrchestratorState,
         config: &ServiceConfig,
@@ -566,19 +564,6 @@ impl Orchestrator {
         identifier: String,
         error: Option<String>,
     ) {
-        if let Some(max) = config.agent.max_retries {
-            if attempt > max {
-                error!(
-                    issue_id = %issue_id,
-                    issue_identifier = %identifier,
-                    attempt = attempt,
-                    max_retries = max,
-                    "max retries exceeded, giving up"
-                );
-                state.claimed.remove(issue_id);
-                return;
-            }
-        }
         let delay = exponential_backoff(attempt, config.agent.max_retry_backoff_ms);
         self.schedule_retry_inner(
             state,
@@ -1344,7 +1329,6 @@ mod tests {
             agent: AgentConfig {
                 max_concurrent_agents: 3,
                 max_turns: 5,
-                max_retries: None,
                 max_retry_backoff_ms: 300_000,
                 max_concurrent_agents_by_state: HashMap::new(),
             },
@@ -2249,85 +2233,9 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
-    async fn test_on_worker_exit_max_retries_exceeded() {
-        // Configure max_retries = 2, then fail with retry_attempt = Some(2)
-        // → next_attempt = 3 > max_retries = 2 → gives up
-        let mut config = test_config();
-        config.agent.max_retries = Some(2);
-        let orch = Orchestrator::new(config, "template".to_string());
-
-        // Insert with retry_attempt = Some(2) so next_attempt = 3
-        let (cancel_tx, _cancel_rx) = oneshot::channel();
-        {
-            let mut state = orch.state.write().await;
-            state.running.insert(
-                "id1".to_string(),
-                RunningEntry {
-                    issue: make_issue("id1", "PROJ-1", "Todo"),
-                    identifier: "PROJ-1".to_string(),
-                    session: LiveSession::default(),
-                    retry_attempt: Some(2),
-                    started_at: Utc::now(),
-                    cancel_tx,
-                    event_log: std::collections::VecDeque::new(),
-                    log_seq: 0,
-                },
-            );
-            state.claimed.insert("id1".to_string());
-        }
-
-        orch.on_worker_exit("id1", WorkerExitReason::Failed("boom".to_string()))
-            .await;
-
-        let state = orch.state.read().await;
-        // Should NOT have a retry entry — max retries exceeded
-        assert_eq!(state.retry_attempts.contains_key("id1"), false);
-        // Claim should be released
-        assert_eq!(state.claimed.contains("id1"), false);
-    }
-
-    #[traced_test]
-    #[tokio::test]
-    async fn test_on_worker_exit_retries_within_cap() {
-        // max_retries = Some(5), retry_attempt = Some(2) → next_attempt = 3 <= 5 → retry allowed
-        let mut config = test_config();
-        config.agent.max_retries = Some(5);
-        let orch = Orchestrator::new(config, "template".to_string());
-
-        let (cancel_tx, _cancel_rx) = oneshot::channel();
-        {
-            let mut state = orch.state.write().await;
-            state.running.insert(
-                "id1".to_string(),
-                RunningEntry {
-                    issue: make_issue("id1", "PROJ-1", "Todo"),
-                    identifier: "PROJ-1".to_string(),
-                    session: LiveSession::default(),
-                    retry_attempt: Some(2),
-                    started_at: Utc::now(),
-                    cancel_tx,
-                    event_log: std::collections::VecDeque::new(),
-                    log_seq: 0,
-                },
-            );
-            state.claimed.insert("id1".to_string());
-        }
-
-        orch.on_worker_exit("id1", WorkerExitReason::Failed("err".to_string()))
-            .await;
-
-        let state = orch.state.read().await;
-        // Should have a retry entry — attempt 3 is within cap of 5
-        let retry = state.retry_attempts.get("id1").unwrap();
-        assert_eq!(retry.attempt, 3); // 2 + 1
-        assert!(state.claimed.contains("id1"));
-    }
-
-    #[traced_test]
-    #[tokio::test]
     async fn test_on_worker_exit_unlimited_retries() {
-        // max_retries = None → retries should always be scheduled, even at high attempt counts
-        let config = test_config(); // max_retries is None by default
+        // §8.2: retries always continue, even at high attempt counts
+        let config = test_config();
         let orch = Orchestrator::new(config, "template".to_string());
 
         // Insert with retry_attempt = Some(100) so next_attempt = 101
