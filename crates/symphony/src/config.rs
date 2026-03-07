@@ -15,7 +15,7 @@ pub struct ServiceConfig {
     pub codex: CodingAgentConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TrackerConfig {
     pub kind: String,
     pub endpoint: String,
@@ -23,6 +23,19 @@ pub struct TrackerConfig {
     pub project_slug: String,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
+}
+
+impl std::fmt::Debug for TrackerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrackerConfig")
+            .field("kind", &self.kind)
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &"[REDACTED]")
+            .field("project_slug", &self.project_slug)
+            .field("active_states", &self.active_states)
+            .field("terminal_states", &self.terminal_states)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +61,7 @@ pub struct HooksConfig {
 pub struct AgentConfig {
     pub max_concurrent_agents: u32,
     pub max_turns: u32,
+    pub max_retries: u32,
     pub max_retry_backoff_ms: u64,
     pub max_concurrent_agents_by_state: HashMap<String, u32>,
 }
@@ -279,6 +293,10 @@ fn parse_agent_config(root: &serde_yaml::Value) -> AgentConfig {
         .map(|v| v.max(1) as u32)
         .unwrap_or(20);
 
+    let max_retries = get_yaml_int(root, &["agent", "max_retries"])
+        .map(|v| v.max(0) as u32)
+        .unwrap_or(10);
+
     let max_retry_backoff_ms = get_yaml_int(root, &["agent", "max_retry_backoff_ms"])
         .map(|v| v.max(0) as u64)
         .unwrap_or(300_000);
@@ -306,6 +324,7 @@ fn parse_agent_config(root: &serde_yaml::Value) -> AgentConfig {
     AgentConfig {
         max_concurrent_agents,
         max_turns,
+        max_retries,
         max_retry_backoff_ms,
         max_concurrent_agents_by_state: by_state,
     }
@@ -793,6 +812,29 @@ agent:
         let wf = parse_workflow(content).unwrap();
         let config = ServiceConfig::from_workflow(&wf).unwrap();
         assert!(config.agent.max_concurrent_agents_by_state.is_empty());
+    }
+
+    // --- TrackerConfig Debug redacts API key ---
+
+    #[test]
+    fn test_tracker_config_debug_redacts_api_key() {
+        let config = TrackerConfig {
+            kind: "linear".to_string(),
+            endpoint: "https://api.linear.app/graphql".to_string(),
+            api_key: "lin_api_supersecretkey123".to_string(),
+            project_slug: "my-project".to_string(),
+            active_states: vec!["Todo".to_string()],
+            terminal_states: vec!["Done".to_string()],
+        };
+        let debug_output = format!("{:?}", config);
+        assert!(
+            !debug_output.contains("supersecretkey"),
+            "API key should be redacted in Debug output"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should show [REDACTED]"
+        );
     }
 
     #[test]
