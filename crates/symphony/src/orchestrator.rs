@@ -1788,12 +1788,27 @@ async fn check_pr_ready_via_gh(
         _ => return false,
     };
 
-    let json: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
+    handle_gh_pr_output(
+        &output.stdout,
+        issue_id,
+        issue_identifier,
+        tracker_config,
+        http,
+    )
+    .await
+}
 
-    if !is_gh_pr_ready(&json) {
+/// Process `gh pr view` output: parse, check readiness, and transition if ready.
+///
+/// Returns `true` if the PR is ready and the transition was initiated.
+async fn handle_gh_pr_output(
+    stdout: &[u8],
+    issue_id: &str,
+    issue_identifier: &str,
+    tracker_config: &crate::config::TrackerConfig,
+    http: &reqwest::Client,
+) -> bool {
+    if !parse_gh_output_ready(stdout) {
         return false;
     }
 
@@ -1806,6 +1821,18 @@ async fn check_pr_ready_via_gh(
     transition_to_in_review(issue_id, issue_identifier, tracker_config, http).await;
 
     true
+}
+
+/// Parse `gh pr view --json` stdout and determine if the PR is ready.
+///
+/// Returns `true` if the output is valid JSON and the PR is open, not
+/// conflicting, and all checks pass.
+fn parse_gh_output_ready(stdout: &[u8]) -> bool {
+    let json: serde_json::Value = match serde_json::from_slice(stdout) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    is_gh_pr_ready(&json)
 }
 
 /// Validate the JSON output from `gh pr view` to determine if a PR is ready.
@@ -4818,6 +4845,148 @@ mod tests {
 
         assert!(result.is_ok());
         mock.assert_async().await;
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_worker_in_review_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Agent completes successfully, Linear returns "In Review" state.
+        // Because we add "In Review" to active_states, state_matches passes,
+        // then is_in_review_state catches it and breaks.
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Review")]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        // Include "In Review" so state_matches passes and is_in_review_state is reached
+        config.tracker.active_states.push("In Review".to_string());
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+
+        let issue = make_issue("id1", "PROJ-1", "In Progress");
+        let (msg_tx, _msg_rx) = mpsc::channel(256);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+
+        let result = run_worker(
+            &config,
+            "Work on {{ issue.identifier }}",
+            &issue,
+            None,
+            reqwest::Client::new(),
+            msg_tx,
+            cancel_rx,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        mock.assert_async().await;
+        assert!(logs_contain("issue moved to In Review, stopping worker"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_worker_pr_ready_breaks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Agent completes, issue is still "In Progress" (active, not In Review).
+        // Then check_pr_ready_and_transition finds a ready PR → break.
+        // Use Regex matcher to only match fetch_issue_states_by_ids calls.
+        let _linear_fetch_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Progress")]))
+            .create_async()
+            .await;
+
+        // find_open_pr returns a mergeable PR
+        // Note: find_open_pr constructs head as "owner:branch"
+        let _find_pr_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "open".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: resolve_state_id (WorkflowStates query)
+        let _resolve_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("WorkflowStates".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"workflowStates":{"nodes":[{"id":"state-in-review","name":"In Review"}]}}}"#)
+            .create_async()
+            .await;
+
+        // Linear: update_issue_state (issueUpdate mutation)
+        let _update_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("issueUpdate".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"issueUpdate":{"success":true}}}"#)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+
+        let issue = make_issue("id1", "PROJ-1", "In Progress");
+        let (msg_tx, _msg_rx) = mpsc::channel(256);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+
+        let result = run_worker(
+            &config,
+            "Work on {{ issue.identifier }}",
+            &issue,
+            None,
+            reqwest::Client::new(),
+            msg_tx,
+            cancel_rx,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(logs_contain(
+            "PR is ready (mergeable, no conflicts) — transitioning to In Review"
+        ));
     }
 
     #[traced_test]
@@ -8886,6 +9055,113 @@ mod tests {
         .await;
 
         // gh CLI will fail in nonexistent dir -> returns false
+        assert!(!result);
+    }
+
+    // ── parse_gh_output_ready ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_gh_output_ready_valid_open_clean() {
+        let json = serde_json::json!({
+            "number": 42,
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                {"conclusion": "SUCCESS", "__typename": "CheckRun"}
+            ]
+        });
+        assert!(parse_gh_output_ready(
+            serde_json::to_vec(&json).unwrap().as_slice()
+        ));
+    }
+
+    #[test]
+    fn test_parse_gh_output_ready_invalid_json() {
+        assert!(!parse_gh_output_ready(b"not valid json"));
+    }
+
+    #[test]
+    fn test_parse_gh_output_ready_not_open() {
+        let json = serde_json::json!({
+            "number": 42,
+            "state": "CLOSED",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                {"conclusion": "SUCCESS", "__typename": "CheckRun"}
+            ]
+        });
+        assert!(!parse_gh_output_ready(
+            serde_json::to_vec(&json).unwrap().as_slice()
+        ));
+    }
+
+    // ── handle_gh_pr_output ─────────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_handle_gh_pr_output_ready() {
+        let mut linear_server = mockito::Server::new_async().await;
+
+        // Linear mocks for transition_to_in_review
+        let _transition_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"workflowStates":{"nodes":[{"id":"state-ir","name":"In Review"}]},"issueUpdate":{"issue":{"id":"id1"}}}}"#)
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&linear_server.url());
+        let http = reqwest::Client::new();
+
+        let stdout = serde_json::to_vec(&serde_json::json!({
+            "number": 42,
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                {"conclusion": "SUCCESS", "__typename": "CheckRun"}
+            ]
+        }))
+        .unwrap();
+
+        let result = handle_gh_pr_output(&stdout, "id1", "PROJ-1", &config.tracker, &http).await;
+
+        assert!(result);
+        assert!(logs_contain(
+            "PR is ready (CI green, no conflicts) — transitioning to In Review"
+        ));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_handle_gh_pr_output_not_ready() {
+        let config = test_config();
+        let http = reqwest::Client::new();
+
+        let stdout = serde_json::to_vec(&serde_json::json!({
+            "number": 42,
+            "state": "CLOSED",
+            "mergeable": "MERGEABLE",
+            "statusCheckRollup": [
+                {"conclusion": "SUCCESS", "__typename": "CheckRun"}
+            ]
+        }))
+        .unwrap();
+
+        let result = handle_gh_pr_output(&stdout, "id1", "PROJ-1", &config.tracker, &http).await;
+
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_handle_gh_pr_output_invalid_json() {
+        let config = test_config();
+        let http = reqwest::Client::new();
+
+        let result =
+            handle_gh_pr_output(b"not json", "id1", "PROJ-1", &config.tracker, &http).await;
+
         assert!(!result);
     }
 
