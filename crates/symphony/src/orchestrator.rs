@@ -9585,4 +9585,31 @@ mod tests {
         transition_to_in_review("id1", "PROJ-1", &config.tracker, &http).await;
         assert!(logs_contain("failed to transition issue to In Review"));
     }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_dispatch_issue_distributed_mode_prompt_render_failure() {
+        let mut config = test_config();
+        config.deployment = DeploymentConfig {
+            mode: DeploymentMode::Distributed,
+            auth_token: Some("dist-token".to_string()),
+        };
+        // Use an invalid Liquid template (unclosed tag) to force render failure
+        let orch = Orchestrator::new(config, "{% if issue.identifier %}unclosed".to_string());
+        let issue = make_issue("dist-err", "DIST-ERR", "Todo");
+        orch.dispatch_issue(issue, None).await;
+
+        // Issue should still be in running/claimed (dispatch adds it before rendering)
+        let state = orch.state.read().await;
+        assert!(state.running.contains_key("dist-err"));
+        assert!(state.claimed.contains("dist-err"));
+
+        // But no work assignment should be enqueued (render failed)
+        assert!(state.pending_jobs.is_empty());
+
+        // Check the error log message
+        assert!(logs_contain(
+            "failed to render prompt for distributed worker"
+        ));
+    }
 }
