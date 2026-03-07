@@ -9785,6 +9785,14 @@ mod tests {
         fail_load_totals: bool,
         /// When true, load_completed_ids returns an error.
         fail_load_completed: bool,
+        /// When true, save_session returns an error.
+        fail_save_session: bool,
+        /// When true, save_agent_totals returns an error.
+        fail_save_totals: bool,
+        /// When true, mark_completed returns an error.
+        fail_mark_completed: bool,
+        /// When true, save_log_entry returns an error.
+        fail_save_log_entry: bool,
     }
 
     impl MockStore {
@@ -9796,7 +9804,31 @@ mod tests {
                 completed: Mutex::new(Vec::new()),
                 fail_load_totals: false,
                 fail_load_completed: false,
+                fail_save_session: false,
+                fail_save_totals: false,
+                fail_mark_completed: false,
+                fail_save_log_entry: false,
             }
+        }
+
+        fn with_fail_save_session(mut self) -> Self {
+            self.fail_save_session = true;
+            self
+        }
+
+        fn with_fail_save_totals(mut self) -> Self {
+            self.fail_save_totals = true;
+            self
+        }
+
+        fn with_fail_mark_completed(mut self) -> Self {
+            self.fail_mark_completed = true;
+            self
+        }
+
+        fn with_fail_save_log_entry(mut self) -> Self {
+            self.fail_save_log_entry = true;
+            self
         }
 
         fn with_totals(self, totals: AgentTotals) -> Self {
@@ -9838,6 +9870,9 @@ mod tests {
 
     impl persistence::StateStore for MockStore {
         fn save_session(&self, session: &PersistedSession) -> persistence::Result<()> {
+            if self.fail_save_session {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
             self.sessions.lock().unwrap().push(session.clone());
             Ok(())
         }
@@ -9855,6 +9890,9 @@ mod tests {
         }
 
         fn save_log_entry(&self, issue_id: &str, entry: &LogEntry) -> persistence::Result<()> {
+            if self.fail_save_log_entry {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
             self.log_entries
                 .lock()
                 .unwrap()
@@ -9871,6 +9909,9 @@ mod tests {
         }
 
         fn save_agent_totals(&self, totals: &AgentTotals) -> persistence::Result<()> {
+            if self.fail_save_totals {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
             *self.agent_totals.lock().unwrap() = Some(totals.clone());
             Ok(())
         }
@@ -9888,6 +9929,9 @@ mod tests {
         }
 
         fn mark_completed(&self, issue_id: &str) -> persistence::Result<()> {
+            if self.fail_mark_completed {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
             self.completed.lock().unwrap().push(issue_id.to_string());
             Ok(())
         }
@@ -9904,6 +9948,39 @@ mod tests {
         let mut orch = test_orchestrator();
         orch.store = Some(store);
         orch
+    }
+
+    // ── MockStore trait coverage ─────────────────────────────────────
+
+    #[test]
+    fn test_mock_store_load_delete_methods() {
+        let store = MockStore::new();
+
+        // save + load + delete sessions
+        let session = PersistedSession {
+            issue_id: "id1".to_string(),
+            identifier: "TST-1".to_string(),
+            session_id: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            turn_count: 0,
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            ended_at: None,
+            last_event: None,
+            last_event_at: None,
+            last_message: None,
+            retry_attempt: None,
+        };
+        store.save_session(&session).unwrap();
+        let loaded = store.load_sessions().unwrap();
+        assert_eq!(loaded.len(), 1);
+        store.delete_session("id1").unwrap();
+        assert!(store.load_sessions().unwrap().is_empty());
+
+        // load + delete log entries
+        assert!(store.load_log_entries("id1").unwrap().is_empty());
+        store.delete_log_entries("id1").unwrap();
     }
 
     // ── with_store ──────────────────────────────────────────────────
@@ -9980,6 +10057,7 @@ mod tests {
 
     // ── persist_session ─────────────────────────────────────────────
 
+    #[traced_test]
     #[tokio::test]
     async fn test_persist_session_with_store() {
         let store = Arc::new(MockStore::new());
@@ -10046,6 +10124,7 @@ mod tests {
 
     // ── on_worker_exit with store ───────────────────────────────────
 
+    #[traced_test]
     #[tokio::test]
     async fn test_on_worker_exit_normal_persists_completed() {
         let store = Arc::new(MockStore::new());
@@ -10066,6 +10145,7 @@ mod tests {
         assert!(store.completed_ids().contains(&"id1".to_string()));
     }
 
+    #[traced_test]
     #[tokio::test]
     async fn test_on_worker_exit_failed_persists_session() {
         let store = Arc::new(MockStore::new());
@@ -10086,6 +10166,7 @@ mod tests {
         assert!(!store.completed_ids().contains(&"id1".to_string()));
     }
 
+    #[traced_test]
     #[tokio::test]
     async fn test_on_worker_exit_cancelled_persists_session() {
         let store = Arc::new(MockStore::new());
@@ -10101,6 +10182,7 @@ mod tests {
         assert!(!sessions.is_empty());
     }
 
+    #[traced_test]
     #[tokio::test]
     async fn test_on_worker_exit_timed_out_persists_session() {
         let store = Arc::new(MockStore::new());
@@ -10114,6 +10196,7 @@ mod tests {
         assert!(!sessions.is_empty());
     }
 
+    #[traced_test]
     #[tokio::test]
     async fn test_on_worker_exit_stalled_persists_session() {
         let store = Arc::new(MockStore::new());
@@ -10129,6 +10212,7 @@ mod tests {
 
     // ── on_agent_update with store ──────────────────────────────────
 
+    #[traced_test]
     #[tokio::test]
     async fn test_on_agent_update_persists_log_entry() {
         let store = Arc::new(MockStore::new());
@@ -10149,6 +10233,7 @@ mod tests {
         assert_eq!(log_entries[0].1.event_type, "turn_completed");
     }
 
+    #[traced_test]
     #[tokio::test]
     async fn test_on_agent_update_persists_session_snapshot() {
         let store = Arc::new(MockStore::new());
@@ -10173,6 +10258,7 @@ mod tests {
         assert_eq!(snap.identifier, "PROJ-1");
     }
 
+    #[traced_test]
     #[tokio::test]
     async fn test_on_agent_update_notification_persists_log_and_session() {
         let store = Arc::new(MockStore::new());
@@ -10190,5 +10276,86 @@ mod tests {
         assert!(!store.saved_log_entries().is_empty());
         assert!(!store.saved_sessions().is_empty());
 
+    }
+
+    // ── persistence error paths (best-effort, should not panic) ─────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_persist_session_save_error_is_best_effort() {
+        let store = Arc::new(MockStore::new().with_fail_save_session());
+        let orch = test_orchestrator_with_store(store.clone());
+
+        let session = LiveSession::default();
+        // Should not panic even when save fails
+        orch.persist_session("id-1", "TST-1", &session, None, Utc::now())
+            .await;
+
+        assert!(logs_contain("failed to persist session"));
+        assert!(store.saved_sessions().is_empty());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_save_totals_error_is_best_effort() {
+        let store = Arc::new(MockStore::new().with_fail_save_totals());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Should not panic even when save_agent_totals fails
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        assert!(logs_contain(
+            "failed to persist agent totals on worker exit"
+        ));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_save_session_error_is_best_effort() {
+        let store = Arc::new(MockStore::new().with_fail_save_session());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Should not panic even when save_session fails
+        orch.on_worker_exit("id1", WorkerExitReason::Failed("err".to_string()))
+            .await;
+
+        assert!(logs_contain(
+            "failed to finalize persisted session on worker exit"
+        ));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_mark_completed_error_is_best_effort() {
+        let store = Arc::new(MockStore::new().with_fail_mark_completed());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Should not panic even when mark_completed fails
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        assert!(logs_contain("failed to persist completed marker"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_agent_update_save_log_entry_error_is_best_effort() {
+        let store = Arc::new(MockStore::new().with_fail_save_log_entry());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Should not panic even when save_log_entry fails
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::TurnCompleted {
+                message: Some("turn done".to_string()),
+            },
+        )
+        .await;
+
+        assert!(logs_contain("failed to persist log entry"));
+        assert!(store.saved_log_entries().is_empty());
     }
 }
