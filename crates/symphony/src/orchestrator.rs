@@ -378,16 +378,13 @@ impl Orchestrator {
                 issue.identifier.to_lowercase()
             );
             let github = GitHubClient::new(github_config, self.http.clone());
-            match github.find_open_pr(&branch).await {
-                Ok(Some(_pr)) => {
-                    info!(issue_id = %issue.id, branch = %branch, "skipping dispatch: open PR already exists");
-                    return false;
-                }
-                Ok(None) => {} // No PR, proceed
-                Err(e) => {
-                    warn!(issue_id = %issue.id, error = %e, "failed to check for existing PR, proceeding with dispatch");
-                    // Don't block dispatch on GitHub API errors
-                }
+            let pr_check = github.find_open_pr(&branch).await;
+            if let Err(e) = &pr_check {
+                warn!(issue_id = %issue.id, error = %e, "failed to check for existing PR, proceeding with dispatch");
+            }
+            if let Ok(Some(_pr)) = pr_check {
+                info!(issue_id = %issue.id, branch = %branch, "skipping dispatch: open PR already exists");
+                return false;
             }
         }
 
@@ -981,16 +978,9 @@ impl Orchestrator {
         let mut state = self.state.write().await;
         if let Some(entry) = state.retry_attempts.remove(issue_id) {
             state.claimed.remove(issue_id);
-            info!(
-                issue_id = %issue_id,
-                issue_identifier = %entry.identifier,
-                "removed from retry queue by user"
-            );
+            info!(issue_id = %issue_id, issue_identifier = %entry.identifier, "removed from retry queue by user");
         } else {
-            debug!(
-                issue_id = %issue_id,
-                "remove-from-retry-queue: issue not in retry queue"
-            );
+            debug!(issue_id = %issue_id, "remove-from-retry-queue: issue not in retry queue");
         }
     }
 
@@ -10842,9 +10832,16 @@ mod tests {
     async fn test_dispatch_issue_skip_state_transition() {
         let mut server = mockito::Server::new_async().await;
 
-        // If transition_to_in_progress were called, it would POST to this
-        // Linear endpoint. We expect 0 calls.
-        let linear_mock = server.mock("POST", "/").expect(0).create_async().await;
+        // The only POST call should be add_claim_label (1 call).
+        // transition_to_in_progress should NOT be called (verified via logs below).
+        let linear_mock = server
+            .mock("POST", "/")
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{}}"#)
+            .create_async()
+            .await;
 
         let config = test_config_with_endpoint(&server.url());
         let orch = Orchestrator::new(config, "template".to_string());
