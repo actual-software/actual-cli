@@ -1578,6 +1578,28 @@ mod tests {
             .expect("should be able to send");
     }
 
+    // ── state_handle / config_handle ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_state_handle_returns_shared_arc() {
+        let orch = test_orchestrator();
+        let handle = orch.state_handle();
+
+        // Verify we can read state through the handle
+        let state = handle.read().await;
+        assert!(state.running.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_config_handle_returns_shared_arc() {
+        let orch = test_orchestrator();
+        let handle = orch.config_handle();
+
+        // Verify we can read config through the handle
+        let config = handle.read().await;
+        assert_eq!(config.polling.interval_ms, 5000);
+    }
+
     // ── snapshot ─────────────────────────────────────────────────────
 
     #[tokio::test]
