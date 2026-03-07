@@ -102,13 +102,19 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
         let config = orchestrator.config_handle();
         let msg_tx = orchestrator.message_sender();
 
+        let job_notify = {
+            let orch_state = state.read().await;
+            std::sync::Arc::clone(&orch_state.job_notify)
+        };
+
         let server_shutdown_rx = _shutdown_tx.subscribe();
         let server_shutdown = async move {
             let mut rx = server_shutdown_rx;
             let _ = rx.changed().await;
         };
         tokio::spawn(async move {
-            if let Err(e) = server::start_server(port, state, config, msg_tx, server_shutdown).await
+            if let Err(e) =
+                server::start_server(port, state, config, msg_tx, job_notify, server_shutdown).await
             {
                 error!(error = %e, "HTTP server failed");
             }

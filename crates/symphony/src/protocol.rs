@@ -98,6 +98,28 @@ pub enum OrchestratorMessage {
     TriggerRefresh,
 }
 
+/// Assignment payload sent to a remote worker via GET /api/v1/work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkAssignment {
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub prompt: String,
+    pub attempt: Option<u32>,
+    pub workspace_path: Option<String>,
+}
+
+/// Payload posted by a worker to report an agent event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerEventPayload {
+    pub event: AgentEvent,
+}
+
+/// Payload posted by a worker to signal completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkResult {
+    pub reason: WorkerExitReason,
+}
+
 /// Snapshot of orchestrator state for observability.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorSnapshot {
@@ -734,5 +756,225 @@ mod tests {
         };
         let debug = format!("{:?}", info);
         assert!(debug.contains("RunningSessionInfo"));
+    }
+
+    // ── WorkAssignment ──────────────────────────────────────────────
+
+    #[test]
+    fn work_assignment_serialize_deserialize_roundtrip() {
+        let assignment = WorkAssignment {
+            issue_id: "id-abc".to_string(),
+            issue_identifier: "TST-42".to_string(),
+            prompt: "Fix the bug in main.rs".to_string(),
+            attempt: Some(2),
+            workspace_path: Some("/tmp/ws/TST-42".to_string()),
+        };
+        let json = serde_json::to_string(&assignment).unwrap();
+        let deserialized: WorkAssignment = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.issue_id, "id-abc");
+        assert_eq!(deserialized.issue_identifier, "TST-42");
+        assert_eq!(deserialized.prompt, "Fix the bug in main.rs");
+        assert_eq!(deserialized.attempt, Some(2));
+        assert_eq!(
+            deserialized.workspace_path,
+            Some("/tmp/ws/TST-42".to_string())
+        );
+    }
+
+    #[test]
+    fn work_assignment_optional_fields_none() {
+        let assignment = WorkAssignment {
+            issue_id: "id1".to_string(),
+            issue_identifier: "TST-1".to_string(),
+            prompt: "do stuff".to_string(),
+            attempt: None,
+            workspace_path: None,
+        };
+        let json = serde_json::to_string(&assignment).unwrap();
+        let deserialized: WorkAssignment = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.attempt.is_none());
+        assert!(deserialized.workspace_path.is_none());
+    }
+
+    #[test]
+    fn work_assignment_empty_prompt() {
+        let assignment = WorkAssignment {
+            issue_id: "id1".to_string(),
+            issue_identifier: "TST-1".to_string(),
+            prompt: String::new(),
+            attempt: None,
+            workspace_path: None,
+        };
+        let json = serde_json::to_string(&assignment).unwrap();
+        let deserialized: WorkAssignment = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.prompt, "");
+    }
+
+    #[test]
+    fn work_assignment_clone() {
+        let assignment = WorkAssignment {
+            issue_id: "id1".to_string(),
+            issue_identifier: "TST-1".to_string(),
+            prompt: "test".to_string(),
+            attempt: Some(1),
+            workspace_path: None,
+        };
+        let cloned = assignment.clone();
+        assert_eq!(cloned.issue_id, assignment.issue_id);
+        assert_eq!(cloned.issue_identifier, assignment.issue_identifier);
+        assert_eq!(cloned.prompt, assignment.prompt);
+        assert_eq!(cloned.attempt, assignment.attempt);
+    }
+
+    #[test]
+    fn work_assignment_debug() {
+        let assignment = WorkAssignment {
+            issue_id: "id1".to_string(),
+            issue_identifier: "TST-1".to_string(),
+            prompt: "test".to_string(),
+            attempt: None,
+            workspace_path: None,
+        };
+        let debug = format!("{:?}", assignment);
+        assert!(debug.contains("WorkAssignment"));
+        assert!(debug.contains("TST-1"));
+    }
+
+    // ── WorkerEventPayload ──────────────────────────────────────────
+
+    #[test]
+    fn worker_event_payload_serialize_deserialize_roundtrip() {
+        let payload = WorkerEventPayload {
+            event: AgentEvent::Notification {
+                message: "hello".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let deserialized: WorkerEventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            deserialized.event,
+            AgentEvent::Notification { ref message }
+            if message == "hello"
+        ));
+    }
+
+    #[test]
+    fn worker_event_payload_with_token_usage() {
+        let payload = WorkerEventPayload {
+            event: AgentEvent::TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+            },
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        let deserialized: WorkerEventPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            deserialized.event,
+            AgentEvent::TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+            }
+        ));
+    }
+
+    #[test]
+    fn worker_event_payload_clone() {
+        let payload = WorkerEventPayload {
+            event: AgentEvent::TurnCompleted {
+                message: Some("done".to_string()),
+            },
+        };
+        let cloned = payload.clone();
+        let json_original = serde_json::to_string(&payload).unwrap();
+        let json_cloned = serde_json::to_string(&cloned).unwrap();
+        assert_eq!(json_original, json_cloned);
+    }
+
+    #[test]
+    fn worker_event_payload_debug() {
+        let payload = WorkerEventPayload {
+            event: AgentEvent::Notification {
+                message: "test".to_string(),
+            },
+        };
+        let debug = format!("{:?}", payload);
+        assert!(debug.contains("WorkerEventPayload"));
+        assert!(debug.contains("Notification"));
+    }
+
+    // ── WorkResult ──────────────────────────────────────────────────
+
+    #[test]
+    fn work_result_normal_roundtrip() {
+        let result = WorkResult {
+            reason: WorkerExitReason::Normal,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: WorkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.reason, WorkerExitReason::Normal);
+    }
+
+    #[test]
+    fn work_result_failed_roundtrip() {
+        let result = WorkResult {
+            reason: WorkerExitReason::Failed("something broke".to_string()),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: WorkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.reason,
+            WorkerExitReason::Failed("something broke".to_string())
+        );
+    }
+
+    #[test]
+    fn work_result_timed_out_roundtrip() {
+        let result = WorkResult {
+            reason: WorkerExitReason::TimedOut,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: WorkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.reason, WorkerExitReason::TimedOut);
+    }
+
+    #[test]
+    fn work_result_stalled_roundtrip() {
+        let result = WorkResult {
+            reason: WorkerExitReason::Stalled,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: WorkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.reason, WorkerExitReason::Stalled);
+    }
+
+    #[test]
+    fn work_result_cancelled_roundtrip() {
+        let result = WorkResult {
+            reason: WorkerExitReason::Cancelled,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let deserialized: WorkResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.reason, WorkerExitReason::Cancelled);
+    }
+
+    #[test]
+    fn work_result_clone() {
+        let result = WorkResult {
+            reason: WorkerExitReason::Failed("err".to_string()),
+        };
+        let cloned = result.clone();
+        assert_eq!(result.reason, cloned.reason);
+    }
+
+    #[test]
+    fn work_result_debug() {
+        let result = WorkResult {
+            reason: WorkerExitReason::Normal,
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("WorkResult"));
+        assert!(debug.contains("Normal"));
     }
 }
