@@ -1021,7 +1021,6 @@ mod tests {
             agent: AgentConfig {
                 max_concurrent_agents: 3,
                 max_turns: 5,
-                max_retries: None,
                 max_retry_backoff_ms: 300_000,
                 max_concurrent_agents_by_state: HashMap::new(),
             },
