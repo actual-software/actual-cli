@@ -177,13 +177,7 @@ fn build_snapshot(state: &OrchestratorState) -> (Vec<RunningInfo>, Vec<RetryInfo
     let active_seconds: f64 = state
         .running
         .values()
-        .map(|entry| {
-            Utc::now()
-                .signed_duration_since(entry.started_at)
-                .num_milliseconds()
-                .max(0) as f64
-                / 1000.0
-        })
+        .map(running_entry_elapsed_seconds)
         .sum();
 
     let totals = TotalsInfo {
@@ -196,6 +190,44 @@ fn build_snapshot(state: &OrchestratorState) -> (Vec<RunningInfo>, Vec<RetryInfo
     (running, retrying, totals)
 }
 
+/// Compute elapsed seconds for a running entry.
+fn running_entry_elapsed_seconds(entry: &crate::model::RunningEntry) -> f64 {
+    Utc::now()
+        .signed_duration_since(entry.started_at)
+        .num_milliseconds()
+        .max(0) as f64
+        / 1000.0
+}
+
+/// Find a running entry by its issue identifier.
+fn find_running_by_identifier<'a>(
+    state: &'a OrchestratorState,
+    identifier: &str,
+) -> Option<&'a crate::model::RunningEntry> {
+    state.running.values().find(|e| e.identifier == identifier)
+}
+
+/// Find a retry entry by its issue identifier.
+fn find_retry_by_identifier<'a>(
+    state: &'a OrchestratorState,
+    identifier: &str,
+) -> Option<&'a RetryEntry> {
+    state
+        .retry_attempts
+        .values()
+        .find(|e| e.identifier == identifier)
+}
+
+/// Format an optional DateTime as an RFC3339 string.
+fn format_optional_datetime(dt: Option<chrono::DateTime<Utc>>) -> Option<String> {
+    dt.map(format_datetime)
+}
+
+/// Format a DateTime as an RFC3339 string.
+fn format_datetime(dt: chrono::DateTime<Utc>) -> String {
+    dt.to_rfc3339()
+}
+
 /// Map a `RunningEntry` to a `RunningInfo` for JSON serialization.
 fn map_running_entry(entry: &crate::model::RunningEntry) -> RunningInfo {
     RunningInfo {
@@ -206,8 +238,8 @@ fn map_running_entry(entry: &crate::model::RunningEntry) -> RunningInfo {
         turn_count: entry.session.turn_count,
         last_event: entry.session.last_event.clone(),
         last_message: entry.session.last_message.clone(),
-        started_at: entry.started_at.to_rfc3339(),
-        last_event_at: entry.session.last_event_at.map(|t| t.to_rfc3339()),
+        started_at: format_datetime(entry.started_at),
+        last_event_at: format_optional_datetime(entry.session.last_event_at),
         input_tokens: entry.session.input_tokens,
         output_tokens: entry.session.output_tokens,
         total_tokens: entry.session.total_tokens,
@@ -269,10 +301,7 @@ async fn handle_issue_detail(
     let config = state.config.read().await;
 
     // Search running entries by identifier
-    let running_entry = orch_state
-        .running
-        .values()
-        .find(|e| e.identifier == issue_identifier);
+    let running_entry = find_running_by_identifier(&orch_state, &issue_identifier);
 
     if let Some(entry) = running_entry {
         let workspace_key = crate::workspace::sanitize_workspace_key(&entry.identifier);
@@ -288,8 +317,8 @@ async fn handle_issue_detail(
                 turn_count: entry.session.turn_count,
                 last_event: entry.session.last_event.clone(),
                 last_message: entry.session.last_message.clone(),
-                started_at: entry.started_at.to_rfc3339(),
-                last_event_at: entry.session.last_event_at.map(|t| t.to_rfc3339()),
+                started_at: format_datetime(entry.started_at),
+                last_event_at: format_optional_datetime(entry.session.last_event_at),
                 input_tokens: entry.session.input_tokens,
                 output_tokens: entry.session.output_tokens,
                 total_tokens: entry.session.total_tokens,
@@ -301,10 +330,7 @@ async fn handle_issue_detail(
     }
 
     // Search retry entries by identifier
-    let retry_entry = orch_state
-        .retry_attempts
-        .values()
-        .find(|e| e.identifier == issue_identifier);
+    let retry_entry = find_retry_by_identifier(&orch_state, &issue_identifier);
 
     if let Some(entry) = retry_entry {
         let detail = IssueDetailResponse {
@@ -322,73 +348,55 @@ async fn handle_issue_detail(
     drop(config);
     drop(orch_state);
 
-    let error = ErrorResponse {
-        error: ErrorDetail {
-            code: "issue_not_found".to_string(),
-            message: format!("No running or retrying issue with identifier '{issue_identifier}'"),
-        },
-    };
-
-    (StatusCode::NOT_FOUND, axum::Json(error)).into_response()
+    error_response(
+        StatusCode::NOT_FOUND,
+        "issue_not_found",
+        format!("No running or retrying issue with identifier '{issue_identifier}'"),
+    )
 }
 
 /// POST /api/v1/refresh — Trigger immediate poll.
 async fn handle_refresh(State(state): State<AppState>) -> impl IntoResponse {
     let now = Utc::now().to_rfc3339();
+    let result = state.msg_tx.try_send(OrchestratorMessage::TriggerRefresh);
+    let coalesced = match result {
+        Ok(()) => None,
+        Err(_) => Some(true),
+    };
+    let response = RefreshResponse {
+        queued: true,
+        coalesced,
+        requested_at: now,
+    };
+    (StatusCode::ACCEPTED, axum::Json(response))
+}
 
-    match state.msg_tx.try_send(OrchestratorMessage::TriggerRefresh) {
-        Ok(()) => {
-            let response = RefreshResponse {
-                queued: true,
-                coalesced: None,
-                requested_at: now,
-            };
-            (StatusCode::ACCEPTED, axum::Json(response))
-        }
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            let response = RefreshResponse {
-                queued: true,
-                coalesced: Some(true),
-                requested_at: now,
-            };
-            (StatusCode::ACCEPTED, axum::Json(response))
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            let response = RefreshResponse {
-                queued: true,
-                coalesced: Some(true),
-                requested_at: now,
-            };
-            (StatusCode::ACCEPTED, axum::Json(response))
-        }
-    }
+/// Build a JSON error response with the given status code, code, and message.
+fn error_response(status: StatusCode, code: &str, message: String) -> Response {
+    let body = ErrorResponse {
+        error: ErrorDetail {
+            code: code.to_string(),
+            message,
+        },
+    };
+    (status, axum::Json(body)).into_response()
 }
 
 /// Fallback handler for unsupported routes/methods.
 async fn handle_fallback(method: Method) -> Response {
     if method != Method::GET && method != Method::POST {
-        return (
+        return error_response(
             StatusCode::METHOD_NOT_ALLOWED,
-            axum::Json(ErrorResponse {
-                error: ErrorDetail {
-                    code: "method_not_allowed".to_string(),
-                    message: format!("Method {method} is not allowed"),
-                },
-            }),
-        )
-            .into_response();
+            "method_not_allowed",
+            format!("Method {method} is not allowed"),
+        );
     }
 
-    (
+    error_response(
         StatusCode::NOT_FOUND,
-        axum::Json(ErrorResponse {
-            error: ErrorDetail {
-                code: "not_found".to_string(),
-                message: "Route not found".to_string(),
-            },
-        }),
+        "not_found",
+        "Route not found".to_string(),
     )
-        .into_response()
 }
 
 // ── HTML Rendering ───────────────────────────────────────────────────
@@ -501,7 +509,7 @@ pre { background: #16213e; padding: 10px; border-radius: 4px; overflow-x: auto; 
     match rate_limits {
         Some(rl) => {
             html.push_str("<pre>");
-            let formatted = serde_json::to_string_pretty(rl).unwrap_or_else(|_| "{}".to_string());
+            let formatted = format_json_pretty(rl);
             html.push_str(&html_escape(&formatted));
             html.push_str("</pre>\n");
         }
@@ -536,6 +544,14 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Pretty-print a JSON value, falling back to `{}` on error.
+fn format_json_pretty(value: &serde_json::Value) -> String {
+    match serde_json::to_string_pretty(value) {
+        Ok(s) => s,
+        Err(_) => "{}".to_string(),
+    }
 }
 
 /// Format token counts for display.
@@ -840,6 +856,64 @@ mod tests {
     fn test_format_tokens_millions() {
         assert_eq!(format_tokens(1_000_000), "1.0M");
         assert_eq!(format_tokens(2_500_000), "2.5M");
+    }
+
+    // ── format_json_pretty tests ───────────────────────────────────────
+
+    #[test]
+    fn test_format_json_pretty_valid() {
+        let value = serde_json::json!({"key": "value"});
+        let result = format_json_pretty(&value);
+        assert!(result.contains("key"));
+        assert!(result.contains("value"));
+    }
+
+    // ── format_datetime tests ────────────────────────────────────────
+
+    #[test]
+    fn test_format_datetime() {
+        let dt = Utc::now();
+        let result = format_datetime(dt);
+        assert!(result.contains("T")); // RFC3339 contains T separator
+    }
+
+    #[test]
+    fn test_format_optional_datetime_some() {
+        let dt = Utc::now();
+        let result = format_optional_datetime(Some(dt));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_format_optional_datetime_none() {
+        let result = format_optional_datetime(None);
+        assert!(result.is_none());
+    }
+
+    // ── error_response tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_error_response_not_found() {
+        let response = error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Resource not found".to_string(),
+        );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "not_found");
+        assert_eq!(json["error"]["message"], "Resource not found");
+    }
+
+    #[tokio::test]
+    async fn test_error_response_method_not_allowed() {
+        let response = error_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method_not_allowed",
+            "Method DELETE is not allowed".to_string(),
+        );
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     // ── html_escape tests ────────────────────────────────────────────
@@ -1293,6 +1367,47 @@ mod tests {
         assert_eq!(resp.status(), 202);
         let json: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(json["queued"], true);
+    }
+
+    // ── start_server ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_start_server_binds_and_serves() {
+        let state = OrchestratorState::new(5000, 3);
+        let config = test_config();
+        let (msg_tx, _msg_rx) = mpsc::channel(512);
+
+        let state_arc = Arc::new(RwLock::new(state));
+        let config_arc = Arc::new(RwLock::new(config));
+
+        let handle = tokio::spawn(start_server(0, state_arc, config_arc, msg_tx));
+
+        // Give server time to bind
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Abort the server task (start_server runs forever)
+        handle.abort();
+        let result = handle.await;
+        assert!(result.is_err()); // JoinError from abort
+    }
+
+    // ── running_entry_elapsed_seconds ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_running_entry_elapsed_seconds() {
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        let entry = RunningEntry {
+            issue: make_issue("id1", "PROJ-1", "Todo"),
+            identifier: "PROJ-1".to_string(),
+            session: LiveSession::default(),
+            retry_attempt: None,
+            started_at: Utc::now(),
+            cancel_tx,
+        };
+
+        let elapsed = running_entry_elapsed_seconds(&entry);
+        assert!(elapsed >= 0.0);
+        assert!(elapsed < 1.0); // just created, should be near-zero
     }
 
     // ── map_running_entry / map_retry_entry ──────────────────────────
