@@ -3060,4 +3060,90 @@ mod tests {
         let cloned = worker.clone();
         assert_eq!(worker.worker_id, cloned.worker_id);
     }
+
+    // ── Channel closed error paths ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_worker_event_channel_closed_returns_500() {
+        let state = OrchestratorState::new(5000, 3);
+        let job_notify = Arc::clone(&state.job_notify);
+        let mut config = test_config();
+        config.deployment.auth_token = Some("test-secret".to_string());
+        let (msg_tx, msg_rx) = mpsc::channel(512);
+        // Drop receiver to close the channel
+        drop(msg_rx);
+
+        let app_state = AppState {
+            orchestrator_state: Arc::new(RwLock::new(state)),
+            config: Arc::new(RwLock::new(config)),
+            msg_tx,
+            job_notify,
+        };
+
+        let app = build_router(app_state);
+
+        let payload = serde_json::json!({
+            "event": {
+                "Notification": {
+                    "message": "hello"
+                }
+            }
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/test-issue-1/events")
+            .header("Authorization", "Bearer test-secret")
+            .header("X-Worker-ID", "worker-1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "channel_closed");
+    }
+
+    #[tokio::test]
+    async fn test_worker_complete_channel_closed_returns_500() {
+        let state = OrchestratorState::new(5000, 3);
+        let job_notify = Arc::clone(&state.job_notify);
+        let mut config = test_config();
+        config.deployment.auth_token = Some("test-secret".to_string());
+        let (msg_tx, msg_rx) = mpsc::channel(512);
+        // Drop receiver to close the channel
+        drop(msg_rx);
+
+        let app_state = AppState {
+            orchestrator_state: Arc::new(RwLock::new(state)),
+            config: Arc::new(RwLock::new(config)),
+            msg_tx,
+            job_notify,
+        };
+
+        let app = build_router(app_state);
+
+        let payload = serde_json::json!({
+            "reason": "Normal"
+        });
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/test-issue-1/complete")
+            .header("Authorization", "Bearer test-secret")
+            .header("X-Worker-ID", "worker-1")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "channel_closed");
+    }
 }
