@@ -1752,8 +1752,16 @@ async fn transition_to_in_review(
 ) {
     let client = LinearClient::new(tracker_config, http.clone());
     let result = client.transition_issue_state(issue_id, "In Review").await;
+    log_transition_error(result, issue_identifier);
+}
+
+/// Log a warning if a Linear transition failed.
+fn log_transition_error(
+    result: std::result::Result<(), crate::error::SymphonyError>,
+    identifier: &str,
+) {
     if let Err(e) = result {
-        warn!(issue_identifier = %issue_identifier, error = %e, "failed to transition issue to In Review");
+        warn!(issue_identifier = %identifier, error = %e, "failed to transition issue to In Review");
     }
 }
 
@@ -8268,6 +8276,79 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_still_in_review_keeps_waiting() {
+        let mut gh_server = mockito::Server::new_async().await;
+        let mut linear_server = mockito::Server::new_async().await;
+
+        // is_pr_merged: still open
+        let _merged_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "merged": false
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: issue is still "In Review"
+        let _linear_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(&mock_states_response(&[("id1", "PROJ-1", "In Review")]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        {
+            let mut state = orch.state.write().await;
+            state.claimed.insert("id1".to_string());
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        let state = orch.state.read().await;
+        // Issue is still "In Review" — should remain in waiting
+        assert!(state.waiting_for_review.contains_key("id1"));
+        assert!(state.claimed.contains("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
     async fn test_reconcile_pr_lifecycle_linear_state_check_error() {
         let mut gh_server = mockito::Server::new_async().await;
         let mut linear_server = mockito::Server::new_async().await;
@@ -8836,6 +8917,26 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("merged"));
+    }
+
+    // ── log_transition_error ─────────────────────────────────────
+
+    #[traced_test]
+    #[test]
+    fn test_log_transition_error_ok() {
+        log_transition_error(Ok(()), "PROJ-1");
+        // No warning logged
+        assert!(!logs_contain("failed to transition"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn test_log_transition_error_err() {
+        let err = crate::error::SymphonyError::GitHubApiRequest {
+            reason: "test error".to_string(),
+        };
+        log_transition_error(Err(err), "PROJ-1");
+        assert!(logs_contain("failed to transition issue to In Review"));
     }
 
     // ── is_gh_pr_ready ────────────────────────────────────────────
