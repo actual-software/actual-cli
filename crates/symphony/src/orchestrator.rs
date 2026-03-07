@@ -1987,6 +1987,43 @@ mod tests {
         assert_eq!(retry.attempt, 4); // 3 + 1
     }
 
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_max_retries_exceeded() {
+        // Configure max_retries = 2, then fail with retry_attempt = Some(2)
+        // → next_attempt = 3 > max_retries = 2 → gives up
+        let mut config = test_config();
+        config.agent.max_retries = 2;
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert with retry_attempt = Some(2) so next_attempt = 3
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        {
+            let mut state = orch.state.write().await;
+            state.running.insert(
+                "id1".to_string(),
+                RunningEntry {
+                    issue: make_issue("id1", "PROJ-1", "Todo"),
+                    identifier: "PROJ-1".to_string(),
+                    session: LiveSession::default(),
+                    retry_attempt: Some(2),
+                    started_at: Utc::now(),
+                    cancel_tx,
+                },
+            );
+            state.claimed.insert("id1".to_string());
+        }
+
+        orch.on_worker_exit("id1", WorkerExitReason::Failed("boom".to_string()))
+            .await;
+
+        let state = orch.state.read().await;
+        // Should NOT have a retry entry — max retries exceeded
+        assert_eq!(state.retry_attempts.contains_key("id1"), false);
+        // Claim should be released
+        assert_eq!(state.claimed.contains("id1"), false);
+    }
+
     // ── on_agent_update ──────────────────────────────────────────────
 
     #[tokio::test]

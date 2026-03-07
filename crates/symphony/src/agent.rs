@@ -54,14 +54,14 @@ impl AgentSession {
 
         let mut child = spawn_agent_process(&full_command, workspace_path)?;
 
-        // Write prompt to stdin to avoid shell interpolation of untrusted data
-        if let Some(mut stdin) = child.stdin.take() {
-            let prompt_bytes = prompt.as_bytes().to_vec();
-            tokio::spawn(async move {
-                let _ = stdin.write_all(&prompt_bytes).await;
-                let _ = stdin.shutdown().await;
-            });
-        }
+        // Write prompt to stdin to avoid shell interpolation of untrusted data.
+        // stdin is always present because we configure Stdio::piped() above.
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        let prompt_bytes = prompt.as_bytes().to_vec();
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&prompt_bytes).await;
+            let _ = stdin.shutdown().await;
+        });
 
         let pid = child.id();
 
