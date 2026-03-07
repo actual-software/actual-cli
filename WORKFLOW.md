@@ -21,6 +21,8 @@ coding_agent:
   command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 30"
   stall_timeout_ms: 600000
   turn_timeout_ms: 1800000
+server:
+  port: 7070
 hooks:
   # NOTE: Hooks are executed as raw shell scripts (bash -lc). They do NOT
   # support Liquid template syntax. The workspace directory name is the
