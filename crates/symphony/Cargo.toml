@@ -34,6 +34,11 @@ liquid = "0.26"
 # File watching
 notify = "7"
 
+# HTTP server
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 
@@ -51,3 +56,4 @@ tokio = { version = "1", features = ["test-util", "macros"] }
 tempfile = "3"
 mockito = "1"
 tracing-test = "0.2"
+http-body-util = "0.1"

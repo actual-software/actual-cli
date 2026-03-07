@@ -14,6 +14,12 @@ pub struct ServiceConfig {
     pub hooks: HooksConfig,
     pub agent: AgentConfig,
     pub coding_agent: CodingAgentConfig,
+    pub server: ServerConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    pub port: Option<u16>,
 }
 
 #[derive(Clone)]
@@ -87,6 +93,7 @@ impl ServiceConfig {
             hooks: parse_hooks_config(root),
             agent: parse_agent_config(root),
             coding_agent: parse_coding_agent_config(root),
+            server: parse_server_config(root),
         })
     }
 
@@ -400,6 +407,19 @@ fn parse_coding_agent_config(root: &serde_yml::Value) -> CodingAgentConfig {
     }
 }
 
+fn parse_server_config(root: &serde_yml::Value) -> ServerConfig {
+    let port = get_yaml_int(root, &["server", "port"]).and_then(|v| {
+        let clamped = v.clamp(0, u16::MAX as i64);
+        if clamped == 0 {
+            None
+        } else {
+            Some(clamped as u16)
+        }
+    });
+
+    ServerConfig { port }
+}
+
 /// Check if a state is in a list (case-insensitive, trimmed).
 pub fn state_matches(state: &str, list: &[String]) -> bool {
     let normalized = state.trim().to_lowercase();
@@ -424,6 +444,7 @@ mod tests {
         assert_eq!(config.hooks.timeout_ms, 60_000);
         assert!(config.tracker.active_states.contains(&"Todo".to_string()));
         assert!(config.tracker.terminal_states.contains(&"Done".to_string()));
+        assert!(config.server.port.is_none());
     }
 
     #[test]
@@ -940,5 +961,54 @@ codex:
         assert!(
             matches!(&err, SymphonyError::MissingRequiredConfig { field } if field == "coding_agent.command")
         );
+    }
+
+    // --- server config tests ---
+
+    #[test]
+    fn test_server_port_configured() {
+        let content = r#"---
+server:
+  port: 8080
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.server.port, Some(8080));
+    }
+
+    #[test]
+    fn test_server_port_zero_treated_as_none() {
+        let content = r#"---
+server:
+  port: 0
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config.server.port.is_none());
+    }
+
+    #[test]
+    fn test_server_port_negative_treated_as_none() {
+        let content = r#"---
+server:
+  port: -1
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config.server.port.is_none());
+    }
+
+    #[test]
+    fn test_server_port_not_configured() {
+        let content = r#"---
+server: {}
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config.server.port.is_none());
     }
 }

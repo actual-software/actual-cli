@@ -93,6 +93,16 @@ impl Orchestrator {
         self.msg_tx.clone()
     }
 
+    /// Get a handle to the shared orchestrator state (for the HTTP server).
+    pub fn state_handle(&self) -> Arc<RwLock<OrchestratorState>> {
+        Arc::clone(&self.state)
+    }
+
+    /// Get a handle to the shared config (for the HTTP server).
+    pub fn config_handle(&self) -> Arc<RwLock<ServiceConfig>> {
+        Arc::clone(&self.config)
+    }
+
     /// Get a snapshot of current state for observability.
     pub async fn snapshot(&self) -> OrchestratorSnapshot {
         let state = self.state.read().await;
@@ -1161,7 +1171,8 @@ pub struct RunningSessionInfo {
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, CodingAgentConfig, HooksConfig, PollingConfig, TrackerConfig, WorkspaceConfig,
+        AgentConfig, CodingAgentConfig, HooksConfig, PollingConfig, ServerConfig, TrackerConfig,
+        WorkspaceConfig,
     };
     use crate::model::BlockerRef;
     use chrono::TimeZone;
@@ -1236,6 +1247,7 @@ mod tests {
                 turn_timeout_ms: 3_600_000,
                 stall_timeout_ms: 300_000,
             },
+            server: ServerConfig { port: None },
         }
     }
 
