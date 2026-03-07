@@ -5,7 +5,7 @@ use crate::github::GitHubClient;
 use crate::model::{Issue, OrchestratorState, RetryEntry};
 use crate::prompt::{build_continuation_prompt, render_prompt};
 use crate::protocol::{
-    AgentEvent, LiveSession, RunningEntry, RunningSessionInfo, WorkerExitReason,
+    AgentEvent, LiveSession, RunningEntry, RunningSessionInfo, WorkAssignment, WorkerExitReason,
 };
 use crate::tracker::LinearClient;
 use crate::workspace;
@@ -369,11 +369,44 @@ impl Orchestrator {
 
         match config.deployment.mode {
             DeploymentMode::Distributed => {
+                // Render prompt for remote worker
+                let prompt_template = self.prompt_template.read().await.clone();
+                let rendered_prompt =
+                    match crate::prompt::render_prompt(&prompt_template, &issue, attempt) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!(
+                                issue_id = %issue_id,
+                                issue_identifier = %identifier,
+                                error = %e,
+                                "failed to render prompt for distributed worker"
+                            );
+                            return;
+                        }
+                    };
+
+                let workspace_key = crate::workspace::sanitize_workspace_key(&identifier);
+                let workspace_path = config.workspace.root.join(&workspace_key);
+
+                let assignment = WorkAssignment {
+                    issue_id: issue_id.clone(),
+                    issue_identifier: identifier.clone(),
+                    prompt: rendered_prompt,
+                    attempt,
+                    workspace_path: Some(workspace_path.display().to_string()),
+                };
+
+                {
+                    let mut state = self.state.write().await;
+                    state.pending_jobs.push_back(assignment);
+                    state.job_notify.notify_one();
+                }
+
                 info!(
                     issue_id = %issue_id,
-                    "issue queued for distributed worker (not yet implemented)"
+                    issue_identifier = %identifier,
+                    "issue enqueued for distributed worker"
                 );
-                // No local subprocess — a remote worker will pick this up
                 return;
             }
             DeploymentMode::Local => {
@@ -6178,12 +6211,22 @@ mod tests {
         assert!(state.running.contains_key("dist-1"));
         assert!(state.claimed.contains("dist-1"));
 
+        // Work assignment should be enqueued
+        assert_eq!(state.pending_jobs.len(), 1);
+        let assignment = &state.pending_jobs[0];
+        assert_eq!(assignment.issue_id, "dist-1");
+        assert_eq!(assignment.issue_identifier, "DIST-1");
+        assert!(assignment.prompt.contains("DIST-1"));
+        assert!(assignment.attempt.is_none());
+        assert!(assignment.workspace_path.is_some());
+
         // No worker handle should exist (distributed mode returns early)
+        drop(state);
         let handles = orch.worker_handles.read().await;
         assert!(!handles.contains_key("dist-1"));
 
         // Check the log message
-        assert!(logs_contain("issue queued for distributed worker"));
+        assert!(logs_contain("issue enqueued for distributed worker"));
     }
 
     // ── reconcile_pr_conflicts ─────────────────────────────────────
