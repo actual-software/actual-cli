@@ -1,17 +1,20 @@
 use crate::agent::AgentSession;
-use crate::config::{state_matches, ServiceConfig};
+use crate::config::{state_matches, DeploymentMode, ServiceConfig};
 use crate::error::{Result, SymphonyError};
-use crate::model::{
-    AgentEvent, AgentTotals, Issue, LiveSession, OrchestratorState, RetryEntry, RunningEntry,
-    WorkerExitReason,
-};
+use crate::model::{Issue, OrchestratorState, RetryEntry};
 use crate::prompt::{build_continuation_prompt, render_prompt};
+use crate::protocol::{
+    AgentEvent, LiveSession, RunningEntry, RunningSessionInfo, WorkerExitReason,
+};
 use crate::tracker::LinearClient;
 use crate::workspace;
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, warn};
+
+// Re-export protocol types for backward compatibility.
+pub use crate::protocol::{OrchestratorMessage, OrchestratorSnapshot};
 
 /// Log orchestrator start parameters.
 fn log_orchestrator_start(poll_interval_ms: u64, max_concurrent: u32) {
@@ -32,23 +35,6 @@ fn map_worker_result(result: Result<()>) -> WorkerExitReason {
         Err(SymphonyError::AgentTurnCancelled) => WorkerExitReason::Cancelled,
         Err(e) => WorkerExitReason::Failed(e.to_string()),
     }
-}
-
-/// Messages from workers back to the orchestrator.
-#[derive(Debug)]
-pub enum OrchestratorMessage {
-    WorkerExited {
-        issue_id: String,
-        reason: WorkerExitReason,
-    },
-    AgentUpdate {
-        issue_id: String,
-        event: AgentEvent,
-    },
-    RetryFired {
-        issue_id: String,
-    },
-    TriggerRefresh,
 }
 
 /// Default timeout for draining workers during shutdown (30 seconds).
@@ -344,6 +330,13 @@ impl Orchestrator {
         {
             let mut state = self.state.write().await;
 
+            // Create broadcast channel for SSE streaming
+            let (broadcast_tx, _) =
+                tokio::sync::broadcast::channel(crate::model::BROADCAST_CHANNEL_CAPACITY);
+            state
+                .event_broadcasts
+                .insert(issue_id.clone(), broadcast_tx);
+
             state.running.insert(
                 issue_id.clone(),
                 RunningEntry {
@@ -353,14 +346,34 @@ impl Orchestrator {
                     retry_attempt: attempt,
                     started_at: Utc::now(),
                     cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
                 },
             );
             state.claimed.insert(issue_id.clone());
             state.retry_attempts.remove(&issue_id);
         }
 
-        // Spawn worker task
+        // Transition issue to "In Progress" in Linear (best-effort)
+        self.transition_to_in_progress(&issue_id, &identifier).await;
+
+        // Read config to check deployment mode
         let config = self.config.read().await.clone();
+
+        match config.deployment.mode {
+            DeploymentMode::Distributed => {
+                info!(
+                    issue_id = %issue_id,
+                    "issue queued for distributed worker (not yet implemented)"
+                );
+                // No local subprocess — a remote worker will pick this up
+                return;
+            }
+            DeploymentMode::Local => {
+                // Spawn local worker task below
+            }
+        }
+
         let prompt_template = self.prompt_template.read().await.clone();
         let http = self.http.clone();
         let msg_tx = self.msg_tx.clone();
@@ -399,6 +412,30 @@ impl Orchestrator {
             .insert(worker_issue_id, handle);
     }
 
+    /// Best-effort transition of an issue to "In Progress" in Linear.
+    /// Logs a warning on failure but does not block dispatch.
+    async fn transition_to_in_progress(&self, issue_id: &str, identifier: &str) {
+        let config = self.config.read().await;
+        let client = LinearClient::new(&config.tracker, self.http.clone());
+        drop(config); // Release RwLock before async call
+
+        match client.transition_issue_state(issue_id, "In Progress").await {
+            Ok(()) => {
+                info!(
+                    issue_identifier = %identifier,
+                    "transitioned issue to In Progress"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    issue_identifier = %identifier,
+                    error = %e,
+                    "failed to transition issue to In Progress (continuing dispatch)"
+                );
+            }
+        }
+    }
+
     async fn handle_message(&self, msg: OrchestratorMessage) {
         match msg {
             OrchestratorMessage::WorkerExited { issue_id, reason } => {
@@ -418,6 +455,9 @@ impl Orchestrator {
 
     async fn on_worker_exit(&self, issue_id: &str, reason: WorkerExitReason) {
         let mut state = self.state.write().await;
+
+        // Remove broadcast sender (dropping it closes all receivers)
+        state.event_broadcasts.remove(issue_id);
 
         if let Some(entry) = state.running.remove(issue_id) {
             // Add runtime seconds to totals
@@ -514,8 +554,9 @@ impl Orchestrator {
         }
     }
 
-    /// Schedule a retry if the attempt count hasn't exceeded `max_retries`.
-    /// If the cap is reached, the issue is released without further retries.
+    /// Schedule a retry with exponential backoff.
+    /// When `max_retries` is `None`, retries continue indefinitely (§8.2 spec).
+    /// When `max_retries` is `Some(n)`, the issue is released after `n` attempts.
     fn maybe_schedule_retry(
         &self,
         state: &mut OrchestratorState,
@@ -525,16 +566,18 @@ impl Orchestrator {
         identifier: String,
         error: Option<String>,
     ) {
-        if attempt > config.agent.max_retries {
-            error!(
-                issue_id = %issue_id,
-                issue_identifier = %identifier,
-                attempt = attempt,
-                max_retries = config.agent.max_retries,
-                "max retries exceeded, giving up"
-            );
-            state.claimed.remove(issue_id);
-            return;
+        if let Some(max) = config.agent.max_retries {
+            if attempt > max {
+                error!(
+                    issue_id = %issue_id,
+                    issue_identifier = %identifier,
+                    attempt = attempt,
+                    max_retries = max,
+                    "max retries exceeded, giving up"
+                );
+                state.claimed.remove(issue_id);
+                return;
+            }
         }
         let delay = exponential_backoff(attempt, config.agent.max_retry_backoff_ms);
         self.schedule_retry_inner(
@@ -696,6 +739,7 @@ impl Orchestrator {
 
         if let Some(entry) = state.running.get_mut(issue_id) {
             let now = Utc::now();
+            let mut should_log = true;
 
             match &event {
                 AgentEvent::SessionStarted { session_id, pid } => {
@@ -750,9 +794,23 @@ impl Orchestrator {
                         entry.session.last_message = Some(msg.clone());
                     }
                 }
-                AgentEvent::RateLimitUpdate { .. } => {
+                AgentEvent::RateLimitUpdate { data } => {
                     entry.session.last_event = Some("rate_limit_event".to_string());
                     entry.session.last_event_at = Some(now);
+                    // Only log/broadcast interesting rate-limit events (not routine "allowed")
+                    should_log = crate::model::should_log_rate_limit(data);
+                }
+            }
+
+            // Create log entry and append to event log (skip filtered events)
+            if should_log {
+                entry.log_seq += 1;
+                let log_entry = crate::model::create_log_entry(entry.log_seq, &event);
+                crate::model::append_log_entry(&mut entry.event_log, log_entry.clone());
+
+                // Broadcast to SSE subscribers (ignore error if no receivers)
+                if let Some(tx) = state.event_broadcasts.get(issue_id) {
+                    let _ = tx.send(log_entry);
                 }
             }
         }
@@ -874,6 +932,8 @@ impl Orchestrator {
 
     async fn terminate_running_issue(&self, issue_id: &str, cleanup_workspace: bool) {
         let mut state = self.state.write().await;
+        // Remove broadcast sender (dropping it closes all receivers)
+        state.event_broadcasts.remove(issue_id);
         if let Some(entry) = state.running.remove(issue_id) {
             // Signal cancellation
             let _ = entry.cancel_tx.send(());
@@ -1175,37 +1235,12 @@ fn exponential_backoff(attempt: u32, max_backoff_ms: u64) -> u64 {
     delay.min(max_backoff_ms)
 }
 
-/// Snapshot of orchestrator state for observability.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct OrchestratorSnapshot {
-    pub running: Vec<RunningSessionInfo>,
-    pub retrying: Vec<RetryEntry>,
-    pub totals: AgentTotals,
-    pub rate_limits: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RunningSessionInfo {
-    pub issue_id: String,
-    pub issue_identifier: String,
-    pub state: String,
-    pub session_id: Option<String>,
-    pub turn_count: u32,
-    pub last_event: Option<String>,
-    pub last_message: Option<String>,
-    pub started_at: chrono::DateTime<Utc>,
-    pub last_event_at: Option<chrono::DateTime<Utc>>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, CodingAgentConfig, HooksConfig, PollingConfig, ServerConfig, TrackerConfig,
-        WorkspaceConfig,
+        AgentConfig, CodingAgentConfig, DeploymentConfig, DeploymentMode, HooksConfig,
+        PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
     };
     use crate::model::BlockerRef;
     use chrono::TimeZone;
@@ -1270,7 +1305,7 @@ mod tests {
             agent: AgentConfig {
                 max_concurrent_agents: 3,
                 max_turns: 5,
-                max_retries: 10,
+                max_retries: None,
                 max_retry_backoff_ms: 300_000,
                 max_concurrent_agents_by_state: HashMap::new(),
             },
@@ -1281,6 +1316,10 @@ mod tests {
                 stall_timeout_ms: 300_000,
             },
             server: ServerConfig { port: None },
+            deployment: DeploymentConfig {
+                mode: DeploymentMode::Local,
+                auth_token: None,
+            },
         }
     }
 
@@ -1315,6 +1354,8 @@ mod tests {
                 retry_attempt: None,
                 started_at: Utc::now(),
                 cancel_tx,
+                event_log: std::collections::VecDeque::new(),
+                log_seq: 0,
             },
         );
         s.claimed.insert(id.to_string());
@@ -1340,6 +1381,8 @@ mod tests {
                 retry_attempt: None,
                 started_at,
                 cancel_tx,
+                event_log: std::collections::VecDeque::new(),
+                log_seq: 0,
             },
         );
         s.claimed.insert(id.to_string());
@@ -2150,6 +2193,8 @@ mod tests {
                     retry_attempt: Some(3),
                     started_at: Utc::now(),
                     cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -2169,7 +2214,7 @@ mod tests {
         // Configure max_retries = 2, then fail with retry_attempt = Some(2)
         // → next_attempt = 3 > max_retries = 2 → gives up
         let mut config = test_config();
-        config.agent.max_retries = 2;
+        config.agent.max_retries = Some(2);
         let orch = Orchestrator::new(config, "template".to_string());
 
         // Insert with retry_attempt = Some(2) so next_attempt = 3
@@ -2185,6 +2230,8 @@ mod tests {
                     retry_attempt: Some(2),
                     started_at: Utc::now(),
                     cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -2198,6 +2245,81 @@ mod tests {
         assert_eq!(state.retry_attempts.contains_key("id1"), false);
         // Claim should be released
         assert_eq!(state.claimed.contains("id1"), false);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_retries_within_cap() {
+        // max_retries = Some(5), retry_attempt = Some(2) → next_attempt = 3 <= 5 → retry allowed
+        let mut config = test_config();
+        config.agent.max_retries = Some(5);
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        {
+            let mut state = orch.state.write().await;
+            state.running.insert(
+                "id1".to_string(),
+                RunningEntry {
+                    issue: make_issue("id1", "PROJ-1", "Todo"),
+                    identifier: "PROJ-1".to_string(),
+                    session: LiveSession::default(),
+                    retry_attempt: Some(2),
+                    started_at: Utc::now(),
+                    cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
+                },
+            );
+            state.claimed.insert("id1".to_string());
+        }
+
+        orch.on_worker_exit("id1", WorkerExitReason::Failed("err".to_string()))
+            .await;
+
+        let state = orch.state.read().await;
+        // Should have a retry entry — attempt 3 is within cap of 5
+        let retry = state.retry_attempts.get("id1").unwrap();
+        assert_eq!(retry.attempt, 3); // 2 + 1
+        assert!(state.claimed.contains("id1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_unlimited_retries() {
+        // max_retries = None → retries should always be scheduled, even at high attempt counts
+        let config = test_config(); // max_retries is None by default
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert with retry_attempt = Some(100) so next_attempt = 101
+        let (cancel_tx, _cancel_rx) = oneshot::channel();
+        {
+            let mut state = orch.state.write().await;
+            state.running.insert(
+                "id1".to_string(),
+                RunningEntry {
+                    issue: make_issue("id1", "PROJ-1", "Todo"),
+                    identifier: "PROJ-1".to_string(),
+                    session: LiveSession::default(),
+                    retry_attempt: Some(100),
+                    started_at: Utc::now(),
+                    cancel_tx,
+                    event_log: std::collections::VecDeque::new(),
+                    log_seq: 0,
+                },
+            );
+            state.claimed.insert("id1".to_string());
+        }
+
+        orch.on_worker_exit("id1", WorkerExitReason::Failed("err".to_string()))
+            .await;
+
+        let state = orch.state.read().await;
+        // Should have a retry entry — unlimited retries never gives up
+        let retry = state.retry_attempts.get("id1").unwrap();
+        assert_eq!(retry.attempt, 101); // 100 + 1
+                                        // Claim should still be held
+        assert!(state.claimed.contains("id1"));
     }
 
     // ── on_agent_update ──────────────────────────────────────────────
@@ -2424,7 +2546,7 @@ mod tests {
         assert_eq!(entry.session.last_message, Some("previous".to_string()));
     }
 
-    // §11.2: rate limit update stored in state
+    // §11.2: rate limit update stored in state (no rate_limit_info → logged)
     #[tokio::test]
     async fn test_on_agent_update_rate_limit() {
         let orch = test_orchestrator();
@@ -2456,6 +2578,70 @@ mod tests {
             Some("rate_limit_event".to_string())
         );
         assert!(entry.session.last_event_at.is_some());
+        // Missing rate_limit_info means it IS logged (conservative)
+        assert_eq!(entry.event_log.len(), 1);
+    }
+
+    // Routine "allowed" rate-limit events are filtered from the log
+    #[tokio::test]
+    async fn test_on_agent_update_rate_limit_allowed_filtered() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        let rate_data = serde_json::json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": { "status": "allowed" }
+        });
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::RateLimitUpdate {
+                data: rate_data.clone(),
+            },
+        )
+        .await;
+
+        let state = orch.state.read().await;
+        // Global rate_limits is still updated
+        assert!(state.rate_limits.is_some());
+        // Session metadata is still updated
+        let entry = state.running.get("id1").unwrap();
+        assert_eq!(
+            entry.session.last_event,
+            Some("rate_limit_event".to_string())
+        );
+        assert!(entry.session.last_event_at.is_some());
+        // But event log is empty — routine event was filtered
+        assert!(entry.event_log.is_empty());
+        assert_eq!(entry.log_seq, 0);
+    }
+
+    // Non-"allowed" rate-limit events ARE logged
+    #[tokio::test]
+    async fn test_on_agent_update_rate_limit_rejected_logged() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        let rate_data = serde_json::json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": { "status": "rejected" }
+        });
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::RateLimitUpdate {
+                data: rate_data.clone(),
+            },
+        )
+        .await;
+
+        let state = orch.state.read().await;
+        assert!(state.rate_limits.is_some());
+        let entry = state.running.get("id1").unwrap();
+        // Rejected event IS logged
+        assert_eq!(entry.event_log.len(), 1);
+        assert_eq!(entry.log_seq, 1);
+        assert_eq!(entry.event_log[0].event_type, "rate_limit_event");
     }
 
     #[tokio::test]
@@ -2494,6 +2680,157 @@ mod tests {
         assert_eq!(state.agent_totals.input_tokens, 0);
         assert_eq!(state.agent_totals.output_tokens, 0);
         assert_eq!(state.agent_totals.total_tokens, 0);
+    }
+
+    // ── on_agent_update: event log and broadcast ───────────────────
+
+    #[tokio::test]
+    async fn test_on_agent_update_appends_to_event_log() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::SessionStarted {
+                session_id: "sess-1".to_string(),
+                pid: Some(42),
+            },
+        )
+        .await;
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::TurnCompleted {
+                message: Some("done".to_string()),
+            },
+        )
+        .await;
+
+        let state = orch.state.read().await;
+        let entry = state.running.get("id1").unwrap();
+        assert_eq!(entry.log_seq, 2);
+        assert_eq!(entry.event_log.len(), 2);
+        assert_eq!(entry.event_log[0].seq, 1);
+        assert_eq!(entry.event_log[0].event_type, "session_started");
+        assert_eq!(entry.event_log[1].seq, 2);
+        assert_eq!(entry.event_log[1].event_type, "turn_completed");
+    }
+
+    #[tokio::test]
+    async fn test_on_agent_update_broadcasts_log_entry() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Create a broadcast channel and subscribe
+        let mut rx = {
+            let mut state = orch.state.write().await;
+            let (tx, rx) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+            rx
+        };
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::Notification {
+                message: "hello".to_string(),
+            },
+        )
+        .await;
+
+        // Receiver should get the broadcast
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.seq, 1);
+        assert_eq!(received.event_type, "notification");
+        assert_eq!(received.message, Some("hello".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_on_agent_update_broadcast_no_subscribers_ok() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Create broadcast channel with no subscribers (receiver dropped)
+        {
+            let mut state = orch.state.write().await;
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+        }
+
+        // Should not panic even with no subscribers
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::TurnCompleted {
+                message: Some("test".to_string()),
+            },
+        )
+        .await;
+
+        let state = orch.state.read().await;
+        let entry = state.running.get("id1").unwrap();
+        assert_eq!(entry.event_log.len(), 1);
+    }
+
+    // ── dispatch_issue: broadcast channel creation ───────────────────
+
+    #[tokio::test]
+    async fn test_dispatch_creates_broadcast_channel() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&server.url());
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        orch.dispatch_issue(issue, None).await;
+
+        let state = orch.state.read().await;
+        assert!(state.event_broadcasts.contains_key("id1"));
+    }
+
+    // ── on_worker_exit: broadcast channel removal ────────────────────
+
+    #[tokio::test]
+    async fn test_on_worker_exit_removes_broadcast_channel() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        // Add a broadcast channel
+        {
+            let mut state = orch.state.write().await;
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+        }
+
+        orch.on_worker_exit("id1", WorkerExitReason::Cancelled)
+            .await;
+
+        let state = orch.state.read().await;
+        assert!(!state.event_broadcasts.contains_key("id1"));
+    }
+
+    // ── terminate_running_issue: broadcast channel removal ───────────
+
+    #[tokio::test]
+    async fn test_terminate_removes_broadcast_channel() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        {
+            let mut state = orch.state.write().await;
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+        }
+
+        orch.terminate_running_issue("id1", false).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.event_broadcasts.contains_key("id1"));
     }
 
     // ── schedule_retry_inner ─────────────────────────────────────────
@@ -2717,7 +3054,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         // Mock: candidates response with 2 issues, then states reconciliation (empty running)
-        let candidates_mock = server
+        let _candidates_mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -2725,6 +3062,7 @@ mod tests {
                 ("id1", "PROJ-1", "Todo"),
                 ("id2", "PROJ-2", "In Progress"),
             ]))
+            .expect_at_least(1)
             .create_async()
             .await;
 
@@ -2739,8 +3077,6 @@ mod tests {
         assert!(state.running.contains_key("id2"));
         assert!(state.claimed.contains("id1"));
         assert!(state.claimed.contains("id2"));
-
-        candidates_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -2748,7 +3084,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
 
         // Return 5 candidates, but max_concurrent is 3
-        let candidates_mock = server
+        let _candidates_mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -2759,6 +3095,7 @@ mod tests {
                 ("id4", "PROJ-4", "Todo"),
                 ("id5", "PROJ-5", "Todo"),
             ]))
+            .expect_at_least(1)
             .create_async()
             .await;
 
@@ -2769,8 +3106,6 @@ mod tests {
 
         let state = orch.state.read().await;
         assert_eq!(state.running.len(), 3); // max_concurrent_agents = 3
-
-        candidates_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -2994,11 +3329,12 @@ mod tests {
     #[tokio::test]
     async fn test_on_retry_fired_issue_still_active_dispatches() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server
+        let _mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect_at_least(1)
             .create_async()
             .await;
 
@@ -3028,8 +3364,6 @@ mod tests {
         assert!(state.running.contains_key("id1"));
         // Retry entry should be removed (replaced by dispatch)
         assert!(!state.retry_attempts.contains_key("id1"));
-
-        mock.assert_async().await;
     }
 
     #[traced_test]
@@ -3306,6 +3640,82 @@ mod tests {
         assert!(state.running.contains_key("id1"));
     }
 
+    // ── transition_to_in_progress ──────────────────────────────────
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_transition_to_in_progress_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        // resolve_state_id response
+        let resolve_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-ip", "name": "In Progress" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // update_issue_state response
+        let update_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let orch = Orchestrator::new(
+            test_config_with_endpoint(&server.url()),
+            "template".to_string(),
+        );
+
+        orch.transition_to_in_progress("issue-1", "PROJ-1").await;
+
+        assert!(logs_contain("transitioned issue to In Progress"));
+        resolve_mock.assert_async().await;
+        update_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_transition_to_in_progress_failure_logs_warning() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let orch = Orchestrator::new(
+            test_config_with_endpoint(&server.url()),
+            "template".to_string(),
+        );
+
+        orch.transition_to_in_progress("issue-1", "PROJ-1").await;
+
+        assert!(logs_contain("failed to transition issue to In Progress"));
+        mock.assert_async().await;
+    }
+
     // ── reconcile (integration) ──────────────────────────────────────
 
     #[tokio::test]
@@ -3359,11 +3769,12 @@ mod tests {
     #[tokio::test]
     async fn test_handle_message_retry_fired() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server
+        let _mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect_at_least(1)
             .create_async()
             .await;
 
@@ -3392,8 +3803,6 @@ mod tests {
 
         let state = orch.state.read().await;
         assert!(state.running.contains_key("id1"));
-
-        mock.assert_async().await;
     }
 
     // ── Edge cases ───────────────────────────────────────────────────
@@ -3402,7 +3811,7 @@ mod tests {
     async fn test_multiple_dispatches_same_tick() {
         let mut server = mockito::Server::new_async().await;
 
-        let mock = server
+        let _mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -3410,6 +3819,7 @@ mod tests {
                 ("id1", "PROJ-1", "Todo"),
                 ("id2", "PROJ-2", "Todo"),
             ]))
+            .expect_at_least(1)
             .create_async()
             .await;
 
@@ -3422,8 +3832,6 @@ mod tests {
         assert_eq!(state.running.len(), 2);
         assert!(state.claimed.contains("id1"));
         assert!(state.claimed.contains("id2"));
-
-        mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -3433,16 +3841,16 @@ mod tests {
         // on_tick calls reconcile() first (which calls reconcile_tracker_states
         // making one HTTP request), then fetch_candidate_issues (another request).
         // Both go to the same endpoint so we need to allow 2 requests.
-        let reconcile_mock = server
+        let _reconcile_mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(mock_states_response(&[("id1", "PROJ-1", "Todo")]))
-            .expect(1)
+            .expect_at_least(1)
             .create_async()
             .await;
 
-        let candidates_mock = server
+        let _candidates_mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -3450,7 +3858,7 @@ mod tests {
                 ("id1", "PROJ-1", "Todo"),
                 ("id2", "PROJ-2", "Todo"),
             ]))
-            .expect(1)
+            .expect_at_least(1)
             .create_async()
             .await;
 
@@ -3467,9 +3875,6 @@ mod tests {
         assert!(state.running.contains_key("id1"));
         assert!(state.running.contains_key("id2"));
         assert_eq!(state.running.len(), 2);
-
-        reconcile_mock.assert_async().await;
-        candidates_mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -4507,19 +4912,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut server = mockito::Server::new_async().await;
 
-        // Startup: empty
-        server
-            .mock("POST", "/")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(mock_candidates_response(&[]))
-            .expect(1)
-            .create_async()
-            .await;
+        // Use body-matching to distinguish GraphQL query types, avoiding
+        // LIFO ordering issues when dispatch adds transition API calls.
+        //
+        // Query types in request bodies:
+        //   - CandidateIssues  → fetch_candidate_issues (polling)
+        //   - IssuesByIds      → fetch_issue_states_by_ids (reconciliation)
+        //   - WorkflowStates   → resolve_state_id (transition step 1)
+        //   - issueUpdate      → update_issue_state (transition step 2)
 
-        // Candidates: one issue in Todo
+        // Candidate polls: first returns PROJ-1, then empty forever
         server
             .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("CandidateIssues".to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
@@ -4527,10 +4932,20 @@ mod tests {
             .create_async()
             .await;
 
-        // Reconcile will see the issue has gone to "Done" (terminal)
-        // and cancel the running worker
         server
             .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("CandidateIssues".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        // Reconcile state check: issue has gone to Done (terminal)
+        server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(mock_states_response(&[("id1", "PROJ-1", "Done")]))
@@ -4538,12 +4953,40 @@ mod tests {
             .create_async()
             .await;
 
-        // Subsequent ticks: no candidates
+        // Transition: resolve workflow state ID
         server
             .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("WorkflowStates".to_string()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(mock_candidates_response(&[]))
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-ip", "name": "In Progress" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        // Transition: update issue state
+        server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("issueUpdate".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
             .expect_at_least(0)
             .create_async()
             .await;
@@ -4943,5 +5386,30 @@ mod tests {
         config.tracker.team_key = String::new();
         let env_vars = build_agent_env_vars(&config);
         assert!(env_vars.is_empty());
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_dispatch_issue_distributed_mode() {
+        let mut config = test_config();
+        config.deployment = DeploymentConfig {
+            mode: DeploymentMode::Distributed,
+            auth_token: Some("dist-token".to_string()),
+        };
+        let orch = Orchestrator::new(config, "Test prompt {{ issue.identifier }}".to_string());
+        let issue = make_issue("dist-1", "DIST-1", "Todo");
+        orch.dispatch_issue(issue, None).await;
+
+        // Issue should be in running state
+        let state = orch.state.read().await;
+        assert!(state.running.contains_key("dist-1"));
+        assert!(state.claimed.contains("dist-1"));
+
+        // No worker handle should exist (distributed mode returns early)
+        let handles = orch.worker_handles.read().await;
+        assert!(!handles.contains_key("dist-1"));
+
+        // Check the log message
+        assert!(logs_contain("issue queued for distributed worker"));
     }
 }

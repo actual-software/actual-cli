@@ -2,6 +2,34 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+// Re-export protocol types for backward compatibility.
+pub use crate::protocol::{AgentEvent, LiveSession, RunningEntry, WorkerExitReason};
+
+/// Maximum number of log entries to retain per running issue.
+/// Older entries are evicted in FIFO order.
+pub const MAX_LOG_ENTRIES: usize = 500;
+
+/// Broadcast channel capacity for per-issue event streaming.
+pub const BROADCAST_CHANNEL_CAPACITY: usize = 256;
+
+/// A timestamped log entry for per-issue event history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogEntry {
+    pub seq: u64,
+    pub timestamp: DateTime<Utc>,
+    pub event_type: String,
+    pub message: Option<String>,
+    pub tokens: Option<TokenSnapshot>,
+}
+
+/// Snapshot of token usage at a point in time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenSnapshot {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
 /// Normalized issue record from the tracker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
@@ -41,36 +69,8 @@ pub struct WorkflowDefinition {
     pub prompt_template: String,
 }
 
-/// Live session metadata for a running coding agent.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct LiveSession {
-    pub session_id: Option<String>,
-    pub agent_pid: Option<u32>,
-    pub last_event: Option<String>,
-    pub last_event_at: Option<DateTime<Utc>>,
-    pub last_message: Option<String>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-    pub last_reported_input_tokens: u64,
-    pub last_reported_output_tokens: u64,
-    pub last_reported_total_tokens: u64,
-    pub turn_count: u32,
-}
-
-/// Entry in the running map, tracking one active worker.
-#[derive(Debug)]
-pub struct RunningEntry {
-    pub issue: Issue,
-    pub identifier: String,
-    pub session: LiveSession,
-    pub retry_attempt: Option<u32>,
-    pub started_at: DateTime<Utc>,
-    pub cancel_tx: tokio::sync::oneshot::Sender<()>,
-}
-
 /// Scheduled retry state for an issue.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryEntry {
     pub issue_id: String,
     pub identifier: String,
@@ -80,7 +80,7 @@ pub struct RetryEntry {
 }
 
 /// Aggregate token totals.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentTotals {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -93,7 +93,6 @@ pub struct AgentTotals {
 const MAX_COMPLETED_ENTRIES: usize = 1000;
 
 /// Orchestrator runtime state.
-#[derive(Debug)]
 pub struct OrchestratorState {
     pub poll_interval_ms: u64,
     pub max_concurrent_agents: u32,
@@ -105,6 +104,26 @@ pub struct OrchestratorState {
     completed_order: VecDeque<String>,
     pub agent_totals: AgentTotals,
     pub rate_limits: Option<serde_json::Value>,
+    /// Per-issue broadcast channels for SSE event streaming.
+    pub event_broadcasts: HashMap<String, tokio::sync::broadcast::Sender<LogEntry>>,
+}
+
+impl std::fmt::Debug for OrchestratorState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrchestratorState")
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("max_concurrent_agents", &self.max_concurrent_agents)
+            .field("running", &self.running)
+            .field("claimed", &self.claimed)
+            .field("retry_attempts", &self.retry_attempts)
+            .field("agent_totals", &self.agent_totals)
+            .field("rate_limits", &self.rate_limits)
+            .field(
+                "event_broadcasts",
+                &format!("<{} channels>", self.event_broadcasts.len()),
+            )
+            .finish()
+    }
 }
 
 impl OrchestratorState {
@@ -119,6 +138,7 @@ impl OrchestratorState {
             completed_order: VecDeque::new(),
             agent_totals: AgentTotals::default(),
             rate_limits: None,
+            event_broadcasts: HashMap::new(),
         }
     }
 
@@ -164,45 +184,76 @@ impl OrchestratorState {
     }
 }
 
-/// Events emitted by the agent runner to the orchestrator.
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    SessionStarted {
-        session_id: String,
-        pid: Option<u32>,
-    },
-    TurnCompleted {
-        message: Option<String>,
-    },
-    TurnFailed {
-        error: String,
-    },
-    Notification {
-        message: String,
-    },
-    TokenUsage {
-        input_tokens: u64,
-        output_tokens: u64,
-        total_tokens: u64,
-    },
-    AgentMessage {
-        event_type: String,
-        message: Option<String>,
-    },
-    /// §11.2: Rate limit information from Claude CLI.
-    RateLimitUpdate {
-        data: serde_json::Value,
-    },
+/// Create a `LogEntry` from an `AgentEvent` for the event log.
+pub fn create_log_entry(seq: u64, event: &AgentEvent) -> LogEntry {
+    let (event_type, message, tokens) = extract_log_fields(event);
+    LogEntry {
+        seq,
+        timestamp: Utc::now(),
+        event_type,
+        message,
+        tokens,
+    }
 }
 
-/// Worker exit reason reported back to orchestrator.
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkerExitReason {
-    Normal,
-    Failed(String),
-    TimedOut,
-    Stalled,
-    Cancelled,
+/// Extract event type, message, and token snapshot from an AgentEvent.
+fn extract_log_fields(event: &AgentEvent) -> (String, Option<String>, Option<TokenSnapshot>) {
+    match event {
+        AgentEvent::SessionStarted { session_id, .. } => (
+            "session_started".to_string(),
+            Some(format!("Session {session_id} started")),
+            None,
+        ),
+        AgentEvent::TurnCompleted { message } => {
+            ("turn_completed".to_string(), message.clone(), None)
+        }
+        AgentEvent::TurnFailed { error } => ("turn_failed".to_string(), Some(error.clone()), None),
+        AgentEvent::Notification { message } => {
+            ("notification".to_string(), Some(message.clone()), None)
+        }
+        AgentEvent::TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens,
+        } => (
+            "token_usage".to_string(),
+            None,
+            Some(TokenSnapshot {
+                input_tokens: *input_tokens,
+                output_tokens: *output_tokens,
+                total_tokens: *total_tokens,
+            }),
+        ),
+        AgentEvent::AgentMessage {
+            event_type,
+            message,
+        } => (event_type.clone(), message.clone(), None),
+        AgentEvent::RateLimitUpdate { data } => {
+            ("rate_limit_event".to_string(), Some(data.to_string()), None)
+        }
+    }
+}
+
+/// Check whether a rate-limit event should be logged to the event stream.
+///
+/// Returns `true` only when the event is interesting: the status is NOT
+/// `"allowed"` (i.e. the agent is being rate-limited or throttled).
+/// Routine "allowed" pings are filtered out to reduce dashboard noise.
+pub fn should_log_rate_limit(data: &serde_json::Value) -> bool {
+    let status = data
+        .get("rate_limit_info")
+        .and_then(|info| info.get("status"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    status != "allowed"
+}
+
+/// Append a log entry to the event log with bounded eviction.
+pub fn append_log_entry(event_log: &mut VecDeque<LogEntry>, entry: LogEntry) {
+    event_log.push_back(entry);
+    while event_log.len() > MAX_LOG_ENTRIES {
+        event_log.pop_front();
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +382,262 @@ mod tests {
         assert!(state.is_completed(&format!("issue-{last}")));
     }
 
+    // ── LogEntry / TokenSnapshot ────────────────────────────────────
+
+    #[test]
+    fn log_entry_serializes_to_json() {
+        let entry = LogEntry {
+            seq: 1,
+            timestamp: Utc::now(),
+            event_type: "session_started".to_string(),
+            message: Some("hello".to_string()),
+            tokens: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"seq\":1"));
+        assert!(json.contains("\"event_type\":\"session_started\""));
+        assert!(json.contains("\"message\":\"hello\""));
+    }
+
+    #[test]
+    fn log_entry_with_tokens_serializes() {
+        let entry = LogEntry {
+            seq: 5,
+            timestamp: Utc::now(),
+            event_type: "token_usage".to_string(),
+            message: None,
+            tokens: Some(TokenSnapshot {
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+            }),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"input_tokens\":100"));
+        assert!(json.contains("\"output_tokens\":50"));
+        assert!(json.contains("\"total_tokens\":150"));
+    }
+
+    #[test]
+    fn token_snapshot_serializes() {
+        let snap = TokenSnapshot {
+            input_tokens: 10,
+            output_tokens: 20,
+            total_tokens: 30,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"input_tokens\":10"));
+    }
+
+    // ── create_log_entry ─────────────────────────────────────────────
+
+    #[test]
+    fn create_log_entry_session_started() {
+        let event = AgentEvent::SessionStarted {
+            session_id: "sess-1".to_string(),
+            pid: Some(42),
+        };
+        let entry = create_log_entry(1, &event);
+        assert_eq!(entry.seq, 1);
+        assert_eq!(entry.event_type, "session_started");
+        assert!(entry.message.unwrap().contains("sess-1"));
+        assert!(entry.tokens.is_none());
+    }
+
+    #[test]
+    fn create_log_entry_turn_completed() {
+        let event = AgentEvent::TurnCompleted {
+            message: Some("done".to_string()),
+        };
+        let entry = create_log_entry(2, &event);
+        assert_eq!(entry.event_type, "turn_completed");
+        assert_eq!(entry.message, Some("done".to_string()));
+        assert!(entry.tokens.is_none());
+    }
+
+    #[test]
+    fn create_log_entry_turn_completed_no_message() {
+        let event = AgentEvent::TurnCompleted { message: None };
+        let entry = create_log_entry(3, &event);
+        assert_eq!(entry.event_type, "turn_completed");
+        assert!(entry.message.is_none());
+    }
+
+    #[test]
+    fn create_log_entry_turn_failed() {
+        let event = AgentEvent::TurnFailed {
+            error: "boom".to_string(),
+        };
+        let entry = create_log_entry(4, &event);
+        assert_eq!(entry.event_type, "turn_failed");
+        assert_eq!(entry.message, Some("boom".to_string()));
+    }
+
+    #[test]
+    fn create_log_entry_notification() {
+        let event = AgentEvent::Notification {
+            message: "heads up".to_string(),
+        };
+        let entry = create_log_entry(5, &event);
+        assert_eq!(entry.event_type, "notification");
+        assert_eq!(entry.message, Some("heads up".to_string()));
+    }
+
+    #[test]
+    fn create_log_entry_token_usage() {
+        let event = AgentEvent::TokenUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+        };
+        let entry = create_log_entry(6, &event);
+        assert_eq!(entry.event_type, "token_usage");
+        assert!(entry.message.is_none());
+        let tokens = entry.tokens.unwrap();
+        assert_eq!(tokens.input_tokens, 100);
+        assert_eq!(tokens.output_tokens, 50);
+        assert_eq!(tokens.total_tokens, 150);
+    }
+
+    #[test]
+    fn create_log_entry_agent_message() {
+        let event = AgentEvent::AgentMessage {
+            event_type: "tool_use".to_string(),
+            message: Some("using grep".to_string()),
+        };
+        let entry = create_log_entry(7, &event);
+        assert_eq!(entry.event_type, "tool_use");
+        assert_eq!(entry.message, Some("using grep".to_string()));
+        assert!(entry.tokens.is_none());
+    }
+
+    #[test]
+    fn create_log_entry_agent_message_no_message() {
+        let event = AgentEvent::AgentMessage {
+            event_type: "thinking".to_string(),
+            message: None,
+        };
+        let entry = create_log_entry(8, &event);
+        assert_eq!(entry.event_type, "thinking");
+        assert!(entry.message.is_none());
+    }
+
+    #[test]
+    fn create_log_entry_rate_limit_update() {
+        let data = serde_json::json!({"requests_remaining": 42});
+        let event = AgentEvent::RateLimitUpdate { data };
+        let entry = create_log_entry(9, &event);
+        assert_eq!(entry.event_type, "rate_limit_event");
+        assert!(entry.message.unwrap().contains("42"));
+        assert!(entry.tokens.is_none());
+    }
+
+    // ── should_log_rate_limit ───────────────────────────────────────
+
+    #[test]
+    fn rate_limit_allowed_is_not_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "status": "allowed" },
+            "type": "rate_limit_event"
+        });
+        assert!(!should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_rejected_is_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "status": "rejected" },
+            "type": "rate_limit_event"
+        });
+        assert!(should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_throttled_is_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "status": "throttled" },
+            "type": "rate_limit_event"
+        });
+        assert!(should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_missing_info_is_logged() {
+        let data = serde_json::json!({"requests_remaining": 42});
+        assert!(should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_missing_status_is_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "isUsingOverage": false }
+        });
+        assert!(should_log_rate_limit(&data));
+    }
+
+    #[test]
+    fn rate_limit_empty_status_is_logged() {
+        let data = serde_json::json!({
+            "rate_limit_info": { "status": "" }
+        });
+        assert!(should_log_rate_limit(&data));
+    }
+
+    // ── append_log_entry / bounded eviction ──────────────────────────
+
+    #[test]
+    fn append_log_entry_adds_entry() {
+        let mut log = VecDeque::new();
+        let entry = LogEntry {
+            seq: 1,
+            timestamp: Utc::now(),
+            event_type: "test".to_string(),
+            message: None,
+            tokens: None,
+        };
+        append_log_entry(&mut log, entry);
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].seq, 1);
+    }
+
+    #[test]
+    fn append_log_entry_evicts_oldest_beyond_limit() {
+        let mut log = VecDeque::new();
+        for i in 0..MAX_LOG_ENTRIES + 10 {
+            let entry = LogEntry {
+                seq: i as u64,
+                timestamp: Utc::now(),
+                event_type: "test".to_string(),
+                message: None,
+                tokens: None,
+            };
+            append_log_entry(&mut log, entry);
+        }
+        assert_eq!(log.len(), MAX_LOG_ENTRIES);
+        // Oldest should be evicted
+        assert_eq!(log.front().unwrap().seq, 10);
+        let last = (MAX_LOG_ENTRIES + 9) as u64;
+        assert_eq!(log.back().unwrap().seq, last);
+    }
+
+    // ── OrchestratorState::new includes event_broadcasts ─────────────
+
+    #[test]
+    fn orchestrator_state_new_has_empty_broadcasts() {
+        let state = OrchestratorState::new(5000, 4);
+        assert!(state.event_broadcasts.is_empty());
+    }
+
+    // ── OrchestratorState Debug impl ─────────────────────────────────
+
+    #[test]
+    fn orchestrator_state_debug_impl() {
+        let state = OrchestratorState::new(5000, 4);
+        let debug = format!("{:?}", state);
+        assert!(debug.contains("OrchestratorState"));
+        assert!(debug.contains("event_broadcasts"));
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
 
     fn make_issue(id: &str, issue_state: &str) -> Issue {
@@ -362,6 +669,8 @@ mod tests {
                 retry_attempt: None,
                 started_at: Utc::now(),
                 cancel_tx,
+                event_log: VecDeque::new(),
+                log_seq: 0,
             },
         );
     }

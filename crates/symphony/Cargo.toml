@@ -39,6 +39,9 @@ axum = "0.8"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 
+# Async streams (for SSE)
+tokio-stream = { version = "0.1", features = ["sync"] }
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 

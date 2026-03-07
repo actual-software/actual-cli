@@ -506,7 +506,7 @@ Example with default `max_retry_backoff_ms: 300000` (5m):
 | 5 | 160s |
 | 6+ | 300s (capped) |
 
-Retries stop after `max_retries` attempts (default 10). At that point the issue's claim is released.
+By default, retries continue indefinitely with backoff capped at `max_retry_backoff_ms`. Set `max_retries` to a positive integer to enforce a retry cap, after which the issue's claim is released.
 
 ### Reconciliation
 

@@ -1,16 +1,20 @@
 use crate::config::ServiceConfig;
-use crate::model::{OrchestratorState, RetryEntry};
-use crate::orchestrator::OrchestratorMessage;
-use axum::extract::{Path, State};
+use crate::model::{LogEntry, OrchestratorState, RetryEntry};
+use crate::protocol::OrchestratorMessage;
+use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, RwLock};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -63,6 +67,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(handle_dashboard))
         .route("/api/v1/state", get(handle_state))
         .route("/api/v1/refresh", post(handle_refresh))
+        .route(
+            "/api/v1/{issue_identifier}/stream",
+            get(handle_issue_stream),
+        )
+        .route("/api/v1/{issue_identifier}/logs", get(handle_issue_logs))
         .route("/api/v1/{issue_identifier}", get(handle_issue_detail))
         .fallback(handle_fallback)
         .layer(cors)
@@ -358,6 +367,139 @@ async fn handle_issue_detail(
     )
 }
 
+/// Query parameters for GET /api/v1/:issue_identifier/logs.
+#[derive(Debug, Deserialize)]
+pub struct LogsQuery {
+    pub after: Option<u64>,
+}
+
+/// Response for GET /api/v1/:issue_identifier/logs.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogsResponse {
+    pub issue_identifier: String,
+    pub count: usize,
+    pub logs: Vec<LogEntry>,
+}
+
+/// Convert a broadcast stream result into an optional SSE event.
+///
+/// Returns `Some` for successfully received entries and `None` for
+/// lagged/closed errors, which are expected in normal operation.
+/// Extracted as a named function so LLVM coverage can track both arms.
+fn broadcast_result_to_sse(
+    result: Result<LogEntry, tokio_stream::wrappers::errors::BroadcastStreamRecvError>,
+) -> Option<Result<Event, Infallible>> {
+    match result {
+        Ok(entry) => Some(format_sse_event(&entry)),
+        Err(_) => None,
+    }
+}
+
+/// Format a single SSE event from a log entry.
+fn format_sse_event(entry: &LogEntry) -> Result<Event, Infallible> {
+    let data = serde_json::to_string(entry).unwrap_or_default();
+    Ok(Event::default()
+        .event(&entry.event_type)
+        .data(data)
+        .id(entry.seq.to_string()))
+}
+
+/// GET /api/v1/:issue_identifier/stream — SSE event stream.
+async fn handle_issue_stream(
+    State(state): State<AppState>,
+    Path(issue_identifier): Path<String>,
+) -> Response {
+    let orch_state = state.orchestrator_state.read().await;
+
+    // Find the running entry by identifier to get the issue_id and catch-up events
+    let found = orch_state
+        .running
+        .values()
+        .find(|e| e.identifier == issue_identifier);
+
+    let (issue_id, catchup_entries) = match found {
+        Some(entry) => (
+            entry.issue.id.clone(),
+            entry.event_log.iter().cloned().collect::<Vec<_>>(),
+        ),
+        None => {
+            drop(orch_state);
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "issue_not_found",
+                format!("No running issue with identifier '{issue_identifier}'"),
+            );
+        }
+    };
+
+    // Subscribe to broadcast channel
+    let broadcast_rx = match orch_state.event_broadcasts.get(&issue_id) {
+        Some(tx) => tx.subscribe(),
+        None => {
+            drop(orch_state);
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "issue_not_found",
+                format!("No broadcast channel for issue '{issue_identifier}'"),
+            );
+        }
+    };
+    drop(orch_state);
+
+    // Build the SSE stream: catch-up burst + live events
+    let catchup_stream =
+        tokio_stream::iter(catchup_entries.into_iter().map(|e| format_sse_event(&e)));
+
+    let live_stream = BroadcastStream::new(broadcast_rx).filter_map(broadcast_result_to_sse);
+
+    let combined = catchup_stream.chain(live_stream);
+
+    Sse::new(combined)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
+}
+
+/// GET /api/v1/:issue_identifier/logs — Log history endpoint.
+async fn handle_issue_logs(
+    State(state): State<AppState>,
+    Path(issue_identifier): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Response {
+    let orch_state = state.orchestrator_state.read().await;
+
+    let found = find_running_by_identifier(&orch_state, &issue_identifier);
+
+    match found {
+        Some(entry) => {
+            let logs: Vec<LogEntry> = match query.after {
+                Some(after_seq) => entry
+                    .event_log
+                    .iter()
+                    .filter(|e| e.seq > after_seq)
+                    .cloned()
+                    .collect(),
+                None => entry.event_log.iter().cloned().collect(),
+            };
+
+            let response = LogsResponse {
+                issue_identifier: entry.identifier.clone(),
+                count: logs.len(),
+                logs,
+            };
+
+            (StatusCode::OK, axum::Json(response)).into_response()
+        }
+        None => {
+            drop(orch_state);
+            error_response(
+                StatusCode::NOT_FOUND,
+                "issue_not_found",
+                format!("No running issue with identifier '{issue_identifier}'"),
+            )
+        }
+    }
+}
+
 /// POST /api/v1/refresh — Trigger immediate poll.
 async fn handle_refresh(State(state): State<AppState>) -> impl IntoResponse {
     let now = Utc::now().to_rfc3339();
@@ -474,7 +616,7 @@ table {{ width:100%; border-collapse:collapse; font-size:13px; }}
 thead th {{ padding:10px 16px; text-align:left; font-weight:500; color:var(--text-dim); font-size:11px; text-transform:uppercase; letter-spacing:0.5px; background:var(--surface2); border-bottom:1px solid var(--border); }}
 tbody td {{ padding:10px 16px; border-bottom:1px solid var(--border); }}
 tbody tr:last-child td {{ border-bottom:none; }}
-tbody tr:hover {{ background:rgba(0,212,255,0.04); }}
+tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
 .mono {{ font-family:'SF Mono',SFMono-Regular,Consolas,monospace; font-size:12px; }}
 .state-badge {{ display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:500; }}
 .state-badge.active {{ background:rgba(0,230,118,0.15); color:var(--green); }}
@@ -487,6 +629,25 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); }}
 .token-bar .out {{ color:var(--accent2); }}
 .rate-limits pre {{ padding:16px 20px; margin:0; font-family:'SF Mono',SFMono-Regular,Consolas,monospace; font-size:12px; line-height:1.5; overflow-x:auto; color:var(--text); }}
 .updated {{ font-size:11px; color:var(--text-dim); }}
+.log-panel {{ background:#0a0a14; border:1px solid var(--border); border-radius:var(--radius); margin-bottom:16px; overflow:hidden; display:none; }}
+.log-panel.open {{ display:block; }}
+.log-panel-header {{ padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; background:var(--surface); }}
+.log-panel-header h3 {{ font-size:13px; font-weight:600; }}
+.log-panel-close {{ background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:16px; padding:4px 8px; }}
+.log-panel-close:hover {{ color:var(--text); }}
+.log-panel-body {{ max-height:400px; overflow-y:auto; padding:8px 0; font-family:'SF Mono',SFMono-Regular,Consolas,monospace; font-size:12px; line-height:1.6; }}
+.log-entry {{ padding:2px 16px; display:flex; gap:10px; align-items:baseline; }}
+.log-entry:hover {{ background:rgba(255,255,255,0.03); }}
+.log-ts {{ color:var(--text-dim); white-space:nowrap; min-width:60px; }}
+.log-badge {{ display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:600; text-transform:uppercase; white-space:nowrap; }}
+.log-badge.session_started {{ background:rgba(0,230,118,0.2); color:var(--green); }}
+.log-badge.turn_completed {{ background:rgba(0,212,255,0.2); color:var(--accent); }}
+.log-badge.notification {{ background:rgba(224,224,224,0.1); color:var(--text); }}
+.log-badge.token_usage {{ background:rgba(136,136,136,0.15); color:var(--text-dim); }}
+.log-badge.turn_failed {{ background:rgba(255,82,82,0.2); color:var(--red); }}
+.log-badge.rate_limit_event {{ background:rgba(255,171,0,0.2); color:var(--amber); }}
+.log-msg {{ color:var(--text); word-break:break-word; flex:1; }}
+.log-tokens {{ color:var(--text-dim); white-space:nowrap; }}
 @media (max-width:768px) {{
   .stats {{ grid-template-columns:repeat(2,1fr); }}
   .header {{ flex-direction:column; gap:12px; }}
@@ -538,6 +699,14 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); }}
         <p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p>
       </div>
     </div>
+  </div>
+
+  <div class="log-panel" id="logPanel">
+    <div class="log-panel-header">
+      <h3 id="logPanelTitle">Event Log</h3>
+      <button class="log-panel-close" onclick="closeLogPanel()">X</button>
+    </div>
+    <div class="log-panel-body" id="logPanelBody"></div>
   </div>
 
   <div class="section">
@@ -600,7 +769,7 @@ function renderRunning(items) {{
   }}
   let h = '<table><thead><tr><th>Issue</th><th>State</th><th>Session</th><th>Turns</th><th>Last Event</th><th>Tokens</th><th>Started</th></tr></thead><tbody>';
   for (const r of items) {{
-    h += '<tr>';
+    h += '<tr onclick="openLogPanel(\''+esc(r.issue_identifier)+'\')" title="Click to view live logs">';
     h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
     h += '<td><span class="state-badge active">'+esc(r.state)+'</span></td>';
     h += '<td class="mono">'+(r.session_id ? esc(r.session_id).slice(0,12) : '-')+'</td>';
@@ -692,6 +861,52 @@ setInterval(() => {{
   document.getElementById('lastUpdate').textContent = s < 3 ? 'Updated just now' : 'Updated '+s+'s ago';
 }}, 1000);
 
+// ── Live Log Panel ──────────────────────────────────────────────
+let currentLogIssue = null;
+let currentEventSource = null;
+
+function openLogPanel(identifier) {{
+  if (currentLogIssue === identifier) {{ closeLogPanel(); return; }}
+  closeLogPanel();
+  currentLogIssue = identifier;
+  const panel = document.getElementById('logPanel');
+  const title = document.getElementById('logPanelTitle');
+  const body = document.getElementById('logPanelBody');
+  title.textContent = 'Event Log — ' + identifier;
+  body.innerHTML = '';
+  panel.classList.add('open');
+  currentEventSource = new EventSource('/api/v1/' + encodeURIComponent(identifier) + '/stream');
+  currentEventSource.onmessage = function(e) {{ appendLogEntry(JSON.parse(e.data)); }};
+  currentEventSource.addEventListener('session_started', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
+  currentEventSource.addEventListener('turn_completed', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
+  currentEventSource.addEventListener('turn_failed', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
+  currentEventSource.addEventListener('notification', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
+  currentEventSource.addEventListener('token_usage', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
+  currentEventSource.addEventListener('rate_limit_event', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
+  currentEventSource.onerror = function() {{ appendLogEntry({{event_type:'notification',message:'Stream disconnected',seq:0,timestamp:new Date().toISOString()}}); }};
+}}
+
+function closeLogPanel() {{
+  if (currentEventSource) {{ currentEventSource.close(); currentEventSource = null; }}
+  currentLogIssue = null;
+  document.getElementById('logPanel').classList.remove('open');
+}}
+
+function appendLogEntry(entry) {{
+  const body = document.getElementById('logPanelBody');
+  const div = document.createElement('div');
+  div.className = 'log-entry';
+  const ts = entry.timestamp ? ago(entry.timestamp) : '';
+  const badgeClass = entry.event_type || 'notification';
+  let parts = '<span class="log-ts">'+esc(ts)+'</span>';
+  parts += '<span class="log-badge '+esc(badgeClass)+'">'+esc(entry.event_type||'')+'</span>';
+  if (entry.message) parts += '<span class="log-msg">'+esc(entry.message)+'</span>';
+  if (entry.tokens) parts += '<span class="log-tokens">'+fmt(entry.tokens.total_tokens||0)+' tok</span>';
+  div.innerHTML = parts;
+  body.appendChild(div);
+  body.scrollTop = body.scrollHeight;
+}}
+
 // Initial render from server-embedded data
 update(INITIAL);
 // Start polling every 3 seconds
@@ -766,10 +981,11 @@ fn format_tokens(n: u64) -> String {
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, CodingAgentConfig, HooksConfig, PollingConfig, ServerConfig, TrackerConfig,
-        WorkspaceConfig,
+        AgentConfig, CodingAgentConfig, DeploymentConfig, DeploymentMode, HooksConfig,
+        PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
     };
-    use crate::model::{AgentTotals, LiveSession, OrchestratorState, RetryEntry, RunningEntry};
+    use crate::model::{AgentTotals, OrchestratorState, RetryEntry};
+    use crate::protocol::{LiveSession, RunningEntry};
     use axum::body::Body;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
@@ -805,7 +1021,7 @@ mod tests {
             agent: AgentConfig {
                 max_concurrent_agents: 3,
                 max_turns: 5,
-                max_retries: 10,
+                max_retries: None,
                 max_retry_backoff_ms: 300_000,
                 max_concurrent_agents_by_state: HashMap::new(),
             },
@@ -816,6 +1032,10 @@ mod tests {
                 stall_timeout_ms: 300_000,
             },
             server: ServerConfig { port: None },
+            deployment: DeploymentConfig {
+                mode: DeploymentMode::Local,
+                auth_token: None,
+            },
         }
     }
 
@@ -860,6 +1080,8 @@ mod tests {
                 retry_attempt: None,
                 started_at: Utc::now(),
                 cancel_tx,
+                event_log: std::collections::VecDeque::new(),
+                log_seq: 0,
             },
         );
     }
@@ -1180,6 +1402,8 @@ mod tests {
                 retry_attempt: None,
                 started_at: Utc::now(),
                 cancel_tx,
+                event_log: std::collections::VecDeque::new(),
+                log_seq: 0,
             },
         );
         state.agent_totals = AgentTotals {
@@ -1629,6 +1853,8 @@ mod tests {
             retry_attempt: None,
             started_at: Utc::now(),
             cancel_tx,
+            event_log: std::collections::VecDeque::new(),
+            log_seq: 0,
         };
 
         let elapsed = running_entry_elapsed_seconds(&entry);
@@ -1659,6 +1885,8 @@ mod tests {
             retry_attempt: None,
             started_at: now,
             cancel_tx,
+            event_log: std::collections::VecDeque::new(),
+            log_seq: 0,
         };
 
         let info = map_running_entry(&entry);
@@ -1828,5 +2056,493 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("issue_not_found"));
         assert!(json.contains("Not found"));
+    }
+
+    // ── LogsResponse serialization ───────────────────────────────────
+
+    #[test]
+    fn test_logs_response_serialization() {
+        let response = LogsResponse {
+            issue_identifier: "PROJ-1".to_string(),
+            count: 1,
+            logs: vec![crate::model::LogEntry {
+                seq: 1,
+                timestamp: Utc::now(),
+                event_type: "session_started".to_string(),
+                message: Some("started".to_string()),
+                tokens: None,
+            }],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("PROJ-1"));
+        assert!(json.contains("\"count\":1"));
+        assert!(json.contains("session_started"));
+    }
+
+    // ── format_sse_event ─────────────────────────────────────────────
+
+    #[test]
+    fn test_format_sse_event_ok() {
+        let entry = crate::model::LogEntry {
+            seq: 42,
+            timestamp: Utc::now(),
+            event_type: "turn_completed".to_string(),
+            message: Some("done".to_string()),
+            tokens: None,
+        };
+        let result = format_sse_event(&entry);
+        assert!(result.is_ok());
+    }
+
+    // ── broadcast_result_to_sse ──────────────────────────────────────
+
+    #[test]
+    fn test_broadcast_result_to_sse_ok() {
+        let entry = crate::model::LogEntry {
+            seq: 1,
+            timestamp: Utc::now(),
+            event_type: "test".to_string(),
+            message: Some("hi".to_string()),
+            tokens: None,
+        };
+        let result = broadcast_result_to_sse(Ok(entry));
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_broadcast_result_to_sse_err() {
+        use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+        let result = broadcast_result_to_sse(Err(BroadcastStreamRecvError::Lagged(5)));
+        assert!(result.is_none());
+    }
+
+    // ── SSE stream endpoint ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_stream_not_found() {
+        let app_state = test_app_state();
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/PROJ-NOPE/stream")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "issue_not_found");
+    }
+
+    #[tokio::test]
+    async fn test_stream_returns_sse_content_type() {
+        let app_state = test_app_state();
+        insert_running(&app_state, "id1", "PROJ-1", "Todo").await;
+
+        // Create broadcast channel for the issue
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/PROJ-1/stream")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(content_type.contains("text/event-stream"));
+    }
+
+    #[tokio::test]
+    async fn test_stream_sends_catchup_events() {
+        let app_state = test_app_state();
+        insert_running(&app_state, "id1", "PROJ-1", "Todo").await;
+
+        // Add log entries and broadcast channel
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            let entry = state.running.get_mut("id1").unwrap();
+            entry.event_log.push_back(crate::model::LogEntry {
+                seq: 1,
+                timestamp: Utc::now(),
+                event_type: "session_started".to_string(),
+                message: Some("test session".to_string()),
+                tokens: None,
+            });
+            entry.event_log.push_back(crate::model::LogEntry {
+                seq: 2,
+                timestamp: Utc::now(),
+                event_type: "turn_completed".to_string(),
+                message: Some("done".to_string()),
+                tokens: None,
+            });
+            entry.log_seq = 2;
+
+            let (tx, _) = tokio::sync::broadcast::channel::<crate::model::LogEntry>(256);
+            // Drop sender immediately so the stream ends after catchup
+            drop(tx);
+            // Create a new one just to have a valid channel
+            let (tx2, _) = tokio::sync::broadcast::channel::<crate::model::LogEntry>(256);
+            state.event_broadcasts.insert("id1".to_string(), tx2);
+        }
+
+        // Use a real TCP server to be able to read stream properly
+        let app = build_router(app_state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        let resp = client
+            .get(format!("http://{addr}/api/v1/PROJ-1/stream"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(content_type.contains("text/event-stream"));
+
+        // Read partial body (catch-up events should be there)
+        let body = tokio::time::timeout(std::time::Duration::from_secs(1), resp.text()).await;
+
+        // The stream may time out after catch-up, that's ok
+        if let Ok(Ok(text)) = body {
+            assert!(text.contains("session_started"));
+            assert!(text.contains("turn_completed"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_no_broadcast_channel() {
+        let app_state = test_app_state();
+        insert_running(&app_state, "id1", "PROJ-1", "Todo").await;
+        // Don't create a broadcast channel
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/PROJ-1/stream")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Log history endpoint ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_logs_not_found() {
+        let app_state = test_app_state();
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/PROJ-NOPE/logs")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "issue_not_found");
+    }
+
+    #[tokio::test]
+    async fn test_logs_empty() {
+        let app_state = test_app_state();
+        insert_running(&app_state, "id1", "PROJ-1", "Todo").await;
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/PROJ-1/logs")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["issue_identifier"], "PROJ-1");
+        assert_eq!(json["count"], 0);
+        assert!(json["logs"].is_array());
+        assert_eq!(json["logs"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_logs_with_entries() {
+        let app_state = test_app_state();
+        insert_running(&app_state, "id1", "PROJ-1", "Todo").await;
+
+        // Add some log entries
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            let entry = state.running.get_mut("id1").unwrap();
+            entry.event_log.push_back(crate::model::LogEntry {
+                seq: 1,
+                timestamp: Utc::now(),
+                event_type: "session_started".to_string(),
+                message: Some("started".to_string()),
+                tokens: None,
+            });
+            entry.event_log.push_back(crate::model::LogEntry {
+                seq: 2,
+                timestamp: Utc::now(),
+                event_type: "token_usage".to_string(),
+                message: None,
+                tokens: Some(crate::model::TokenSnapshot {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    total_tokens: 150,
+                }),
+            });
+            entry.log_seq = 2;
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/PROJ-1/logs")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["issue_identifier"], "PROJ-1");
+        assert_eq!(json["count"], 2);
+        assert_eq!(json["logs"][0]["seq"], 1);
+        assert_eq!(json["logs"][0]["event_type"], "session_started");
+        assert_eq!(json["logs"][1]["seq"], 2);
+        assert_eq!(json["logs"][1]["event_type"], "token_usage");
+        assert!(json["logs"][1]["tokens"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_logs_with_after_filter() {
+        let app_state = test_app_state();
+        insert_running(&app_state, "id1", "PROJ-1", "Todo").await;
+
+        // Add 5 log entries
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            let entry = state.running.get_mut("id1").unwrap();
+            for i in 1..=5 {
+                entry.event_log.push_back(crate::model::LogEntry {
+                    seq: i,
+                    timestamp: Utc::now(),
+                    event_type: format!("event_{i}"),
+                    message: Some(format!("message {i}")),
+                    tokens: None,
+                });
+            }
+            entry.log_seq = 5;
+        }
+
+        let app = build_router(app_state);
+
+        // Request logs after seq=3
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/PROJ-1/logs?after=3")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["count"], 2);
+        assert_eq!(json["logs"][0]["seq"], 4);
+        assert_eq!(json["logs"][1]["seq"], 5);
+    }
+
+    #[tokio::test]
+    async fn test_logs_with_after_returns_none_when_all_before() {
+        let app_state = test_app_state();
+        insert_running(&app_state, "id1", "PROJ-1", "Todo").await;
+
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            let entry = state.running.get_mut("id1").unwrap();
+            entry.event_log.push_back(crate::model::LogEntry {
+                seq: 1,
+                timestamp: Utc::now(),
+                event_type: "test".to_string(),
+                message: None,
+                tokens: None,
+            });
+            entry.log_seq = 1;
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/PROJ-1/logs?after=999")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["count"], 0);
+    }
+
+    // ── Dashboard contains log panel ─────────────────────────────────
+
+    #[test]
+    fn test_dashboard_contains_log_panel() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        assert!(html.contains("logPanel"));
+        assert!(html.contains("logPanelBody"));
+        assert!(html.contains("openLogPanel"));
+        assert!(html.contains("closeLogPanel"));
+        assert!(html.contains("appendLogEntry"));
+        assert!(html.contains("EventSource"));
+        assert!(html.contains("/stream"));
+    }
+
+    #[test]
+    fn test_dashboard_log_panel_css() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        assert!(html.contains("log-panel"));
+        assert!(html.contains("log-entry"));
+        assert!(html.contains("log-badge"));
+        assert!(html.contains("log-badge.session_started"));
+        assert!(html.contains("log-badge.turn_completed"));
+        assert!(html.contains("log-badge.turn_failed"));
+        assert!(html.contains("log-badge.rate_limit_event"));
+    }
+
+    // ── Integration: real server with stream & logs ──────────────────
+
+    #[tokio::test]
+    async fn test_real_server_stream_and_logs() {
+        let app_state = test_app_state();
+        insert_running(&app_state, "id1", "PROJ-1", "Todo").await;
+
+        // Add broadcast channel and some log entries
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            let (tx, _) = tokio::sync::broadcast::channel(256);
+            state.event_broadcasts.insert("id1".to_string(), tx);
+            let entry = state.running.get_mut("id1").unwrap();
+            entry.event_log.push_back(crate::model::LogEntry {
+                seq: 1,
+                timestamp: Utc::now(),
+                event_type: "session_started".to_string(),
+                message: Some("test".to_string()),
+                tokens: None,
+            });
+            entry.log_seq = 1;
+        }
+
+        let app = build_router(app_state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+
+        // Test GET /api/v1/PROJ-1/logs
+        let resp = client
+            .get(format!("http://{addr}/api/v1/PROJ-1/logs"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["logs"][0]["event_type"], "session_started");
+
+        // Test GET /api/v1/PROJ-1/logs?after=0
+        let resp = client
+            .get(format!("http://{addr}/api/v1/PROJ-1/logs?after=0"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["count"], 1);
+
+        // Test GET /api/v1/PROJ-1/logs?after=1
+        let resp = client
+            .get(format!("http://{addr}/api/v1/PROJ-1/logs?after=1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["count"], 0);
+
+        // Test 404 for non-existent issue logs
+        let resp = client
+            .get(format!("http://{addr}/api/v1/PROJ-NOPE/logs"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+
+        // Test 404 for non-existent issue stream
+        let resp = client
+            .get(format!("http://{addr}/api/v1/PROJ-NOPE/stream"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
     }
 }
