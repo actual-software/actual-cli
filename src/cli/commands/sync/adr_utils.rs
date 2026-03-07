@@ -141,11 +141,7 @@ pub(crate) fn raw_adrs_to_output(
         } else {
             for project_path in &adr.matched_projects {
                 if validate_project_path(project_path).is_err() {
-                    tracing::warn!(
-                        "skipping invalid project path '{}' for ADR '{}'",
-                        console::strip_ansi_codes(project_path),
-                        adr.id
-                    );
+                    log_skip_invalid_project(project_path, &adr.id);
                     continue;
                 }
                 let file_path = if project_path == "." {
@@ -239,4 +235,9 @@ pub(crate) fn find_existing_output_files(root_dir: &Path, format: &OutputFormat)
         })
         .collect();
     results.join("\n\n")
+}
+
+fn log_skip_invalid_project(project_path: &str, adr_id: &str) {
+    let clean = console::strip_ansi_codes(project_path);
+    tracing::warn!("skipping invalid project path '{clean}' for ADR '{adr_id}'");
 }
