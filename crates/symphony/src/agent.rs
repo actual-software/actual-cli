@@ -506,6 +506,59 @@ mod tests {
     }
 
     #[test]
+    fn test_regex_replace_max_turns_at_end_of_string() {
+        // --max-turns=N at end with no trailing whitespace
+        let result = regex_replace_max_turns("claude -p --max-turns=30");
+        assert!(!result.contains("--max-turns"));
+        assert_eq!(result, "claude -p");
+    }
+
+    #[test]
+    fn test_regex_replace_max_turns_trailing_whitespace_only() {
+        // --max-turns followed by whitespace but no value after it
+        // This is a malformed command; the flag text is preserved as-is
+        let result = regex_replace_max_turns("claude -p --max-turns   ");
+        // after_ws is empty so we fall through — the bare flag stays
+        assert!(result.contains("--max-turns"));
+    }
+
+    #[test]
+    fn test_regex_replace_max_turns_space_form_at_end() {
+        // --max-turns N at the very end
+        let result = regex_replace_max_turns("claude -p --max-turns 30");
+        assert!(!result.contains("--max-turns"));
+        assert_eq!(result, "claude -p");
+    }
+
+    #[test]
+    fn test_inject_max_turns_no_existing_flag() {
+        let result = inject_max_turns("claude -p --verbose", 25);
+        assert_eq!(result, "claude -p --verbose --max-turns 25");
+    }
+
+    #[test]
+    fn test_inject_max_turns_replaces_equals_form() {
+        let result = inject_max_turns("claude -p --max-turns=10 --verbose", 50);
+        assert!(result.contains("--max-turns 50"));
+        assert!(!result.contains("--max-turns=10"));
+    }
+
+    #[test]
+    fn test_regex_replace_max_turns_bare_flag_no_separator() {
+        // --max-turns immediately followed by another flag (no space, no =)
+        // This is a malformed command; the flag text stays as-is
+        let result = regex_replace_max_turns("claude -p --max-turns--verbose");
+        assert!(result.contains("--max-turns--verbose"));
+    }
+
+    #[test]
+    fn test_regex_replace_max_turns_with_tab_separator() {
+        let result = regex_replace_max_turns("claude -p --max-turns\t30 --verbose");
+        assert!(!result.contains("30"));
+        assert!(result.contains("--verbose"));
+    }
+
+    #[test]
     fn test_parse_system_init() {
         let json = serde_json::json!({
             "type": "system",
