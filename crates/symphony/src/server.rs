@@ -405,140 +405,304 @@ async fn handle_fallback(method: Method) -> Response {
 // ── HTML Rendering ───────────────────────────────────────────────────
 
 /// Render the HTML dashboard page.
+///
+/// The initial page includes server-rendered data for the first paint,
+/// then JavaScript takes over and polls `/api/v1/state` every 3 seconds
+/// for live updates.
 pub fn render_dashboard(
     running: &[RunningInfo],
     retrying: &[RetryInfo],
     totals: &TotalsInfo,
     rate_limits: &Option<serde_json::Value>,
 ) -> String {
-    let mut html = String::with_capacity(4096);
+    let mut html = String::with_capacity(16384);
 
-    html.push_str(
-        r#"<!DOCTYPE html>
+    // Serialize initial state as JSON for the JS hydration
+    let initial_state = serde_json::json!({
+        "running": running,
+        "retrying": retrying,
+        "codex_totals": totals,
+        "rate_limits": rate_limits,
+        "counts": { "running": running.len(), "retrying": retrying.len() },
+    });
+
+    html.push_str(&format!(
+        r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Symphony Dashboard</title>
 <style>
-body { font-family: monospace; margin: 20px; background: #1a1a2e; color: #e0e0e0; }
-h1 { color: #00d4ff; }
-h2 { color: #7b68ee; margin-top: 30px; }
-table { border-collapse: collapse; width: 100%; margin-top: 10px; }
-th, td { border: 1px solid #333; padding: 6px 10px; text-align: left; }
-th { background: #16213e; color: #00d4ff; }
-tr:nth-child(even) { background: #0f3460; }
-tr:nth-child(odd) { background: #1a1a2e; }
-.stat { display: inline-block; margin-right: 30px; }
-.stat-value { font-size: 1.4em; color: #00d4ff; }
-.stat-label { color: #888; }
-.empty { color: #666; font-style: italic; }
-pre { background: #16213e; padding: 10px; border-radius: 4px; overflow-x: auto; }
+*,*::before,*::after {{ box-sizing:border-box; margin:0; padding:0; }}
+:root {{
+  --bg: #0f0f1a;
+  --surface: #1a1a2e;
+  --surface2: #16213e;
+  --border: #2a2a4a;
+  --text: #e0e0e0;
+  --text-dim: #888;
+  --accent: #00d4ff;
+  --accent2: #7b68ee;
+  --green: #00e676;
+  --amber: #ffab00;
+  --red: #ff5252;
+  --radius: 8px;
+}}
+body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }}
+.header {{ background:var(--surface); border-bottom:1px solid var(--border); padding:16px 24px; display:flex; align-items:center; justify-content:space-between; }}
+.header h1 {{ font-size:18px; font-weight:600; display:flex; align-items:center; gap:10px; }}
+.header h1 span {{ color:var(--accent); }}
+.header-right {{ display:flex; align-items:center; gap:16px; font-size:13px; color:var(--text-dim); }}
+.status-dot {{ width:8px; height:8px; border-radius:50%; background:var(--green); display:inline-block; animation:pulse 2s infinite; }}
+@keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.4; }} }}
+.btn {{ background:var(--surface2); border:1px solid var(--border); color:var(--text); padding:6px 14px; border-radius:var(--radius); cursor:pointer; font-size:13px; transition:all 0.15s; }}
+.btn:hover {{ background:var(--border); border-color:var(--accent); }}
+.btn:active {{ transform:scale(0.97); }}
+.content {{ max-width:1400px; margin:0 auto; padding:24px; }}
+.stats {{ display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }}
+.stat-card {{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:20px; }}
+.stat-card .label {{ font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); margin-bottom:8px; }}
+.stat-card .value {{ font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; }}
+.stat-card .value.accent {{ color:var(--accent); }}
+.stat-card .sub {{ font-size:12px; color:var(--text-dim); margin-top:4px; }}
+.section {{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:16px; overflow:hidden; }}
+.section-header {{ padding:14px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }}
+.section-header h2 {{ font-size:14px; font-weight:600; display:flex; align-items:center; gap:8px; }}
+.section-header .badge {{ background:var(--surface2); border:1px solid var(--border); padding:2px 8px; border-radius:12px; font-size:12px; color:var(--text-dim); font-weight:500; }}
+table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+thead th {{ padding:10px 16px; text-align:left; font-weight:500; color:var(--text-dim); font-size:11px; text-transform:uppercase; letter-spacing:0.5px; background:var(--surface2); border-bottom:1px solid var(--border); }}
+tbody td {{ padding:10px 16px; border-bottom:1px solid var(--border); }}
+tbody tr:last-child td {{ border-bottom:none; }}
+tbody tr:hover {{ background:rgba(0,212,255,0.04); }}
+.mono {{ font-family:'SF Mono',SFMono-Regular,Consolas,monospace; font-size:12px; }}
+.state-badge {{ display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:500; }}
+.state-badge.active {{ background:rgba(0,230,118,0.15); color:var(--green); }}
+.state-badge.retry {{ background:rgba(255,171,0,0.15); color:var(--amber); }}
+.empty-state {{ padding:40px 20px; text-align:center; color:var(--text-dim); }}
+.empty-state .icon {{ font-size:32px; margin-bottom:12px; }}
+.empty-state p {{ font-size:13px; line-height:1.6; }}
+.token-bar {{ display:flex; gap:4px; align-items:center; }}
+.token-bar .in {{ color:var(--accent); }}
+.token-bar .out {{ color:var(--accent2); }}
+.rate-limits pre {{ padding:16px 20px; margin:0; font-family:'SF Mono',SFMono-Regular,Consolas,monospace; font-size:12px; line-height:1.5; overflow-x:auto; color:var(--text); }}
+.updated {{ font-size:11px; color:var(--text-dim); }}
+@media (max-width:768px) {{
+  .stats {{ grid-template-columns:repeat(2,1fr); }}
+  .header {{ flex-direction:column; gap:12px; }}
+}}
 </style>
 </head>
 <body>
-<h1>Symphony Dashboard</h1>
-"#,
-    );
 
-    // Aggregate totals
-    html.push_str("<div>\n");
-    push_stat(
-        &mut html,
-        "Total Tokens",
-        &format_tokens(totals.total_tokens),
-    );
-    push_stat(
-        &mut html,
-        "Input Tokens",
-        &format_tokens(totals.input_tokens),
-    );
-    push_stat(
-        &mut html,
-        "Output Tokens",
-        &format_tokens(totals.output_tokens),
-    );
-    push_stat(
-        &mut html,
-        "Seconds Running",
-        &format!("{:.1}", totals.seconds_running),
-    );
-    html.push_str("</div>\n");
+<div class="header">
+  <h1><span>Symphony</span> Dashboard</h1>
+  <div class="header-right">
+    <span><span class="status-dot" id="statusDot"></span> <span id="statusText">Connected</span></span>
+    <span class="updated" id="lastUpdate">Updated just now</span>
+    <button class="btn" id="refreshBtn" onclick="triggerRefresh()">Refresh Now</button>
+  </div>
+</div>
 
-    // Running sessions table
-    html.push_str("<h2>Running Sessions</h2>\n");
-    if running.is_empty() {
-        html.push_str("<p class=\"empty\">No running sessions</p>\n");
-    } else {
-        html.push_str(
-            "<table>\n<tr><th>Identifier</th><th>State</th><th>Session</th>\
-             <th>Turns</th><th>Last Event</th><th>Tokens</th><th>Started</th></tr>\n",
-        );
-        for entry in running {
-            html.push_str("<tr>");
-            push_td(&mut html, &entry.issue_identifier);
-            push_td(&mut html, &entry.state);
-            push_td(&mut html, entry.session_id.as_deref().unwrap_or("-"));
-            push_td(&mut html, &entry.turn_count.to_string());
-            push_td(&mut html, entry.last_event.as_deref().unwrap_or("-"));
-            push_td(&mut html, &format_tokens(entry.total_tokens));
-            push_td(&mut html, &entry.started_at);
-            html.push_str("</tr>\n");
-        }
-        html.push_str("</table>\n");
-    }
+<div class="content">
+  <div class="stats">
+    <div class="stat-card">
+      <div class="label">Running</div>
+      <div class="value accent" id="countRunning">0</div>
+      <div class="sub">active sessions</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Total Tokens</div>
+      <div class="value" id="totalTokens">0</div>
+      <div class="sub"><span class="token-bar"><span class="in" id="inputTokens">0 in</span> / <span class="out" id="outputTokens">0 out</span></span></div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Runtime</div>
+      <div class="value" id="runtime">0s</div>
+      <div class="sub">total agent time</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Retrying</div>
+      <div class="value" id="countRetrying">0</div>
+      <div class="sub">in retry queue</div>
+    </div>
+  </div>
 
-    // Retry queue table
-    html.push_str("<h2>Retry Queue</h2>\n");
-    if retrying.is_empty() {
-        html.push_str("<p class=\"empty\">No retries pending</p>\n");
-    } else {
-        html.push_str(
-            "<table>\n<tr><th>Identifier</th><th>Attempt</th>\
-             <th>Due At (ms)</th><th>Error</th></tr>\n",
-        );
-        for entry in retrying {
-            html.push_str("<tr>");
-            push_td(&mut html, &entry.identifier);
-            push_td(&mut html, &entry.attempt.to_string());
-            push_td(&mut html, &entry.due_at_ms.to_string());
-            push_td(&mut html, entry.error.as_deref().unwrap_or("-"));
-            html.push_str("</tr>\n");
-        }
-        html.push_str("</table>\n");
-    }
+  <div class="section">
+    <div class="section-header">
+      <h2>Running Sessions <span class="badge" id="runningBadge">0</span></h2>
+    </div>
+    <div id="runningContent">
+      <div class="empty-state">
+        <div class="icon">No running sessions</div>
+        <p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p>
+      </div>
+    </div>
+  </div>
 
-    // Rate limits
-    html.push_str("<h2>Rate Limits</h2>\n");
-    match rate_limits {
-        Some(rl) => {
-            html.push_str("<pre>");
-            let formatted = format_json_pretty(rl);
-            html.push_str(&html_escape(&formatted));
-            html.push_str("</pre>\n");
-        }
-        None => {
-            html.push_str("<p class=\"empty\">No rate limit data</p>\n");
-        }
-    }
+  <div class="section">
+    <div class="section-header">
+      <h2>Retry Queue <span class="badge" id="retryBadge">0</span></h2>
+    </div>
+    <div id="retryContent">
+      <div class="empty-state">
+        <div class="icon">No retries pending</div>
+        <p>Failed or timed-out sessions will appear here with their retry schedule.</p>
+      </div>
+    </div>
+  </div>
 
-    html.push_str("</body>\n</html>");
+  <div class="section" id="rateLimitSection">
+    <div class="section-header">
+      <h2>Rate Limits</h2>
+    </div>
+    <div id="rateLimitContent" class="rate-limits">
+      <div class="empty-state">
+        <p>No rate limit data</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const INITIAL = {initial_json};
+let lastFetch = Date.now();
+
+function fmt(n) {{
+  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return String(n);
+}}
+
+function fmtTime(s) {{
+  if (s >= 3600) return (s/3600).toFixed(1)+'h';
+  if (s >= 60) return (s/60).toFixed(1)+'m';
+  return s.toFixed(0)+'s';
+}}
+
+function ago(iso) {{
+  if (!iso) return '-';
+  const d = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (d < 5) return 'just now';
+  if (d < 60) return Math.floor(d)+'s ago';
+  if (d < 3600) return Math.floor(d/60)+'m ago';
+  return Math.floor(d/3600)+'h ago';
+}}
+
+function esc(s) {{ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }}
+
+function renderRunning(items) {{
+  const el = document.getElementById('runningContent');
+  document.getElementById('runningBadge').textContent = items.length;
+  if (!items.length) {{
+    el.innerHTML = '<div class="empty-state"><div class="icon">No running sessions</div><p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p></div>';
+    return;
+  }}
+  let h = '<table><thead><tr><th>Issue</th><th>State</th><th>Session</th><th>Turns</th><th>Last Event</th><th>Tokens</th><th>Started</th></tr></thead><tbody>';
+  for (const r of items) {{
+    h += '<tr>';
+    h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
+    h += '<td><span class="state-badge active">'+esc(r.state)+'</span></td>';
+    h += '<td class="mono">'+(r.session_id ? esc(r.session_id).slice(0,12) : '-')+'</td>';
+    h += '<td>'+r.turn_count+'</td>';
+    h += '<td>'+(r.last_event ? esc(r.last_event) : '-')+'</td>';
+    h += '<td class="mono">'+fmt(r.total_tokens)+'</td>';
+    h += '<td>'+ago(r.started_at)+'</td>';
+    h += '</tr>';
+  }}
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}}
+
+function renderRetrying(items) {{
+  const el = document.getElementById('retryContent');
+  document.getElementById('retryBadge').textContent = items.length;
+  if (!items.length) {{
+    el.innerHTML = '<div class="empty-state"><div class="icon">No retries pending</div><p>Failed or timed-out sessions will appear here with their retry schedule.</p></div>';
+    return;
+  }}
+  let h = '<table><thead><tr><th>Issue</th><th>Attempt</th><th>Retry In</th><th>Error</th></tr></thead><tbody>';
+  for (const r of items) {{
+    const dueIn = Math.max(0, r.due_at_ms - Date.now());
+    const dueStr = dueIn > 0 ? fmtTime(dueIn/1000) : 'now';
+    h += '<tr>';
+    h += '<td class="mono"><strong>'+esc(r.identifier)+'</strong></td>';
+    h += '<td><span class="state-badge retry">#'+r.attempt+'</span></td>';
+    h += '<td>'+dueStr+'</td>';
+    h += '<td>'+(r.error ? esc(r.error) : '-')+'</td>';
+    h += '</tr>';
+  }}
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}}
+
+function renderRateLimits(rl) {{
+  const el = document.getElementById('rateLimitContent');
+  if (!rl) {{
+    el.innerHTML = '<div class="empty-state"><p>No rate limit data</p></div>';
+    return;
+  }}
+  el.innerHTML = '<pre>'+esc(JSON.stringify(rl, null, 2))+'</pre>';
+}}
+
+function update(data) {{
+  const t = data.codex_totals || {{}};
+  document.getElementById('countRunning').textContent = (data.counts||{{}}).running || 0;
+  document.getElementById('countRetrying').textContent = (data.counts||{{}}).retrying || 0;
+  document.getElementById('totalTokens').textContent = fmt(t.total_tokens || 0);
+  document.getElementById('inputTokens').textContent = fmt(t.input_tokens || 0) + ' in';
+  document.getElementById('outputTokens').textContent = fmt(t.output_tokens || 0) + ' out';
+  document.getElementById('runtime').textContent = fmtTime(t.seconds_running || 0);
+  renderRunning(data.running || []);
+  renderRetrying(data.retrying || []);
+  renderRateLimits(data.rate_limits);
+  lastFetch = Date.now();
+}}
+
+async function poll() {{
+  try {{
+    const r = await fetch('/api/v1/state');
+    if (r.ok) {{
+      update(await r.json());
+      document.getElementById('statusDot').style.background = 'var(--green)';
+      document.getElementById('statusText').textContent = 'Connected';
+    }}
+  }} catch(e) {{
+    document.getElementById('statusDot').style.background = 'var(--red)';
+    document.getElementById('statusText').textContent = 'Disconnected';
+  }}
+}}
+
+async function triggerRefresh() {{
+  const btn = document.getElementById('refreshBtn');
+  btn.textContent = 'Refreshing...';
+  btn.disabled = true;
+  try {{
+    await fetch('/api/v1/refresh', {{ method: 'POST' }});
+    await new Promise(r => setTimeout(r, 500));
+    await poll();
+  }} catch(e) {{}}
+  btn.textContent = 'Refresh Now';
+  btn.disabled = false;
+}}
+
+// Update relative timestamps every second
+setInterval(() => {{
+  const s = Math.floor((Date.now() - lastFetch) / 1000);
+  document.getElementById('lastUpdate').textContent = s < 3 ? 'Updated just now' : 'Updated '+s+'s ago';
+}}, 1000);
+
+// Initial render from server-embedded data
+update(INITIAL);
+// Start polling every 3 seconds
+setInterval(poll, 3000);
+</script>
+</body>
+</html>"##,
+        initial_json = html_escape(&serde_json::to_string(&initial_state).unwrap_or_default())
+    ));
+
     html
-}
-
-/// Push a stat display block into the HTML buffer.
-fn push_stat(html: &mut String, label: &str, value: &str) {
-    html.push_str("<div class=\"stat\"><span class=\"stat-value\">");
-    html.push_str(&html_escape(value));
-    html.push_str("</span><br><span class=\"stat-label\">");
-    html.push_str(&html_escape(label));
-    html.push_str("</span></div>\n");
-}
-
-/// Push a `<td>` element into the HTML buffer.
-fn push_td(html: &mut String, content: &str) {
-    html.push_str("<td>");
-    html.push_str(&html_escape(content));
-    html.push_str("</td>");
 }
 
 /// Minimal HTML escaping for display safety.
@@ -549,12 +713,32 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Push a stat display block into the HTML buffer.
+#[cfg(test)]
+fn push_stat(html: &mut String, label: &str, value: &str) {
+    html.push_str("<div class=\"stat\"><span class=\"stat-value\">");
+    html.push_str(&html_escape(value));
+    html.push_str("</span><br><span class=\"stat-label\">");
+    html.push_str(&html_escape(label));
+    html.push_str("</span></div>\n");
+}
+
+/// Push a `<td>` element into the HTML buffer.
+#[cfg(test)]
+fn push_td(html: &mut String, content: &str) {
+    html.push_str("<td>");
+    html.push_str(&html_escape(content));
+    html.push_str("</td>");
+}
+
 /// Pretty-print a JSON value. Infallible for valid `serde_json::Value`.
+#[cfg(test)]
 fn format_json_pretty(value: &serde_json::Value) -> String {
     serde_json::to_string_pretty(value).expect("serde_json::Value always serializes")
 }
 
 /// Format token counts for display.
+#[cfg(test)]
 fn format_tokens(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
@@ -691,10 +875,15 @@ mod tests {
             &None,
         );
 
-        assert!(html.contains("Symphony Dashboard"));
+        assert!(html.contains("Symphony"));
+        assert!(html.contains("Dashboard"));
         assert!(html.contains("No running sessions"));
         assert!(html.contains("No retries pending"));
         assert!(html.contains("No rate limit data"));
+        // Verify initial JSON state is embedded
+        assert!(html.contains("const INITIAL"));
+        // Verify auto-polling JS is present
+        assert!(html.contains("/api/v1/state"));
     }
 
     #[test]
@@ -726,10 +915,10 @@ mod tests {
             &None,
         );
 
+        // Data is embedded in the JSON initial state
         assert!(html.contains("PROJ-1"));
         assert!(html.contains("sess-abc"));
-        assert!(html.contains("1.5K"));
-        assert!(!html.contains("No running sessions"));
+        assert!(html.contains("1500"));
     }
 
     #[test]
@@ -756,7 +945,6 @@ mod tests {
 
         assert!(html.contains("PROJ-2"));
         assert!(html.contains("timeout"));
-        assert!(!html.contains("No retries pending"));
     }
 
     #[test]
@@ -777,7 +965,6 @@ mod tests {
 
         assert!(html.contains("requests_remaining"));
         assert!(html.contains("42"));
-        assert!(!html.contains("No rate limit data"));
     }
 
     #[test]
@@ -809,7 +996,6 @@ mod tests {
             &None,
         );
 
-        // Should show "-" for missing session/event
         assert!(html.contains("PROJ-1"));
     }
 
@@ -1024,7 +1210,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = get_body(response).await;
-        assert!(body.contains("Symphony Dashboard"));
+        assert!(body.contains("Symphony"));
+        assert!(body.contains("Dashboard"));
         assert!(body.contains("No running sessions"));
     }
 
