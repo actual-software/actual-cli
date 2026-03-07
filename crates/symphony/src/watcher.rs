@@ -3,8 +3,7 @@ use crate::error::{Result, SymphonyError};
 use crate::workflow::load_workflow;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Workflow file watcher that detects changes and triggers reload.
@@ -87,29 +86,9 @@ fn reload_workflow(path: &Path) -> Result<(ServiceConfig, String)> {
     Ok((config, workflow.prompt_template))
 }
 
-/// Spawn a task that processes workflow reload events and updates the orchestrator.
-pub fn spawn_reload_handler(
-    mut rx: mpsc::Receiver<(ServiceConfig, String)>,
-    config: Arc<RwLock<ServiceConfig>>,
-    prompt_template: Arc<RwLock<String>>,
-    orchestrator_tx: mpsc::Sender<crate::orchestrator::OrchestratorMessage>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        while let Some((new_config, new_prompt)) = rx.recv().await {
-            *config.write().await = new_config;
-            *prompt_template.write().await = new_prompt;
-            // Optionally trigger an immediate poll
-            let _ = orchestrator_tx
-                .send(crate::orchestrator::OrchestratorMessage::TriggerRefresh)
-                .await;
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::OrchestratorMessage;
     use std::fs;
     use std::time::Duration;
 
@@ -143,72 +122,6 @@ Do the work on {{ issue.identifier }}.
         );
         fs::write(&path, content).unwrap();
         path
-    }
-
-    // ---- spawn_reload_handler tests ----
-
-    #[tokio::test]
-    async fn test_spawn_reload_handler_updates_state_and_sends_trigger() {
-        // Build an initial config from a workflow
-        let tmp = tempfile::tempdir().unwrap();
-        let path = write_workflow(tmp.path(), "initial", "Old prompt.");
-        let (initial_config, _) = reload_workflow(&path).unwrap();
-
-        // Shared state
-        let config = Arc::new(RwLock::new(initial_config));
-        let prompt = Arc::new(RwLock::new("old prompt".to_string()));
-
-        // Channels
-        let (reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(16);
-        let (orch_tx, mut orch_rx) = mpsc::channel::<OrchestratorMessage>(16);
-
-        // Spawn handler
-        let handle = spawn_reload_handler(reload_rx, config.clone(), prompt.clone(), orch_tx);
-
-        // Build a new config
-        let path2 = write_workflow(tmp.path(), "updated", "New prompt.");
-        let (new_config, new_prompt) = reload_workflow(&path2).unwrap();
-
-        // Send the update
-        reload_tx.send((new_config, new_prompt)).await.unwrap();
-
-        // Wait for processing
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Verify shared state was updated
-        assert_eq!(config.read().await.tracker.team_key, "updated");
-        assert_eq!(*prompt.read().await, "New prompt.");
-
-        // Verify TriggerRefresh was sent
-        assert!(matches!(
-            orch_rx.try_recv(),
-            Ok(OrchestratorMessage::TriggerRefresh)
-        ));
-
-        // Drop sender so the handler loop exits
-        drop(reload_tx);
-        handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_spawn_reload_handler_exits_when_sender_dropped() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = write_workflow(tmp.path(), "test", "Prompt.");
-        let (initial_config, _) = reload_workflow(&path).unwrap();
-
-        let config = Arc::new(RwLock::new(initial_config));
-        let prompt = Arc::new(RwLock::new(String::new()));
-
-        let (reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(16);
-        let (orch_tx, _orch_rx) = mpsc::channel::<OrchestratorMessage>(16);
-
-        let handle = spawn_reload_handler(reload_rx, config, prompt, orch_tx);
-
-        // Drop sender immediately — handler should exit cleanly
-        drop(reload_tx);
-
-        let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
-        assert!(result.is_ok(), "handler should exit when sender is dropped");
     }
 
     // ---- start_workflow_watch tests ----
