@@ -122,7 +122,7 @@ mod tests {
             r#"---
 tracker:
   kind: linear
-  project_slug: test
+  team_key: test
   api_key: key123
 ---
 Do the work on {{ issue.identifier }}.
@@ -139,7 +139,7 @@ Do the work on {{ issue.identifier }}.
     fn write_workflow(dir: &Path, slug: &str, prompt_body: &str) -> PathBuf {
         let path = dir.join("WORKFLOW.md");
         let content = format!(
-            "---\ntracker:\n  kind: linear\n  project_slug: {slug}\n  api_key: key123\n---\n{prompt_body}\n"
+            "---\ntracker:\n  kind: linear\n  team_key: {slug}\n  api_key: key123\n---\n{prompt_body}\n"
         );
         fs::write(&path, content).unwrap();
         path
@@ -176,7 +176,7 @@ Do the work on {{ issue.identifier }}.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Verify shared state was updated
-        assert_eq!(config.read().await.tracker.project_slug, "updated");
+        assert_eq!(config.read().await.tracker.team_key, "updated");
         assert_eq!(*prompt.read().await, "New prompt.");
 
         // Verify TriggerRefresh was sent
@@ -229,7 +229,7 @@ Do the work on {{ issue.identifier }}.
 
         // Modify the file
         let updated_content =
-            "---\ntracker:\n  kind: linear\n  project_slug: modified\n  api_key: key123\n---\nDo modified work.\n";
+            "---\ntracker:\n  kind: linear\n  team_key: modified\n  api_key: key123\n---\nDo modified work.\n";
         fs::write(&path, updated_content).unwrap();
 
         // Wait for the reload event
@@ -237,7 +237,7 @@ Do the work on {{ issue.identifier }}.
         assert!(result.is_ok());
 
         let (config, prompt) = result.unwrap().unwrap();
-        assert_eq!(config.tracker.project_slug, "modified");
+        assert_eq!(config.tracker.team_key, "modified");
         assert!(prompt.contains("modified work"));
 
         // Keep watcher alive until assertions are done
@@ -276,14 +276,14 @@ Do the work on {{ issue.identifier }}.
 
         // Now write valid YAML to confirm the watcher is still alive
         let valid_content =
-            "---\ntracker:\n  kind: linear\n  project_slug: recovered\n  api_key: key123\n---\nRecovered.\n";
+            "---\ntracker:\n  kind: linear\n  team_key: recovered\n  api_key: key123\n---\nRecovered.\n";
         fs::write(&path, valid_content).unwrap();
 
         let result = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
         assert!(result.is_ok());
 
         let (config, _prompt) = result.unwrap().unwrap();
-        assert_eq!(config.tracker.project_slug, "recovered");
+        assert_eq!(config.tracker.team_key, "recovered");
 
         drop(watcher);
     }

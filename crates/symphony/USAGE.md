@@ -13,7 +13,7 @@ Create a `WORKFLOW.md` file in your working directory:
 ---
 tracker:
   kind: linear
-  project_slug: my-project
+  team_key: MY-TEAM
   api_key: $LINEAR_API_KEY
 polling:
   interval_ms: 30000
@@ -78,7 +78,7 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 | `kind` | string | (required) | Issue tracker type. Currently only `linear` |
 | `endpoint` | string | `https://api.linear.app/graphql` | GraphQL endpoint |
 | `api_key` | string | `$LINEAR_API_KEY` | API key. Supports `$VAR` for env var indirection |
-| `project_slug` | string | (required) | Linear project slug ID |
+| `team_key` | string | (required) | Linear team key (e.g. `ACTCLI`) |
 | `active_states` | list or CSV | `Todo, In Progress` | States that trigger dispatch |
 | `terminal_states` | list or CSV | `Closed, Cancelled, Canceled, Duplicate, Done` | States that stop work and clean up |
 

@@ -132,7 +132,7 @@ mod tests {
         let content = r#"---
 tracker:
   kind: linear
-  project_slug: my-project
+  team_key: my-project
 polling:
   interval_ms: 5000
 ---
