@@ -4,6 +4,7 @@ pub mod error;
 pub mod github;
 pub mod model;
 pub mod orchestrator;
+pub mod persistence;
 pub mod prompt;
 pub mod protocol;
 pub mod server;

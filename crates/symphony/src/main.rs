@@ -1,12 +1,14 @@
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Arc;
 use symphony::config::ServiceConfig;
 use symphony::error::SymphonyError;
 use symphony::orchestrator::Orchestrator;
+use symphony::persistence::SqliteStore;
 use symphony::server;
 use symphony::watcher::start_workflow_watch;
 use symphony::workflow::load_workflow;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -90,8 +92,22 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
     // Start workflow file watcher
     let (_watcher, reload_rx) = start_workflow_watch(&workflow_path)?;
 
-    // Create orchestrator
-    let orchestrator = Orchestrator::new(config, workflow.prompt_template);
+    // Create orchestrator with persistence store
+    let orchestrator = Orchestrator::new(config.clone(), workflow.prompt_template);
+
+    // Open SQLite persistence store in the workspace root directory
+    let db_path = config.workspace.root.join("symphony.db");
+    let orchestrator = match SqliteStore::new(&db_path) {
+        Ok(store) => orchestrator.with_store(Arc::new(store)).await,
+        Err(e) => {
+            warn!(
+                error = %e,
+                path = %db_path.display(),
+                "failed to open persistence store, running without persistence"
+            );
+            orchestrator
+        }
+    };
 
     // Setup shutdown signal
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
