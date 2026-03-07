@@ -9741,6 +9741,7 @@ mod tests {
         assert!(logs_contain("failed to transition issue to In Review"));
     }
 
+
     #[tokio::test]
     #[traced_test]
     async fn test_dispatch_issue_distributed_mode_prompt_render_failure() {
@@ -9766,5 +9767,428 @@ mod tests {
         assert!(logs_contain(
             "failed to render prompt for distributed worker"
         ));
+    }
+
+    // ── MockStore for persistence integration tests ──────────────────
+
+    use crate::model::{AgentTotals, LogEntry};
+    use crate::persistence::{self, PersistedSession};
+    use std::sync::Mutex;
+
+    /// A simple mock that records calls and can be configured to fail.
+    struct MockStore {
+        sessions: Mutex<Vec<PersistedSession>>,
+        log_entries: Mutex<Vec<(String, LogEntry)>>,
+        agent_totals: Mutex<Option<AgentTotals>>,
+        completed: Mutex<Vec<String>>,
+        /// When true, load_agent_totals returns an error.
+        fail_load_totals: bool,
+        /// When true, load_completed_ids returns an error.
+        fail_load_completed: bool,
+    }
+
+    impl MockStore {
+        fn new() -> Self {
+            Self {
+                sessions: Mutex::new(Vec::new()),
+                log_entries: Mutex::new(Vec::new()),
+                agent_totals: Mutex::new(None),
+                completed: Mutex::new(Vec::new()),
+                fail_load_totals: false,
+                fail_load_completed: false,
+            }
+        }
+
+        fn with_totals(self, totals: AgentTotals) -> Self {
+            *self.agent_totals.lock().unwrap() = Some(totals);
+            self
+        }
+
+        fn with_completed(self, ids: Vec<String>) -> Self {
+            *self.completed.lock().unwrap() = ids;
+            self
+        }
+
+        fn with_fail_load_totals(mut self) -> Self {
+            self.fail_load_totals = true;
+            self
+        }
+
+        fn with_fail_load_completed(mut self) -> Self {
+            self.fail_load_completed = true;
+            self
+        }
+
+        fn saved_sessions(&self) -> Vec<PersistedSession> {
+            self.sessions.lock().unwrap().clone()
+        }
+
+        fn saved_log_entries(&self) -> Vec<(String, LogEntry)> {
+            self.log_entries.lock().unwrap().clone()
+        }
+
+        fn saved_totals(&self) -> Option<AgentTotals> {
+            self.agent_totals.lock().unwrap().clone()
+        }
+
+        fn completed_ids(&self) -> Vec<String> {
+            self.completed.lock().unwrap().clone()
+        }
+    }
+
+    impl persistence::StateStore for MockStore {
+        fn save_session(&self, session: &PersistedSession) -> persistence::Result<()> {
+            self.sessions.lock().unwrap().push(session.clone());
+            Ok(())
+        }
+
+        fn load_sessions(&self) -> persistence::Result<Vec<PersistedSession>> {
+            Ok(self.sessions.lock().unwrap().clone())
+        }
+
+        fn delete_session(&self, issue_id: &str) -> persistence::Result<()> {
+            self.sessions
+                .lock()
+                .unwrap()
+                .retain(|s| s.issue_id != issue_id);
+            Ok(())
+        }
+
+        fn save_log_entry(&self, issue_id: &str, entry: &LogEntry) -> persistence::Result<()> {
+            self.log_entries
+                .lock()
+                .unwrap()
+                .push((issue_id.to_string(), entry.clone()));
+            Ok(())
+        }
+
+        fn load_log_entries(&self, _issue_id: &str) -> persistence::Result<Vec<LogEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn delete_log_entries(&self, _issue_id: &str) -> persistence::Result<()> {
+            Ok(())
+        }
+
+        fn save_agent_totals(&self, totals: &AgentTotals) -> persistence::Result<()> {
+            *self.agent_totals.lock().unwrap() = Some(totals.clone());
+            Ok(())
+        }
+
+        fn load_agent_totals(&self) -> persistence::Result<AgentTotals> {
+            if self.fail_load_totals {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
+            Ok(self
+                .agent_totals
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default())
+        }
+
+        fn mark_completed(&self, issue_id: &str) -> persistence::Result<()> {
+            self.completed.lock().unwrap().push(issue_id.to_string());
+            Ok(())
+        }
+
+        fn load_completed_ids(&self) -> persistence::Result<Vec<String>> {
+            if self.fail_load_completed {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
+            Ok(self.completed.lock().unwrap().clone())
+        }
+    }
+
+    fn test_orchestrator_with_store(store: Arc<dyn persistence::StateStore>) -> Orchestrator {
+        let mut orch = test_orchestrator();
+        orch.store = Some(store);
+        orch
+    }
+
+    // ── with_store ──────────────────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_with_store_loads_agent_totals() {
+        let store = Arc::new(MockStore::new().with_totals(AgentTotals {
+            input_tokens: 1000,
+            output_tokens: 500,
+            total_tokens: 1500,
+            seconds_running: 42.0,
+        }));
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        assert_eq!(state.agent_totals.input_tokens, 1000);
+        assert_eq!(state.agent_totals.output_tokens, 500);
+        assert_eq!(state.agent_totals.total_tokens, 1500);
+        assert!((state.agent_totals.seconds_running - 42.0).abs() < 0.001);
+        assert!(logs_contain("restored persisted agent totals"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_with_store_loads_completed_ids() {
+        let store =
+            Arc::new(MockStore::new().with_completed(vec!["id-a".to_string(), "id-b".to_string()]));
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        assert!(state.is_completed("id-a"));
+        assert!(state.is_completed("id-b"));
+        assert!(logs_contain("restored persisted completed issues"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_with_store_handles_totals_error() {
+        let store = Arc::new(MockStore::new().with_fail_load_totals());
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        // Defaults should remain
+        assert_eq!(state.agent_totals.input_tokens, 0);
+        assert!(logs_contain("failed to load persisted agent totals"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_with_store_handles_completed_error() {
+        let store = Arc::new(MockStore::new().with_fail_load_completed());
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        assert_eq!(state.completed_count(), 0);
+        assert!(logs_contain("failed to load persisted completed issues"));
+    }
+
+    // ── store_handle ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_store_handle_none_without_store() {
+        let orch = test_orchestrator();
+        assert!(orch.store_handle().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_store_handle_some_with_store() {
+        let store: Arc<dyn persistence::StateStore> = Arc::new(MockStore::new());
+        let orch = test_orchestrator().with_store(store).await;
+        assert!(orch.store_handle().is_some());
+    }
+
+    // ── persist_session ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_persist_session_with_store() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+
+        let session = LiveSession {
+            session_id: Some("sess-1".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            turn_count: 3,
+            last_event: Some("turn_completed".to_string()),
+            last_event_at: Some(Utc::now()),
+            last_message: Some("Done".to_string()),
+            ..Default::default()
+        };
+        let started_at = Utc::now();
+
+        orch.persist_session("id-1", "TST-1", &session, Some(2), started_at)
+            .await;
+
+        let saved = store.saved_sessions();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].issue_id, "id-1");
+        assert_eq!(saved[0].identifier, "TST-1");
+        assert_eq!(saved[0].session_id, Some("sess-1".to_string()));
+        assert_eq!(saved[0].input_tokens, 100);
+        assert_eq!(saved[0].output_tokens, 50);
+        assert_eq!(saved[0].total_tokens, 150);
+        assert_eq!(saved[0].turn_count, 3);
+        assert!(saved[0].ended_at.is_none());
+        assert_eq!(saved[0].last_event, Some("turn_completed".to_string()));
+        assert!(saved[0].last_event_at.is_some());
+        assert_eq!(saved[0].last_message, Some("Done".to_string()));
+        assert_eq!(saved[0].retry_attempt, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_persist_session_without_store_is_noop() {
+        let orch = test_orchestrator();
+        let session = LiveSession::default();
+        // Should not panic
+        orch.persist_session("id-1", "TST-1", &session, None, Utc::now())
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_persist_session_none_optionals() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+
+        let session = LiveSession::default();
+        orch.persist_session("id-1", "TST-1", &session, None, Utc::now())
+            .await;
+
+        let saved = store.saved_sessions();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].session_id.is_none());
+        assert!(saved[0].last_event.is_none());
+        assert!(saved[0].last_event_at.is_none());
+        assert!(saved[0].last_message.is_none());
+        assert!(saved[0].retry_attempt.is_none());
+    }
+
+    // ── on_worker_exit with store ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_persists_completed() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        // Should persist agent totals
+        assert!(store.saved_totals().is_some());
+        // Should finalize session with ended_at
+        let sessions = store.saved_sessions();
+        assert!(!sessions.is_empty());
+        let finalized = sessions.last().unwrap();
+        assert_eq!(finalized.issue_id, "id1");
+        assert!(finalized.ended_at.is_some());
+        // Should persist completed marker
+        assert!(store.completed_ids().contains(&"id1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_on_worker_exit_failed_persists_session() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Failed("crash".to_string()))
+            .await;
+
+        // Should persist agent totals
+        assert!(store.saved_totals().is_some());
+        // Should finalize session
+        let sessions = store.saved_sessions();
+        assert!(!sessions.is_empty());
+        let finalized = sessions.last().unwrap();
+        assert!(finalized.ended_at.is_some());
+        // Should NOT persist completed marker (it failed)
+        assert!(!store.completed_ids().contains(&"id1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_on_worker_exit_cancelled_persists_session() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Cancelled)
+            .await;
+
+        // Should persist agent totals and finalized session
+        assert!(store.saved_totals().is_some());
+        let sessions = store.saved_sessions();
+        assert!(!sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_on_worker_exit_timed_out_persists_session() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::TimedOut).await;
+
+        assert!(store.saved_totals().is_some());
+        let sessions = store.saved_sessions();
+        assert!(!sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_on_worker_exit_stalled_persists_session() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Stalled).await;
+
+        assert!(store.saved_totals().is_some());
+        let sessions = store.saved_sessions();
+        assert!(!sessions.is_empty());
+    }
+
+    // ── on_agent_update with store ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_on_agent_update_persists_log_entry() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::TurnCompleted {
+                message: Some("turn 1 done".to_string()),
+            },
+        )
+        .await;
+
+        let log_entries = store.saved_log_entries();
+        assert_eq!(log_entries.len(), 1);
+        assert_eq!(log_entries[0].0, "id1");
+        assert_eq!(log_entries[0].1.event_type, "turn_completed");
+    }
+
+    #[tokio::test]
+    async fn test_on_agent_update_persists_session_snapshot() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::TokenUsage {
+                input_tokens: 200,
+                output_tokens: 100,
+                total_tokens: 300,
+            },
+        )
+        .await;
+
+        // Should persist session snapshot (persist_session called after processing)
+        let sessions = store.saved_sessions();
+        assert!(!sessions.is_empty());
+        let snap = sessions.last().unwrap();
+        assert_eq!(snap.issue_id, "id1");
+        assert_eq!(snap.identifier, "PROJ-1");
+    }
+
+    #[tokio::test]
+    async fn test_on_agent_update_notification_persists_log_and_session() {
+        let store = Arc::new(MockStore::new());
+        let orch = test_orchestrator_with_store(store.clone());
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::Notification {
+                message: "hello".to_string(),
+            },
+        )
+        .await;
+
+        assert!(!store.saved_log_entries().is_empty());
+        assert!(!store.saved_sessions().is_empty());
+
     }
 }
