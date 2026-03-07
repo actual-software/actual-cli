@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use symphony::config::ServiceConfig;
 use symphony::error::SymphonyError;
 use symphony::orchestrator::Orchestrator;
+use symphony::server;
 use symphony::watcher::start_workflow_watch;
 use symphony::workflow::load_workflow;
 use tracing::{error, info};
@@ -16,6 +17,10 @@ struct Cli {
     /// Path to WORKFLOW.md (defaults to ./WORKFLOW.md)
     #[arg(default_value = "WORKFLOW.md")]
     workflow_path: PathBuf,
+
+    /// Start HTTP dashboard on this port (overrides server.port in WORKFLOW.md)
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 #[tokio::main]
@@ -68,6 +73,9 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
     let config = ServiceConfig::from_workflow(&workflow)?;
     config.validate_for_dispatch()?;
 
+    // Resolve HTTP server port: CLI flag overrides config
+    let server_port = cli.port.or(config.server.port);
+
     info!(
         workflow = %workflow_path.display(),
         tracker_kind = %config.tracker.kind,
@@ -75,6 +83,7 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
         poll_interval_ms = config.polling.interval_ms,
         max_concurrent = config.agent.max_concurrent_agents,
         workspace_root = %config.workspace.root.display(),
+        server_port = ?server_port,
         "symphony starting"
     );
 
@@ -83,6 +92,19 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
 
     // Create orchestrator
     let orchestrator = Orchestrator::new(config, workflow.prompt_template);
+
+    // Start HTTP server if port is configured
+    if let Some(port) = server_port {
+        let state = orchestrator.state_handle();
+        let config = orchestrator.config_handle();
+        let msg_tx = orchestrator.message_sender();
+
+        tokio::spawn(async move {
+            if let Err(e) = server::start_server(port, state, config, msg_tx).await {
+                error!(error = %e, "HTTP server failed");
+            }
+        });
+    }
 
     // Setup shutdown signal
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
