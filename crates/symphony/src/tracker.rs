@@ -170,6 +170,190 @@ impl LinearClient {
         }
     }
 
+    /// Add a label to an issue. Creates the label on the team if it doesn't exist.
+    ///
+    /// This is a best-effort operation — callers should log warnings on failure
+    /// but not block dispatch.
+    pub async fn add_label_to_issue(&self, issue_id: &str, label_name: &str) -> Result<()> {
+        // Step 1: Find or create the label for the team
+        let label_id = self.find_or_create_label(label_name).await?;
+
+        // Step 2: Get current label IDs on the issue
+        let current_label_ids = self.get_issue_label_ids(issue_id).await?;
+
+        // Step 3: Add the new label ID if not already present
+        if current_label_ids.contains(&label_id) {
+            return Ok(());
+        }
+
+        let mut updated_ids = current_label_ids;
+        updated_ids.push(label_id);
+
+        self.set_issue_labels(issue_id, &updated_ids).await
+    }
+
+    /// Remove a label from an issue by name.
+    ///
+    /// This is a best-effort operation — callers should log warnings on failure
+    /// but not block other operations.
+    pub async fn remove_label_from_issue(&self, issue_id: &str, label_name: &str) -> Result<()> {
+        // Step 1: Find the label ID
+        let label_id = match self.find_label(label_name).await? {
+            Some(id) => id,
+            None => return Ok(()), // Label doesn't exist, nothing to remove
+        };
+
+        // Step 2: Get current label IDs on the issue
+        let current_label_ids = self.get_issue_label_ids(issue_id).await?;
+
+        // Step 3: Remove the label ID
+        let updated_ids: Vec<String> = current_label_ids
+            .into_iter()
+            .filter(|id| id != &label_id)
+            .collect();
+
+        self.set_issue_labels(issue_id, &updated_ids).await
+    }
+
+    /// Find a label by name for the team. Returns the label ID if found.
+    async fn find_label(&self, label_name: &str) -> Result<Option<String>> {
+        let query = r#"
+            query FindLabel($teamKey: String!) {
+                issueLabels(filter: { team: { key: { eq: $teamKey } } }) {
+                    nodes { id name }
+                }
+            }
+        "#;
+        let variables = serde_json::json!({ "teamKey": self.team_key });
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let response = self.execute_graphql(&body).await?;
+
+        let nodes = extract_nodes(&response, &["data", "issueLabels", "nodes"])?;
+        for node in nodes {
+            if let Some(name) = node.get("name").and_then(Value::as_str) {
+                if name.eq_ignore_ascii_case(label_name) {
+                    if let Some(id) = node.get("id").and_then(Value::as_str) {
+                        return Ok(Some(id.to_string()));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Find or create a label by name for the team. Returns the label ID.
+    async fn find_or_create_label(&self, label_name: &str) -> Result<String> {
+        if let Some(id) = self.find_label(label_name).await? {
+            return Ok(id);
+        }
+
+        // Label doesn't exist — create it
+        // First, resolve the team ID from the team key
+        let team_id = self.resolve_team_id().await?;
+
+        let query = r#"
+            mutation CreateLabel($teamId: String!, $name: String!) {
+                issueLabelCreate(input: { teamId: $teamId, name: $name }) {
+                    issueLabel { id }
+                    success
+                }
+            }
+        "#;
+        let variables = serde_json::json!({
+            "teamId": team_id,
+            "name": label_name,
+        });
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let response = self.execute_graphql(&body).await?;
+
+        navigate_json(&response, &["data", "issueLabelCreate", "issueLabel", "id"])
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| SymphonyError::LinearUnknownPayload {
+                reason: "failed to create label: missing id in response".to_string(),
+            })
+    }
+
+    /// Resolve the team ID from the configured team key.
+    async fn resolve_team_id(&self) -> Result<String> {
+        let query = r#"
+            query TeamId($teamKey: String!) {
+                teams(filter: { key: { eq: $teamKey } }) {
+                    nodes { id }
+                }
+            }
+        "#;
+        let variables = serde_json::json!({ "teamKey": self.team_key });
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let response = self.execute_graphql(&body).await?;
+
+        let nodes = extract_nodes(&response, &["data", "teams", "nodes"])?;
+        nodes
+            .first()
+            .and_then(|n| n.get("id"))
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| SymphonyError::LinearUnknownPayload {
+                reason: format!("team not found for key '{}'", self.team_key),
+            })
+    }
+
+    /// Get the current label IDs attached to an issue.
+    async fn get_issue_label_ids(&self, issue_id: &str) -> Result<Vec<String>> {
+        let query = r#"
+            query IssueLabels($issueId: String!) {
+                issue(id: $issueId) {
+                    labels { nodes { id } }
+                }
+            }
+        "#;
+        let variables = serde_json::json!({ "issueId": issue_id });
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let response = self.execute_graphql(&body).await?;
+
+        let ids = navigate_json(&response, &["data", "issue", "labels", "nodes"])
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|n| n.get("id").and_then(Value::as_str).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(ids)
+    }
+
+    /// Set the labels on an issue (replaces all labels).
+    async fn set_issue_labels(&self, issue_id: &str, label_ids: &[String]) -> Result<()> {
+        let query = r#"
+            mutation SetLabels($issueId: String!, $labelIds: [String!]!) {
+                issueUpdate(id: $issueId, input: { labelIds: $labelIds }) {
+                    success
+                }
+            }
+        "#;
+        let variables = serde_json::json!({
+            "issueId": issue_id,
+            "labelIds": label_ids,
+        });
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        let response = self.execute_graphql(&body).await?;
+
+        let success = navigate_json(&response, &["data", "issueUpdate", "success"])
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        if success {
+            Ok(())
+        } else {
+            Err(SymphonyError::LinearUnknownPayload {
+                reason: format!(
+                    "issueUpdate returned success=false setting labels for issue {issue_id}"
+                ),
+            })
+        }
+    }
+
     /// Fetch issues in specified states (for startup terminal cleanup).
     pub async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>> {
         if states.is_empty() {
@@ -1580,6 +1764,353 @@ mod tests {
         let body = serde_json::json!({"query": "{ ok }"});
         let result = client.execute_graphql(&body).await;
         assert!(result.is_ok());
+        mock.assert_async().await;
+    }
+
+    // ── add_label_to_issue ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_add_label_to_issue_creates_and_attaches() {
+        let mut server = mockito::Server::new_async().await;
+
+        // 1. find_label: no existing labels
+        let mock_find = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 2. resolve_team_id
+        let mock_team = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "teams": { "nodes": [{ "id": "team-id-1" }] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 3. create label
+        let mock_create = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "issueLabelCreate": {
+                            "issueLabel": { "id": "label-id-1" },
+                            "success": true
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 4. get current issue labels
+        let mock_get_labels = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issue": { "labels": { "nodes": [] } } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 5. set labels on issue
+        let mock_set = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .add_label_to_issue("issue-1", "symphony-claimed")
+            .await;
+
+        assert!(result.is_ok());
+        mock_find.assert_async().await;
+        mock_team.assert_async().await;
+        mock_create.assert_async().await;
+        mock_get_labels.assert_async().await;
+        mock_set.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_add_label_to_issue_already_attached() {
+        let mut server = mockito::Server::new_async().await;
+
+        // 1. find_label: label exists
+        let mock_find = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [
+                        { "id": "label-id-1", "name": "symphony-claimed" }
+                    ] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 2. get current issue labels: label already present
+        let mock_get = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issue": { "labels": { "nodes": [
+                        { "id": "label-id-1" }
+                    ] } } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .add_label_to_issue("issue-1", "symphony-claimed")
+            .await;
+
+        assert!(result.is_ok());
+        mock_find.assert_async().await;
+        mock_get.assert_async().await;
+        // No set_issue_labels call expected since label was already present
+    }
+
+    // ── remove_label_from_issue ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_remove_label_from_issue_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        // 1. find_label: label exists
+        let mock_find = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [
+                        { "id": "label-id-1", "name": "symphony-claimed" },
+                        { "id": "label-id-2", "name": "bug" }
+                    ] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 2. get current issue labels
+        let mock_get = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issue": { "labels": { "nodes": [
+                        { "id": "label-id-1" },
+                        { "id": "label-id-2" }
+                    ] } } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // 3. set labels (without the removed one)
+        let mock_set = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .remove_label_from_issue("issue-1", "symphony-claimed")
+            .await;
+
+        assert!(result.is_ok());
+        mock_find.assert_async().await;
+        mock_get.assert_async().await;
+        mock_set.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_remove_label_from_issue_label_not_found() {
+        let mut server = mockito::Server::new_async().await;
+
+        // find_label: label doesn't exist
+        let mock_find = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [
+                        { "id": "label-id-2", "name": "bug" }
+                    ] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client
+            .remove_label_from_issue("issue-1", "symphony-claimed")
+            .await;
+
+        assert!(result.is_ok(), "should succeed when label doesn't exist");
+        mock_find.assert_async().await;
+    }
+
+    // ── find_label ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_label_case_insensitive() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [
+                        { "id": "label-1", "name": "Symphony-Claimed" }
+                    ] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.find_label("symphony-claimed").await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some("label-1".to_string()));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_find_label_not_found() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueLabels": { "nodes": [] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.find_label("nonexistent").await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+        mock.assert_async().await;
+    }
+
+    // ── resolve_team_id ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_resolve_team_id_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "teams": { "nodes": [{ "id": "team-123" }] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.resolve_team_id().await;
+
+        assert_eq!(result.unwrap(), "team-123");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_resolve_team_id_not_found() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "teams": { "nodes": [] } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let config = mock_tracker_config(&server.url());
+        let client = LinearClient::new(&config, new_http());
+        let result = client.resolve_team_id().await;
+
+        assert!(result.is_err());
         mock.assert_async().await;
     }
 }
