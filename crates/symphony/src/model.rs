@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+// Re-export protocol types for backward compatibility.
+pub use crate::protocol::{AgentEvent, LiveSession, RunningEntry, WorkerExitReason};
+
 /// Maximum number of log entries to retain per running issue.
 /// Older entries are evicted in FIFO order.
 pub const MAX_LOG_ENTRIES: usize = 500;
@@ -64,38 +67,6 @@ pub struct WorkflowDefinition {
     pub config: serde_yml::Value,
     /// Markdown body after front matter, trimmed.
     pub prompt_template: String,
-}
-
-/// Live session metadata for a running coding agent.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct LiveSession {
-    pub session_id: Option<String>,
-    pub agent_pid: Option<u32>,
-    pub last_event: Option<String>,
-    pub last_event_at: Option<DateTime<Utc>>,
-    pub last_message: Option<String>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-    pub last_reported_input_tokens: u64,
-    pub last_reported_output_tokens: u64,
-    pub last_reported_total_tokens: u64,
-    pub turn_count: u32,
-}
-
-/// Entry in the running map, tracking one active worker.
-#[derive(Debug)]
-pub struct RunningEntry {
-    pub issue: Issue,
-    pub identifier: String,
-    pub session: LiveSession,
-    pub retry_attempt: Option<u32>,
-    pub started_at: DateTime<Utc>,
-    pub cancel_tx: tokio::sync::oneshot::Sender<()>,
-    /// Bounded event log for this issue (FIFO eviction at MAX_LOG_ENTRIES).
-    pub event_log: VecDeque<LogEntry>,
-    /// Monotonically increasing sequence number for log entries.
-    pub log_seq: u64,
 }
 
 /// Scheduled retry state for an issue.
@@ -211,47 +182,6 @@ impl OrchestratorState {
             .filter(|e| e.issue.state.trim().to_lowercase() == normalized)
             .count() as u32
     }
-}
-
-/// Events emitted by the agent runner to the orchestrator.
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    SessionStarted {
-        session_id: String,
-        pid: Option<u32>,
-    },
-    TurnCompleted {
-        message: Option<String>,
-    },
-    TurnFailed {
-        error: String,
-    },
-    Notification {
-        message: String,
-    },
-    TokenUsage {
-        input_tokens: u64,
-        output_tokens: u64,
-        total_tokens: u64,
-    },
-    AgentMessage {
-        event_type: String,
-        message: Option<String>,
-    },
-    /// §11.2: Rate limit information from Claude CLI.
-    RateLimitUpdate {
-        data: serde_json::Value,
-    },
-}
-
-/// Worker exit reason reported back to orchestrator.
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkerExitReason {
-    Normal,
-    Failed(String),
-    TimedOut,
-    Stalled,
-    Cancelled,
 }
 
 /// Create a `LogEntry` from an `AgentEvent` for the event log.
