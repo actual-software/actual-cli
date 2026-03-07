@@ -2,6 +2,7 @@ use crate::config::CodingAgentConfig;
 use crate::error::{Result, SymphonyError};
 use crate::model::Issue;
 use crate::protocol::AgentEvent;
+use regex::Regex;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -44,6 +45,7 @@ impl AgentSession {
         prompt: &str,
         issue: &Issue,
         env_vars: &HashMap<String, String>,
+        max_turns: u32,
     ) -> Result<(Self, mpsc::Receiver<AgentEvent>)> {
         // Validate workspace path
         if !workspace_path.is_dir() {
@@ -56,7 +58,7 @@ impl AgentSession {
 
         // Build the command. The prompt is passed via stdin to avoid shell
         // injection — issue titles/descriptions from Linear are user-controlled.
-        let full_command = build_agent_command(&config.command);
+        let full_command = build_agent_command(&config.command, max_turns);
 
         log_agent_launch(
             &config.command,
@@ -216,9 +218,13 @@ fn log_stderr_line_if_nonempty(line: &str) {
 ///
 /// The prompt is NOT included in the command — it is passed via stdin to
 /// avoid shell injection from untrusted issue data (titles, descriptions).
-fn build_agent_command(base_command: &str) -> String {
+///
+/// `max_turns` from the config is injected into the `--max-turns` flag for
+/// bare commands. Pass-through commands (`-p`/`--print`/`app-server`) are
+/// NOT modified — they are used as-is.
+fn build_agent_command(base_command: &str, max_turns: u32) -> String {
     // If the command already includes arguments (like -p, --output-format, etc.),
-    // we just use it as-is. Otherwise, we add the standard flags.
+    // we just use it as-is (pass-through mode). Otherwise, we add the standard flags.
     // The prompt arrives on stdin, so Claude Code reads from stdin in -p mode.
     if base_command.contains("-p")
         || base_command.contains("--print")
@@ -226,11 +232,21 @@ fn build_agent_command(base_command: &str) -> String {
     {
         base_command.to_string()
     } else {
-        // Default: claude -p with stream-json for structured output
-        format!(
-            "{base_command} -p --output-format stream-json --dangerously-skip-permissions --max-turns 20"
-        )
+        // Default: claude -p with stream-json for structured output.
+        // Use max_turns from config instead of a hardcoded value.
+        let cmd = format!(
+            "{base_command} -p --output-format stream-json --dangerously-skip-permissions --max-turns {max_turns}"
+        );
+        // If the base command already had --max-turns, rewrite it to match config.
+        rewrite_max_turns(&cmd, max_turns)
     }
+}
+
+/// Rewrite any existing `--max-turns <N>` in the command to the given value.
+fn rewrite_max_turns(command: &str, max_turns: u32) -> String {
+    let re = Regex::new(r"--max-turns\s+\d+").expect("valid regex");
+    re.replace_all(command, format!("--max-turns {max_turns}"))
+        .into_owned()
 }
 
 /// Parse a JSON message from the agent subprocess stdout.
@@ -391,6 +407,7 @@ mod tests {
     fn test_build_agent_command_with_flags() {
         let cmd = build_agent_command(
             "claude -p --output-format stream-json --dangerously-skip-permissions",
+            20,
         );
         assert!(cmd.contains("claude -p"));
         // Prompt is passed via stdin, not in the command
@@ -399,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_bare() {
-        let cmd = build_agent_command("claude");
+        let cmd = build_agent_command("claude", 20);
         assert!(cmd.contains("claude"));
         assert!(cmd.contains("-p"));
         assert!(cmd.contains("--output-format stream-json"));
@@ -408,9 +425,38 @@ mod tests {
     #[test]
     fn test_build_agent_command_no_prompt_in_command() {
         // Verify that the prompt is never embedded in the shell command
-        let cmd = build_agent_command("claude -p");
+        let cmd = build_agent_command("claude -p", 20);
         // Should just be the base command as-is, no prompt appended
         assert_eq!(cmd, "claude -p");
+    }
+
+    #[test]
+    fn test_build_agent_command_bare_uses_config_max_turns() {
+        // Bare command gets --max-turns from the config value, not hardcoded 20
+        let cmd = build_agent_command("claude", 42);
+        assert!(cmd.contains("--max-turns 42"));
+        assert!(!cmd.contains("--max-turns 20"));
+    }
+
+    #[test]
+    fn test_build_agent_command_passthrough_no_rewrite() {
+        // Command with -p and --max-turns 30 should NOT be rewritten
+        let cmd = build_agent_command("claude -p --max-turns 30", 50);
+        assert_eq!(cmd, "claude -p --max-turns 30");
+    }
+
+    #[test]
+    fn test_build_agent_command_passthrough_without_max_turns() {
+        // Command with -p but no --max-turns stays as-is
+        let cmd = build_agent_command("claude -p --output-format json", 50);
+        assert_eq!(cmd, "claude -p --output-format json");
+    }
+
+    #[test]
+    fn test_rewrite_max_turns() {
+        // Existing --max-turns value gets rewritten
+        let result = rewrite_max_turns("claude -p --max-turns 30 --verbose", 50);
+        assert_eq!(result, "claude -p --max-turns 50 --verbose");
     }
 
     #[test]
@@ -668,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_with_print_flag() {
-        let cmd = build_agent_command("claude --print");
+        let cmd = build_agent_command("claude --print", 20);
         // --print matches, so it should use the command as-is
         assert_eq!(cmd, "claude --print");
         assert!(!cmd.contains("--output-format"));
@@ -676,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_with_app_server() {
-        let cmd = build_agent_command("claude app-server --port 3000");
+        let cmd = build_agent_command("claude app-server --port 3000", 20);
         // app-server matches, so it should use the command as-is
         assert_eq!(cmd, "claude app-server --port 3000");
         assert!(!cmd.contains("--output-format"));
@@ -726,7 +772,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "do work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "do work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -750,6 +796,7 @@ mod tests {
             "do work",
             &issue,
             &HashMap::new(),
+            20,
         )
         .await;
         assert!(
@@ -767,7 +814,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "do work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "do work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -787,7 +834,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -806,7 +853,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -832,7 +879,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -853,7 +900,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -885,7 +932,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -939,7 +986,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -980,7 +1027,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -1021,7 +1068,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -1057,7 +1104,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -1108,7 +1155,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -1172,7 +1219,7 @@ mod tests {
 
         // This exercises the debug! at lines 38-42 with a tracing subscriber
         let (mut session, _rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
         let _ = session.wait_with_timeout(5_000).await;
@@ -1194,7 +1241,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -1228,7 +1275,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -1252,7 +1299,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (mut session, event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -1272,7 +1319,7 @@ mod tests {
         let issue = make_test_issue();
 
         let (session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new())
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
                 .await
                 .unwrap();
 
@@ -1382,7 +1429,7 @@ mod tests {
         );
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &env_vars)
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &env_vars, 20)
                 .await
                 .unwrap();
 
