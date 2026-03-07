@@ -116,6 +116,7 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 |-------|------|---------|-------------|
 | `max_concurrent_agents` | integer | `10` | Maximum parallel agent sessions |
 | `max_turns` | integer | `20` | Maximum agent turns per worker run |
+| `max_retries` | integer | `10` | Maximum retry attempts per issue (enhancement beyond base spec) |
 | `max_retry_backoff_ms` | integer | `300000` (5m) | Cap on exponential retry backoff |
 | `max_concurrent_agents_by_state` | map | `{}` | Per-state concurrency limits (e.g., `todo: 2`) |
 
@@ -126,8 +127,7 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 | `command` | shell command | `claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 20` | Command to launch the coding agent |
 | `permission_mode` | string | `bypassPermissions` | Permission mode for agent sessions |
 | `turn_timeout_ms` | integer | `3600000` (1h) | Timeout per agent turn |
-| `read_timeout_ms` | integer | `5000` | Request/response timeout during startup |
-| `stall_timeout_ms` | integer | `300000` (5m) | Kill agent if no activity for this long. Set `0` to disable |
+| `stall_timeout_ms` | integer | `300000` (5m) | Kill agent if no activity for this long. Set `0` or negative to disable |
 
 ## Prompt Template
 

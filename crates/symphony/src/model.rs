@@ -41,40 +41,6 @@ pub struct WorkflowDefinition {
     pub prompt_template: String,
 }
 
-/// Run attempt status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub enum RunStatus {
-    PreparingWorkspace,
-    BuildingPrompt,
-    LaunchingAgentProcess,
-    InitializingSession,
-    StreamingTurn,
-    Finishing,
-    Succeeded,
-    Failed,
-    TimedOut,
-    Stalled,
-    CanceledByReconciliation,
-}
-
-impl std::fmt::Display for RunStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::PreparingWorkspace => write!(f, "preparing_workspace"),
-            Self::BuildingPrompt => write!(f, "building_prompt"),
-            Self::LaunchingAgentProcess => write!(f, "launching_agent"),
-            Self::InitializingSession => write!(f, "initializing_session"),
-            Self::StreamingTurn => write!(f, "streaming_turn"),
-            Self::Finishing => write!(f, "finishing"),
-            Self::Succeeded => write!(f, "succeeded"),
-            Self::Failed => write!(f, "failed"),
-            Self::TimedOut => write!(f, "timed_out"),
-            Self::Stalled => write!(f, "stalled"),
-            Self::CanceledByReconciliation => write!(f, "canceled_by_reconciliation"),
-        }
-    }
-}
-
 /// Live session metadata for a running coding agent.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct LiveSession {
@@ -223,6 +189,10 @@ pub enum AgentEvent {
         event_type: String,
         message: Option<String>,
     },
+    /// §11.2: Rate limit information from Claude CLI.
+    RateLimitUpdate {
+        data: serde_json::Value,
+    },
 }
 
 /// Worker exit reason reported back to orchestrator.
@@ -238,75 +208,6 @@ pub enum WorkerExitReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── RunStatus Display ────────────────────────────────────────────
-
-    #[test]
-    fn run_status_display_preparing_workspace() {
-        assert_eq!(
-            RunStatus::PreparingWorkspace.to_string(),
-            "preparing_workspace"
-        );
-    }
-
-    #[test]
-    fn run_status_display_building_prompt() {
-        assert_eq!(RunStatus::BuildingPrompt.to_string(), "building_prompt");
-    }
-
-    #[test]
-    fn run_status_display_launching_agent() {
-        assert_eq!(
-            RunStatus::LaunchingAgentProcess.to_string(),
-            "launching_agent"
-        );
-    }
-
-    #[test]
-    fn run_status_display_initializing_session() {
-        assert_eq!(
-            RunStatus::InitializingSession.to_string(),
-            "initializing_session"
-        );
-    }
-
-    #[test]
-    fn run_status_display_streaming_turn() {
-        assert_eq!(RunStatus::StreamingTurn.to_string(), "streaming_turn");
-    }
-
-    #[test]
-    fn run_status_display_finishing() {
-        assert_eq!(RunStatus::Finishing.to_string(), "finishing");
-    }
-
-    #[test]
-    fn run_status_display_succeeded() {
-        assert_eq!(RunStatus::Succeeded.to_string(), "succeeded");
-    }
-
-    #[test]
-    fn run_status_display_failed() {
-        assert_eq!(RunStatus::Failed.to_string(), "failed");
-    }
-
-    #[test]
-    fn run_status_display_timed_out() {
-        assert_eq!(RunStatus::TimedOut.to_string(), "timed_out");
-    }
-
-    #[test]
-    fn run_status_display_stalled() {
-        assert_eq!(RunStatus::Stalled.to_string(), "stalled");
-    }
-
-    #[test]
-    fn run_status_display_canceled_by_reconciliation() {
-        assert_eq!(
-            RunStatus::CanceledByReconciliation.to_string(),
-            "canceled_by_reconciliation"
-        );
-    }
 
     // ── OrchestratorState::new ───────────────────────────────────────
 

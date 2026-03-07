@@ -83,6 +83,8 @@ pub fn start_workflow_watch(
 fn reload_workflow(path: &Path) -> Result<(ServiceConfig, String)> {
     let workflow = load_workflow(path)?;
     let config = ServiceConfig::from_workflow(&workflow)?;
+    // §14.2: Validate the reloaded config before applying it
+    config.validate_for_dispatch()?;
     Ok((config, workflow.prompt_template))
 }
 
@@ -112,6 +114,29 @@ Do the work on {{ issue.identifier }}.
         let (config, prompt) = reload_workflow(&path).unwrap();
         assert_eq!(config.tracker.kind, "linear");
         assert!(prompt.contains("issue.identifier"));
+    }
+
+    /// §14.2: reload_workflow rejects config that fails validate_for_dispatch
+    #[tokio::test]
+    async fn test_reload_workflow_rejects_invalid_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("WORKFLOW.md");
+        // Missing api_key → validate_for_dispatch fails
+        fs::write(
+            &path,
+            r#"---
+tracker:
+  kind: linear
+  team_key: test
+  api_key: ""
+---
+Do the work.
+"#,
+        )
+        .unwrap();
+
+        let result = reload_workflow(&path);
+        assert!(result.is_err());
     }
 
     /// Helper: write a valid WORKFLOW.md and return its ServiceConfig + prompt.
