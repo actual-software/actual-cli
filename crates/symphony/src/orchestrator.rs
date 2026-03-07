@@ -1,5 +1,5 @@
 use crate::agent::AgentSession;
-use crate::config::{state_matches, ServiceConfig};
+use crate::config::{state_matches, DeploymentMode, ServiceConfig};
 use crate::error::{Result, SymphonyError};
 use crate::model::{
     AgentEvent, AgentTotals, Issue, LiveSession, OrchestratorState, RetryEntry, RunningEntry,
@@ -371,8 +371,23 @@ impl Orchestrator {
         // Transition issue to "In Progress" in Linear (best-effort)
         self.transition_to_in_progress(&issue_id, &identifier).await;
 
-        // Spawn worker task
+        // Read config to check deployment mode
         let config = self.config.read().await.clone();
+
+        match config.deployment.mode {
+            DeploymentMode::Distributed => {
+                info!(
+                    issue_id = %issue_id,
+                    "issue queued for distributed worker (not yet implemented)"
+                );
+                // No local subprocess — a remote worker will pick this up
+                return;
+            }
+            DeploymentMode::Local => {
+                // Spawn local worker task below
+            }
+        }
+
         let prompt_template = self.prompt_template.read().await.clone();
         let http = self.http.clone();
         let msg_tx = self.msg_tx.clone();
@@ -1259,8 +1274,8 @@ pub struct RunningSessionInfo {
 mod tests {
     use super::*;
     use crate::config::{
-        AgentConfig, CodingAgentConfig, HooksConfig, PollingConfig, ServerConfig, TrackerConfig,
-        WorkspaceConfig,
+        AgentConfig, CodingAgentConfig, DeploymentConfig, DeploymentMode, HooksConfig,
+        PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
     };
     use crate::model::BlockerRef;
     use chrono::TimeZone;
@@ -1336,6 +1351,10 @@ mod tests {
                 stall_timeout_ms: 300_000,
             },
             server: ServerConfig { port: None },
+            deployment: DeploymentConfig {
+                mode: DeploymentMode::Local,
+                auth_token: None,
+            },
         }
     }
 
@@ -5327,5 +5346,30 @@ mod tests {
         config.tracker.team_key = String::new();
         let env_vars = build_agent_env_vars(&config);
         assert!(env_vars.is_empty());
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_dispatch_issue_distributed_mode() {
+        let mut config = test_config();
+        config.deployment = DeploymentConfig {
+            mode: DeploymentMode::Distributed,
+            auth_token: Some("dist-token".to_string()),
+        };
+        let orch = Orchestrator::new(config, "Test prompt {{ issue.identifier }}".to_string());
+        let issue = make_issue("dist-1", "DIST-1", "Todo");
+        orch.dispatch_issue(issue, None).await;
+
+        // Issue should be in running state
+        let state = orch.state.read().await;
+        assert!(state.running.contains_key("dist-1"));
+        assert!(state.claimed.contains("dist-1"));
+
+        // No worker handle should exist (distributed mode returns early)
+        let handles = orch.worker_handles.read().await;
+        assert!(!handles.contains_key("dist-1"));
+
+        // Check the log message
+        assert!(logs_contain("issue queued for distributed worker"));
     }
 }
