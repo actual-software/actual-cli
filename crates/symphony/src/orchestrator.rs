@@ -1,17 +1,20 @@
 use crate::agent::AgentSession;
 use crate::config::{state_matches, ServiceConfig};
 use crate::error::{Result, SymphonyError};
-use crate::model::{
-    AgentEvent, AgentTotals, Issue, LiveSession, OrchestratorState, RetryEntry, RunningEntry,
-    WorkerExitReason,
-};
+use crate::model::{Issue, OrchestratorState, RetryEntry};
 use crate::prompt::{build_continuation_prompt, render_prompt};
+use crate::protocol::{
+    AgentEvent, LiveSession, RunningEntry, RunningSessionInfo, WorkerExitReason,
+};
 use crate::tracker::LinearClient;
 use crate::workspace;
 use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, warn};
+
+// Re-export protocol types for backward compatibility.
+pub use crate::protocol::{OrchestratorMessage, OrchestratorSnapshot};
 
 /// Log orchestrator start parameters.
 fn log_orchestrator_start(poll_interval_ms: u64, max_concurrent: u32) {
@@ -32,23 +35,6 @@ fn map_worker_result(result: Result<()>) -> WorkerExitReason {
         Err(SymphonyError::AgentTurnCancelled) => WorkerExitReason::Cancelled,
         Err(e) => WorkerExitReason::Failed(e.to_string()),
     }
-}
-
-/// Messages from workers back to the orchestrator.
-#[derive(Debug)]
-pub enum OrchestratorMessage {
-    WorkerExited {
-        issue_id: String,
-        reason: WorkerExitReason,
-    },
-    AgentUpdate {
-        issue_id: String,
-        event: AgentEvent,
-    },
-    RetryFired {
-        issue_id: String,
-    },
-    TriggerRefresh,
 }
 
 /// Default timeout for draining workers during shutdown (30 seconds).
@@ -1201,31 +1187,6 @@ fn exponential_backoff(attempt: u32, max_backoff_ms: u64) -> u64 {
     let power = attempt.saturating_sub(1).min(20); // Cap to prevent overflow
     let delay = base.saturating_mul(1u64.checked_shl(power).unwrap_or(u64::MAX));
     delay.min(max_backoff_ms)
-}
-
-/// Snapshot of orchestrator state for observability.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct OrchestratorSnapshot {
-    pub running: Vec<RunningSessionInfo>,
-    pub retrying: Vec<RetryEntry>,
-    pub totals: AgentTotals,
-    pub rate_limits: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RunningSessionInfo {
-    pub issue_id: String,
-    pub issue_identifier: String,
-    pub state: String,
-    pub session_id: Option<String>,
-    pub turn_count: u32,
-    pub last_event: Option<String>,
-    pub last_message: Option<String>,
-    pub started_at: chrono::DateTime<Utc>,
-    pub last_event_at: Option<chrono::DateTime<Utc>>,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
 }
 
 #[cfg(test)]
