@@ -84,13 +84,8 @@ impl Orchestrator {
             Ok(totals) => {
                 let mut state = self.state.write().await;
                 state.agent_totals = totals;
-                info!(
-                    input_tokens = state.agent_totals.input_tokens,
-                    output_tokens = state.agent_totals.output_tokens,
-                    total_tokens = state.agent_totals.total_tokens,
-                    seconds_running = state.agent_totals.seconds_running,
-                    "restored persisted agent totals"
-                );
+                let t = &state.agent_totals;
+                info!("restored persisted agent totals: input_tokens={} output_tokens={} total_tokens={} seconds_running={:.1}", t.input_tokens, t.output_tokens, t.total_tokens, t.seconds_running);
             }
             Err(e) => {
                 warn!(error = %e, "failed to load persisted agent totals");
