@@ -175,43 +175,60 @@ pub async fn cleanup_workspace(workspace_path: &Path, hooks: &HooksConfig) {
 }
 
 /// Execute a hook script in a workspace directory with timeout.
+///
+/// On timeout the child process is explicitly killed to prevent orphans.
 async fn run_hook(hook_name: &str, script: &str, cwd: &Path, timeout_ms: u64) -> Result<()> {
     let timeout = Duration::from_millis(timeout_ms);
 
-    let result = tokio::time::timeout(timeout, async {
-        let output = Command::new("bash")
-            .arg("-lc")
-            .arg(script)
-            .current_dir(cwd)
-            .output()
-            .await
-            .map_err(|e| SymphonyError::WorkspaceHookFailed {
-                hook: hook_name.to_string(),
-                reason: format!("failed to execute: {e}"),
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let truncated = if stderr.len() > 500 {
-                format!("{}...(truncated)", &stderr[..500])
-            } else {
-                stderr.to_string()
-            };
-            return Err(SymphonyError::WorkspaceHookFailed {
-                hook: hook_name.to_string(),
-                reason: format!("exit code {:?}: {}", output.status.code(), truncated),
-            });
-        }
-
-        Ok(())
-    })
-    .await;
-
-    match result {
-        Ok(inner) => inner,
-        Err(_) => Err(SymphonyError::WorkspaceHookTimedOut {
+    let mut child = Command::new("bash")
+        .arg("-lc")
+        .arg(script)
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| SymphonyError::WorkspaceHookFailed {
             hook: hook_name.to_string(),
+            reason: format!("failed to execute: {e}"),
+        })?;
+
+    // Use child.wait() (borrows) instead of child.wait_with_output() (consumes)
+    // so we can still call child.kill() on timeout.
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => {
+            if !status.success() {
+                // Collect stderr for diagnostics after the process exits
+                let stderr_bytes = if let Some(mut stderr) = child.stderr.take() {
+                    let mut buf = Vec::new();
+                    let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
+                    buf
+                } else {
+                    Vec::new()
+                };
+                let stderr = String::from_utf8_lossy(&stderr_bytes);
+                let truncated = if stderr.len() > 500 {
+                    format!("{}...(truncated)", &stderr[..500])
+                } else {
+                    stderr.to_string()
+                };
+                return Err(SymphonyError::WorkspaceHookFailed {
+                    hook: hook_name.to_string(),
+                    reason: format!("exit code {:?}: {}", status.code(), truncated),
+                });
+            }
+            Ok(())
+        }
+        Ok(Err(e)) => Err(SymphonyError::WorkspaceHookFailed {
+            hook: hook_name.to_string(),
+            reason: format!("failed to wait: {e}"),
         }),
+        Err(_) => {
+            // Timeout — kill the child to prevent orphaned processes
+            let _ = child.kill().await;
+            Err(SymphonyError::WorkspaceHookTimedOut {
+                hook: hook_name.to_string(),
+            })
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Normalized issue record from the tracker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,6 +122,10 @@ pub struct AgentTotals {
     pub seconds_running: f64,
 }
 
+/// Maximum number of completed issue IDs to retain for observability.
+/// Older entries are evicted in FIFO order to prevent unbounded growth.
+const MAX_COMPLETED_ENTRIES: usize = 1000;
+
 /// Orchestrator runtime state.
 #[derive(Debug)]
 pub struct OrchestratorState {
@@ -130,7 +134,9 @@ pub struct OrchestratorState {
     pub running: HashMap<String, RunningEntry>,
     pub claimed: HashSet<String>,
     pub retry_attempts: HashMap<String, RetryEntry>,
-    pub completed: HashSet<String>,
+    /// Bounded set of recently-completed issue IDs (FIFO eviction).
+    completed_set: HashSet<String>,
+    completed_order: VecDeque<String>,
     pub agent_totals: AgentTotals,
     pub rate_limits: Option<serde_json::Value>,
 }
@@ -143,10 +149,34 @@ impl OrchestratorState {
             running: HashMap::new(),
             claimed: HashSet::new(),
             retry_attempts: HashMap::new(),
-            completed: HashSet::new(),
+            completed_set: HashSet::new(),
+            completed_order: VecDeque::new(),
             agent_totals: AgentTotals::default(),
             rate_limits: None,
         }
+    }
+
+    /// Mark an issue as completed. Evicts the oldest entry if the set exceeds
+    /// `MAX_COMPLETED_ENTRIES` to prevent unbounded memory growth.
+    pub fn mark_completed(&mut self, issue_id: String) {
+        if self.completed_set.insert(issue_id.clone()) {
+            self.completed_order.push_back(issue_id);
+        }
+        while self.completed_set.len() > MAX_COMPLETED_ENTRIES {
+            if let Some(oldest) = self.completed_order.pop_front() {
+                self.completed_set.remove(&oldest);
+            }
+        }
+    }
+
+    /// Check if an issue ID is in the completed set.
+    pub fn is_completed(&self, issue_id: &str) -> bool {
+        self.completed_set.contains(issue_id)
+    }
+
+    /// Number of completed entries.
+    pub fn completed_count(&self) -> usize {
+        self.completed_set.len()
     }
 
     pub fn running_count(&self) -> usize {
@@ -288,7 +318,7 @@ mod tests {
         assert!(state.running.is_empty());
         assert!(state.claimed.is_empty());
         assert!(state.retry_attempts.is_empty());
-        assert!(state.completed.is_empty());
+        assert_eq!(state.completed_count(), 0);
         assert_eq!(state.agent_totals.input_tokens, 0);
         assert_eq!(state.agent_totals.output_tokens, 0);
         assert_eq!(state.agent_totals.total_tokens, 0);
@@ -360,6 +390,44 @@ mod tests {
         let mut state = OrchestratorState::new(1000, 5);
         insert_running_entry(&mut state, "a", "  review  ");
         assert_eq!(state.running_count_by_state(" review "), 1);
+    }
+
+    // ── mark_completed / bounded eviction ──────────────────────────
+
+    #[test]
+    fn mark_completed_basic() {
+        let mut state = OrchestratorState::new(1000, 2);
+        state.mark_completed("a".to_string());
+        state.mark_completed("b".to_string());
+        assert!(state.is_completed("a"));
+        assert!(state.is_completed("b"));
+        assert!(!state.is_completed("c"));
+        assert_eq!(state.completed_count(), 2);
+    }
+
+    #[test]
+    fn mark_completed_duplicate_is_idempotent() {
+        let mut state = OrchestratorState::new(1000, 2);
+        state.mark_completed("a".to_string());
+        state.mark_completed("a".to_string());
+        assert_eq!(state.completed_count(), 1);
+    }
+
+    #[test]
+    fn mark_completed_evicts_oldest_beyond_limit() {
+        let mut state = OrchestratorState::new(1000, 2);
+        // Insert MAX_COMPLETED_ENTRIES + 10 items
+        for i in 0..super::MAX_COMPLETED_ENTRIES + 10 {
+            state.mark_completed(format!("issue-{i}"));
+        }
+        // Should be capped at MAX_COMPLETED_ENTRIES
+        assert_eq!(state.completed_count(), super::MAX_COMPLETED_ENTRIES);
+        // Oldest entries should be evicted
+        assert!(!state.is_completed("issue-0"));
+        assert!(!state.is_completed("issue-9"));
+        // Recent entries should be present
+        let last = super::MAX_COMPLETED_ENTRIES + 9;
+        assert!(state.is_completed(&format!("issue-{last}")));
     }
 
     // ── helpers ──────────────────────────────────────────────────────

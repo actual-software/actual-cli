@@ -35,6 +35,7 @@ pub struct Orchestrator {
     state: Arc<RwLock<OrchestratorState>>,
     config: Arc<RwLock<ServiceConfig>>,
     prompt_template: Arc<RwLock<String>>,
+    http: reqwest::Client,
     msg_tx: mpsc::Sender<OrchestratorMessage>,
     msg_rx: mpsc::Receiver<OrchestratorMessage>,
 }
@@ -52,6 +53,7 @@ impl Orchestrator {
             state: Arc::new(RwLock::new(state)),
             config: Arc::new(RwLock::new(config)),
             prompt_template: Arc::new(RwLock::new(prompt_template)),
+            http: reqwest::Client::new(),
             msg_tx,
             msg_rx,
         }
@@ -198,7 +200,7 @@ impl Orchestrator {
         }
 
         // Phase 3: Fetch candidates
-        let client = LinearClient::new(&config.tracker);
+        let client = LinearClient::new(&config.tracker, self.http.clone());
         let candidates = match client
             .fetch_candidate_issues(&config.tracker.active_states)
             .await
@@ -321,6 +323,7 @@ impl Orchestrator {
         // Spawn worker task
         let config = self.config.read().await.clone();
         let prompt_template = self.prompt_template.read().await.clone();
+        let http = self.http.clone();
         let msg_tx = self.msg_tx.clone();
 
         tokio::spawn(async move {
@@ -329,6 +332,7 @@ impl Orchestrator {
                 &prompt_template,
                 &issue,
                 attempt,
+                http,
                 msg_tx.clone(),
                 cancel_rx,
             )
@@ -388,7 +392,7 @@ impl Orchestrator {
                         issue_identifier = %identifier,
                         "worker completed normally"
                     );
-                    state.completed.insert(issue_id.to_string());
+                    state.mark_completed(issue_id.to_string());
                     state.claimed.remove(issue_id);
                     // No retry scheduled — the run_worker turn loop already
                     // handles multi-turn continuation.  The periodic poll tick
@@ -402,16 +406,13 @@ impl Orchestrator {
                         "worker failed"
                     );
                     let config = self.config.read().await;
-                    let delay =
-                        exponential_backoff(next_attempt, config.agent.max_retry_backoff_ms);
-                    drop(config);
-                    self.schedule_retry_inner(
+                    self.maybe_schedule_retry(
                         &mut state,
-                        issue_id.to_string(),
+                        &config,
+                        issue_id,
                         next_attempt,
                         identifier,
                         Some(err.clone()),
-                        delay,
                     );
                 }
                 WorkerExitReason::TimedOut => {
@@ -421,16 +422,13 @@ impl Orchestrator {
                         "worker timed out"
                     );
                     let config = self.config.read().await;
-                    let delay =
-                        exponential_backoff(next_attempt, config.agent.max_retry_backoff_ms);
-                    drop(config);
-                    self.schedule_retry_inner(
+                    self.maybe_schedule_retry(
                         &mut state,
-                        issue_id.to_string(),
+                        &config,
+                        issue_id,
                         next_attempt,
                         identifier,
                         Some("turn timeout".to_string()),
-                        delay,
                     );
                 }
                 WorkerExitReason::Stalled => {
@@ -440,16 +438,13 @@ impl Orchestrator {
                         "worker stalled"
                     );
                     let config = self.config.read().await;
-                    let delay =
-                        exponential_backoff(next_attempt, config.agent.max_retry_backoff_ms);
-                    drop(config);
-                    self.schedule_retry_inner(
+                    self.maybe_schedule_retry(
                         &mut state,
-                        issue_id.to_string(),
+                        &config,
+                        issue_id,
                         next_attempt,
                         identifier,
                         Some("stalled".to_string()),
-                        delay,
                     );
                 }
                 WorkerExitReason::Cancelled => {
@@ -462,6 +457,39 @@ impl Orchestrator {
                 }
             }
         }
+    }
+
+    /// Schedule a retry if the attempt count hasn't exceeded `max_retries`.
+    /// If the cap is reached, the issue is released without further retries.
+    fn maybe_schedule_retry(
+        &self,
+        state: &mut OrchestratorState,
+        config: &ServiceConfig,
+        issue_id: &str,
+        attempt: u32,
+        identifier: String,
+        error: Option<String>,
+    ) {
+        if attempt > config.agent.max_retries {
+            error!(
+                issue_id = %issue_id,
+                issue_identifier = %identifier,
+                attempt = attempt,
+                max_retries = config.agent.max_retries,
+                "max retries exceeded, giving up"
+            );
+            state.claimed.remove(issue_id);
+            return;
+        }
+        let delay = exponential_backoff(attempt, config.agent.max_retry_backoff_ms);
+        self.schedule_retry_inner(
+            state,
+            issue_id.to_string(),
+            attempt,
+            identifier,
+            error,
+            delay,
+        );
     }
 
     fn schedule_retry_inner(
@@ -519,7 +547,7 @@ impl Orchestrator {
         drop(state);
 
         let config = self.config.read().await;
-        let client = LinearClient::new(&config.tracker);
+        let client = LinearClient::new(&config.tracker, self.http.clone());
 
         // Fetch active candidates to check if issue is still eligible
         let candidates = match client
@@ -734,7 +762,7 @@ impl Orchestrator {
         }
 
         let config = self.config.read().await;
-        let client = LinearClient::new(&config.tracker);
+        let client = LinearClient::new(&config.tracker, self.http.clone());
 
         let refreshed = match client.fetch_issue_states_by_ids(&running_ids).await {
             Ok(issues) => issues,
@@ -755,7 +783,7 @@ impl Orchestrator {
                 // Mark as completed before terminating — the tracker says it's done
                 {
                     let mut state = self.state.write().await;
-                    state.completed.insert(issue.id.clone());
+                    state.mark_completed(issue.id.clone());
                 }
                 self.terminate_running_issue(&issue.id, true).await;
             } else if state_matches(&issue.state, &config.tracker.active_states) {
@@ -805,7 +833,7 @@ impl Orchestrator {
 
     async fn startup_cleanup(&self) {
         let config = self.config.read().await;
-        let client = LinearClient::new(&config.tracker);
+        let client = LinearClient::new(&config.tracker, self.http.clone());
 
         info!("running startup terminal workspace cleanup");
 
@@ -856,6 +884,7 @@ async fn run_worker(
     prompt_template: &str,
     issue: &Issue,
     attempt: Option<u32>,
+    http: reqwest::Client,
     msg_tx: mpsc::Sender<OrchestratorMessage>,
     mut cancel_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
@@ -920,7 +949,7 @@ async fn run_worker(
                 );
 
                 // Check if issue is still active
-                let client = LinearClient::new(&config.tracker);
+                let client = LinearClient::new(&config.tracker, http.clone());
                 match client.fetch_issue_states_by_ids(&[issue.id.clone()]).await {
                     Ok(refreshed) => {
                         if let Some(refreshed_issue) = refreshed.first() {
@@ -1090,6 +1119,7 @@ mod tests {
             agent: AgentConfig {
                 max_concurrent_agents: 3,
                 max_turns: 5,
+                max_retries: 10,
                 max_retry_backoff_ms: 300_000,
                 max_concurrent_agents_by_state: HashMap::new(),
             },
@@ -1384,7 +1414,7 @@ mod tests {
         assert!(state.running.is_empty());
         assert!(state.claimed.is_empty());
         assert!(state.retry_attempts.is_empty());
-        assert!(state.completed.is_empty());
+        assert_eq!(state.completed_count(), 0);
         assert_eq!(state.agent_totals.input_tokens, 0);
         assert!(state.rate_limits.is_none());
     }
@@ -1829,7 +1859,7 @@ mod tests {
 
         let state = orch.state.read().await;
         assert!(!state.running.contains_key("id1"));
-        assert!(state.completed.contains("id1"));
+        assert!(state.is_completed("id1"));
         // Claim is released so the poll tick can re-dispatch if still active
         assert!(!state.claimed.contains("id1"));
         // No retry scheduled — the run_worker turn loop handles continuation
@@ -1908,7 +1938,7 @@ mod tests {
         let state = orch.state.read().await;
         // Nothing should have changed
         assert!(state.running.is_empty());
-        assert!(state.completed.is_empty());
+        assert_eq!(state.completed_count(), 0);
         assert!(state.retry_attempts.is_empty());
     }
 
@@ -3468,6 +3498,7 @@ mod tests {
             "Work on {{ issue.identifier }}",
             &issue,
             None,
+            reqwest::Client::new(),
             msg_tx,
             cancel_rx,
         )
@@ -3505,6 +3536,7 @@ mod tests {
             "Work on {{ issue.identifier }}",
             &issue,
             None,
+            reqwest::Client::new(),
             msg_tx,
             cancel_rx,
         )
@@ -3541,6 +3573,7 @@ mod tests {
             "Work on {{ issue.identifier }}",
             &issue,
             None,
+            reqwest::Client::new(),
             msg_tx,
             cancel_rx,
         )
@@ -3579,6 +3612,7 @@ mod tests {
             "Work on {{ issue.identifier }}",
             &issue,
             None,
+            reqwest::Client::new(),
             msg_tx,
             cancel_rx,
         )
@@ -3607,6 +3641,7 @@ mod tests {
             "Work on {{ issue.identifier }}",
             &issue,
             None,
+            reqwest::Client::new(),
             msg_tx,
             cancel_rx,
         )
@@ -3636,6 +3671,7 @@ mod tests {
             "Work on {{ issue.identifier }}",
             &issue,
             None,
+            reqwest::Client::new(),
             msg_tx,
             cancel_rx,
         )
@@ -3685,6 +3721,7 @@ mod tests {
             "Work on {{ issue.identifier }}",
             &issue,
             None,
+            reqwest::Client::new(),
             msg_tx,
             cancel_rx,
         )
@@ -3759,6 +3796,7 @@ mod tests {
             "Work on {{ issue.identifier }}",
             &issue,
             None,
+            reqwest::Client::new(),
             msg_tx,
             cancel_rx,
         )
@@ -3842,7 +3880,7 @@ mod tests {
                 let state = state_ref.read().await;
                 // Worker has exited normally: completed set has the issue,
                 // claimed does NOT (bug fix #4), and running is empty
-                done = state.completed.contains("id1")
+                done = state.is_completed("id1")
                     && !state.claimed.contains("id1")
                     && !state.running.contains_key("id1");
                 drop(state);
@@ -4009,9 +4047,9 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let state = state_ref.read().await;
                 // All 3 issues should be completed
-                all_completed = state.completed.contains("id1")
-                    && state.completed.contains("id2")
-                    && state.completed.contains("id3");
+                all_completed = state.is_completed("id1")
+                    && state.is_completed("id2")
+                    && state.is_completed("id3");
                 drop(state);
             }
             // Verify no claims are held (bug fix #4)
@@ -4086,7 +4124,7 @@ mod tests {
             while !done {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let state = state_ref.read().await;
-                done = state.completed.contains("id1") && state.completed.contains("id2");
+                done = state.is_completed("id1") && state.is_completed("id2");
                 drop(state);
             }
             let _ = shutdown_tx.send(true);
