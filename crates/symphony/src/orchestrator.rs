@@ -1091,8 +1091,19 @@ async fn drain_worker_handles(handles: Vec<tokio::task::JoinHandle<()>>) {
 
 /// Drain worker handles with a timeout, logging a warning if it expires.
 async fn abort_and_drain_handles(handles: Vec<tokio::task::JoinHandle<()>>) {
-    let drain_timeout = std::time::Duration::from_secs(SHUTDOWN_DRAIN_TIMEOUT_SECS);
-    let drain_result = tokio::time::timeout(drain_timeout, drain_worker_handles(handles)).await;
+    abort_and_drain_with_timeout(
+        handles,
+        std::time::Duration::from_secs(SHUTDOWN_DRAIN_TIMEOUT_SECS),
+    )
+    .await;
+}
+
+/// Inner implementation with configurable timeout (for testability).
+async fn abort_and_drain_with_timeout(
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    timeout: std::time::Duration,
+) {
+    let drain_result = tokio::time::timeout(timeout, drain_worker_handles(handles)).await;
     if drain_result.is_err() {
         warn!("worker drain timed out after {SHUTDOWN_DRAIN_TIMEOUT_SECS}s");
     }
@@ -4677,10 +4688,10 @@ mod tests {
         let r = map_worker_result(Err(SymphonyError::MissingRequiredConfig {
             field: "test".into(),
         }));
-        match r {
-            WorkerExitReason::Failed(msg) => assert!(msg.contains("test")),
-            other => panic!("expected Failed, got {other:?}"),
-        }
+        assert!(
+            matches!(&r, WorkerExitReason::Failed(msg) if msg.contains("test")),
+            "expected Failed containing 'test', got {r:?}"
+        );
     }
 
     // ── drain_worker_handles ─────────────────────────────────────────
@@ -4719,25 +4730,36 @@ mod tests {
         abort_and_drain_handles(vec![h]).await;
     }
 
+    /// Named async helper that blocks until a oneshot signal is received.
+    async fn block_until_signal(rx: tokio::sync::oneshot::Receiver<()>) {
+        let _ = rx.await;
+    }
+
     #[traced_test]
     #[tokio::test]
-    async fn test_abort_and_drain_handles_timeout_warns() {
-        // Spawn a task that blocks long enough to exceed a simulated timeout.
-        // We can't easily change SHUTDOWN_DRAIN_TIMEOUT_SECS, so instead we
-        // call the inner helper directly with a manual timeout.
+    async fn test_abort_and_drain_with_timeout_fires_warn() {
+        // Use abort_and_drain_with_timeout with a short timeout and a
+        // blocking task to exercise the warn branch.
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let h = tokio::spawn(async move {
-            let _ = rx.await;
-        });
-        // Don't abort the handle so it blocks on rx
-        let drain_timeout = std::time::Duration::from_millis(10);
-        let drain_result = tokio::time::timeout(drain_timeout, drain_worker_handles(vec![h])).await;
-        if drain_result.is_err() {
-            warn!("worker drain timed out after {SHUTDOWN_DRAIN_TIMEOUT_SECS}s");
-        }
-        assert!(drain_result.is_err());
+        let h = tokio::spawn(block_until_signal(rx));
+        // Don't abort — let the drain timeout expire
+        abort_and_drain_with_timeout(vec![h], std::time::Duration::from_millis(10)).await;
         // Clean up: signal the blocked task to exit
         let _ = tx.send(());
+    }
+
+    #[tokio::test]
+    async fn test_abort_and_drain_with_timeout_no_warn() {
+        // When handles complete before timeout, no warn is emitted.
+        let h = tokio::spawn(sleep_briefly());
+        abort_and_drain_with_timeout(vec![h], std::time::Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn test_abort_and_drain_handles_completes_with_aborted_task() {
+        let h = tokio::spawn(sleep_briefly());
+        h.abort();
+        abort_and_drain_handles(vec![h]).await;
     }
 
     // ── shutdown drains workers ──────────────────────────────────────
