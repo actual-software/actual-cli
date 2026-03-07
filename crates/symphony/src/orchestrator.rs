@@ -20,11 +20,8 @@ fn log_orchestrator_start(poll_interval_ms: u64, max_concurrent: u32) {
 
 /// Log terminal workspace cleanup.
 fn log_terminal_cleanup(identifier: &str, workspace: &std::path::Path) {
-    info!(
-        issue_identifier = %identifier,
-        workspace = %workspace.display(),
-        "cleaning terminal workspace"
-    );
+    let ws = workspace.display().to_string();
+    info!(issue_identifier = %identifier, workspace = %ws, "cleaning terminal workspace");
 }
 
 /// Map a worker `Result<()>` to its exit reason.

@@ -578,6 +578,7 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use std::collections::HashMap;
+    use std::future::IntoFuture;
     use std::path::PathBuf;
     use tower::ServiceExt;
 
@@ -666,10 +667,6 @@ mod tests {
                 cancel_tx,
             },
         );
-    }
-
-    async fn serve_test_app(listener: TcpListener, app: Router) {
-        axum::serve(listener, app).await.unwrap();
     }
 
     async fn get_body(response: axum::response::Response) -> String {
@@ -1319,7 +1316,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(serve_test_app(listener, app));
+        tokio::spawn(axum::serve(listener, app).into_future());
 
         // Wait for server to be ready
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
