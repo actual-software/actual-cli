@@ -10,7 +10,7 @@ use crate::protocol::{
 };
 use crate::tracker::LinearClient;
 use crate::workspace;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, warn};
@@ -410,8 +410,14 @@ impl Orchestrator {
         }
 
         // Persist new session (best-effort)
-        self.persist_session(&issue_id, &identifier, &LiveSession::default(), attempt)
-            .await;
+        self.persist_session(
+            &issue_id,
+            &identifier,
+            &LiveSession::default(),
+            attempt,
+            Utc::now(),
+        )
+        .await;
 
         // Transition issue to "In Progress" in Linear (best-effort)
         self.transition_to_in_progress(&issue_id, &identifier).await;
@@ -597,6 +603,7 @@ impl Orchestrator {
         identifier: &str,
         session: &LiveSession,
         retry_attempt: Option<u32>,
+        started_at: DateTime<Utc>,
     ) {
         if let Some(ref store) = self.store {
             let persisted = PersistedSession {
@@ -607,7 +614,7 @@ impl Orchestrator {
                 output_tokens: session.output_tokens,
                 total_tokens: session.total_tokens,
                 turn_count: session.turn_count,
-                started_at: Utc::now().to_rfc3339(),
+                started_at: started_at.to_rfc3339(),
                 ended_at: None,
                 last_event: session.last_event.clone(),
                 last_event_at: session.last_event_at.map(|t| t.to_rfc3339()),
@@ -1054,6 +1061,7 @@ impl Orchestrator {
                 &entry.identifier,
                 &entry.session,
                 entry.retry_attempt,
+                entry.started_at,
             )
             .await;
         }
