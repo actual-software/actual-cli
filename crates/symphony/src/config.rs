@@ -71,7 +71,6 @@ pub struct CodingAgentConfig {
     pub command: String,
     pub permission_mode: String,
     pub turn_timeout_ms: u64,
-    pub read_timeout_ms: u64,
     pub stall_timeout_ms: u64,
 }
 
@@ -354,19 +353,19 @@ fn parse_codex_config(root: &serde_yaml::Value) -> CodingAgentConfig {
         .map(|v| v.max(0) as u64)
         .unwrap_or(3_600_000);
 
-    let read_timeout_ms = get_yaml_int(root, &["codex", "read_timeout_ms"])
-        .map(|v| v.max(0) as u64)
-        .unwrap_or(5_000);
+    // §10.2: read_timeout_ms removed — it was parsed but never used.
+    // The field is silently ignored if present in YAML.
 
+    // §8.3: Clamp negative values to 0 (disables stall detection)
+    // instead of wrapping via `v as u64`.
     let stall_timeout_ms = get_yaml_int(root, &["codex", "stall_timeout_ms"])
-        .map(|v| v as u64)
+        .map(|v| v.max(0) as u64)
         .unwrap_or(300_000);
 
     CodingAgentConfig {
         command,
         permission_mode,
         turn_timeout_ms,
-        read_timeout_ms,
         stall_timeout_ms,
     }
 }
@@ -829,6 +828,20 @@ agent:
         let debug_output = format!("{:?}", config);
         assert_eq!(debug_output.contains("supersecretkey"), false);
         assert!(debug_output.contains("[REDACTED]"));
+    }
+
+    // --- stall_timeout_ms: negative value clamps to 0 (§8.3) ---
+
+    #[test]
+    fn test_stall_timeout_negative_clamps_to_zero() {
+        let content = r#"---
+codex:
+  stall_timeout_ms: -100
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.codex.stall_timeout_ms, 0);
     }
 
     #[test]

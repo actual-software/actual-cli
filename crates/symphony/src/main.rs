@@ -87,13 +87,25 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
     // Setup shutdown signal
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // Handle SIGINT/SIGTERM
+    // Handle SIGINT/SIGTERM (§12.1: Docker/K8s send SIGTERM)
     let shutdown_tx_signal = _shutdown_tx.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to listen for ctrl_c");
-        info!("received shutdown signal");
+        let ctrl_c = tokio::signal::ctrl_c();
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = ctrl_c => { info!("received SIGINT"); }
+                _ = sigterm.recv() => { info!("received SIGTERM"); }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.expect("failed to listen for ctrl_c");
+            info!("received SIGINT");
+        }
         let _ = shutdown_tx_signal.send(true);
     });
 
