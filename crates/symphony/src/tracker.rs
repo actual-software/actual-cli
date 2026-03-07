@@ -132,7 +132,7 @@ impl LinearClient {
 
         let nodes = extract_nodes(&response, &["data", "workflowStates", "nodes"])?;
         for node in nodes {
-            if let Some(id) = extract_matching_state_id(&node, state_name) {
+            if let Some(id) = extract_matching_state_id(node, state_name) {
                 return Ok(id);
             }
         }
