@@ -699,18 +699,29 @@ setInterval(poll, 3000);
 </script>
 </body>
 </html>"##,
-        initial_json = html_escape(&serde_json::to_string(&initial_state).unwrap_or_default())
+        initial_json = script_safe_json(&serde_json::to_string(&initial_state).unwrap_or_default())
     ));
 
     html
 }
 
 /// Minimal HTML escaping for display safety.
+#[cfg(test)]
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Escape JSON for safe embedding inside a `<script>` tag.
+///
+/// Inside `<script>`, HTML entities are NOT interpreted, so we must NOT
+/// use HTML escaping. The only dangerous sequences are `</script>` (which
+/// would close the tag) and `<!--` (which could start an HTML comment).
+/// We escape `</` to `<\/` to prevent both.
+fn script_safe_json(s: &str) -> String {
+    s.replace("</", "<\\/")
 }
 
 /// Push a stat display block into the HTML buffer.
@@ -1118,6 +1129,22 @@ mod tests {
     #[test]
     fn test_html_escape_plain() {
         assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    // ── script_safe_json tests ───────────────────────────────────────
+
+    #[test]
+    fn test_script_safe_json_escapes_closing_tag() {
+        assert_eq!(script_safe_json("</script>"), "<\\/script>");
+        assert_eq!(script_safe_json("a</b"), "a<\\/b");
+    }
+
+    #[test]
+    fn test_script_safe_json_no_change_for_safe_input() {
+        assert_eq!(
+            script_safe_json("{\"key\":\"value\"}"),
+            "{\"key\":\"value\"}"
+        );
     }
 
     // ── build_snapshot tests ─────────────────────────────────────────
