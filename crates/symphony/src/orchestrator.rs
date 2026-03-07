@@ -296,7 +296,7 @@ impl Orchestrator {
             drop(state);
 
             if self.should_dispatch(&issue, &config).await {
-                self.dispatch_issue(issue, None).await;
+                self.dispatch_issue(issue, None, false).await;
             }
         }
     }
@@ -363,7 +363,12 @@ impl Orchestrator {
         true
     }
 
-    async fn dispatch_issue(&self, issue: Issue, attempt: Option<u32>) {
+    async fn dispatch_issue(
+        &self,
+        issue: Issue,
+        attempt: Option<u32>,
+        skip_state_transition: bool,
+    ) {
         let issue_id = issue.id.clone();
         let identifier = issue.identifier.clone();
 
@@ -410,7 +415,9 @@ impl Orchestrator {
         .await;
 
         // Transition issue to "In Progress" in Linear (best-effort)
-        self.transition_to_in_progress(&issue_id, &identifier).await;
+        if !skip_state_transition {
+            self.transition_to_in_progress(&issue_id, &identifier).await;
+        }
 
         // Read config to check deployment mode
         let config = self.config.read().await.clone();
@@ -511,6 +518,23 @@ impl Orchestrator {
         }
     }
 
+    /// Best-effort transition of an issue to "Merged" in Linear.
+    /// Logs a warning on failure but does not block cleanup.
+    async fn transition_to_merged(&self, issue_id: &str, identifier: &str) {
+        let config = self.config.read().await;
+        let client = LinearClient::new(&config.tracker, self.http.clone());
+        drop(config); // Release RwLock before async call
+
+        match client.transition_issue_state(issue_id, "Merged").await {
+            Ok(()) => {
+                info!(issue_identifier = %identifier, "transitioned issue to Merged");
+            }
+            Err(e) => {
+                warn!(issue_identifier = %identifier, error = %e, "failed to transition issue to Merged (continuing cleanup)");
+            }
+        }
+    }
+
     /// Add an "In Review" issue to waiting_for_review by looking up its PR.
     async fn add_to_waiting_for_review(&self, issue_id: &str, identifier: &str) {
         let config = self.config.read().await;
@@ -534,8 +558,18 @@ impl Orchestrator {
         let pr_number = match github.find_open_pr(&branch).await {
             Ok(Some(pr)) => pr.number,
             Ok(None) => {
-                debug!(issue_id = %issue_id, branch = %branch, "no open PR found for In Review issue");
-                return;
+                // Fallback: check if PR was already merged
+                match github.is_pr_merged(&branch).await {
+                    Ok(Some(true)) => {
+                        info!(issue_id = %issue_id, branch = %branch, "PR already merged — transitioning to Merged");
+                        self.transition_to_merged(issue_id, identifier).await;
+                        return;
+                    }
+                    _ => {
+                        debug!(issue_id = %issue_id, branch = %branch, "no open PR found for In Review issue");
+                        return;
+                    }
+                }
             }
             Err(e) => {
                 debug!(issue_id = %issue_id, error = %e, "failed to find PR for In Review issue");
@@ -663,11 +697,13 @@ impl Orchestrator {
                         }
                     }
 
-                    // If the issue is "In Review", add to waiting_for_review
-                    // so the reconciliation loop can handle auto-merge.
+                    // Check issue state to determine next action
                     let issue_state = entry.issue.state.clone();
                     let issue_identifier = entry.identifier.clone();
-                    if is_in_review_state(&issue_state) {
+                    if is_done_state(&issue_state) {
+                        // Cleanup completed — issue already transitioned, nothing more to do
+                        info!(issue_id = %issue_id, issue_identifier = %identifier, "cleanup worker completed, issue already in terminal state");
+                    } else if is_in_review_state(&issue_state) {
                         drop(state); // Release lock before async GitHub call
                         self.add_to_waiting_for_review(issue_id, &issue_identifier)
                             .await;
@@ -852,7 +888,7 @@ impl Orchestrator {
                 }
                 drop(state);
 
-                self.dispatch_issue(issue.clone(), Some(entry.attempt))
+                self.dispatch_issue(issue.clone(), Some(entry.attempt), false)
                     .await;
             }
         }
@@ -1153,7 +1189,9 @@ impl Orchestrator {
             // 1. Check if PR has been merged
             match github.is_pr_merged(&entry.branch).await {
                 Ok(Some(true)) => {
-                    info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, pr_number = entry.pr_number, "PR merged — dispatching cleanup");
+                    info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, pr_number = entry.pr_number, "PR merged — transitioning to Merged and dispatching cleanup");
+                    self.transition_to_merged(&entry.issue_id, &entry.identifier)
+                        .await;
                     let mut state = self.state.write().await;
                     state.waiting_for_review.remove(&entry.issue_id);
                     drop(state);
@@ -1267,7 +1305,7 @@ impl Orchestrator {
                 entry.pr_number, entry.identifier, entry.branch
             )),
             priority: Some(0), // Highest priority — cleanup is quick
-            state: "In Review".to_string(),
+            state: "Done".to_string(),
             branch_name: Some(entry.branch.clone()),
             url: None,
             labels: vec![],
@@ -1279,7 +1317,8 @@ impl Orchestrator {
         info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, "dispatching cleanup agent turn");
 
         // Dispatch with attempt=None (cleanup is a fresh single turn)
-        self.dispatch_issue(issue, None).await;
+        // skip_state_transition=true: issue is already in "Merged" state
+        self.dispatch_issue(issue, None, true).await;
     }
 
     async fn reconcile_stalls(&self) {
@@ -1645,6 +1684,12 @@ async fn run_worker(
 /// Check if an issue state is "In Review" (case-insensitive).
 fn is_in_review_state(state: &str) -> bool {
     state.trim().eq_ignore_ascii_case("in review")
+}
+
+/// Check if an issue state indicates a terminal/completed state.
+fn is_done_state(state: &str) -> bool {
+    let s = state.trim().to_ascii_lowercase();
+    s == "done" || s == "merged"
 }
 
 /// Check if the worker's branch has an open PR with green CI.
@@ -3400,7 +3445,7 @@ mod tests {
         let orch = Orchestrator::new(config, "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None).await;
+        orch.dispatch_issue(issue, None, false).await;
 
         let state = orch.state.read().await;
         assert!(state.event_broadcasts.contains_key("id1"));
@@ -4204,7 +4249,7 @@ mod tests {
         let orch = test_orchestrator();
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, None).await;
+        orch.dispatch_issue(issue, None, false).await;
 
         let state = orch.state.read().await;
         assert!(state.running.contains_key("id1"));
@@ -4219,7 +4264,7 @@ mod tests {
         let orch = test_orchestrator();
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, Some(3)).await;
+        orch.dispatch_issue(issue, Some(3), false).await;
 
         let state = orch.state.read().await;
         let entry = state.running.get("id1").unwrap();
@@ -4246,7 +4291,7 @@ mod tests {
         }
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, Some(2)).await;
+        orch.dispatch_issue(issue, Some(2), false).await;
 
         let state = orch.state.read().await;
         assert!(!state.retry_attempts.contains_key("id1"));
@@ -4763,7 +4808,7 @@ mod tests {
         let orch = Orchestrator::new(config, "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None).await;
+        orch.dispatch_issue(issue, None, false).await;
 
         // Give the spawned worker time to run and send WorkerExited message
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -5206,7 +5251,7 @@ mod tests {
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None).await;
+        orch.dispatch_issue(issue, None, false).await;
 
         // Wait for the worker to timeout and send WorkerExited
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -5228,7 +5273,7 @@ mod tests {
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None).await;
+        orch.dispatch_issue(issue, None, false).await;
 
         // Give worker time to fail
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -6205,7 +6250,7 @@ mod tests {
         };
         let orch = Orchestrator::new(config, "Test prompt {{ issue.identifier }}".to_string());
         let issue = make_issue("dist-1", "DIST-1", "Todo");
-        orch.dispatch_issue(issue, None).await;
+        orch.dispatch_issue(issue, None, false).await;
 
         // Issue should be in running state
         let state = orch.state.read().await;
@@ -9598,7 +9643,7 @@ mod tests {
         // Use an invalid Liquid template (unclosed tag) to force render failure
         let orch = Orchestrator::new(config, "{% if issue.identifier %}unclosed".to_string());
         let issue = make_issue("dist-err", "DIST-ERR", "Todo");
-        orch.dispatch_issue(issue, None).await;
+        orch.dispatch_issue(issue, None, false).await;
 
         // Issue should still be in running/claimed (dispatch adds it before rendering)
         let state = orch.state.read().await;
@@ -10201,5 +10246,353 @@ mod tests {
 
         assert!(logs_contain("failed to persist log entry"));
         assert!(store.saved_log_entries().is_empty());
+    }
+
+    // ── is_done_state ──────────────────────────────────────────────
+
+    #[test]
+    fn test_is_done_state() {
+        assert!(is_done_state("Done"));
+        assert!(is_done_state("done"));
+        assert!(is_done_state("DONE"));
+        assert!(is_done_state("Merged"));
+        assert!(is_done_state("merged"));
+        assert!(is_done_state("MERGED"));
+        assert!(is_done_state("  Done  "));
+        assert!(is_done_state("  Merged  "));
+        assert!(!is_done_state("In Progress"));
+        assert!(!is_done_state("In Review"));
+        assert!(!is_done_state("Todo"));
+        assert!(!is_done_state(""));
+    }
+
+    // ── transition_to_merged ──────────────────────────────────────
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_transition_to_merged_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        // resolve_state_id response
+        let resolve_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-merged", "name": "Merged" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // update_issue_state response
+        let update_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let orch = Orchestrator::new(
+            test_config_with_endpoint(&server.url()),
+            "template".to_string(),
+        );
+
+        orch.transition_to_merged("issue-1", "PROJ-1").await;
+
+        assert!(logs_contain("transitioned issue to Merged"));
+        resolve_mock.assert_async().await;
+        update_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    #[traced_test]
+    async fn test_transition_to_merged_failure() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let orch = Orchestrator::new(
+            test_config_with_endpoint(&server.url()),
+            "template".to_string(),
+        );
+
+        orch.transition_to_merged("issue-1", "PROJ-1").await;
+
+        assert!(logs_contain("failed to transition issue to Merged"));
+        mock.assert_async().await;
+    }
+
+    // ── reconcile_pr_lifecycle: merged PR transitions to Merged ──
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_pr_lifecycle_pr_merged_transitions_to_merged() {
+        let mut server = mockito::Server::new_async().await;
+
+        // is_pr_merged: returns merged PR (GitHub GET)
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "closed",
+                    "merged": true
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: resolve_state_id for "Merged"
+        let _resolve_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-merged", "name": "Merged" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: issueUpdate
+        let _update_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "Cleanup {{ issue.identifier }}".to_string());
+
+        // Add waiting entry
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-1".to_string(),
+                    started_waiting_at: Utc::now(),
+                },
+            );
+        }
+
+        orch.reconcile_pr_lifecycle().await;
+
+        // Verify transition to Merged was called
+        assert!(logs_contain("transitioned issue to Merged"));
+        // Verify cleanup was dispatched
+        assert!(logs_contain("dispatching cleanup agent turn"));
+
+        let state = orch.state.read().await;
+        // Should be removed from waiting
+        assert!(!state.waiting_for_review.contains_key("id1"));
+        // Cleanup dispatch should have added it to running
+        assert!(state.running.contains_key("id1"));
+    }
+
+    // ── dispatch_issue: skip_state_transition ────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_dispatch_issue_skip_state_transition() {
+        let mut server = mockito::Server::new_async().await;
+
+        // If transition_to_in_progress were called, it would POST to this
+        // Linear endpoint. We expect 0 calls.
+        let linear_mock = server.mock("POST", "/").expect(0).create_async().await;
+
+        let config = test_config_with_endpoint(&server.url());
+        let orch = Orchestrator::new(config, "template".to_string());
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+
+        orch.dispatch_issue(issue, None, true).await;
+
+        let state = orch.state.read().await;
+        // Issue should still be dispatched (in running and claimed)
+        assert!(state.running.contains_key("id1"));
+        assert!(state.claimed.contains("id1"));
+        // transition_to_in_progress should NOT have been called
+        assert!(!logs_contain("transitioned issue to In Progress"));
+        linear_mock.assert_async().await;
+    }
+
+    // ── add_to_waiting_for_review: merged PR fallback ───────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_add_to_waiting_merged_pr_fallback() {
+        let mut server = mockito::Server::new_async().await;
+
+        // find_open_pr: no open PR (state=open returns empty)
+        let _open_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "open".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        // is_pr_merged fallback: PR was merged (state=all returns merged PR)
+        let _merged_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/proj-1".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "all".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "closed",
+                    "merged": true
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: resolve_state_id for "Merged"
+        let _resolve_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-merged", "name": "Merged" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: issueUpdate
+        let _update_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": { "issueUpdate": { "success": true } }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        orch.add_to_waiting_for_review("id1", "PROJ-1").await;
+
+        // Should have detected merged PR and transitioned
+        assert!(logs_contain("PR already merged"));
+        assert!(logs_contain("transitioned issue to Merged"));
+
+        // Should NOT be in waiting_for_review (merged, not waiting)
+        let state = orch.state.read().await;
+        assert!(!state.waiting_for_review.contains_key("id1"));
+    }
+
+    // ── on_worker_exit: Done state marks completed without retry ─
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_done_state_marks_completed() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Done").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.is_completed("id1"));
+        // Should NOT schedule a retry
+        assert!(!state.retry_attempts.contains_key("id1"));
+        // Should NOT be in waiting_for_review
+        assert!(!state.waiting_for_review.contains_key("id1"));
+        assert!(logs_contain(
+            "cleanup worker completed, issue already in terminal state"
+        ));
     }
 }
