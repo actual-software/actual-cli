@@ -135,7 +135,7 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 |-------|------|---------|-------------|
 | `max_concurrent_agents` | integer | `10` | Maximum parallel agent sessions |
 | `max_turns` | integer | `20` | Maximum agent turns per worker run |
-| `max_retries` | integer | `10` | Maximum retry attempts per issue |
+| `max_retries` | integer | none (unlimited) | Maximum retry attempts per issue; omit for unlimited retries |
 | `max_retry_backoff_ms` | integer | `300000` (5m) | Cap on exponential retry backoff |
 | `max_concurrent_agents_by_state` | map | `{}` | Per-state concurrency limits (e.g. `todo: 2, in progress: 3`) |
 
@@ -506,7 +506,7 @@ Example with default `max_retry_backoff_ms: 300000` (5m):
 | 5 | 160s |
 | 6+ | 300s (capped) |
 
-Retries stop after `max_retries` attempts (default 10). At that point the issue's claim is released.
+By default, retries continue indefinitely with backoff capped at `max_retry_backoff_ms`. Set `max_retries` to a positive integer to enforce a retry cap, after which the issue's claim is released.
 
 ### Reconciliation
 

@@ -93,7 +93,7 @@ pub struct HooksConfig {
 pub struct AgentConfig {
     pub max_concurrent_agents: u32,
     pub max_turns: u32,
-    pub max_retries: u32,
+    pub max_retries: Option<u32>,
     pub max_retry_backoff_ms: u64,
     pub max_concurrent_agents_by_state: HashMap<String, u32>,
 }
@@ -342,9 +342,7 @@ fn parse_agent_config(root: &serde_yml::Value) -> AgentConfig {
         .map(|v| v.max(1) as u32)
         .unwrap_or(20);
 
-    let max_retries = get_yaml_int(root, &["agent", "max_retries"])
-        .map(|v| v.max(0) as u32)
-        .unwrap_or(10);
+    let max_retries = get_yaml_int(root, &["agent", "max_retries"]).map(|v| v.max(0) as u32);
 
     let max_retry_backoff_ms = get_yaml_int(root, &["agent", "max_retry_backoff_ms"])
         .map(|v| v.max(0) as u64)
@@ -491,6 +489,7 @@ mod tests {
         assert_eq!(config.polling.interval_ms, 30_000);
         assert_eq!(config.agent.max_concurrent_agents, 10);
         assert_eq!(config.agent.max_turns, 20);
+        assert_eq!(config.agent.max_retries, None);
         assert_eq!(config.agent.max_retry_backoff_ms, 300_000);
         assert_eq!(config.coding_agent.turn_timeout_ms, 3_600_000);
         assert_eq!(config.coding_agent.stall_timeout_ms, 300_000);
@@ -516,6 +515,7 @@ polling:
 agent:
   max_concurrent_agents: 5
   max_turns: 10
+  max_retries: 5
   max_retry_backoff_ms: 60000
   max_concurrent_agents_by_state:
     todo: 2
@@ -534,6 +534,7 @@ Do the work."#;
         assert_eq!(config.polling.interval_ms, 5_000);
         assert_eq!(config.agent.max_concurrent_agents, 5);
         assert_eq!(config.agent.max_turns, 10);
+        assert_eq!(config.agent.max_retries, Some(5));
         assert_eq!(config.agent.max_retry_backoff_ms, 60_000);
         assert_eq!(
             config.agent.max_concurrent_agents_by_state.get("todo"),
