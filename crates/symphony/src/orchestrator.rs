@@ -708,6 +708,7 @@ impl Orchestrator {
 
         if let Some(entry) = state.running.get_mut(issue_id) {
             let now = Utc::now();
+            let mut should_log = true;
 
             match &event {
                 AgentEvent::SessionStarted { session_id, pid } => {
@@ -762,20 +763,24 @@ impl Orchestrator {
                         entry.session.last_message = Some(msg.clone());
                     }
                 }
-                AgentEvent::RateLimitUpdate { .. } => {
+                AgentEvent::RateLimitUpdate { data } => {
                     entry.session.last_event = Some("rate_limit_event".to_string());
                     entry.session.last_event_at = Some(now);
+                    // Only log/broadcast interesting rate-limit events (not routine "allowed")
+                    should_log = crate::model::should_log_rate_limit(data);
                 }
             }
 
-            // Create log entry and append to event log
-            entry.log_seq += 1;
-            let log_entry = crate::model::create_log_entry(entry.log_seq, &event);
-            crate::model::append_log_entry(&mut entry.event_log, log_entry.clone());
+            // Create log entry and append to event log (skip filtered events)
+            if should_log {
+                entry.log_seq += 1;
+                let log_entry = crate::model::create_log_entry(entry.log_seq, &event);
+                crate::model::append_log_entry(&mut entry.event_log, log_entry.clone());
 
-            // Broadcast to SSE subscribers (ignore error if no receivers)
-            if let Some(tx) = state.event_broadcasts.get(issue_id) {
-                let _ = tx.send(log_entry);
+                // Broadcast to SSE subscribers (ignore error if no receivers)
+                if let Some(tx) = state.event_broadcasts.get(issue_id) {
+                    let _ = tx.send(log_entry);
+                }
             }
         }
 
@@ -2455,7 +2460,7 @@ mod tests {
         assert_eq!(entry.session.last_message, Some("previous".to_string()));
     }
 
-    // §11.2: rate limit update stored in state
+    // §11.2: rate limit update stored in state (no rate_limit_info → logged)
     #[tokio::test]
     async fn test_on_agent_update_rate_limit() {
         let orch = test_orchestrator();
@@ -2487,6 +2492,70 @@ mod tests {
             Some("rate_limit_event".to_string())
         );
         assert!(entry.session.last_event_at.is_some());
+        // Missing rate_limit_info means it IS logged (conservative)
+        assert_eq!(entry.event_log.len(), 1);
+    }
+
+    // Routine "allowed" rate-limit events are filtered from the log
+    #[tokio::test]
+    async fn test_on_agent_update_rate_limit_allowed_filtered() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        let rate_data = serde_json::json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": { "status": "allowed" }
+        });
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::RateLimitUpdate {
+                data: rate_data.clone(),
+            },
+        )
+        .await;
+
+        let state = orch.state.read().await;
+        // Global rate_limits is still updated
+        assert!(state.rate_limits.is_some());
+        // Session metadata is still updated
+        let entry = state.running.get("id1").unwrap();
+        assert_eq!(
+            entry.session.last_event,
+            Some("rate_limit_event".to_string())
+        );
+        assert!(entry.session.last_event_at.is_some());
+        // But event log is empty — routine event was filtered
+        assert!(entry.event_log.is_empty());
+        assert_eq!(entry.log_seq, 0);
+    }
+
+    // Non-"allowed" rate-limit events ARE logged
+    #[tokio::test]
+    async fn test_on_agent_update_rate_limit_rejected_logged() {
+        let orch = test_orchestrator();
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        let rate_data = serde_json::json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": { "status": "rejected" }
+        });
+
+        orch.on_agent_update(
+            "id1",
+            AgentEvent::RateLimitUpdate {
+                data: rate_data.clone(),
+            },
+        )
+        .await;
+
+        let state = orch.state.read().await;
+        assert!(state.rate_limits.is_some());
+        let entry = state.running.get("id1").unwrap();
+        // Rejected event IS logged
+        assert_eq!(entry.event_log.len(), 1);
+        assert_eq!(entry.log_seq, 1);
+        assert_eq!(entry.event_log[0].event_type, "rate_limit_event");
     }
 
     #[tokio::test]
