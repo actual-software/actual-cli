@@ -18,20 +18,22 @@ agent:
     in progress: 3
     in review: 1
 codex:
-  command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 30"
+  command: "claude -p --output-format stream-json --dangerously-skip-permissions --max-turns 30"
   stall_timeout_ms: 600000
-  turn_timeout_ms: 7200000
+  turn_timeout_ms: 1800000
 hooks:
   # NOTE: Hooks are executed as raw shell scripts (bash -lc). They do NOT
   # support Liquid template syntax. The workspace directory name is the
   # sanitized issue identifier (e.g., ACTCLI-42), available via $(basename $(pwd)).
   after_create: |
-    git clone --depth 1 https://github.com/actual-software/actual-cli.git .
+    # Clone the repo into the empty workspace directory
+    git clone --branch main --depth 1 git@github.com:actual-software/actual-cli.git .
     git fetch --unshallow origin main
+    # Install Rust toolchain components needed for quality gates
     rustup component add clippy rustfmt llvm-tools-preview
   before_run: |
     ISSUE_KEY=$(basename "$(pwd)")
-    BRANCH="symphony/${ISSUE_KEY,,}"
+    BRANCH="symphony/$(echo "$ISSUE_KEY" | tr '[:upper:]' '[:lower:]')"
     git fetch origin main
     # Preserve existing branch work on retries; only create if new
     git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" origin/main
@@ -40,11 +42,21 @@ hooks:
     if [ "$LOCAL_COMMITS" = "0" ]; then
       git reset --hard origin/main
     fi
-  after_run: |
-    ISSUE_KEY=$(basename "$(pwd)")
-    echo "[$ISSUE_KEY] Agent run completed at $(date)" >> .symphony-log
   timeout_ms: 300000
 ---
+
+## First Steps (MANDATORY)
+
+Before doing ANY work, read the project's agent instructions:
+
+```bash
+cat CLAUDE.md
+cat AGENTS.md
+```
+
+Follow all conventions, workflows, and rules described in those files.
+
+## Your Task
 
 You are an expert Rust engineer working on **actual-cli**, an ADR-powered AI context file generator built in Rust. You are working on issue **{{ issue.identifier }}: {{ issue.title }}**.
 
@@ -93,7 +105,7 @@ You MUST pass ALL of these before committing. Run them in this order:
 ```bash
 cargo fmt --check       # Fix: cargo fmt
 cargo clippy -- -D warnings  # Zero warnings allowed
-cargo test --workspace --features integration  # Zero failures
+cargo test              # Zero failures
 cargo build --release   # Must compile
 ```
 
@@ -104,7 +116,10 @@ If any gate fails, fix it. Do NOT commit or push broken code.
 This project enforces **100% per-file line coverage** via CI. Every source file (except `main.rs` and a few excluded files) must have 100% test coverage. When adding new code:
 
 1. Write tests for every code path, including error branches
-2. Run `cargo llvm-cov --workspace --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs)' --lcov --output-path lcov.info` to check coverage locally
+2. Check coverage locally if `cargo-llvm-cov` is installed:
+   ```bash
+   cargo llvm-cov --workspace --lcov --output-path lcov.info
+   ```
 3. If a line is uncovered, add a test that exercises it
 
 ## Git Workflow
@@ -146,6 +161,7 @@ gh pr view $PR_NUM --json reviews --jq '.reviews[] | select(.body != "") | {user
 - **All CI checks must be green** before the PR is considered complete
 - **All code review feedback must be addressed** — fix issues, push, re-verify
 - PRs go through a **merge queue** with rebase strategy
+- Do NOT merge PRs — the orchestrator or a human handles merging
 
 ## Refactoring for Testability
 

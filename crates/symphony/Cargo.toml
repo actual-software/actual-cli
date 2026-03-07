@@ -37,6 +37,9 @@ notify = "7"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Environment
+dotenvy = "0.15"
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
