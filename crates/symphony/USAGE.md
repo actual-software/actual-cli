@@ -131,6 +131,122 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 
 > **Deprecated**: The `codex` key is still accepted as a fallback but will be removed in a future release. Rename it to `coding_agent`.
 
+### server
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `port` | integer | (none) | Port for the HTTP dashboard/API server. If not set, the server is not started. Use `0` for an ephemeral port. |
+
+## CLI Flags
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--port` | integer | Start HTTP dashboard on this port. Overrides `server.port` in WORKFLOW.md. |
+
+## HTTP Dashboard & API
+
+When `--port` or `server.port` is configured, Symphony starts an HTTP server on `127.0.0.1:{port}` with the following endpoints:
+
+### GET /
+
+Server-rendered HTML dashboard showing:
+- Running sessions table (identifier, state, session ID, turns, last event, tokens, started)
+- Retry queue table (identifier, attempt, due at, error)
+- Aggregate totals (input tokens, output tokens, total tokens, seconds running)
+- Rate limit data (if available)
+
+### GET /api/v1/state
+
+JSON snapshot of the orchestrator state:
+
+```json
+{
+  "generated_at": "2025-01-01T00:00:00Z",
+  "counts": { "running": 2, "retrying": 1 },
+  "running": [
+    {
+      "issue_id": "abc123",
+      "issue_identifier": "PROJ-42",
+      "state": "In Progress",
+      "session_id": "sess-abc",
+      "turn_count": 3,
+      "last_event": "turn_completed",
+      "last_message": "Working on tests",
+      "started_at": "2025-01-01T00:00:00Z",
+      "last_event_at": "2025-01-01T00:01:00Z",
+      "input_tokens": 1000,
+      "output_tokens": 500,
+      "total_tokens": 1500
+    }
+  ],
+  "retrying": [
+    {
+      "issue_id": "def456",
+      "identifier": "PROJ-43",
+      "attempt": 2,
+      "due_at_ms": 1234567890,
+      "error": "turn timeout"
+    }
+  ],
+  "codex_totals": {
+    "input_tokens": 50000,
+    "output_tokens": 20000,
+    "total_tokens": 70000,
+    "seconds_running": 3600.5
+  },
+  "rate_limits": null
+}
+```
+
+### GET /api/v1/:issue_identifier
+
+Per-issue details by identifier (e.g., `GET /api/v1/PROJ-42`). Returns 404 if the issue is not currently running or retrying.
+
+**Running issue response:**
+```json
+{
+  "issue_identifier": "PROJ-42",
+  "status": "running",
+  "issue_id": "abc123",
+  "workspace_path": "/tmp/symphony_workspaces/PROJ-42",
+  "session": {
+    "session_id": "sess-abc",
+    "turn_count": 3,
+    "last_event": "turn_completed",
+    "last_message": "Working",
+    "started_at": "2025-01-01T00:00:00Z",
+    "last_event_at": "2025-01-01T00:01:00Z",
+    "input_tokens": 1000,
+    "output_tokens": 500,
+    "total_tokens": 1500
+  },
+  "retry": null
+}
+```
+
+**Not found response (404):**
+```json
+{
+  "error": {
+    "code": "issue_not_found",
+    "message": "No running or retrying issue with identifier 'PROJ-99'"
+  }
+}
+```
+
+### POST /api/v1/refresh
+
+Trigger an immediate poll cycle. Returns 202 Accepted.
+
+```json
+{
+  "queued": true,
+  "requested_at": "2025-01-01T00:00:00Z"
+}
+```
+
+If the message channel is full, the response includes `"coalesced": true` indicating the refresh will be coalesced with an existing pending refresh.
+
 ## Prompt Template
 
 The markdown body after the YAML front matter is the prompt template, rendered per-issue using [Liquid](https://shopify.github.io/liquid/) syntax.
@@ -350,6 +466,7 @@ WORKFLOW.md
 | `prompt.rs` | Liquid template rendering with strict variable checking |
 | `agent.rs` | Claude Code subprocess launch and event streaming |
 | `orchestrator.rs` | Poll loop, dispatch, reconciliation, retry/backoff state machine |
+| `server.rs` | HTTP dashboard and JSON API (axum) for observability |
 | `watcher.rs` | File watcher for dynamic WORKFLOW.md reload |
 | `error.rs` | Typed error taxonomy (25+ variants) |
 | `main.rs` | CLI entry point with structured logging |
