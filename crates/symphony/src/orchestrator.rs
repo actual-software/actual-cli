@@ -1625,6 +1625,16 @@ async fn run_worker(
     // Phase 3: Build env vars for agent subprocess
     let env_vars = build_agent_env_vars(config, config.agent.max_turns);
 
+    // Phase 3b: Generate MCP config for agent subprocess
+    let symphony_binary =
+        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("symphony"));
+    let mcp_config_path =
+        crate::mcp::write_mcp_config(&workspace_result.path, &symphony_binary, &env_vars).map_err(
+            |e| SymphonyError::McpConfigWriteFailed {
+                reason: format!("failed to write MCP config: {e}"),
+            },
+        )?;
+
     // Phase 4: Build prompt and launch agent
     let max_turns = config.agent.max_turns;
     let mut turn_number: u32 = 1;
@@ -1657,6 +1667,7 @@ async fn run_worker(
             issue,
             &env_vars,
             config.agent.max_turns,
+            Some(&mcp_config_path),
         )
         .await?;
 

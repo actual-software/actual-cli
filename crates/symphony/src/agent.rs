@@ -46,6 +46,7 @@ impl AgentSession {
         issue: &Issue,
         env_vars: &HashMap<String, String>,
         max_turns: u32,
+        mcp_config_path: Option<&Path>,
     ) -> Result<(Self, mpsc::Receiver<AgentEvent>)> {
         // Validate workspace path
         if !workspace_path.is_dir() {
@@ -58,7 +59,7 @@ impl AgentSession {
 
         // Build the command. The prompt is passed via stdin to avoid shell
         // injection — issue titles/descriptions from Linear are user-controlled.
-        let full_command = build_agent_command(&config.command, max_turns);
+        let full_command = build_agent_command(&config.command, max_turns, mcp_config_path);
 
         log_agent_launch(
             &config.command,
@@ -222,11 +223,18 @@ fn log_stderr_line_if_nonempty(line: &str) {
 /// `max_turns` from the config is injected into the `--max-turns` flag for
 /// bare commands. Pass-through commands (`-p`/`--print`/`app-server`) are
 /// NOT modified — they are used as-is.
-fn build_agent_command(base_command: &str, max_turns: u32) -> String {
+///
+/// If `mcp_config_path` is provided, `--mcp-config <path>` is appended to
+/// the command so the agent subprocess can use MCP tools.
+fn build_agent_command(
+    base_command: &str,
+    max_turns: u32,
+    mcp_config_path: Option<&Path>,
+) -> String {
     // If the command already includes arguments (like -p, --output-format, etc.),
     // we just use it as-is (pass-through mode). Otherwise, we add the standard flags.
     // The prompt arrives on stdin, so Claude Code reads from stdin in -p mode.
-    if base_command.contains("-p")
+    let mut cmd = if base_command.contains("-p")
         || base_command.contains("--print")
         || base_command.contains("app-server")
     {
@@ -234,12 +242,18 @@ fn build_agent_command(base_command: &str, max_turns: u32) -> String {
     } else {
         // Default: claude -p with stream-json for structured output.
         // Use max_turns from config instead of a hardcoded value.
-        let cmd = format!(
+        let c = format!(
             "{base_command} -p --output-format stream-json --dangerously-skip-permissions --max-turns {max_turns}"
         );
         // If the base command already had --max-turns, rewrite it to match config.
-        rewrite_max_turns(&cmd, max_turns)
+        rewrite_max_turns(&c, max_turns)
+    };
+
+    if let Some(path) = mcp_config_path {
+        cmd.push_str(&format!(" --mcp-config {}", path.display()));
     }
+
+    cmd
 }
 
 /// Rewrite any existing `--max-turns <N>` in the command to the given value.
@@ -408,6 +422,7 @@ mod tests {
         let cmd = build_agent_command(
             "claude -p --output-format stream-json --dangerously-skip-permissions",
             20,
+            None,
         );
         assert!(cmd.contains("claude -p"));
         // Prompt is passed via stdin, not in the command
@@ -416,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_bare() {
-        let cmd = build_agent_command("claude", 20);
+        let cmd = build_agent_command("claude", 20, None);
         assert!(cmd.contains("claude"));
         assert!(cmd.contains("-p"));
         assert!(cmd.contains("--output-format stream-json"));
@@ -425,7 +440,7 @@ mod tests {
     #[test]
     fn test_build_agent_command_no_prompt_in_command() {
         // Verify that the prompt is never embedded in the shell command
-        let cmd = build_agent_command("claude -p", 20);
+        let cmd = build_agent_command("claude -p", 20, None);
         // Should just be the base command as-is, no prompt appended
         assert_eq!(cmd, "claude -p");
     }
@@ -433,7 +448,7 @@ mod tests {
     #[test]
     fn test_build_agent_command_bare_uses_config_max_turns() {
         // Bare command gets --max-turns from the config value, not hardcoded 20
-        let cmd = build_agent_command("claude", 42);
+        let cmd = build_agent_command("claude", 42, None);
         assert!(cmd.contains("--max-turns 42"));
         assert!(!cmd.contains("--max-turns 20"));
     }
@@ -441,15 +456,39 @@ mod tests {
     #[test]
     fn test_build_agent_command_passthrough_no_rewrite() {
         // Command with -p and --max-turns 30 should NOT be rewritten
-        let cmd = build_agent_command("claude -p --max-turns 30", 50);
+        let cmd = build_agent_command("claude -p --max-turns 30", 50, None);
         assert_eq!(cmd, "claude -p --max-turns 30");
     }
 
     #[test]
     fn test_build_agent_command_passthrough_without_max_turns() {
         // Command with -p but no --max-turns stays as-is
-        let cmd = build_agent_command("claude -p --output-format json", 50);
+        let cmd = build_agent_command("claude -p --output-format json", 50, None);
         assert_eq!(cmd, "claude -p --output-format json");
+    }
+
+    #[test]
+    fn test_build_agent_command_with_mcp_config_bare() {
+        let cmd = build_agent_command("claude", 20, Some(Path::new("/tmp/mcp.json")));
+        assert!(cmd.contains("--mcp-config /tmp/mcp.json"));
+        assert!(cmd.contains("-p"));
+    }
+
+    #[test]
+    fn test_build_agent_command_with_mcp_config_passthrough() {
+        let cmd = build_agent_command(
+            "claude -p --output-format json",
+            20,
+            Some(Path::new("/tmp/mcp.json")),
+        );
+        assert!(cmd.contains("--mcp-config /tmp/mcp.json"));
+        assert!(cmd.starts_with("claude -p --output-format json"));
+    }
+
+    #[test]
+    fn test_build_agent_command_with_mcp_config_none() {
+        let cmd = build_agent_command("claude", 20, None);
+        assert!(!cmd.contains("--mcp-config"));
     }
 
     #[test]
@@ -714,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_with_print_flag() {
-        let cmd = build_agent_command("claude --print", 20);
+        let cmd = build_agent_command("claude --print", 20, None);
         // --print matches, so it should use the command as-is
         assert_eq!(cmd, "claude --print");
         assert!(!cmd.contains("--output-format"));
@@ -722,7 +761,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_with_app_server() {
-        let cmd = build_agent_command("claude app-server --port 3000", 20);
+        let cmd = build_agent_command("claude app-server --port 3000", 20, None);
         // app-server matches, so it should use the command as-is
         assert_eq!(cmd, "claude app-server --port 3000");
         assert!(!cmd.contains("--output-format"));
@@ -771,10 +810,17 @@ mod tests {
         let config = make_test_config(r#"printf '{"type":"result","result":"done"}\n' #-p"#);
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "do work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, _event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "do work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(session.pid.is_some());
 
@@ -797,6 +843,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
         )
         .await;
         assert!(
@@ -813,10 +860,17 @@ mod tests {
         let config = make_test_config("exit 1 #-p");
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "do work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, _event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "do work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         let result = session.wait_with_timeout(10_000).await;
         assert!(
@@ -833,10 +887,17 @@ mod tests {
         let config = make_test_config("sleep 999 #-p");
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, _event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         let result = session.wait_with_timeout(100).await; // 100ms timeout
         assert!(matches!(&result, Err(SymphonyError::AgentTurnTimeout)));
@@ -852,10 +913,17 @@ mod tests {
         let config = make_test_config("sleep 999 #-p");
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, _event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         // kill() should not panic
         session.kill().await;
@@ -878,10 +946,17 @@ mod tests {
         let config = make_test_config("true #-p");
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, _event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Wait for the process to finish
         let _ = session.wait_with_timeout(5_000).await;
@@ -899,10 +974,17 @@ mod tests {
         let config = make_test_config("true #-p");
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         // The launch itself sends SessionStarted
         let event = event_rx
@@ -931,10 +1013,17 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -985,10 +1074,17 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -1026,10 +1122,17 @@ mod tests {
         );
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         let result = session.wait_with_timeout(10_000).await;
         assert!(result.is_ok());
@@ -1067,10 +1170,17 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -1103,10 +1213,17 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -1154,10 +1271,17 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         // The process exits immediately after printf (exit 0)
         session.wait_with_timeout(10_000).await.unwrap();
@@ -1218,10 +1342,17 @@ mod tests {
         let issue = make_test_issue();
 
         // This exercises the debug! at lines 38-42 with a tracing subscriber
-        let (mut session, _rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, _rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
         let _ = session.wait_with_timeout(5_000).await;
     }
 
@@ -1240,10 +1371,17 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
@@ -1274,10 +1412,17 @@ mod tests {
         );
         let issue = make_test_issue();
 
-        let (mut session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, _event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         let result = session.wait_with_timeout(10_000).await;
         assert!(result.is_ok());
@@ -1298,10 +1443,17 @@ mod tests {
         let config = make_test_config(script);
         let issue = make_test_issue();
 
-        let (mut session, event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (mut session, event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Drop the receiver immediately — the stdout reader should break on send error
         drop(event_rx);
@@ -1318,10 +1470,17 @@ mod tests {
         let config = make_test_config("sleep 999 #-p");
         let issue = make_test_issue();
 
-        let (session, _event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &HashMap::new(), 20)
-                .await
-                .unwrap();
+        let (session, _event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &HashMap::new(),
+            20,
+            None,
+        )
+        .await
+        .unwrap();
 
         let pid = session.pid.expect("should have pid");
 
@@ -1429,7 +1588,7 @@ mod tests {
         );
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &env_vars, 20)
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &env_vars, 20, None)
                 .await
                 .unwrap();
 
