@@ -1126,6 +1126,30 @@ echo "" > "$OUTPUT_FILE"
         assert_eq!(detail, "spaced out error");
     }
 
+    #[test]
+    fn test_extract_error_detail_no_closing_brace() {
+        // `{` found but no `}` — hits the `break` branch, falls through to ERROR
+        let output = "prefix { unterminated\n] ERROR: fallback";
+        let detail = extract_codex_error_detail(output).unwrap();
+        assert_eq!(detail, "fallback");
+    }
+
+    #[test]
+    fn test_extract_error_detail_json_without_detail_key() {
+        // Valid JSON but no "detail" key — skipped, falls through to ERROR
+        let output = r#"{"error":"not found"} [ts] ERROR: real error"#;
+        let detail = extract_codex_error_detail(output).unwrap();
+        assert_eq!(detail, "real error");
+    }
+
+    #[test]
+    fn test_extract_error_detail_invalid_json_braces() {
+        // `{...}` present but not valid JSON — skipped, falls through to ERROR
+        let output = "{not json} ] ERROR: fallback msg";
+        let detail = extract_codex_error_detail(output).unwrap();
+        assert_eq!(detail, "fallback msg");
+    }
+
     // ---- strip_markdown_json_fences: bare fences without newline ----
 
     #[test]
