@@ -93,11 +93,18 @@ pub fn strip_adr_section_markers(content: &str) -> String {
         .join("\n")
 }
 
-/// Check if a trimmed line is an ADR section start or end marker.
+/// Check if a trimmed line is an ADR section start or end marker with a non-empty ID.
 fn is_adr_section_marker(trimmed: &str) -> bool {
-    trimmed.starts_with(ADR_SECTION_START_PREFIX)
-        && (trimmed.ends_with(ADR_SECTION_START_SUFFIX)
-            || trimmed.ends_with(ADR_SECTION_END_SUFFIX))
+    let Some(rest) = trimmed.strip_prefix(ADR_SECTION_START_PREFIX) else {
+        return false;
+    };
+    if let Some(id) = rest.strip_suffix(ADR_SECTION_START_SUFFIX) {
+        return !id.is_empty();
+    }
+    if let Some(id) = rest.strip_suffix(ADR_SECTION_END_SUFFIX) {
+        return !id.is_empty();
+    }
+    false
 }
 
 /// Parse an ADR section start marker and return the ADR ID if valid.
@@ -1066,6 +1073,83 @@ mod tests {
         assert!(
             result.contains("Y content"),
             "should preserve content: {result}"
+        );
+    }
+
+    // --- is_adr_section_marker rejects empty-ID markers ---
+
+    #[test]
+    fn test_strip_adr_section_markers_preserves_empty_id_start() {
+        // "<!-- adr: start -->" has an empty ID and should NOT be stripped
+        let content = "before\n<!-- adr: start -->\nafter";
+        let result = strip_adr_section_markers(content);
+        assert!(
+            result.contains("<!-- adr: start -->"),
+            "empty-ID start marker should be preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_adr_section_markers_preserves_empty_id_end() {
+        // "<!-- adr: end -->" has an empty ID and should NOT be stripped
+        let content = "before\n<!-- adr: end -->\nafter";
+        let result = strip_adr_section_markers(content);
+        assert!(
+            result.contains("<!-- adr: end -->"),
+            "empty-ID end marker should be preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_adr_section_markers_still_strips_valid_markers() {
+        let content = "<!-- adr:some-id start -->\nContent here\n<!-- adr:some-id end -->";
+        let result = strip_adr_section_markers(content);
+        assert_eq!(result, "Content here");
+        assert!(!result.contains("<!-- adr:"));
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_preserves_empty_id_markers() {
+        // Malformed markers with empty IDs should NOT be stripped by strip_managed_metadata
+        let content = "# Title\n<!-- adr: start -->\nSome content\n<!-- adr: end -->\n# Footer";
+        let result = strip_managed_metadata(content);
+        assert!(
+            result.contains("<!-- adr: start -->"),
+            "empty-ID start marker should be preserved: {result}"
+        );
+        assert!(
+            result.contains("<!-- adr: end -->"),
+            "empty-ID end marker should be preserved: {result}"
+        );
+        assert!(
+            result.contains("# Title"),
+            "should preserve surrounding content: {result}"
+        );
+        assert!(
+            result.contains("# Footer"),
+            "should preserve surrounding content: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_adr_section_markers_preserves_no_suffix_match() {
+        // "<!-- adr:foo unknown -->" has the prefix but neither start nor end suffix
+        let content = "before\n<!-- adr:foo unknown -->\nafter";
+        let result = strip_adr_section_markers(content);
+        assert!(
+            result.contains("<!-- adr:foo unknown -->"),
+            "non-matching suffix should be preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_preserves_no_suffix_match() {
+        // "<!-- adr:foo unknown -->" has the prefix but neither start nor end suffix
+        let content = "# Title\n<!-- adr:foo unknown -->\n# Footer";
+        let result = strip_managed_metadata(content);
+        assert!(
+            result.contains("<!-- adr:foo unknown -->"),
+            "non-matching suffix should be preserved: {result}"
         );
     }
 }
