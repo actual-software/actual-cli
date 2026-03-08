@@ -171,8 +171,10 @@ pub fn get(config: &Config, path: &str) -> Result<String, ActualError> {
 
 /// Set a config value by dotpath, parsing the string value to the correct type.
 ///
+/// Returns `Ok(None)` on success, or `Ok(Some(warning))` when the value was
+/// accepted but deserves a user-visible warning (e.g. an unknown model name).
 /// Returns an error if the path is unknown or the value cannot be parsed.
-pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualError> {
+pub fn set(config: &mut Config, path: &str, value: &str) -> Result<Option<String>, ActualError> {
     let key = path.parse::<ConfigKey>()?;
     match key {
         ConfigKey::ApiUrl => {
@@ -187,9 +189,9 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             let in_live = cached_openai.iter().any(|m| m == value)
                 || cached_anthropic.iter().any(|m| m == value);
             if !in_static && !in_live {
-                eprintln!(
+                return Ok(Some(format!(
                     "Warning: '{value}' is not a known model name. Run 'actual models' to see known models."
-                );
+                )));
             }
         }
         ConfigKey::BatchSize => {
@@ -341,7 +343,7 @@ pub fn set(config: &mut Config, path: &str, value: &str) -> Result<(), ActualErr
             config.max_turns = Some(v);
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -426,8 +428,8 @@ mod tests {
 
     #[test]
     fn test_set_known_model_succeeds_and_is_recognised() {
-        // A known model name should be accepted with no error and should be
-        // present in the known_model_names list (i.e. no warning would fire).
+        // A known model name should be accepted with no warning (Ok(None)) and
+        // should be present in the known_model_names list.
         let known = known_model_names();
         for name in &[
             "claude-sonnet-4-6",
@@ -440,7 +442,11 @@ mod tests {
             "gpt-5.2-codex",
         ] {
             let mut config = Config::default();
-            set(&mut config, "model", name).unwrap();
+            let result = set(&mut config, "model", name).unwrap();
+            assert_eq!(
+                result, None,
+                "known model '{name}' should not produce a warning"
+            );
             assert_eq!(get(&config, "model").unwrap(), *name);
             assert!(
                 known.contains(name),
@@ -462,9 +468,12 @@ mod tests {
         let known = known_model_names();
         for name in &["gpt-4o", "o4-mini", "o3", "o3-mini", "o1"] {
             let mut config = Config::default();
-            // set() succeeds regardless (warning is soft), but we also assert
-            // the model is in the known list so the warning would NOT fire.
-            set(&mut config, "model", name).unwrap();
+            // set() must return Ok(None) for known models (no warning).
+            let result = set(&mut config, "model", name).unwrap();
+            assert_eq!(
+                result, None,
+                "known model '{name}' should not produce a warning"
+            );
             assert_eq!(
                 get(&config, "model").unwrap(),
                 *name,
@@ -480,14 +489,39 @@ mod tests {
 
     #[test]
     fn test_set_unknown_model_still_succeeds() {
-        // An unknown model name must NOT return an error — it's a soft warning only.
+        // An unknown model name must NOT return an error — it returns Ok(Some(warning)).
         let mut config = Config::default();
         let result = set(&mut config, "model", "totally-invalid-model-xyz");
         assert!(
             result.is_ok(),
             "set() must succeed even for unknown model names"
         );
+        let warning = result.unwrap();
+        assert!(warning.is_some(), "unknown model should produce a warning");
+        let msg = warning.unwrap();
+        assert!(
+            msg.contains("totally-invalid-model-xyz") && msg.contains("not a known model name"),
+            "warning should mention the model name and 'not a known model name', got: {msg}"
+        );
         assert_eq!(get(&config, "model").unwrap(), "totally-invalid-model-xyz");
+    }
+
+    #[test]
+    fn test_set_unknown_model_returns_warning_message() {
+        // Verify the structured warning returned for an unrecognised model name.
+        let mut config = Config::default();
+        let result = set(&mut config, "model", "bogus-model-abc123");
+        let warning = result
+            .expect("set() must not error for unknown model")
+            .expect("unknown model must return Some(warning)");
+        assert!(
+            warning.contains("bogus-model-abc123"),
+            "warning must contain the model name, got: {warning}"
+        );
+        assert!(
+            warning.contains("not a known model name"),
+            "warning must say 'not a known model name', got: {warning}"
+        );
     }
 
     #[test]
