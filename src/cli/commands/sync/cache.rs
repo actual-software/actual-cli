@@ -88,7 +88,15 @@ pub(crate) fn store_tailoring_cache(
     };
 
     // Size guard: skip caching if the serialized output exceeds the limit.
-    let serialized_size = serde_yml::to_string(output).map(|s| s.len()).unwrap_or(0);
+    let serialized_size = match serde_yml::to_string(output) {
+        Ok(s) => s.len(),
+        Err(e) => {
+            tracing::warn!(
+                "failed to serialize tailoring output for size check: {e}; skipping cache"
+            );
+            return;
+        }
+    };
     if serialized_size > CACHE_MAX_SIZE_BYTES {
         tracing::warn!(
             "tailoring output size ({} bytes) exceeds cache limit ({} bytes); skipping cache",
