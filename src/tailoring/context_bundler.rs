@@ -279,8 +279,14 @@ fn is_likely_text_file(path: &Path) -> bool {
         }
     }
     // Try reading first 512 bytes to check for binary content.
-    if let Ok(data) = std::fs::read(path) {
-        let sample = &data[..data.len().min(512)];
+    if let Ok(file) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = vec![0u8; 512];
+        let n = match file.take(512).read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let sample = &buf[..n];
         // If more than 30% non-text bytes, treat as binary.
         let non_text = sample
             .iter()
@@ -1056,6 +1062,42 @@ mod tests {
         assert!(!is_sensitive_file(Path::new("src/main.rs")));
         assert!(!is_sensitive_file(Path::new("README.md")));
         assert!(!is_sensitive_file(Path::new("config.toml")));
+    }
+
+    // Test 45: is_likely_text_file only reads first 512 bytes, not the entire file
+    #[test]
+    fn test_is_likely_text_file_reads_only_512_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("large.txt");
+        // Create a file with 512 bytes of valid text followed by all-null bytes.
+        // If the function reads only 512 bytes, it sees only text → returns true.
+        // If it reads beyond 512 bytes, it would see nulls (binary) → returns false.
+        let mut data = Vec::new();
+        data.extend_from_slice(&[b'A'; 512]);
+        data.extend_from_slice(&[0u8; 4096]);
+        fs::write(&path, &data).unwrap();
+
+        assert!(
+            is_likely_text_file(&path),
+            "should return true because only the first 512 text bytes are sampled"
+        );
+    }
+
+    // Test 46: is_likely_text_file returns false when File::open succeeds but read fails
+    #[test]
+    #[cfg(unix)]
+    fn test_is_likely_text_file_read_error_after_open() {
+        // On macOS/Linux, File::open on a directory succeeds but read() returns an error.
+        // We create a directory with a non-binary extension name so it passes the
+        // extension check and reaches the read path.
+        let tmp = TempDir::new().unwrap();
+        let dir_path = tmp.path().join("fake_file.txt");
+        fs::create_dir(&dir_path).unwrap();
+
+        assert!(
+            !is_likely_text_file(&dir_path),
+            "should return false when read fails after successful open"
+        );
     }
 
     // Test 39: walker error path in find_entrypoints — unreadable subdirectory is skipped
