@@ -3,6 +3,7 @@
 //! Prints known model names grouped by runner family so users can discover
 //! valid values for `--model` / `actual config set model`.
 
+use crate::config::types::DEFAULT_OPENAI_MODEL;
 use crate::error::ActualError;
 
 /// A single model entry: its ID and whether it is the default for its family.
@@ -84,11 +85,10 @@ static RUNNER_FAMILIES: &[RunnerFamily] = &[
     RunnerFamily {
         name: "OpenAI",
         runners: &["openai-api"],
-        // keep in sync with RUNNER_FAMILIES default for openai-api (see sync_wiring.rs unwrap_or)
         // Source: https://platform.openai.com/docs/models (verified via live API 2026-02-23)
         // Removed: o1-preview (shutdown 2025-07-28), chatgpt-4o-latest (shutdown 2026-02-17)
         models: &[
-            ModelEntry::default_model("gpt-5.2"),
+            ModelEntry::default_model(DEFAULT_OPENAI_MODEL),
             ModelEntry::new("gpt-5.1"),
             ModelEntry::new("gpt-5"),
             ModelEntry::new("gpt-5-mini"),
