@@ -32,7 +32,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 liquid = "0.26"
 
 # File watching
-notify = "7"
+notify = "8"
 
 # HTTP server
 axum = "0.8"
