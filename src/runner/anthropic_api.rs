@@ -149,6 +149,30 @@ impl AnthropicApiRunner {
             }
 
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                // Save Retry-After header before consuming the body.
+                let retry_after = parse_retry_after(response.headers());
+                // Check body for quota exhaustion before retrying.
+                // Quota exhaustion is unrecoverable — no retry needed.
+                let body_text = extract_error_body(response.bytes().await, 4096);
+                if let Ok(json) = serde_json::from_str::<Value>(&body_text) {
+                    let error_type = json
+                        .get("error")
+                        .and_then(|e| e.get("type"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let message = json
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if error_type == "rate_limit_error"
+                        && message.to_lowercase().contains("credit balance")
+                    {
+                        return Err(ActualError::CreditBalanceTooLow {
+                            message: "Anthropic API credit balance too low".to_string(),
+                        });
+                    }
+                }
                 attempt += 1;
                 if attempt > MAX_RATE_LIMIT_RETRIES {
                     return Err(ActualError::RunnerFailed {
@@ -159,8 +183,7 @@ impl AnthropicApiRunner {
                     });
                 }
                 // Respect Retry-After header if present, else use exponential backoff.
-                let wait_secs =
-                    parse_retry_after(response.headers()).unwrap_or_else(|| 1u64 << (attempt - 1)); // 1s, 2s, 4s
+                let wait_secs = retry_after.unwrap_or_else(|| 1u64 << (attempt - 1)); // 1s, 2s, 4s
                 let wait_secs = wait_secs.min(60);
                 tracing::warn!(
                     "Anthropic API rate limited, waiting {}s before retry {}/{}",
@@ -270,6 +293,22 @@ impl AnthropicApiRunner {
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     let value = headers.get("retry-after")?.to_str().ok()?;
     value.trim().parse::<u64>().ok()
+}
+
+/// Extract a truncated body string from an HTTP response byte result,
+/// returning a fallback message if the body could not be read.
+fn extract_error_body(
+    body_result: Result<impl AsRef<[u8]>, impl std::fmt::Display>,
+    max: usize,
+) -> String {
+    match body_result {
+        Ok(bytes) => {
+            let bytes = bytes.as_ref();
+            let truncated = &bytes[..bytes.len().min(max)];
+            String::from_utf8_lossy(truncated).into_owned()
+        }
+        Err(e) => format!("<body read error: {e}>"),
+    }
 }
 
 /// Intermediate representation for a content block in the Anthropic response.
@@ -1571,5 +1610,126 @@ mod tests {
             events.iter().any(|e| e.contains("overloaded")),
             "expected an 'overloaded' retry event, got: {events:?}"
         );
+    }
+
+    // Test: HTTP 429 with quota exhaustion body maps to CreditBalanceTooLow (no retries)
+    #[tokio::test]
+    async fn test_429_quota_exhaustion_maps_to_credit_balance_too_low() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(429)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"type":"error","error":{"type":"rate_limit_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}"#)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(
+            matches!(result, Err(ActualError::CreditBalanceTooLow { .. })),
+            "expected CreditBalanceTooLow, got: {:?}",
+            result
+        );
+    }
+
+    // Test: HTTP 429 with non-JSON body retries and eventually returns RunnerFailed
+    // (covers the json-parse-fail branch of the quota exhaustion check)
+    #[tokio::test]
+    async fn test_429_non_json_body_retries_and_fails() {
+        let mut server = Server::new_async().await;
+
+        // Return 429 with non-JSON body on every attempt.
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(429)
+            .with_header("content-type", "text/plain")
+            .with_body("rate limited")
+            .expect(4) // 1 initial + 3 retries = MAX_RATE_LIMIT_RETRIES + 1
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(
+            matches!(result, Err(ActualError::RunnerFailed { .. })),
+            "expected RunnerFailed after non-JSON 429 retries, got: {:?}",
+            result
+        );
+    }
+
+    // Test: HTTP 429 with JSON body that is NOT quota exhaustion still retries normally
+    #[tokio::test]
+    async fn test_429_rate_limit_without_credit_balance_retries() {
+        let mut server = Server::new_async().await;
+
+        // Return 429 with a normal rate_limit_error (no "credit balance" in message).
+        let mock_429 = server
+            .mock("POST", "/v1/messages")
+            .with_status(429)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"type":"error","error":{"type":"rate_limit_error","message":"Too many requests, please slow down."}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let response_body = anthropic_tool_use_response(tailoring_output_json());
+        let mock_200 = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let result = runner
+            .run_tailoring("prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        mock_429.assert_async().await;
+        mock_200.assert_async().await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after retry of normal 429, got: {:?}",
+            result
+        );
+    }
+
+    // Tests for extract_error_body helper
+
+    // Test: OK body shorter than max returns full string
+    #[test]
+    fn test_extract_error_body_ok_short() {
+        let result: Result<Vec<u8>, String> = Ok(b"hello".to_vec());
+        let body = extract_error_body(result, 4096);
+        assert_eq!(body, "hello");
+    }
+
+    // Test: OK body longer than max truncates
+    #[test]
+    fn test_extract_error_body_ok_truncates() {
+        let data = vec![b'X'; 8192];
+        let result: Result<Vec<u8>, String> = Ok(data);
+        let body = extract_error_body(result, 4096);
+        assert_eq!(body.len(), 4096);
+        assert!(body.chars().all(|c| c == 'X'));
+    }
+
+    // Test: Err returns fallback message
+    #[test]
+    fn test_extract_error_body_err_fallback() {
+        let result: Result<Vec<u8>, String> = Err("connection reset".to_string());
+        let body = extract_error_body(result, 4096);
+        assert_eq!(body, "<body read error: connection reset>");
     }
 }
