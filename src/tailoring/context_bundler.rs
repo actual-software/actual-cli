@@ -279,8 +279,17 @@ fn is_likely_text_file(path: &Path) -> bool {
         }
     }
     // Try reading first 512 bytes to check for binary content.
-    if let Ok(data) = std::fs::read(path) {
-        let sample = &data[..data.len().min(512)];
+    if let Ok(mut file) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = [0u8; 512];
+        let n = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n == 0 {
+            return true; // Empty file is "text"
+        }
+        let sample = &buf[..n];
         // If more than 30% non-text bytes, treat as binary.
         let non_text = sample
             .iter()
