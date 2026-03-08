@@ -20,7 +20,7 @@ use crate::cli::ui::real_terminal::RealTerminal;
 use crate::config::paths::{config_path, load_from};
 use crate::config::types::{DEFAULT_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_TIMEOUT_SECS};
 use crate::error::ActualError;
-use crate::runner::anthropic_api::AnthropicApiRunner;
+use crate::runner::anthropic_api::{AnthropicApiRunner, DEFAULT_MAX_TOKENS};
 use crate::runner::binary::find_claude_binary;
 use crate::runner::codex_cli::{check_codex_auth, find_codex_binary, CodexCliRunner};
 use crate::runner::cursor_cli::{find_cursor_binary, CursorCliRunner};
@@ -313,10 +313,17 @@ where
                 model: model.clone(),
                 warning: RunnerChoice::AnthropicApi.model_compatibility_warning(&model),
             };
+            let max_tokens = cfg.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
             let api_runner = if let Ok(base_url) = std::env::var("ANTHROPIC_API_BASE_URL") {
-                AnthropicApiRunner::with_base_url(api_key, model, subprocess_timeout, base_url)?
+                AnthropicApiRunner::with_base_url(
+                    api_key,
+                    model,
+                    subprocess_timeout,
+                    base_url,
+                    max_tokens,
+                )?
             } else {
-                AnthropicApiRunner::new(api_key, model, subprocess_timeout)?
+                AnthropicApiRunner::with_max_tokens(api_key, model, subprocess_timeout, max_tokens)?
             };
             run_sync(
                 args,

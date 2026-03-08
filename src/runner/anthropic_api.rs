@@ -16,6 +16,12 @@ const ANTHROPIC_API_BASE: &str = "https://api.anthropic.com";
 /// Maximum number of retries on HTTP 429 rate-limit responses.
 const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 
+/// Default maximum number of tokens in an Anthropic API response.
+///
+/// Raised from the original hardcoded 8192 to 16384 to accommodate large
+/// repositories with many ADRs that need more output space.
+pub const DEFAULT_MAX_TOKENS: u32 = 16384;
+
 /// Direct HTTP runner that calls the Anthropic Messages API without spawning a subprocess.
 ///
 /// Uses a forced tool call (`tool_choice: { type: "tool", name: "return_result" }`) to obtain
@@ -31,6 +37,9 @@ pub struct AnthropicApiRunner {
     /// Base duration for exponential back-off on 429 responses.
     /// Defaults to 1 second; tests override this to zero for speed.
     retry_base: Duration,
+    /// Maximum number of tokens in the API response.
+    /// Defaults to [`DEFAULT_MAX_TOKENS`] (16384).
+    max_tokens: u32,
     /// Optional channel for streaming progress events to the TUI.
     event_tx: std::sync::Mutex<Option<UnboundedSender<String>>>,
 }
@@ -44,9 +53,25 @@ fn map_client_build_error(e: reqwest::Error) -> ActualError {
 }
 
 impl AnthropicApiRunner {
-    /// Create a new runner with an explicit API key.
+    /// Create a new runner with an explicit API key and default max_tokens.
     pub fn new(api_key: String, model: String, timeout: Duration) -> Result<Self, ActualError> {
-        Self::with_base_url(api_key, model, timeout, ANTHROPIC_API_BASE.to_string())
+        Self::with_max_tokens(api_key, model, timeout, DEFAULT_MAX_TOKENS)
+    }
+
+    /// Create a new runner with an explicit API key and custom max_tokens.
+    pub fn with_max_tokens(
+        api_key: String,
+        model: String,
+        timeout: Duration,
+        max_tokens: u32,
+    ) -> Result<Self, ActualError> {
+        Self::with_base_url(
+            api_key,
+            model,
+            timeout,
+            ANTHROPIC_API_BASE.to_string(),
+            max_tokens,
+        )
     }
 
     /// Create a runner with a custom base URL (used in tests to point at a mock server).
@@ -55,6 +80,7 @@ impl AnthropicApiRunner {
         model: String,
         timeout: Duration,
         base_url: String,
+        max_tokens: u32,
     ) -> Result<Self, ActualError> {
         let is_localhost = base_url.starts_with("http://localhost")
             || base_url.starts_with("http://127.0.0.1")
@@ -71,6 +97,7 @@ impl AnthropicApiRunner {
             timeout,
             base_url,
             retry_base: Duration::from_secs(1),
+            max_tokens,
             event_tx: std::sync::Mutex::new(None),
         })
     }
@@ -283,7 +310,7 @@ impl TailoringRunner for AnthropicApiRunner {
 
         let request_body = serde_json::json!({
             "model": model,
-            "max_tokens": 8192,
+            "max_tokens": self.max_tokens,
             "system": system_prompt,
             "messages": [
                 {
@@ -310,6 +337,27 @@ impl TailoringRunner for AnthropicApiRunner {
             let _ = tx.send("Response received from Anthropic API".to_string());
         }
 
+        // Check if the response was truncated due to hitting the max_tokens limit.
+        let truncated = response
+            .get("stop_reason")
+            .and_then(Value::as_str)
+            .is_some_and(|r| r == "max_tokens");
+
+        if truncated {
+            tracing::warn!(
+                "Anthropic API response was truncated (stop_reason=max_tokens, \
+                 limit={}). Consider increasing max_tokens in your config.",
+                self.max_tokens
+            );
+            if let Some(ref tx) = event_tx {
+                let _ = tx.send(format!(
+                    "Warning: response truncated at {} tokens. \
+                     Consider increasing max_tokens in config.",
+                    self.max_tokens
+                ));
+            }
+        }
+
         // Find the tool_use block named "return_result" in the content array.
         // Propagate deserialization failures so API schema drift produces a
         // specific, actionable error rather than a confusing "no structured result".
@@ -328,11 +376,30 @@ impl TailoringRunner for AnthropicApiRunner {
             .find(|block| {
                 block.block_type == "tool_use" && block.name.as_deref() == Some("return_result")
             })
-            .and_then(|block| block.input)
-            .ok_or_else(|| ActualError::RunnerFailed {
-                message: "Anthropic API did not return structured result".to_string(),
-                stderr: String::new(),
-            })?;
+            .and_then(|block| block.input);
+
+        // If response was truncated and no tool_use block was found, produce a
+        // specific error mentioning truncation so the user knows to raise max_tokens.
+        let tool_input = match tool_input {
+            Some(input) => input,
+            None if truncated => {
+                return Err(ActualError::RunnerFailed {
+                    message: format!(
+                        "Anthropic API response was truncated at {} tokens and \
+                         did not contain a complete structured result. \
+                         Increase max_tokens in your config to fix this.",
+                        self.max_tokens
+                    ),
+                    stderr: String::new(),
+                });
+            }
+            None => {
+                return Err(ActualError::RunnerFailed {
+                    message: "Anthropic API did not return structured result".to_string(),
+                    stderr: String::new(),
+                });
+            }
+        };
 
         let output: TailoringOutput = serde_json::from_value(tool_input)?;
         Ok(output)
@@ -347,11 +414,17 @@ mod tests {
     /// Create a runner pointed at `server_url` instead of the production API.
     /// Sets `retry_base` to zero so 429 retry tests run without real sleeps.
     fn make_runner(server_url: &str) -> AnthropicApiRunner {
+        make_runner_with_max_tokens(server_url, DEFAULT_MAX_TOKENS)
+    }
+
+    /// Create a runner with a custom `max_tokens` value.
+    fn make_runner_with_max_tokens(server_url: &str, max_tokens: u32) -> AnthropicApiRunner {
         let mut runner = AnthropicApiRunner::with_base_url(
             "test-key".to_string(),
             "claude-sonnet-4-6".to_string(),
             Duration::from_secs(10),
             server_url.to_string(),
+            max_tokens,
         )
         .expect("failed to build test runner");
         runner.retry_base = Duration::ZERO;
@@ -948,6 +1021,7 @@ mod tests {
             "claude-sonnet-4-6".to_string(),
             Duration::from_millis(1),
             format!("http://127.0.0.1:{port}"),
+            DEFAULT_MAX_TOKENS,
         )
         .expect("failed to build test runner");
 
@@ -1190,6 +1264,264 @@ mod tests {
             events.iter().any(|e| e.contains("Rate limited")),
             "expected a 'Rate limited' retry event, got: {events:?}"
         );
+    }
+
+    // Test: default max_tokens is DEFAULT_MAX_TOKENS (16384)
+    #[test]
+    fn test_default_max_tokens_is_16384() {
+        assert_eq!(DEFAULT_MAX_TOKENS, 16384);
+    }
+
+    // Test: new() constructs with DEFAULT_MAX_TOKENS
+    #[test]
+    fn test_new_uses_default_max_tokens() {
+        let runner = AnthropicApiRunner::new(
+            "sk-test".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            Duration::from_secs(10),
+        )
+        .expect("failed to build runner");
+        assert_eq!(runner.max_tokens, DEFAULT_MAX_TOKENS);
+    }
+
+    // Test: with_max_tokens stores the custom value
+    #[test]
+    fn test_with_max_tokens_stores_custom_value() {
+        let runner = AnthropicApiRunner::with_max_tokens(
+            "sk-test".to_string(),
+            "claude-sonnet-4-6".to_string(),
+            Duration::from_secs(10),
+            32768,
+        )
+        .expect("failed to build runner");
+        assert_eq!(runner.max_tokens, 32768);
+    }
+
+    // Test: max_tokens value appears in request body
+    #[tokio::test]
+    async fn test_max_tokens_appears_in_request_body() {
+        let mut server = Server::new_async().await;
+        let response_body = anthropic_tool_use_response(tailoring_output_json());
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"max_tokens":4096}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner_with_max_tokens(&server.url(), 4096);
+        let schema = r#"{"type":"object"}"#;
+        let result = runner
+            .run_tailoring("Test prompt", schema, None, None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+    }
+
+    /// Build the Anthropic response envelope with a custom stop_reason.
+    fn anthropic_response_with_stop_reason(input: Value, stop_reason: &str) -> Value {
+        serde_json::json!({
+            "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01A09q90qw90lq917835lq9",
+                    "name": "return_result",
+                    "input": input
+                }
+            ],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": stop_reason,
+            "usage": {"input_tokens": 100, "output_tokens": 200}
+        })
+    }
+
+    // Test: truncated response (stop_reason=max_tokens) with valid tool_use still succeeds
+    // but emits a warning event
+    #[tokio::test]
+    async fn test_truncated_response_with_valid_tool_use_succeeds_with_warning() {
+        let mut server = Server::new_async().await;
+        let response_body =
+            anthropic_response_with_stop_reason(tailoring_output_json(), "max_tokens");
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        runner.set_event_tx(tx);
+
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        // Should still succeed because the tool_use block is valid
+        assert!(
+            result.is_ok(),
+            "expected Ok for truncated-but-complete response, got: {:?}",
+            result
+        );
+
+        // Verify the truncation warning event was emitted
+        let mut events = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            events.push(msg);
+        }
+        assert!(
+            events.iter().any(|e| e.contains("truncated")),
+            "expected a truncation warning event, got: {events:?}"
+        );
+    }
+
+    // Test: truncated response (stop_reason=max_tokens) without tool_use returns truncation error
+    #[tokio::test]
+    async fn test_truncated_response_without_tool_use_returns_truncation_error() {
+        let mut server = Server::new_async().await;
+
+        // Response with max_tokens stop reason and only text content (no tool_use)
+        let response_body = serde_json::json!({
+            "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Here is the partial result that got cut off..."
+                }
+            ],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 100, "output_tokens": 8192}
+        });
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        match result {
+            Err(ActualError::RunnerFailed { message, .. }) => {
+                assert!(
+                    message.contains("truncated"),
+                    "expected 'truncated' in error message: {message}"
+                );
+                assert!(
+                    message.contains("max_tokens"),
+                    "expected 'max_tokens' in error message: {message}"
+                );
+            }
+            other => panic!(
+                "expected RunnerFailed with truncation message, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    // Test: truncated response without tool_use mentions the configured limit in the error
+    #[tokio::test]
+    async fn test_truncated_error_mentions_configured_limit() {
+        let mut server = Server::new_async().await;
+
+        let response_body = serde_json::json!({
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                { "type": "text", "text": "partial..." }
+            ],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 50, "output_tokens": 4096}
+        });
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner_with_max_tokens(&server.url(), 4096);
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        match result {
+            Err(ActualError::RunnerFailed { message, .. }) => {
+                assert!(
+                    message.contains("4096"),
+                    "expected '4096' (configured limit) in error message: {message}"
+                );
+            }
+            other => panic!("expected RunnerFailed, got: {:?}", other),
+        }
+    }
+
+    // Test: non-truncated response without tool_use still gives generic error (not truncation error)
+    #[tokio::test]
+    async fn test_non_truncated_missing_tool_use_gives_generic_error() {
+        let mut server = Server::new_async().await;
+
+        let response_body = serde_json::json!({
+            "id": "msg_test",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                { "type": "text", "text": "Here is the result..." }
+            ],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "output_tokens": 50}
+        });
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result = runner.run_tailoring("prompt", schema, None, None).await;
+
+        mock.assert_async().await;
+        match result {
+            Err(ActualError::RunnerFailed { message, .. }) => {
+                assert!(
+                    message.contains("structured result"),
+                    "expected 'structured result' in generic error: {message}"
+                );
+                assert!(
+                    !message.contains("truncated"),
+                    "should NOT mention truncation for end_turn stop reason: {message}"
+                );
+            }
+            other => panic!("expected RunnerFailed, got: {:?}", other),
+        }
     }
 
     // Test: event_tx emits overloaded retry event on 529 then success
