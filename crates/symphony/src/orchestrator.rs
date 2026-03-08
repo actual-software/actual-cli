@@ -1592,6 +1592,22 @@ fn build_agent_env_vars(
     env_vars
 }
 
+/// Write the MCP config file for an agent subprocess.
+///
+/// Returns the path to the generated config file, or a `McpConfigWriteFailed` error.
+fn setup_mcp_config(
+    workspace_path: &std::path::Path,
+    env_vars: &std::collections::HashMap<String, String>,
+) -> Result<std::path::PathBuf> {
+    let symphony_binary =
+        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("symphony"));
+    crate::mcp::write_mcp_config(workspace_path, &symphony_binary, env_vars).map_err(|e| {
+        SymphonyError::McpConfigWriteFailed {
+            reason: format!("failed to write MCP config: {e}"),
+        }
+    })
+}
+
 /// Run a worker for one issue.
 async fn run_worker(
     config: &ServiceConfig,
@@ -1626,14 +1642,7 @@ async fn run_worker(
     let env_vars = build_agent_env_vars(config, config.agent.max_turns);
 
     // Phase 3b: Generate MCP config for agent subprocess
-    let symphony_binary =
-        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("symphony"));
-    let mcp_config_path =
-        crate::mcp::write_mcp_config(&workspace_result.path, &symphony_binary, &env_vars).map_err(
-            |e| SymphonyError::McpConfigWriteFailed {
-                reason: format!("failed to write MCP config: {e}"),
-            },
-        )?;
+    let mcp_config_path = setup_mcp_config(&workspace_result.path, &env_vars)?;
 
     // Phase 4: Build prompt and launch agent
     let max_turns = config.agent.max_turns;
@@ -6628,6 +6637,29 @@ mod tests {
         let config = test_config();
         let env_vars = build_agent_env_vars(&config, 42);
         assert_eq!(env_vars.get("SYMPHONY_MAX_TURNS"), Some(&"42".to_string()));
+    }
+
+    // ── setup_mcp_config ────────────────────────────────────────────
+
+    #[test]
+    fn test_setup_mcp_config_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_vars = std::collections::HashMap::new();
+        let result = setup_mcp_config(dir.path(), &env_vars);
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert!(path.exists());
+        assert_eq!(path.file_name().unwrap(), ".mcp-config.json");
+    }
+
+    #[test]
+    fn test_setup_mcp_config_error_invalid_path() {
+        let env_vars = std::collections::HashMap::new();
+        // Use a path that does not exist to trigger an I/O error
+        let result = setup_mcp_config(std::path::Path::new("/nonexistent/dir/xyz"), &env_vars);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("failed to write MCP config"));
     }
 
     #[tokio::test]
