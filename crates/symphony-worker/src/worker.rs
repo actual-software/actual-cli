@@ -92,7 +92,7 @@ where
                 let job_shutdown_rx = shutdown_rx.clone();
 
                 // Execute the job
-                if let Err(e) = executor::execute_job(
+                let job_result = executor::execute_job(
                     client,
                     git,
                     launcher,
@@ -102,52 +102,50 @@ where
                     config.turn_timeout_ms,
                     job_shutdown_rx,
                 )
-                .await
-                {
-                    log_job_error(&e.to_string());
-                    // If it was cancelled, exit the loop
-                    if matches!(e, executor::ExecutorError::Cancelled) {
-                        break;
+                .await;
+                let cancelled = match job_result {
+                    Ok(()) => false,
+                    Err(ref e) => {
+                        log_job_error(&e.to_string());
+                        matches!(e, executor::ExecutorError::Cancelled)
                     }
+                };
+                if cancelled {
+                    break;
                 }
             }
             Ok(None) => {
                 log_no_work();
-                // Reset backoff on successful poll (even if no work)
                 backoff_ms = config.poll_backoff_base_ms;
-
-                // Wait before polling again, but check shutdown
-                tokio::select! {
-                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)) => {}
-                    _ = wait_for_shutdown_or_change(&mut shutdown_rx) => {
-                        if *shutdown_rx.borrow() {
-                            log_shutdown();
-                            break;
-                        }
-                    }
+                if sleep_or_shutdown(backoff_ms, &mut shutdown_rx).await {
+                    log_shutdown();
+                    break;
                 }
             }
             Err(e) => {
                 log_claim_error(&e.to_string(), backoff_ms);
-
-                // Wait with exponential backoff
-                tokio::select! {
-                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)) => {}
-                    _ = wait_for_shutdown_or_change(&mut shutdown_rx) => {
-                        if *shutdown_rx.borrow() {
-                            log_shutdown();
-                            break;
-                        }
-                    }
+                if sleep_or_shutdown(backoff_ms, &mut shutdown_rx).await {
+                    log_shutdown();
+                    break;
                 }
-
-                // Double backoff, cap at max
                 backoff_ms = (backoff_ms * 2).min(config.poll_backoff_max_ms);
             }
         }
     }
 
     Ok(())
+}
+
+/// Sleep for `duration_ms` or until a shutdown signal is received.
+/// Returns `true` if shutdown was signaled, `false` if the sleep completed.
+async fn sleep_or_shutdown(
+    duration_ms: u64,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(tokio::time::Duration::from_millis(duration_ms)) => false,
+        _ = wait_for_shutdown_or_change(shutdown_rx) => *shutdown_rx.borrow(),
+    }
 }
 
 /// Wait for shutdown signal change.
