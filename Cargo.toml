@@ -93,6 +93,8 @@ lto = true          # Link-time optimization; also reduces binary size
 codegen-units = 1   # Better optimization, fewer symbol artifacts
 
 [features]
+default = ["telemetry"]
+telemetry = []
 integration = []
 
 [dev-dependencies]

@@ -8,6 +8,7 @@ pub mod generation;
 pub mod model_cache;
 pub mod runner;
 pub mod tailoring;
+#[cfg(feature = "telemetry")]
 pub mod telemetry;
 
 pub use cli::commands::handle_result;

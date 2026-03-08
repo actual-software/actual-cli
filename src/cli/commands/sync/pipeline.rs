@@ -21,8 +21,11 @@ use crate::runner::subprocess::TailoringRunner;
 use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfig};
 use crate::tailoring::filter::pre_filter_rejected;
 use crate::tailoring::types::{TailoringEvent, TailoringOutput};
+#[cfg(feature = "telemetry")]
 use crate::telemetry::identity::hash_repo_identity;
+#[cfg(feature = "telemetry")]
 use crate::telemetry::metrics::SyncMetrics;
+#[cfg(feature = "telemetry")]
 use crate::telemetry::reporter::report_metrics;
 
 use super::adr_utils::{
@@ -621,11 +624,15 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         term,
         &mut pipeline,
     )?;
+    // Keep `sync_result` alive when telemetry is compiled out.
+    #[cfg(not(feature = "telemetry"))]
+    let _ = &sync_result;
 
     // ── Telemetry (fire-and-forget) ──
     // Only fires on the happy path (after `?` above). Errors in telemetry are
     // silently swallowed inside `report_metrics`. Runtime build failures cause
     // telemetry to be silently skipped (fire-and-forget preserved).
+    #[cfg(feature = "telemetry")]
     {
         // Fetch git remote URL for repo identity hashing.
         let repo_url = tokio::runtime::Builder::new_current_thread()
@@ -6121,6 +6128,7 @@ mod tests {
     /// Sets up a real git repo with a remote origin URL so that
     /// `git remote get-url origin` succeeds and returns a non-empty string,
     /// exercising the `Some(s)` branch in the repo_url extraction block.
+    #[cfg(feature = "telemetry")]
     #[test]
     fn test_run_sync_telemetry_fires_with_git_remote() {
         let _lock = crate::testutil::ENV_MUTEX
