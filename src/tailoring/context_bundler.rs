@@ -282,12 +282,9 @@ fn is_likely_text_file(path: &Path) -> bool {
     if let Ok(mut file) = std::fs::File::open(path) {
         use std::io::Read;
         let mut buf = [0u8; 512];
-        let n = match file.read(&mut buf) {
-            Ok(n) => n,
-            Err(_) => return false,
-        };
+        let n = file.read(&mut buf).unwrap_or(0);
         if n == 0 {
-            return true; // Empty file is "text"
+            return true; // Empty or unreadable file is treated as "text"
         }
         let sample = &buf[..n];
         // If more than 30% non-text bytes, treat as binary.
@@ -1091,5 +1088,15 @@ mod tests {
         // Should not panic; walker error is skipped gracefully
         // The readable main.rs may or may not be found depending on walker behavior
         let _ = found;
+    }
+
+    // Test 42: is_likely_text_file returns true for an empty file (n == 0 branch)
+    #[test]
+    fn test_is_likely_text_file_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("empty.xyz");
+        fs::write(&path, b"").unwrap();
+        // Empty file with unknown extension should be treated as text
+        assert!(is_likely_text_file(&path));
     }
 }
