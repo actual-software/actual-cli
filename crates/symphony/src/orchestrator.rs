@@ -803,6 +803,18 @@ impl Orchestrator {
             let identifier = entry.identifier.clone();
             let next_attempt = entry.retry_attempt.unwrap_or(0) + 1;
 
+            // Extract data needed for normal-exit processing before the match,
+            // since the Normal arm needs to drop the state lock for async HTTP calls.
+            let normal_exit_data = if matches!(reason, WorkerExitReason::Normal) {
+                Some((
+                    entry.identifier.clone(),
+                    entry.issue.state.clone(),
+                    entry.issue.id.clone(),
+                ))
+            } else {
+                None
+            };
+
             match &reason {
                 WorkerExitReason::Normal => {
                     info!(issue_id = %issue_id, issue_identifier = %identifier, "worker completed normally");
@@ -814,14 +826,40 @@ impl Orchestrator {
                         }
                     }
 
-                    // Check issue state to determine next action
-                    let issue_state = entry.issue.state.clone();
-                    let issue_identifier = entry.identifier.clone();
+                    let (issue_identifier, cached_state, entry_issue_id) =
+                        normal_exit_data.expect("set when Normal");
+
+                    // Drop the write lock before making async HTTP calls
+                    drop(state);
+
+                    // Re-fetch the current issue state from the tracker.
+                    // The locally cached `entry.issue.state` may be stale if the
+                    // worker itself transitioned the issue (e.g. to "In Review")
+                    // during its run.
+                    let issue_state = {
+                        let config = self.config.read().await;
+                        let client = LinearClient::new(&config.tracker, self.http.clone());
+                        match client.fetch_issue_states_by_ids(&[entry_issue_id]).await {
+                            Ok(refreshed) => refreshed
+                                .first()
+                                .map(|i| i.state.clone())
+                                .unwrap_or_else(|| cached_state.clone()),
+                            Err(e) => {
+                                warn!(
+                                    issue_id = %issue_id,
+                                    issue_identifier = %identifier,
+                                    error = %e,
+                                    "failed to refresh issue state on worker exit, using cached state"
+                                );
+                                cached_state.clone()
+                            }
+                        }
+                    };
+
                     if is_done_state(&issue_state) {
                         // Cleanup completed — issue already transitioned, nothing more to do
                         info!(issue_id = %issue_id, issue_identifier = %identifier, "cleanup worker completed, issue already in terminal state");
                     } else if is_in_review_state(&issue_state) {
-                        drop(state); // Release lock before async GitHub call
                         self.add_to_waiting_for_review(issue_id, &issue_identifier)
                             .await;
                         // Verify the entry was added; if not (GitHub API failed), schedule a retry
@@ -845,6 +883,7 @@ impl Orchestrator {
                         self.remove_claim_label(issue_id, &issue_identifier).await;
                     } else {
                         // §8.1: Schedule a short continuation retry (1000ms)
+                        let mut state = self.state.write().await;
                         self.schedule_retry_inner(
                             &mut state,
                             issue_id.to_string(),
@@ -8028,6 +8067,109 @@ mod tests {
         let config = orch.config.read().await;
         let issue = make_issue("id1", "PROJ-1", "In Review");
         assert!(!orch.should_dispatch(&issue, &config).await);
+    }
+
+    // ── on_worker_exit: state refresh on Normal exit ────────────────
+
+    /// Test that when Linear state refresh fails, on_worker_exit falls back
+    /// to the cached state and logs a warning.
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_refresh_failure_uses_cached_state() {
+        let mut linear_server = mockito::Server::new_async().await;
+
+        // Linear returns 500 error
+        let _linear_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&linear_server.url());
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert running entry with "Todo" state
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.is_completed("id1"));
+        // Should fall back to cached "Todo" state → continuation retry
+        assert!(state.retry_attempts.contains_key("id1"));
+        assert!(logs_contain(
+            "failed to refresh issue state on worker exit, using cached state"
+        ));
+    }
+
+    /// Test that on_worker_exit re-fetches issue state from Linear and
+    /// correctly routes to waiting_for_review even when the cached state
+    /// is stale (e.g. "In Progress" in cache, but "In Review" in Linear).
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_refreshes_stale_state() {
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Linear returns "In Review" even though the entry was cached as "In Progress"
+        let _linear_mock = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Review")]))
+            .create_async()
+            .await;
+
+        // Mock find_open_pr (called by add_to_waiting_for_review)
+        let _pr_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert running entry with STALE "In Progress" state
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.is_completed("id1"));
+        // Should be in waiting_for_review — NOT in retry queue
+        assert!(
+            state.waiting_for_review.contains_key("id1"),
+            "issue should be in waiting_for_review after state refresh"
+        );
+        assert!(
+            !state.retry_attempts.contains_key("id1"),
+            "issue should NOT be in retry queue when refresh shows In Review"
+        );
+        let entry = state.waiting_for_review.get("id1").unwrap();
+        assert_eq!(entry.pr_number, 42);
     }
 
     // ── on_worker_exit: In Review → waiting_for_review ──────────────
