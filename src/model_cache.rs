@@ -255,10 +255,19 @@ pub(crate) async fn fetch_anthropic_models_async(
         .build()
         .expect("reqwest client build failed");
 
+    const MAX_PAGES: usize = 50;
+
     let mut all_models = Vec::new();
     let mut after_id: Option<String> = None;
+    let mut page_count: usize = 0;
 
     loop {
+        page_count += 1;
+        if page_count > MAX_PAGES {
+            tracing::warn!("Anthropic models pagination exceeded {MAX_PAGES} pages, stopping");
+            break;
+        }
+
         let url = match &after_id {
             Some(id) => format!("{base_url}/v1/models?after_id={id}"),
             None => format!("{base_url}/v1/models"),
@@ -791,6 +800,39 @@ mod tests {
             result,
             Err(crate::error::ActualError::RunnerFailed { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_anthropic_models_async_pagination_limit() {
+        let mut server = mockito::Server::new_async().await;
+
+        // First page (no after_id query param)
+        let _m1 = server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"model-0"}],"has_more":true,"last_id":"model-0"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        // All subsequent pages (with after_id) — called MAX_PAGES - 1 times
+        let _m2 = server
+            .mock(
+                "GET",
+                mockito::Matcher::Regex(r"/v1/models\?after_id=.*".to_string()),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":[{"id":"model-n"}],"has_more":true,"last_id":"model-n"}"#)
+            .expect(49)
+            .create_async()
+            .await;
+
+        let timeout = std::time::Duration::from_secs(10);
+        let result = fetch_anthropic_models_async("sk-ant-test", &server.url(), timeout).await;
+        let models = result.expect("should succeed even when hitting page limit");
+        assert_eq!(models.len(), 50); // 1 from first page + 49 from subsequent
     }
 
     // -----------------------------------------------------------------------
