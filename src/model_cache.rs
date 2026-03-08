@@ -955,6 +955,7 @@ mod tests {
         assert!(result.contains(&"claude-cached-model".to_string()));
     }
 
+    #[tracing_test::traced_test]
     #[test]
     fn test_get_anthropic_models_fetch_error_returns_empty() {
         let result = get_anthropic_models(
@@ -962,6 +963,7 @@ mod tests {
             Some("http://127.0.0.1:1"), // nothing listening on port 1
         );
         assert!(result.is_empty());
+        assert!(logs_contain("Anthropic model fetch failed"));
     }
 
     #[test]
