@@ -24,6 +24,10 @@ struct Cli {
     /// Start HTTP dashboard on this port (overrides server.port in WORKFLOW.md)
     #[arg(long)]
     port: Option<u16>,
+
+    /// Run as MCP server (stdio transport for Linear tools)
+    #[arg(long)]
+    mcp_server: bool,
 }
 
 #[tokio::main]
@@ -44,6 +48,19 @@ async fn main() {
         .init();
 
     let cli = Cli::parse();
+
+    // MCP server mode: run the stdio-based MCP server and exit
+    if cli.mcp_server {
+        match symphony::mcp::run_mcp_server(std::io::stdin().lock(), std::io::stdout().lock()).await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                error!(error = %e, "MCP server failed");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     match run(cli).await {
         Ok(()) => {

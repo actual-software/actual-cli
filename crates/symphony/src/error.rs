@@ -105,6 +105,13 @@ pub enum SymphonyError {
     #[error("github invalid repo format: {repo}")]
     GitHubInvalidRepo { repo: String },
 
+    // MCP errors
+    #[error("MCP server error: {reason}")]
+    McpServerError { reason: String },
+
+    #[error("MCP config write failed: {reason}")]
+    McpConfigWriteFailed { reason: String },
+
     // Dispatch errors
     #[error("dispatch validation failed: {reason}")]
     DispatchValidationFailed { reason: String },
@@ -165,5 +172,40 @@ mod tests {
         };
         let debug = format!("{:?}", err);
         assert!(debug.contains("GitHubApiRequest"));
+    }
+
+    #[test]
+    fn test_mcp_server_error_display() {
+        let err = SymphonyError::McpServerError {
+            reason: "stdin closed".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("MCP server error"));
+        assert!(msg.contains("stdin closed"));
+    }
+
+    #[test]
+    fn test_mcp_config_write_failed_display() {
+        let err = SymphonyError::McpConfigWriteFailed {
+            reason: "permission denied".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("MCP config write failed"));
+        assert!(msg.contains("permission denied"));
+    }
+
+    #[test]
+    fn test_mcp_errors_are_debug() {
+        let err = SymphonyError::McpServerError {
+            reason: "test".to_string(),
+        };
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("McpServerError"));
+
+        let err2 = SymphonyError::McpConfigWriteFailed {
+            reason: "test".to_string(),
+        };
+        let debug2 = format!("{:?}", err2);
+        assert!(debug2.contains("McpConfigWriteFailed"));
     }
 }
