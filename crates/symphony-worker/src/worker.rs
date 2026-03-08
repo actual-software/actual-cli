@@ -523,4 +523,66 @@ mod tests {
         // Should return because sender was dropped
         wait_for_shutdown_or_change(&mut rx).await;
     }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_main_loop_shutdown_during_idle_wait() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.base_clone_path = tmp.path().join("base");
+        config.poll_backoff_base_ms = 600_000; // Very long so sleep won't complete
+
+        let mut git = MockGitCommandRunner::new();
+        setup_base_clone_mock(&mut git);
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_claim_work().times(1).returning(|| Ok(None));
+
+        let launcher = MockTestAgentLauncher::new();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        let result = run_main_loop(&client, &git, &launcher, &config, shutdown_rx).await;
+        assert!(result.is_ok());
+        assert!(logs_contain("no work available"));
+        assert!(logs_contain("shutdown signal received"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_main_loop_shutdown_during_error_backoff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.base_clone_path = tmp.path().join("base");
+        config.poll_backoff_base_ms = 600_000; // Very long backoff
+
+        let mut git = MockGitCommandRunner::new();
+        setup_base_clone_mock(&mut git);
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_claim_work().times(1).returning(|| {
+            Err(ClientError::RequestFailed {
+                reason: "connection refused".to_string(),
+            })
+        });
+
+        let launcher = MockTestAgentLauncher::new();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        let result = run_main_loop(&client, &git, &launcher, &config, shutdown_rx).await;
+        assert!(result.is_ok());
+        assert!(logs_contain("failed to claim work"));
+        assert!(logs_contain("shutdown signal received"));
+    }
 }
