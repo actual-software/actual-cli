@@ -3,8 +3,10 @@
 //! # Design
 //!
 //! - `get_openai_models()` / `get_anthropic_models()` are the main entry points.
-//!   They are synchronous so they can be called from any non-async context
-//!   (e.g. the `actual models` command).
+//!   They are thin wrappers around a generic [`get_models`] function that handles
+//!   API-key resolution, on-disk caching, and tokio-runtime creation. The
+//!   provider-specific async fetch functions (`fetch_openai_models_async`,
+//!   `fetch_anthropic_models_async`) are passed in as closures.
 //! - A 24-hour TTL cache is stored at `~/.actualai/actual/model-cache.yaml`.
 //! - On any error (no API key, network failure, parse error) the function returns
 //!   an empty `Vec` so the caller can fall back to the static hardcoded list.
@@ -41,6 +43,39 @@ impl ProviderCache {
     }
 }
 
+/// Which model provider to fetch from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Provider {
+    OpenAi,
+    Anthropic,
+}
+
+impl Provider {
+    /// The environment variable that holds this provider's API key.
+    fn env_var(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OPENAI_API_KEY",
+            Self::Anthropic => "ANTHROPIC_API_KEY",
+        }
+    }
+
+    /// The production base URL for this provider's API.
+    fn production_base_url(self) -> &'static str {
+        match self {
+            Self::OpenAi => "https://api.openai.com",
+            Self::Anthropic => "https://api.anthropic.com",
+        }
+    }
+
+    /// A human-readable name used in log messages.
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Anthropic => "Anthropic",
+        }
+    }
+}
+
 /// The top-level model cache file structure.
 ///
 /// The `anthropic` section is reserved for actual-3kh.2.
@@ -50,6 +85,24 @@ pub(crate) struct ModelCacheFile {
     pub openai: ProviderCache,
     #[serde(default)]
     pub anthropic: ProviderCache,
+}
+
+impl ModelCacheFile {
+    /// Immutable access to the cache section for the given provider.
+    fn provider(&self, p: Provider) -> &ProviderCache {
+        match p {
+            Provider::OpenAi => &self.openai,
+            Provider::Anthropic => &self.anthropic,
+        }
+    }
+
+    /// Mutable access to the cache section for the given provider.
+    fn provider_mut(&mut self, p: Provider) -> &mut ProviderCache {
+        match p {
+            Provider::OpenAi => &mut self.openai,
+            Provider::Anthropic => &mut self.anthropic,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +377,87 @@ pub(crate) async fn fetch_anthropic_models_async(
 }
 
 // ---------------------------------------------------------------------------
-// Public synchronous entry point (Anthropic)
+// Generic synchronous entry point
+// ---------------------------------------------------------------------------
+
+/// Generic cached-fetch for any provider.
+///
+/// 1. Resolve the API key (env var takes priority over `config_key`).
+/// 2. If `base_url` is `None` (production), check the on-disk cache and return
+///    early when it is fresh.
+/// 3. Otherwise create a one-shot tokio runtime and call `fetch_fn`.
+/// 4. On success, persist the result to the cache file.
+/// 5. On error, log a warning and return an empty `Vec`.
+fn get_models<F, Fut>(
+    provider: Provider,
+    config_key: Option<&str>,
+    base_url: Option<&str>,
+    fetch_fn: F,
+) -> Vec<String>
+where
+    F: FnOnce(String, String, std::time::Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>, crate::error::ActualError>>,
+{
+    // Resolve API key (env var takes priority)
+    let api_key = std::env::var(provider.env_var())
+        .ok()
+        .or_else(|| config_key.map(|s| s.to_string()));
+
+    let Some(api_key) = api_key else {
+        return Vec::new(); // no key available — skip silently
+    };
+
+    let ttl = DEFAULT_CACHE_TTL_HOURS;
+
+    // Return cached list if fresh (skip TTL check when base_url is overridden for tests).
+    let cached = base_url.is_none().then(|| {
+        cache_path().and_then(|path| {
+            let file = load_cache_file(&path);
+            let section = file.provider(provider);
+            section.is_fresh(ttl).then(|| section.models.clone())
+        })
+    });
+    if let Some(Some(models)) = cached {
+        return models;
+    }
+
+    // Fetch live
+    let url = base_url.unwrap_or(provider.production_base_url());
+    let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
+
+    // tokio::runtime::Builder::new_current_thread().enable_all().build() is
+    // infallible in practice (only fails if the OS cannot create an I/O driver,
+    // which would be a catastrophic system-level failure).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime build failed");
+
+    match rt.block_on(fetch_fn(api_key, url.to_string(), timeout)) {
+        Ok(models) => {
+            // Persist to cache
+            if let Some(path) = cache_path() {
+                let mut file = load_cache_file(&path);
+                *file.provider_mut(provider) = ProviderCache {
+                    fetched_at: Some(Utc::now()),
+                    models: models.clone(),
+                };
+                save_cache_file(&path, &file);
+            }
+            models
+        }
+        Err(e) => {
+            tracing::warn!(
+                "{} model fetch failed (using hardcoded fallback): {e}",
+                provider.display_name()
+            );
+            Vec::new()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public synchronous entry points (thin wrappers)
 // ---------------------------------------------------------------------------
 
 /// Fetch Anthropic models: return cached list if fresh, otherwise fetch live.
@@ -340,63 +473,13 @@ pub(crate) async fn fetch_anthropic_models_async(
 ///   override the Anthropic base URL.  When `Some`, the TTL check is skipped
 ///   so tests always exercise the network path.
 pub fn get_anthropic_models(config_key: Option<&str>, base_url: Option<&str>) -> Vec<String> {
-    // Resolve API key (env var takes priority)
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .or_else(|| config_key.map(|s| s.to_string()));
-
-    let Some(api_key) = api_key else {
-        return Vec::new(); // no key available — skip silently
-    };
-
-    let ttl = DEFAULT_CACHE_TTL_HOURS;
-
-    // Return cached list if fresh (skip TTL check when base_url is overridden for tests).
-    let cached = base_url.is_none().then(|| {
-        cache_path().and_then(|path| {
-            let file = load_cache_file(&path);
-            file.anthropic
-                .is_fresh(ttl)
-                .then_some(file.anthropic.models)
-        })
-    });
-    if let Some(Some(models)) = cached {
-        return models;
-    }
-
-    // Fetch live
-    let production_base = "https://api.anthropic.com";
-    let url = base_url.unwrap_or(production_base);
-    let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime build failed");
-
-    match rt.block_on(fetch_anthropic_models_async(&api_key, url, timeout)) {
-        Ok(models) => {
-            // Persist to cache
-            if let Some(path) = cache_path() {
-                let mut file = load_cache_file(&path);
-                file.anthropic = ProviderCache {
-                    fetched_at: Some(Utc::now()),
-                    models: models.clone(),
-                };
-                save_cache_file(&path, &file);
-            }
-            models
-        }
-        Err(e) => {
-            tracing::warn!("Anthropic model fetch failed (using hardcoded fallback): {e}");
-            Vec::new()
-        }
-    }
+    get_models(
+        Provider::Anthropic,
+        config_key,
+        base_url,
+        |key, url, timeout| async move { fetch_anthropic_models_async(&key, &url, timeout).await },
+    )
 }
-
-// ---------------------------------------------------------------------------
-// Public synchronous entry point (OpenAI)
-// ---------------------------------------------------------------------------
 
 /// Fetch OpenAI models: return cached list if fresh, otherwise fetch live.
 ///
@@ -411,106 +494,57 @@ pub fn get_anthropic_models(config_key: Option<&str>, base_url: Option<&str>) ->
 ///   override the OpenAI base URL.  When `Some`, the TTL check is skipped so
 ///   tests always exercise the network path.
 pub fn get_openai_models(config_key: Option<&str>, base_url: Option<&str>) -> Vec<String> {
-    // Resolve API key (env var takes priority)
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .or_else(|| config_key.map(|s| s.to_string()));
-
-    let Some(api_key) = api_key else {
-        return Vec::new(); // no key available — skip silently
-    };
-
-    let ttl = DEFAULT_CACHE_TTL_HOURS;
-
-    // Return cached list if fresh (skip TTL check when base_url is overridden for tests).
-    // When base_url is None (production), check the on-disk cache before fetching live.
-    let cached = base_url.is_none().then(|| {
-        cache_path().and_then(|path| {
-            let file = load_cache_file(&path);
-            file.openai.is_fresh(ttl).then_some(file.openai.models)
-        })
-    });
-    if let Some(Some(models)) = cached {
-        return models;
-    }
-
-    // Fetch live
-    let production_base = "https://api.openai.com";
-    let url = base_url.unwrap_or(production_base);
-    let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
-
-    // tokio::runtime::Builder::new_current_thread().enable_all().build() is
-    // infallible in practice (only fails if the OS cannot create an I/O driver,
-    // which would be a catastrophic system-level failure).
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime build failed");
-
-    match rt.block_on(fetch_openai_models_async(&api_key, url, timeout)) {
-        Ok(models) => {
-            // Persist to cache
-            if let Some(path) = cache_path() {
-                let mut file = load_cache_file(&path);
-                file.openai = ProviderCache {
-                    fetched_at: Some(Utc::now()),
-                    models: models.clone(),
-                };
-                save_cache_file(&path, &file);
-            }
-            models
-        }
-        Err(e) => {
-            tracing::warn!("OpenAI model fetch failed (using hardcoded fallback): {e}");
-            Vec::new()
-        }
-    }
+    get_models(
+        Provider::OpenAi,
+        config_key,
+        base_url,
+        |key, url, timeout| async move { fetch_openai_models_async(&key, &url, timeout).await },
+    )
 }
 
 // ---------------------------------------------------------------------------
 // Provenance helpers (read-only, no network call)
 // ---------------------------------------------------------------------------
 
+/// Read a cached model timestamp from disk for the given provider (no network
+/// call). Returns `None` if there is no cache file or no timestamp.
+fn read_cache_timestamp(provider: Provider) -> Option<chrono::DateTime<chrono::Utc>> {
+    cache_path().and_then(|path| load_cache_file(&path).provider(provider).fetched_at)
+}
+
+/// Read cached models from disk for the given provider without making a
+/// network call. Returns empty `Vec` if no cache or no timestamp present.
+fn read_cached_models(provider: Provider) -> Vec<String> {
+    cache_path()
+        .and_then(|path| {
+            let section = load_cache_file(&path).provider(provider).clone();
+            section.fetched_at.is_some().then_some(section.models)
+        })
+        .unwrap_or_default()
+}
+
 /// Read the cached OpenAI model timestamp from disk (no network call).
 /// Returns None if there is no cache file or no timestamp.
 pub fn read_openai_cache_timestamp() -> Option<chrono::DateTime<chrono::Utc>> {
-    cache_path().and_then(|path| load_cache_file(&path).openai.fetched_at)
+    read_cache_timestamp(Provider::OpenAi)
 }
 
 /// Read the cached Anthropic model timestamp from disk (no network call).
 /// Returns None if there is no cache file or no timestamp.
 pub fn read_anthropic_cache_timestamp() -> Option<chrono::DateTime<chrono::Utc>> {
-    cache_path().and_then(|path| load_cache_file(&path).anthropic.fetched_at)
+    read_cache_timestamp(Provider::Anthropic)
 }
 
 /// Read cached OpenAI models from disk without making a network call.
 /// Returns empty Vec if no cache or no timestamp present.
 pub fn read_cached_openai_models() -> Vec<String> {
-    cache_path()
-        .and_then(|path| {
-            let file = load_cache_file(&path);
-            if file.openai.fetched_at.is_some() {
-                Some(file.openai.models)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
+    read_cached_models(Provider::OpenAi)
 }
 
 /// Read cached Anthropic models from disk without making a network call.
 /// Returns empty Vec if no cache or no timestamp present.
 pub fn read_cached_anthropic_models() -> Vec<String> {
-    cache_path()
-        .and_then(|path| {
-            let file = load_cache_file(&path);
-            if file.anthropic.fetched_at.is_some() {
-                Some(file.anthropic.models)
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
+    read_cached_models(Provider::Anthropic)
 }
 
 // ---------------------------------------------------------------------------
