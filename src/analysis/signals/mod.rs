@@ -5,7 +5,6 @@ pub mod semgrep;
 pub mod tree_sitter;
 
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
 use std::collections::HashMap;
 
 /// Source of a signal detection.
@@ -55,7 +54,7 @@ pub struct ArchitectureSignals {
 
 impl ArchitectureSignals {
     /// Group matches by their `leaf_id`.
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn matches_by_leaf_id(&self) -> HashMap<&str, Vec<&ToolMatch>> {
         let mut result: HashMap<&str, Vec<&ToolMatch>> = HashMap::new();
         for m in &self.matches {
@@ -65,7 +64,7 @@ impl ArchitectureSignals {
     }
 
     /// Group matches by their `facet_slot`.
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn matches_by_facet_slot(&self) -> HashMap<&str, Vec<&ToolMatch>> {
         let mut result: HashMap<&str, Vec<&ToolMatch>> = HashMap::new();
         for m in &self.matches {
