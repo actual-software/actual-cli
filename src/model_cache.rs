@@ -579,6 +579,56 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Provider enum & ModelCacheFile accessors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_provider_enum_methods() {
+        assert_eq!(Provider::OpenAi.env_var(), "OPENAI_API_KEY");
+        assert_eq!(Provider::Anthropic.env_var(), "ANTHROPIC_API_KEY");
+
+        assert_eq!(
+            Provider::OpenAi.production_base_url(),
+            "https://api.openai.com"
+        );
+        assert_eq!(
+            Provider::Anthropic.production_base_url(),
+            "https://api.anthropic.com"
+        );
+
+        assert_eq!(Provider::OpenAi.display_name(), "OpenAI");
+        assert_eq!(Provider::Anthropic.display_name(), "Anthropic");
+    }
+
+    #[test]
+    fn test_model_cache_file_provider_accessors() {
+        let mut cache = ModelCacheFile::default();
+        cache.openai = ProviderCache {
+            fetched_at: Some(Utc::now()),
+            models: vec!["gpt-4o".to_string()],
+        };
+        cache.anthropic = ProviderCache {
+            fetched_at: Some(Utc::now()),
+            models: vec!["claude-sonnet-4-6".to_string()],
+        };
+
+        assert_eq!(cache.provider(Provider::OpenAi).models, vec!["gpt-4o"]);
+        assert_eq!(
+            cache.provider(Provider::Anthropic).models,
+            vec!["claude-sonnet-4-6"]
+        );
+
+        cache.provider_mut(Provider::OpenAi).models = vec!["gpt-5".to_string()];
+        assert_eq!(cache.provider(Provider::OpenAi).models, vec!["gpt-5"]);
+
+        cache.provider_mut(Provider::Anthropic).models = vec!["claude-new".to_string()];
+        assert_eq!(
+            cache.provider(Provider::Anthropic).models,
+            vec!["claude-new"]
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Cache file I/O
     // -----------------------------------------------------------------------
 
