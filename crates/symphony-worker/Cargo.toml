@@ -1,0 +1,17 @@
+[package]
+name = "symphony-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Worker process for Symphony distributed agent orchestration"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+tracing = "0.1"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util", "macros"] }
+tempfile = "3"
+tracing-test = "0.2"
+mockall = "0.13"
