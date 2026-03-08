@@ -152,6 +152,13 @@ pub struct Config {
     /// Only applies to the claude-cli runner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+
+    /// Maximum number of output tokens for the Anthropic API runner (default: 16384).
+    ///
+    /// Increase this if responses are being truncated for large repositories
+    /// with many ADRs. Only applies to the `anthropic-api` runner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 impl Default for Config {
@@ -177,6 +184,7 @@ impl Default for Config {
             openai_api_key: None,
             cursor_api_key: None,
             max_turns: None,
+            max_tokens: None,
         }
     }
 }
@@ -294,6 +302,7 @@ mod tests {
             openai_api_key: None,
             cursor_api_key: None,
             max_turns: Some(10),
+            max_tokens: Some(32768),
         };
 
         let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
@@ -559,5 +568,33 @@ mod tests {
             cfg.cached_tailoring.is_none(),
             "corrupt cached_tailoring must degrade to None, not fail config parsing"
         );
+    }
+
+    /// Round-trip test: config with max_tokens set serializes and deserializes correctly.
+    #[test]
+    fn test_round_trip_max_tokens() {
+        let config = Config {
+            max_tokens: Some(32768),
+            ..Config::default()
+        };
+        let yaml = serde_yml::to_string(&config).expect("serialize to YAML");
+        assert!(yaml.contains("32768"), "YAML must contain '32768': {yaml}");
+        let deserialized: Config = serde_yml::from_str(&yaml).expect("deserialize from YAML");
+        assert_eq!(config, deserialized);
+    }
+
+    /// Partial YAML with max_tokens set deserializes correctly.
+    #[test]
+    fn test_partial_yaml_with_max_tokens() {
+        let yaml = "max_tokens: 8192\n";
+        let config: Config = serde_yml::from_str(yaml).expect("deserialize partial YAML");
+        assert_eq!(config.max_tokens, Some(8192));
+    }
+
+    /// max_tokens defaults to None when not specified in YAML.
+    #[test]
+    fn test_max_tokens_defaults_to_none() {
+        let config = Config::default();
+        assert_eq!(config.max_tokens, None);
     }
 }
