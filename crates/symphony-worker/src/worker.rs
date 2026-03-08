@@ -161,39 +161,13 @@ async fn wait_for_shutdown_or_change(rx: &mut tokio::sync::watch::Receiver<bool>
 mod tests {
     use super::*;
     use crate::client::{ClientError, MockOrchestratorClient};
-    use crate::executor::{AgentHandle, AgentLauncher};
+    use crate::test_support::{MockTestAgentHandle, MockTestAgentLauncher};
     use crate::workspace::MockGitCommandRunner;
-    use mockall::mock;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use symphony::protocol::{AgentEvent, WorkAssignment, WorkerExitReason};
     use tracing_test::traced_test;
-
-    // Define mock types locally (can't import from executor::tests)
-    mock! {
-        pub TestAgentHandle {}
-
-        #[async_trait::async_trait]
-        impl AgentHandle for TestAgentHandle {
-            async fn wait_with_timeout(&mut self, timeout_ms: u64) -> Result<bool, String>;
-            async fn kill(&mut self);
-        }
-    }
-
-    mock! {
-        pub TestAgentLauncher {}
-
-        #[async_trait::async_trait]
-        impl AgentLauncher for TestAgentLauncher {
-            async fn launch_agent(
-                &self,
-                workspace_path: &std::path::Path,
-                prompt: &str,
-                issue_identifier: &str,
-            ) -> Result<(Box<dyn AgentHandle>, tokio::sync::mpsc::Receiver<AgentEvent>), String>;
-        }
-    }
 
     fn make_config() -> WorkerConfig {
         WorkerConfig {
