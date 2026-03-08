@@ -18,7 +18,9 @@ pub fn terminal_width() -> usize {
 ///
 /// Falls back to (24, 80) if the size cannot be determined.
 pub fn terminal_size() -> (u16, u16) {
-    crossterm::terminal::size().unwrap_or((24, 80))
+    crossterm::terminal::size()
+        .map(|(cols, rows)| (rows, cols))
+        .unwrap_or((24, 80))
 }
 
 #[cfg(test)]
@@ -36,9 +38,28 @@ mod tests {
     #[test]
     fn terminal_size_returns_positive_dimensions() {
         let (rows, cols) = terminal_size();
-        // In a non-TTY environment (CI, pipes) crossterm may return a small
-        // pseudo-size, so we only require non-zero values here.
+        // In a non-TTY environment (CI, pipes) the fallback (24, 80) applies,
+        // so rows < cols.  When a real TTY is present rows and cols are both
+        // positive — we accept either situation.
         assert!(rows >= 1, "expected at least 1 row, got {rows}");
         assert!(cols >= 1, "expected at least 1 col, got {cols}");
+    }
+
+    #[test]
+    fn terminal_size_fallback_has_correct_order() {
+        // When no TTY is available crossterm::terminal::size() fails and
+        // we fall back to (24, 80).  Verify the tuple is (rows, cols) —
+        // i.e. the first element (rows) is less than the second (cols).
+        let (rows, cols) = terminal_size();
+        // CI and piped environments always hit the fallback path.
+        // A real terminal *could* have rows >= cols, so this assertion is
+        // only meaningful in non-TTY contexts (which is how CI runs).
+        if crossterm::terminal::size().is_err() {
+            assert_eq!(
+                (rows, cols),
+                (24, 80),
+                "fallback should be (24 rows, 80 cols)"
+            );
+        }
     }
 }
