@@ -18,7 +18,7 @@ use crate::cli::commands::sync::{resolve_cwd, run_sync, run_sync_with_probe};
 use crate::cli::ui::header::{AuthDisplay, RunnerDisplay};
 use crate::cli::ui::real_terminal::RealTerminal;
 use crate::config::paths::{config_path, load_from};
-use crate::config::types::{DEFAULT_MODEL, DEFAULT_TIMEOUT_SECS};
+use crate::config::types::{DEFAULT_MODEL, DEFAULT_OPENAI_MODEL, DEFAULT_TIMEOUT_SECS};
 use crate::error::ActualError;
 use crate::runner::anthropic_api::AnthropicApiRunner;
 use crate::runner::binary::find_claude_binary;
@@ -149,8 +149,7 @@ fn codex_cli_fallback_if_model_error(
                     tracing::warn!(
                         "Codex CLI failed with a model error, falling back to OpenAI API runner"
                     );
-                    // keep in sync with RUNNER_FAMILIES default for openai-api (models.rs)
-                    let fallback_model = model.unwrap_or_else(|| "gpt-5.2".to_string());
+                    let fallback_model = model.unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
                     let fallback_auth = AuthDisplay {
                         authenticated: true,
                         email: Some("OpenAI API (fallback)".to_string()),
@@ -341,7 +340,7 @@ where
                 .model
                 .as_deref()
                 .or(cfg.model.as_deref())
-                .unwrap_or("gpt-5.2")
+                .unwrap_or(DEFAULT_OPENAI_MODEL)
                 .to_string();
             let runner_display = RunnerDisplay {
                 runner_name: RunnerChoice::OpenAiApi.display_name().to_string(),

@@ -20,6 +20,9 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 600;
 /// Default model for Claude/Anthropic-based runners.
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
+/// Default model for OpenAI-based runners (openai-api).
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.2";
+
 /// Maximum age of a cached value before it is considered stale (7 days).
 pub const CACHE_TTL_DAYS: i64 = 7;
 
