@@ -314,21 +314,18 @@ where
                 warning: RunnerChoice::AnthropicApi.model_compatibility_warning(&model),
             };
             let max_tokens = cfg.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-            let api_runner = match std::env::var("ANTHROPIC_API_BASE_URL") {
-                Ok(base_url) => AnthropicApiRunner::with_base_url(
+            let runner_result = if let Ok(base_url) = std::env::var("ANTHROPIC_API_BASE_URL") {
+                AnthropicApiRunner::with_base_url(
                     api_key,
                     model,
                     subprocess_timeout,
                     base_url,
                     max_tokens,
-                ),
-                Err(_) => AnthropicApiRunner::with_max_tokens(
-                    api_key,
-                    model,
-                    subprocess_timeout,
-                    max_tokens,
-                ),
-            }?;
+                )
+            } else {
+                AnthropicApiRunner::with_max_tokens(api_key, model, subprocess_timeout, max_tokens)
+            };
+            let api_runner = runner_result?;
             run_sync(
                 args,
                 &root_dir,
