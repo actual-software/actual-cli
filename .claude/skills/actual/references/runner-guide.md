@@ -99,7 +99,13 @@ actual config set runner anthropic-api
 actual config set model claude-sonnet-4-6
 # Or set the API key in config (stored with 0600 permissions):
 actual config set anthropic_api_key "sk-ant-..."
+# Increase max output tokens if responses are truncated (default: 16384):
+actual config set max_tokens 32768
 ```
+
+### Truncation Detection
+
+The anthropic-api runner detects when a response is truncated (stop reason `max_tokens`) and logs a warning with the configured limit. If you see truncation warnings, increase `max_tokens`.
 
 ## openai-api
 

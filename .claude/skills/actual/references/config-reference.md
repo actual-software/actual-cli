@@ -39,6 +39,7 @@ actual config path
 | `invocation_timeout_secs` | u64 | 600 | min 1 | Runner timeout in seconds |
 | `max_budget_usd` | f64 | (none) | positive, finite | Spending cap for tailoring |
 | `max_turns` | u32 | (none) | min 1 | Max conversation turns (claude-cli only) |
+| `max_tokens` | u32 | (none) | min 1 | Max output tokens (anthropic-api only, default 16384) |
 | `max_per_framework` | u32 | (none) | min 1 | Max ADRs per framework |
 | `include_general` | bool | (none) | true/false | Include general (non-framework) ADRs |
 | `include_categories` | string | (none) | comma-separated | Only include these ADR categories |
@@ -72,6 +73,7 @@ All numeric keys have a minimum of 1. Setting a value below the minimum results 
 - `invocation_timeout_secs`: How long to wait for the AI runner to respond per invocation. Increase this for slow models or large codebases.
 - `max_budget_usd`: Must be positive and finite. Prevents runaway spending during tailoring.
 - `max_turns`: Only used by claude-cli runner. Limits the number of conversation turns.
+- `max_tokens`: Only used by anthropic-api runner. Controls the maximum number of output tokens per API call (default 16384). Increase this if responses are being truncated for large repositories with many ADRs.
 
 ### Category Filtering
 
