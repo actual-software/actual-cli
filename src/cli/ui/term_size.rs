@@ -14,12 +14,17 @@ pub fn terminal_width() -> usize {
         .unwrap_or(80)
 }
 
+/// Normalize crossterm's `(cols, rows)` into our `(rows, cols)` convention.
+fn cols_rows_to_rows_cols((cols, rows): (u16, u16)) -> (u16, u16) {
+    (rows, cols)
+}
+
 /// Query the current terminal size as (rows, cols).
 ///
 /// Falls back to (24, 80) if the size cannot be determined.
 pub fn terminal_size() -> (u16, u16) {
     crossterm::terminal::size()
-        .map(|(cols, rows)| (rows, cols))
+        .map(cols_rows_to_rows_cols)
         .unwrap_or((24, 80))
 }
 
@@ -30,7 +35,7 @@ mod tests {
     #[test]
     fn terminal_width_returns_positive() {
         // In a test environment the TTY may not be available, so we just
-        // verify the function returns a sane default (≥ 40).
+        // verify the function returns a sane default (>= 40).
         let w = terminal_width();
         assert!(w >= 40, "expected at least 40 cols, got {w}");
     }
@@ -61,5 +66,14 @@ mod tests {
                 "fallback should be (24 rows, 80 cols)"
             );
         }
+    }
+
+    #[test]
+    fn cols_rows_to_rows_cols_swaps_order() {
+        // Directly test the normalization helper so the mapping path is
+        // covered even when no TTY is available (CI).
+        assert_eq!(cols_rows_to_rows_cols((80, 24)), (24, 80));
+        assert_eq!(cols_rows_to_rows_cols((120, 40)), (40, 120));
+        assert_eq!(cols_rows_to_rows_cols((1, 1)), (1, 1));
     }
 }
