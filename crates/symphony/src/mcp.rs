@@ -337,10 +337,7 @@ mod tests {
         run_mcp_server(reader, &mut output).await.unwrap();
 
         let response_text = String::from_utf8(output).unwrap();
-        assert!(
-            response_text.is_empty(),
-            "notifications should not produce a response"
-        );
+        assert!(response_text.is_empty());
     }
 
     #[tokio::test]
@@ -352,7 +349,7 @@ mod tests {
         run_mcp_server(reader, &mut output).await.unwrap();
 
         let response_text = String::from_utf8(output).unwrap();
-        assert!(response_text.is_empty(), "empty lines produce no output");
+        assert!(response_text.is_empty());
     }
 
     #[tokio::test]
@@ -369,7 +366,7 @@ mod tests {
 
         let response_text = String::from_utf8(output).unwrap();
         let lines: Vec<&str> = response_text.trim().split('\n').collect();
-        assert_eq!(lines.len(), 2, "should have two response lines");
+        assert_eq!(lines.len(), 2);
 
         let resp1: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(resp1["id"], 1);
@@ -464,16 +461,56 @@ mod tests {
         });
         let result = handle_tools_call(&params).await;
 
-        // Restore
-        if let Some(val) = original {
-            std::env::set_var("LINEAR_API_KEY", val);
-        }
+        // Restore: always remove, then re-set if there was a prior value
+        std::env::remove_var("LINEAR_API_KEY");
+        original
+            .into_iter()
+            .for_each(|v| std::env::set_var("LINEAR_API_KEY", v));
 
         assert_eq!(result["isError"], true);
         assert!(result["content"][0]["text"]
             .as_str()
             .unwrap()
             .contains("LINEAR_API_KEY"));
+    }
+
+    /// Test the full `execute_linear_graphql_tool` success path through env vars.
+    #[tokio::test]
+    async fn test_execute_linear_graphql_tool_success_via_env() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(r#"{"data":{"viewer":{"id":"u-env"}}}"#)
+            .create_async()
+            .await;
+
+        // Save original env vars
+        let orig_key = std::env::var("LINEAR_API_KEY").ok();
+        let orig_endpoint = std::env::var("LINEAR_ENDPOINT").ok();
+
+        // Set env vars for the test
+        std::env::set_var("LINEAR_API_KEY", "test-key-env");
+        std::env::set_var("LINEAR_ENDPOINT", server.url());
+
+        let arguments = serde_json::json!({ "query": "{ viewer { id } }" });
+        let result = execute_linear_graphql_tool(&arguments).await;
+
+        // Restore env vars: always remove, then re-set if there was a prior value
+        std::env::remove_var("LINEAR_API_KEY");
+        orig_key
+            .into_iter()
+            .for_each(|v| std::env::set_var("LINEAR_API_KEY", v));
+        std::env::remove_var("LINEAR_ENDPOINT");
+        orig_endpoint
+            .into_iter()
+            .for_each(|v| std::env::set_var("LINEAR_ENDPOINT", v));
+
+        assert!(result.get("isError").is_none());
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("u-env"));
+
+        mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -847,11 +884,7 @@ mod tests {
 
         let response_text = String::from_utf8(output).unwrap();
         let lines: Vec<&str> = response_text.trim().split('\n').collect();
-        assert_eq!(
-            lines.len(),
-            1,
-            "only the request with id should produce a response"
-        );
+        assert_eq!(lines.len(), 1);
 
         let resp: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(resp["id"], 1);
@@ -990,10 +1023,7 @@ mod tests {
 
         let result = run_graphql_query(&config, "{ viewer { id } }", None).await;
 
-        assert!(
-            result.get("isError").is_none(),
-            "expected success but got error: {result:?}"
-        );
+        assert!(result.get("isError").is_none());
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("u-direct"));
 
