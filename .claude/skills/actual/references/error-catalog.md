@@ -278,11 +278,14 @@ curl -I <api_url>   # test connectivity
 
 **Cause**: The runner process exited with a non-zero status.
 
+**Display**: `Runner failed: {message}\nstderr: {stderr}` — stderr output from the subprocess is shown inline.
+
 **Hint**: Check the error details above. For subprocess runners, re-run with --verbose for more output.
 
 **Diagnosis**:
 ```bash
 actual adr-bot --verbose --show-errors  # get detailed output
+# stderr from the runner subprocess is now included in the error message
 ```
 
 **Fix**: Depends on the runner's error message. Common causes: model not available, rate limiting, context too large.
