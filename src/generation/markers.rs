@@ -93,17 +93,29 @@ pub fn strip_adr_section_markers(content: &str) -> String {
         .join("\n")
 }
 
-/// Check if a trimmed line is an ADR section start or end marker.
+/// Check if a trimmed line is a valid ADR section start or end marker.
+///
+/// Delegates to the strict parsers to ensure the ID between the prefix and
+/// suffix is non-empty, avoiding false positives on malformed markers like
+/// `<!-- adr: start -->` or `<!-- adr: end -->`.
 fn is_adr_section_marker(trimmed: &str) -> bool {
-    trimmed.starts_with(ADR_SECTION_START_PREFIX)
-        && (trimmed.ends_with(ADR_SECTION_START_SUFFIX)
-            || trimmed.ends_with(ADR_SECTION_END_SUFFIX))
+    parse_adr_section_start(trimmed).is_some() || parse_adr_section_end(trimmed).is_some()
 }
 
 /// Parse an ADR section start marker and return the ADR ID if valid.
 fn parse_adr_section_start(trimmed: &str) -> Option<String> {
     let rest = trimmed.strip_prefix(ADR_SECTION_START_PREFIX)?;
     let id = rest.strip_suffix(ADR_SECTION_START_SUFFIX)?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// Parse an ADR section end marker and return the ADR ID if valid.
+fn parse_adr_section_end(trimmed: &str) -> Option<String> {
+    let rest = trimmed.strip_prefix(ADR_SECTION_END_PREFIX)?;
+    let id = rest.strip_suffix(ADR_SECTION_END_SUFFIX)?;
     if id.is_empty() {
         return None;
     }
@@ -1066,6 +1078,144 @@ mod tests {
         assert!(
             result.contains("Y content"),
             "should preserve content: {result}"
+        );
+    }
+
+    // --- is_adr_section_marker strict validation tests ---
+
+    #[test]
+    fn test_is_adr_section_marker_accepts_valid_start() {
+        assert!(is_adr_section_marker("<!-- adr:abc-123 start -->"));
+    }
+
+    #[test]
+    fn test_is_adr_section_marker_accepts_valid_end() {
+        assert!(is_adr_section_marker("<!-- adr:abc-123 end -->"));
+    }
+
+    #[test]
+    fn test_is_adr_section_marker_rejects_empty_id_start() {
+        assert!(
+            !is_adr_section_marker("<!-- adr: start -->"),
+            "empty ID start marker should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_is_adr_section_marker_rejects_empty_id_end() {
+        assert!(
+            !is_adr_section_marker("<!-- adr: end -->"),
+            "empty ID end marker should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_is_adr_section_marker_rejects_plain_text() {
+        assert!(!is_adr_section_marker("just some text"));
+    }
+
+    #[test]
+    fn test_is_adr_section_marker_rejects_partial_prefix() {
+        assert!(!is_adr_section_marker("<!-- adr:abc"));
+    }
+
+    #[test]
+    fn test_is_adr_section_marker_rejects_wrong_suffix() {
+        assert!(!is_adr_section_marker("<!-- adr:abc foo -->"));
+    }
+
+    // --- parse_adr_section_end tests ---
+
+    #[test]
+    fn test_parse_adr_section_end_valid() {
+        assert_eq!(
+            parse_adr_section_end("<!-- adr:my-id end -->"),
+            Some("my-id".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_adr_section_end_empty_id() {
+        assert_eq!(
+            parse_adr_section_end("<!-- adr: end -->"),
+            None,
+            "empty ID should return None"
+        );
+    }
+
+    #[test]
+    fn test_parse_adr_section_end_malformed_no_suffix() {
+        assert_eq!(
+            parse_adr_section_end("<!-- adr:my-id"),
+            None,
+            "missing suffix should return None"
+        );
+    }
+
+    #[test]
+    fn test_parse_adr_section_end_wrong_prefix() {
+        assert_eq!(
+            parse_adr_section_end("<!-- wrong:my-id end -->"),
+            None,
+            "wrong prefix should return None"
+        );
+    }
+
+    #[test]
+    fn test_parse_adr_section_end_start_suffix() {
+        assert_eq!(
+            parse_adr_section_end("<!-- adr:my-id start -->"),
+            None,
+            "start suffix should not match end parser"
+        );
+    }
+
+    // --- strip_adr_section_markers preserves empty-ID markers ---
+
+    #[test]
+    fn test_strip_adr_section_markers_preserves_empty_id_markers() {
+        let content =
+            "<!-- adr: start -->\nUser content here\n<!-- adr: end -->\n<!-- adr:real-id start -->\nManaged content\n<!-- adr:real-id end -->";
+        let result = strip_adr_section_markers(content);
+        assert!(
+            result.contains("<!-- adr: start -->"),
+            "empty-ID start marker should be preserved: {result}"
+        );
+        assert!(
+            result.contains("<!-- adr: end -->"),
+            "empty-ID end marker should be preserved: {result}"
+        );
+        assert!(
+            result.contains("User content here"),
+            "user content should be preserved: {result}"
+        );
+        assert!(
+            !result.contains("<!-- adr:real-id start -->"),
+            "valid start marker should be stripped: {result}"
+        );
+        assert!(
+            !result.contains("<!-- adr:real-id end -->"),
+            "valid end marker should be stripped: {result}"
+        );
+    }
+
+    // --- strip_managed_metadata preserves empty-ID markers ---
+
+    #[test]
+    fn test_strip_managed_metadata_preserves_empty_id_markers() {
+        let content = "# Title\n<!-- adr: start -->\nUser note\n<!-- adr: end -->\nMore content";
+        let result = strip_managed_metadata(content);
+        assert!(
+            result.contains("<!-- adr: start -->"),
+            "empty-ID start marker should be preserved: {result}"
+        );
+        assert!(
+            result.contains("<!-- adr: end -->"),
+            "empty-ID end marker should be preserved: {result}"
+        );
+        assert!(
+            result.contains("User note"),
+            "user content should be preserved: {result}"
         );
     }
 }
