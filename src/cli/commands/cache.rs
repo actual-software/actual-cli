@@ -192,15 +192,17 @@ mod tests {
 
     #[test]
     fn test_exec_uses_config_path_via_env_var() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Redirect the real config path to a temp file via ACTUAL_CONFIG.
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");
         config::paths::save_to(&config::Config::default(), &config_file).unwrap();
 
-        std::env::set_var("ACTUAL_CONFIG", config_file.to_str().unwrap());
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
         let args = make_args_clear();
         let result = exec(&args);
-        std::env::remove_var("ACTUAL_CONFIG");
 
         assert!(result.is_ok());
     }
