@@ -433,6 +433,25 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Setting an unknown model name via `run_with_path` should succeed and
+    /// exercise the `eprintln!` warning branch in the Set action.
+    #[test]
+    fn test_set_unknown_model_emits_warning_and_succeeds() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+        let args = ConfigArgs {
+            action: ConfigAction::Set(ConfigSetArgs {
+                key: "model".to_string(),
+                value: "totally-bogus-model-name".to_string(),
+            }),
+        };
+        let result = run_with_path(&args, &config_file);
+        assert!(
+            result.is_ok(),
+            "setting an unknown model must still succeed"
+        );
+    }
+
     #[test]
     fn test_set_non_secret_key_succeeds() {
         let dir = tempdir().unwrap();
