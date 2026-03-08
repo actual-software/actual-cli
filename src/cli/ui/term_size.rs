@@ -3,6 +3,8 @@
 //! Replaces the scattered `console::Term::stdout/stderr().size_checked()` call
 //! sites with a single, consistent helper backed by crossterm.
 
+use std::io;
+
 /// Query the current terminal width in columns.
 ///
 /// Falls back to 80 if the terminal size cannot be determined (non-TTY,
@@ -14,18 +16,20 @@ pub fn terminal_width() -> usize {
         .unwrap_or(80)
 }
 
-/// Normalize crossterm's `(cols, rows)` into our `(rows, cols)` convention.
-fn cols_rows_to_rows_cols((cols, rows): (u16, u16)) -> (u16, u16) {
-    (rows, cols)
+/// Normalize a crossterm `(cols, rows)` result into `(rows, cols)`, falling
+/// back to `(24, 80)` on error.
+fn normalize_size(raw: Result<(u16, u16), io::Error>) -> (u16, u16) {
+    match raw {
+        Ok((cols, rows)) => (rows, cols),
+        Err(_) => (24, 80),
+    }
 }
 
 /// Query the current terminal size as (rows, cols).
 ///
 /// Falls back to (24, 80) if the size cannot be determined.
 pub fn terminal_size() -> (u16, u16) {
-    crossterm::terminal::size()
-        .map(cols_rows_to_rows_cols)
-        .unwrap_or((24, 80))
+    normalize_size(crossterm::terminal::size())
 }
 
 #[cfg(test)]
@@ -51,29 +55,19 @@ mod tests {
     }
 
     #[test]
-    fn terminal_size_fallback_has_correct_order() {
-        // When no TTY is available crossterm::terminal::size() fails and
-        // we fall back to (24, 80).  Verify the tuple is (rows, cols) —
-        // i.e. the first element (rows) is less than the second (cols).
-        let (rows, cols) = terminal_size();
-        // CI and piped environments always hit the fallback path.
-        // A real terminal *could* have rows >= cols, so this assertion is
-        // only meaningful in non-TTY contexts (which is how CI runs).
-        if crossterm::terminal::size().is_err() {
-            assert_eq!(
-                (rows, cols),
-                (24, 80),
-                "fallback should be (24 rows, 80 cols)"
-            );
-        }
+    fn normalize_size_swaps_cols_rows_on_success() {
+        // crossterm returns (cols, rows); normalize_size must return (rows, cols).
+        let ok: Result<(u16, u16), io::Error> = Ok((80, 24));
+        assert_eq!(normalize_size(ok), (24, 80));
+
+        let ok2: Result<(u16, u16), io::Error> = Ok((120, 40));
+        assert_eq!(normalize_size(ok2), (40, 120));
     }
 
     #[test]
-    fn cols_rows_to_rows_cols_swaps_order() {
-        // Directly test the normalization helper so the mapping path is
-        // covered even when no TTY is available (CI).
-        assert_eq!(cols_rows_to_rows_cols((80, 24)), (24, 80));
-        assert_eq!(cols_rows_to_rows_cols((120, 40)), (40, 120));
-        assert_eq!(cols_rows_to_rows_cols((1, 1)), (1, 1));
+    fn normalize_size_returns_fallback_on_error() {
+        let err: Result<(u16, u16), io::Error> =
+            Err(io::Error::new(io::ErrorKind::Other, "no tty"));
+        assert_eq!(normalize_size(err), (24, 80));
     }
 }
