@@ -1307,7 +1307,11 @@ mod tests {
     impl EnvGuard {
         fn remove(key: &'static str) -> Self {
             let old = std::env::var(key).ok();
-            std::env::remove_var(key);
+            #[allow(deprecated)]
+            // SAFETY: caller holds ENV_MUTEX before calling this.
+            unsafe {
+                std::env::remove_var(key);
+            }
             Self { key, old }
         }
     }
@@ -1315,18 +1319,37 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.old {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
+                Some(v) => {
+                    #[allow(deprecated)]
+                    // SAFETY: caller holds ENV_MUTEX for the lifetime of this guard.
+                    unsafe {
+                        std::env::set_var(self.key, v);
+                    }
+                }
+                None => {
+                    #[allow(deprecated)]
+                    // SAFETY: caller holds ENV_MUTEX for the lifetime of this guard.
+                    unsafe {
+                        std::env::remove_var(self.key);
+                    }
+                }
             }
         }
     }
 
     #[test]
     fn test_local_env_guard_restores_previous_value() {
+        use crate::testutil::ENV_MUTEX;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Exercise the Some(v) branch in EnvGuard::drop(): when a var had a prior
         // value before remove(), drop() must restore it.
         let key = "ACTUAL_CLI_TEST_LOCAL_ENV_GUARD_RESTORE";
-        std::env::set_var(key, "original-value");
+        #[allow(deprecated)]
+        // SAFETY: ENV_MUTEX is held.
+        unsafe {
+            std::env::set_var(key, "original-value");
+        }
         {
             let _guard = EnvGuard::remove(key);
             // While the guard is alive, the var should be absent
@@ -1335,7 +1358,11 @@ mod tests {
         // After drop(), the original value must be restored
         assert_eq!(std::env::var(key).unwrap(), "original-value");
         // Clean up
-        std::env::remove_var(key);
+        #[allow(deprecated)]
+        // SAFETY: ENV_MUTEX is held.
+        unsafe {
+            std::env::remove_var(key);
+        }
     }
 
     // -----------------------------------------------------------------------
