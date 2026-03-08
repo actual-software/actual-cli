@@ -295,7 +295,8 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     };
 
     // 4. Filter by --project if specified
-    let analysis = filter_projects(analysis, &args.projects).inspect_err(|_| {
+    let analysis = filter_projects(analysis, &args.projects).inspect_err(|e| {
+        pipeline.error(SyncPhase::Analysis, &format!("Project filter failed: {e}"));
         pipeline.finish_remaining();
     })?;
 
