@@ -25,5 +25,5 @@ async-trait = "0.1"
 tokio = { version = "1", features = ["test-util", "macros"] }
 tempfile = "3"
 tracing-test = "0.2"
-mockall = "0.13"
+mockall = "0.14"
 mockito = "1"
