@@ -99,21 +99,43 @@ async fn execute_linear_graphql_tool(arguments: &Value) -> Value {
     let variables = arguments.get("variables");
 
     // Build TrackerConfig from environment
+    let config = match build_tracker_config_from_env() {
+        Ok(c) => c,
+        Err(msg) => return tool_error(&msg),
+    };
+
+    run_graphql_query(&config, query, variables).await
+}
+
+/// Build a `TrackerConfig` from environment variables.
+///
+/// Returns `Err` with a user-facing message if `LINEAR_API_KEY` is missing.
+fn build_tracker_config_from_env() -> std::result::Result<TrackerConfig, String> {
     let api_key = std::env::var("LINEAR_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
-        return tool_error("LINEAR_API_KEY environment variable not set");
+        return Err("LINEAR_API_KEY environment variable not set".to_string());
     }
 
-    let config = TrackerConfig {
+    let endpoint = std::env::var("LINEAR_ENDPOINT")
+        .unwrap_or_else(|_| "https://api.linear.app/graphql".to_string());
+
+    Ok(TrackerConfig {
         kind: "linear".to_string(),
-        endpoint: "https://api.linear.app/graphql".to_string(),
+        endpoint,
         api_key,
         team_key: std::env::var("LINEAR_TEAM_KEY").unwrap_or_default(),
         active_states: vec![],
         terminal_states: vec![],
-    };
+    })
+}
 
-    match execute_linear_graphql(&config, query, variables).await {
+/// Execute a GraphQL query using the given config and return an MCP tool result.
+async fn run_graphql_query(
+    config: &TrackerConfig,
+    query: &str,
+    variables: Option<&Value>,
+) -> Value {
+    match execute_linear_graphql(config, query, variables).await {
         Ok(data) => tool_success(&serde_json::to_string(&data).unwrap_or_default()),
         Err(e) => tool_error(&e),
     }
@@ -942,5 +964,102 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("missing required parameter"));
+    }
+
+    // ── run_graphql_query (bypasses env vars) ─────────────────────
+
+    /// Test `run_graphql_query` success path with a mock server.
+    #[tokio::test]
+    async fn test_run_graphql_query_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(r#"{"data":{"viewer":{"id":"u-direct"}}}"#)
+            .create_async()
+            .await;
+
+        let config = TrackerConfig {
+            kind: "linear".to_string(),
+            endpoint: server.url(),
+            api_key: "test-key".to_string(),
+            team_key: "test-team".to_string(),
+            active_states: vec![],
+            terminal_states: vec![],
+        };
+
+        let result = run_graphql_query(&config, "{ viewer { id } }", None).await;
+
+        assert!(
+            result.get("isError").is_none(),
+            "expected success but got error: {result:?}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("u-direct"));
+
+        mock.assert_async().await;
+    }
+
+    /// Test `run_graphql_query` error path with a mock server.
+    #[tokio::test]
+    async fn test_run_graphql_query_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(401)
+            .with_body("Unauthorized")
+            .create_async()
+            .await;
+
+        let config = TrackerConfig {
+            kind: "linear".to_string(),
+            endpoint: server.url(),
+            api_key: "bad-key".to_string(),
+            team_key: "test-team".to_string(),
+            active_states: vec![],
+            terminal_states: vec![],
+        };
+
+        let result = run_graphql_query(&config, "{ viewer { id } }", None).await;
+        assert_eq!(result["isError"], true);
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("HTTP 401"));
+    }
+
+    /// Test `run_graphql_query` with variables.
+    #[tokio::test]
+    async fn test_run_graphql_query_with_variables() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(r#"{"data":{"issue":{"id":"iss-1"}}}"#)
+            .create_async()
+            .await;
+
+        let config = TrackerConfig {
+            kind: "linear".to_string(),
+            endpoint: server.url(),
+            api_key: "test-key".to_string(),
+            team_key: "test-team".to_string(),
+            active_states: vec![],
+            terminal_states: vec![],
+        };
+
+        let vars = serde_json::json!({"id": "iss-1"});
+        let result = run_graphql_query(
+            &config,
+            "query($id: ID!) { issue(id: $id) { id } }",
+            Some(&vars),
+        )
+        .await;
+
+        assert!(result.get("isError").is_none());
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("iss-1"));
+
+        mock.assert_async().await;
     }
 }
