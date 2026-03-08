@@ -536,11 +536,7 @@ mod tests {
             }
         });
         let events = parse_agent_message(&json);
-        assert_eq!(
-            events.len(),
-            2,
-            "should emit both TurnCompleted and TokenUsage"
-        );
+        assert_eq!(events.len(), 2);
         assert!(
             matches!(&events[0], AgentEvent::TurnCompleted { message } if message.as_deref() == Some("Done"))
         );
@@ -565,11 +561,7 @@ mod tests {
             }
         });
         let events = parse_agent_message(&json);
-        assert_eq!(
-            events.len(),
-            2,
-            "should emit both TurnCompleted and TokenUsage even with empty text"
-        );
+        assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], AgentEvent::TurnCompleted { message } if message.is_none()));
         assert!(matches!(
             &events[1],
