@@ -126,6 +126,18 @@ fn log_creating_worktree_root(root: &Path) {
     debug!(path = %p, "creating worktree root directory");
 }
 
+/// Helper to ensure a directory exists, creating it (and parents) if needed.
+fn ensure_dir_exists(dir: &Path, log_fn: fn(&Path)) -> Result<()> {
+    if !dir.exists() {
+        log_fn(dir);
+        std::fs::create_dir_all(dir).map_err(|e| WorkspaceError::DirectoryCreationFailed {
+            path: dir.to_string_lossy().into_owned(),
+            reason: e.to_string(),
+        })?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -150,13 +162,7 @@ pub async fn ensure_base_clone(
             path: base_clone_path.to_string_lossy().into_owned(),
         })?;
 
-    if !parent.exists() {
-        log_creating_parent(parent);
-        std::fs::create_dir_all(parent).map_err(|e| WorkspaceError::DirectoryCreationFailed {
-            path: parent.to_string_lossy().into_owned(),
-            reason: e.to_string(),
-        })?;
-    }
+    ensure_dir_exists(parent, log_creating_parent)?;
 
     log_clone(repo_url, base_clone_path);
 
@@ -209,15 +215,7 @@ pub async fn create_worktree(
     let worktree_path = worktree_root.join(issue_id);
 
     // Ensure worktree_root exists.
-    if !worktree_root.exists() {
-        log_creating_worktree_root(worktree_root);
-        std::fs::create_dir_all(worktree_root).map_err(|e| {
-            WorkspaceError::DirectoryCreationFailed {
-                path: worktree_root.to_string_lossy().into_owned(),
-                reason: e.to_string(),
-            }
-        })?;
-    }
+    ensure_dir_exists(worktree_root, log_creating_worktree_root)?;
 
     let wt_str = worktree_path.to_string_lossy().into_owned();
 
@@ -820,6 +818,67 @@ mod tests {
         let runner = RealGitCommandRunner;
         let result = runner.run_git(tmp.path(), &to_strings(&["log"])).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_real_git_command_runner_spawn_error() {
+        // Use a non-existent directory as cwd so the spawn itself fails.
+        let bad_dir = Path::new("/nonexistent_dir_for_test_12345");
+        let runner = RealGitCommandRunner;
+        let result = runner.run_git(bad_dir, &to_strings(&["status"])).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("failed to spawn git"));
+    }
+
+    // ---- Directory creation failure tests ---------------------------------
+
+    #[tokio::test]
+    async fn test_ensure_base_clone_parent_dir_creation_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a file where we need a directory, so create_dir_all fails.
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "I am a file").unwrap();
+        // base_clone_path has the file as its parent-to-be-created
+        let base_path = blocker.join("subdir").join("repo");
+
+        let mock = MockGitCommandRunner::new();
+        let result = ensure_base_clone(&mock, "https://example.com/repo.git", &base_path).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("failed to create directory"));
+    }
+
+    #[tokio::test]
+    async fn test_create_worktree_root_dir_creation_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base_path = tmp.path().join("base");
+        std::fs::create_dir_all(&base_path).unwrap();
+
+        // Create a file where we need a directory, so create_dir_all fails.
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "I am a file").unwrap();
+        let wt_root = blocker.join("worktrees");
+
+        let mut mock = MockGitCommandRunner::new();
+        // Fetch succeeds
+        mock.expect_run_git()
+            .withf(|_cwd, args| args_eq(args, &["fetch", "origin", "main"]))
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        let result = create_worktree(
+            &mock,
+            &base_path,
+            &wt_root,
+            "ACTCLI-42",
+            "feature/actcli-42",
+        )
+        .await;
+
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("failed to create directory"));
     }
 
     // ---- Error Display tests ----------------------------------------------
