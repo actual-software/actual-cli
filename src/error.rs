@@ -40,7 +40,7 @@ pub enum ActualError {
     )]
     CodexCliModelRequiresApiKey { model: String },
 
-    #[error("Runner failed: {message}")]
+    #[error("Runner failed: {message}\nstderr: {stderr}")]
     RunnerFailed { message: String, stderr: String },
 
     #[error("Insufficient credits: {message}")]
@@ -306,10 +306,14 @@ mod tests {
 
         let msg = ActualError::RunnerFailed {
             message: "oops".to_string(),
-            stderr: "...".to_string(),
+            stderr: "some error output".to_string(),
         }
         .to_string();
         assert!(msg.contains("oops"), "expected 'oops' in: {msg}");
+        assert!(
+            msg.contains("some error output"),
+            "expected stderr content in: {msg}"
+        );
 
         let msg = ActualError::ApiError("timeout".to_string()).to_string();
         assert!(msg.contains("timeout"), "expected 'timeout' in: {msg}");
@@ -668,6 +672,44 @@ mod tests {
         assert!(!ActualError::UserCancelled.is_model_error());
         assert!(!ActualError::RunnerTimeout { seconds: 30 }.is_model_error());
         assert!(!ActualError::ConfigError("bad".to_string()).is_model_error());
+    }
+
+    #[test]
+    fn test_runner_failed_stderr_displayed() {
+        let err = ActualError::RunnerFailed {
+            message: "exit code 1".to_string(),
+            stderr: "error: could not compile `foo`".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Runner failed: exit code 1"),
+            "expected message in display: {msg}"
+        );
+        assert!(
+            msg.contains("stderr:"),
+            "expected 'stderr:' label in display: {msg}"
+        );
+        assert!(
+            msg.contains("could not compile `foo`"),
+            "expected stderr content in display: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_runner_failed_empty_stderr_displayed() {
+        let err = ActualError::RunnerFailed {
+            message: "exit code 1".to_string(),
+            stderr: String::new(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Runner failed: exit code 1"),
+            "expected message in display: {msg}"
+        );
+        assert!(
+            msg.contains("stderr:"),
+            "expected 'stderr:' label even when empty: {msg}"
+        );
     }
 
     #[test]
