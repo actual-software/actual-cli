@@ -160,9 +160,18 @@ pub fn get_git_branch(repo_path: &Path) -> Option<String> {
 ///
 /// When this returns `true`, the caller should skip persisting the cache entry.
 fn is_analysis_cache_oversized(cached: &CachedAnalysis) -> bool {
+    let size_result = serde_yml::to_string(cached)
+        .map(|s| s.len())
+        .map_err(|e| e.to_string());
+    is_analysis_cache_oversized_inner(size_result)
+}
+
+/// Inner implementation that accepts a pre-computed serialized-size result,
+/// enabling tests to simulate serialization failures.
+fn is_analysis_cache_oversized_inner(size_result: Result<usize, String>) -> bool {
     use crate::config::types::CACHE_MAX_SIZE_BYTES;
-    let serialized_size = match serde_yml::to_string(cached) {
-        Ok(s) => s.len(),
+    let serialized_size = match size_result {
+        Ok(size) => size,
         Err(e) => {
             tracing::warn!(
                 "failed to serialize analysis cache for size check: {e}; treating as oversized"
@@ -1202,6 +1211,32 @@ cached_analysis:
         assert_ne!(
             outcome.analysis.projects[0].name, "test-project",
             "expired cache should not return stale data"
+        );
+    }
+
+    #[test]
+    fn test_is_analysis_cache_oversized_inner_returns_true_on_serialization_failure() {
+        // Simulate a serialization failure — should be treated as oversized
+        assert!(
+            is_analysis_cache_oversized_inner(Err("simulated failure".to_string())),
+            "serialization failure should be treated as oversized"
+        );
+    }
+
+    #[test]
+    fn test_is_analysis_cache_oversized_inner_returns_false_for_small_size() {
+        assert!(
+            !is_analysis_cache_oversized_inner(Ok(100)),
+            "small size should not be oversized"
+        );
+    }
+
+    #[test]
+    fn test_is_analysis_cache_oversized_inner_returns_true_for_large_size() {
+        use crate::config::types::CACHE_MAX_SIZE_BYTES;
+        assert!(
+            is_analysis_cache_oversized_inner(Ok(CACHE_MAX_SIZE_BYTES + 1)),
+            "size exceeding limit should be oversized"
         );
     }
 }
