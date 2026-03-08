@@ -310,6 +310,15 @@ impl TailoringRunner for OpenAiApiRunner {
                 });
             }
 
+            // Catch-all for any other non-success status (e.g. 400, 404, 422).
+            if !status.is_success() {
+                let body_text = extract_error_body(response.bytes().await, 4096);
+                return Err(ActualError::RunnerFailed {
+                    message: format!("HTTP {status}"),
+                    stderr: body_text,
+                });
+            }
+
             // Read body as text first so we can include it in errors if
             // JSON parsing fails.
             let body_text = response.text().await.map_err(map_body_read_error)?;
@@ -871,6 +880,40 @@ mod tests {
                 );
                 assert!(
                     stderr.contains("Internal Server Error"),
+                    "expected body in stderr: {stderr}"
+                );
+            }
+            other => panic!("expected RunnerFailed, got: {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    // Test 8b: HTTP 400 (unmatched 4xx) maps to RunnerFailed with status in message
+    #[tokio::test]
+    async fn test_400_maps_to_runner_failed() {
+        let mut server = Server::new_async().await;
+
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(400)
+            .with_body(r#"{"error": "Bad Request"}"#)
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server);
+        let result = runner
+            .run_tailoring("test prompt", r#"{"type":"object"}"#, None, None)
+            .await;
+
+        match result {
+            Err(ActualError::RunnerFailed { message, stderr }) => {
+                assert!(
+                    message.contains("400"),
+                    "expected status code in message: {message}"
+                );
+                assert!(
+                    stderr.contains("Bad Request"),
                     "expected body in stderr: {stderr}"
                 );
             }
