@@ -83,13 +83,29 @@ pub(crate) fn store_tailoring_cache(
     root_dir: &Path,
     output: &TailoringOutput,
 ) {
+    let size_result = serde_yml::to_string(output)
+        .map(|s| s.len())
+        .map_err(|e| e.to_string());
+    store_tailoring_cache_inner(config, cfg_path, cache_key, root_dir, output, size_result);
+}
+
+/// Inner implementation that accepts a pre-computed serialized-size result,
+/// enabling tests to simulate serialization failures.
+fn store_tailoring_cache_inner(
+    config: &mut crate::config::types::Config,
+    cfg_path: &Path,
+    cache_key: Option<&str>,
+    root_dir: &Path,
+    output: &TailoringOutput,
+    size_result: Result<usize, String>,
+) {
     let Some(key) = cache_key else {
         return;
     };
 
-    // Size guard: skip caching if the serialized output exceeds the limit.
-    let serialized_size = match serde_yml::to_string(output) {
-        Ok(s) => s.len(),
+    // Size guard: skip caching if serialization fails or the output exceeds the limit.
+    let serialized_size = match size_result {
+        Ok(size) => size,
         Err(e) => {
             tracing::warn!(
                 "failed to serialize tailoring output for size check: {e}; skipping cache"
@@ -239,4 +255,64 @@ pub(crate) fn load_config_with_fallback(cfg_path: &std::path::Path) -> crate::co
 fn log_config_load_fallback(cfg_path: &std::path::Path, e: &dyn std::fmt::Display) {
     let p = cfg_path.display();
     tracing::warn!("failed to load config from {p}: {e} — using defaults");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tailoring::types::{AdrSection, FileOutput, TailoringSummary};
+
+    fn make_output(files: Vec<FileOutput>) -> TailoringOutput {
+        let file_count = files.len();
+        TailoringOutput {
+            summary: TailoringSummary {
+                total_input: file_count,
+                applicable: file_count,
+                not_applicable: 0,
+                files_generated: file_count,
+            },
+            skipped_adrs: vec![],
+            files,
+        }
+    }
+
+    fn make_file(path: &str, content: &str, adr_ids: Vec<&str>) -> FileOutput {
+        FileOutput {
+            path: path.to_string(),
+            sections: adr_ids
+                .into_iter()
+                .map(|id| AdrSection {
+                    adr_id: id.to_string(),
+                    content: content.to_string(),
+                })
+                .collect(),
+            reasoning: format!("reason for {path}"),
+        }
+    }
+
+    #[test]
+    fn test_store_tailoring_cache_inner_skips_on_serialization_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+        let mut config = crate::config::Config::default();
+        save_to(&config, &cfg_path).unwrap();
+
+        let output = make_output(vec![make_file("CLAUDE.md", "rules", vec!["adr-001"])]);
+
+        // Simulate serialization failure by passing Err
+        store_tailoring_cache_inner(
+            &mut config,
+            &cfg_path,
+            Some("fail-test-key"),
+            dir.path(),
+            &output,
+            Err("simulated serialization failure".to_string()),
+        );
+
+        // Cache should NOT be stored because serialization "failed"
+        assert!(
+            config.cached_tailoring.is_none(),
+            "cache should not be stored when serialization fails"
+        );
+    }
 }
