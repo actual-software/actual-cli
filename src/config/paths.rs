@@ -71,19 +71,20 @@ pub fn load() -> Result<Config, ActualError> {
 /// that default. On unix, the created file has permissions `0600`.
 pub fn load_from(path: &Path) -> Result<Config, ActualError> {
     const MAX_CONFIG_SIZE: u64 = 1024 * 1024; // 1 MiB
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_CONFIG_SIZE => {
-            return Err(config_error(format!(
-                "Config file is too large ({} bytes, max {} bytes)",
-                meta.len(),
-                MAX_CONFIG_SIZE
-            )));
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            if bytes.len() as u64 > MAX_CONFIG_SIZE {
+                return Err(config_error(format!(
+                    "Config file is too large ({} bytes, max {} bytes)",
+                    bytes.len(),
+                    MAX_CONFIG_SIZE
+                )));
+            }
+            let contents = String::from_utf8(bytes)
+                .map_err(|e| config_error(format!("Config file is not valid UTF-8: {e}")))?;
+            serde_yml::from_str(&contents)
+                .map_err(|e| config_error(format!("Failed to parse config YAML: {e}")))
         }
-        _ => {}
-    }
-    match std::fs::read_to_string(path) {
-        Ok(contents) => serde_yml::from_str(&contents)
-            .map_err(|e| config_error(format!("Failed to parse config YAML: {e}"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let default = Config::default();
             save_to(&default, path)?;
@@ -644,6 +645,21 @@ mod tests {
         assert!(
             err.to_string().contains("must not contain '..'"),
             "Expected traversal error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_load_from_rejects_invalid_utf8() {
+        let dir = tempdir().unwrap();
+        let config_file = dir.path().join("config.yaml");
+
+        // Write invalid UTF-8 bytes
+        std::fs::write(&config_file, &[0xFF, 0xFE, 0x00, 0x01]).unwrap();
+
+        let err = load_from(&config_file).unwrap_err();
+        assert!(
+            err.to_string().contains("not valid UTF-8"),
+            "Expected UTF-8 error, got: {err}"
         );
     }
 }
