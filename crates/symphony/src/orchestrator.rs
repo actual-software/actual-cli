@@ -107,6 +107,38 @@ impl Orchestrator {
             }
         }
 
+        // Load persisted claimed set
+        match store.load_claimed_ids() {
+            Ok(ids) => {
+                let count = ids.len();
+                let mut state = self.state.write().await;
+                for id in ids {
+                    state.claimed.insert(id);
+                }
+                info!(count, "restored persisted claimed issues");
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to load persisted claimed issues");
+            }
+        }
+
+        // Load persisted waiting_for_review entries
+        match store.load_waiting() {
+            Ok(entries) => {
+                let count = entries.len();
+                let mut state = self.state.write().await;
+                for entry in entries {
+                    state
+                        .waiting_for_review
+                        .insert(entry.issue_id.clone(), entry);
+                }
+                info!(count, "restored persisted waiting_for_review entries");
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to load persisted waiting entries");
+            }
+        }
+
         self.store = Some(store);
         self
     }
@@ -432,6 +464,13 @@ impl Orchestrator {
             state.retry_attempts.remove(&issue_id);
         }
 
+        // Persist claimed marker (best-effort)
+        if let Some(ref store) = self.store {
+            if let Err(e) = store.save_claimed(&issue_id) {
+                debug!(error = %e, "failed to persist claimed marker");
+            }
+        }
+
         // Persist new session (best-effort)
         self.persist_session(
             &issue_id,
@@ -646,17 +685,26 @@ impl Orchestrator {
             }
         };
 
+        let waiting_entry = crate::model::WaitingEntry {
+            issue_id: issue_id.to_string(),
+            identifier: identifier.to_string(),
+            pr_number,
+            branch,
+            started_waiting_at: Utc::now(),
+        };
         let mut state = self.state.write().await;
-        state.waiting_for_review.insert(
-            issue_id.to_string(),
-            crate::model::WaitingEntry {
-                issue_id: issue_id.to_string(),
-                identifier: identifier.to_string(),
-                pr_number,
-                branch,
-                started_waiting_at: Utc::now(),
-            },
-        );
+        state
+            .waiting_for_review
+            .insert(issue_id.to_string(), waiting_entry.clone());
+        drop(state);
+
+        // Persist waiting entry (best-effort)
+        if let Some(ref store) = self.store {
+            if let Err(e) = store.save_waiting(&waiting_entry) {
+                debug!(error = %e, issue_id = %issue_id, "failed to persist waiting entry");
+            }
+        }
+
         info!(issue_id = %issue_id, issue_identifier = %identifier, pr_number = pr_number, "added to waiting_for_review");
     }
 
@@ -776,6 +824,23 @@ impl Orchestrator {
                         drop(state); // Release lock before async GitHub call
                         self.add_to_waiting_for_review(issue_id, &issue_identifier)
                             .await;
+                        // Verify the entry was added; if not (GitHub API failed), schedule a retry
+                        let state = self.state.read().await;
+                        if !state.waiting_for_review.contains_key(issue_id) {
+                            drop(state);
+                            warn!(issue_id = %issue_id, issue_identifier = %issue_identifier, "add_to_waiting_for_review failed, scheduling retry");
+                            let mut state = self.state.write().await;
+                            self.schedule_retry_inner(
+                                &mut state,
+                                issue_id.to_string(),
+                                0,
+                                issue_identifier.clone(),
+                                Some("failed to add to waiting_for_review".to_string()),
+                                30_000, // 30 second retry
+                            );
+                        } else {
+                            drop(state);
+                        }
                         // Remove claim label when entering review (best-effort)
                         self.remove_claim_label(issue_id, &issue_identifier).await;
                     } else {
@@ -833,6 +898,11 @@ impl Orchestrator {
                     let id = issue_id.to_string();
                     let ident = identifier.clone();
                     drop(state);
+                    if let Some(ref store) = self.store {
+                        if let Err(e) = store.remove_claimed(&id) {
+                            debug!(error = %e, "failed to remove persisted claimed marker");
+                        }
+                    }
                     self.remove_claim_label(&id, &ident).await;
                 }
             }
@@ -944,6 +1014,12 @@ impl Orchestrator {
                 info!(issue_id = %issue_id, issue_identifier = %entry.identifier, "issue no longer active, releasing claim");
                 let mut state = self.state.write().await;
                 state.claimed.remove(issue_id);
+                drop(state);
+                if let Some(ref store) = self.store {
+                    if let Err(e) = store.remove_claimed(issue_id) {
+                        debug!(error = %e, "failed to remove persisted claimed marker");
+                    }
+                }
             }
             Some(issue) => {
                 let state = self.state.read().await;
@@ -978,6 +1054,12 @@ impl Orchestrator {
         let mut state = self.state.write().await;
         if let Some(entry) = state.retry_attempts.remove(issue_id) {
             state.claimed.remove(issue_id);
+            drop(state);
+            if let Some(ref store) = self.store {
+                if let Err(e) = store.remove_claimed(issue_id) {
+                    debug!(error = %e, "failed to remove persisted claimed marker");
+                }
+            }
             info!(issue_id = %issue_id, issue_identifier = %entry.identifier, "removed from retry queue by user");
         } else {
             debug!(issue_id = %issue_id, "remove-from-retry-queue: issue not in retry queue");
@@ -1263,7 +1345,16 @@ impl Orchestrator {
                         .await;
                     let mut state = self.state.write().await;
                     state.waiting_for_review.remove(&entry.issue_id);
+                    state.claimed.remove(&entry.issue_id);
                     drop(state);
+                    if let Some(ref store) = self.store {
+                        if let Err(e) = store.remove_waiting(&entry.issue_id) {
+                            debug!(error = %e, "failed to remove persisted waiting entry");
+                        }
+                        if let Err(e) = store.remove_claimed(&entry.issue_id) {
+                            debug!(error = %e, "failed to remove persisted claimed marker");
+                        }
+                    }
                     self.dispatch_cleanup(entry, &tracker_config).await;
                     continue;
                 }
@@ -1274,6 +1365,16 @@ impl Orchestrator {
                     debug!(issue_id = %entry.issue_id, "no PR found for waiting entry, removing");
                     let mut state = self.state.write().await;
                     state.waiting_for_review.remove(&entry.issue_id);
+                    state.claimed.remove(&entry.issue_id);
+                    drop(state);
+                    if let Some(ref store) = self.store {
+                        if let Err(e) = store.remove_waiting(&entry.issue_id) {
+                            debug!(error = %e, "failed to remove persisted waiting entry");
+                        }
+                        if let Err(e) = store.remove_claimed(&entry.issue_id) {
+                            debug!(error = %e, "failed to remove persisted claimed marker");
+                        }
+                    }
                     continue;
                 }
                 Err(e) => {
@@ -1317,7 +1418,16 @@ impl Orchestrator {
                     info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, pr_number = entry.pr_number, "auto-merge succeeded");
                     let mut state = self.state.write().await;
                     state.waiting_for_review.remove(&entry.issue_id);
+                    state.claimed.remove(&entry.issue_id);
                     drop(state);
+                    if let Some(ref store) = self.store {
+                        if let Err(e) = store.remove_waiting(&entry.issue_id) {
+                            debug!(error = %e, "failed to remove persisted waiting entry");
+                        }
+                        if let Err(e) = store.remove_claimed(&entry.issue_id) {
+                            debug!(error = %e, "failed to remove persisted claimed marker");
+                        }
+                    }
                     self.dispatch_cleanup(entry, &tracker_config).await;
                 }
                 Ok(false) => {
@@ -1341,14 +1451,28 @@ impl Orchestrator {
 
         match linear.fetch_issue_states_by_ids(&remaining).await {
             Ok(refreshed) => {
-                let mut state = self.state.write().await;
-                for issue in &refreshed {
-                    if is_in_review_state(&issue.state) {
-                        continue;
+                let mut removed_ids = Vec::new();
+                {
+                    let mut state = self.state.write().await;
+                    for issue in &refreshed {
+                        if is_in_review_state(&issue.state) {
+                            continue;
+                        }
+                        info!(issue_id = %issue.id, issue_identifier = %issue.identifier, state = %issue.state, "waiting issue no longer In Review, removing from waiting");
+                        state.waiting_for_review.remove(&issue.id);
+                        state.claimed.remove(&issue.id);
+                        removed_ids.push(issue.id.clone());
                     }
-                    info!(issue_id = %issue.id, issue_identifier = %issue.identifier, state = %issue.state, "waiting issue no longer In Review, removing from waiting");
-                    state.waiting_for_review.remove(&issue.id);
-                    state.claimed.remove(&issue.id);
+                }
+                if let Some(ref store) = self.store {
+                    for id in &removed_ids {
+                        if let Err(e) = store.remove_waiting(id) {
+                            debug!(error = %e, "failed to remove persisted waiting entry");
+                        }
+                        if let Err(e) = store.remove_claimed(id) {
+                            debug!(error = %e, "failed to remove persisted claimed marker");
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -1481,6 +1605,13 @@ impl Orchestrator {
                 / 1000.0;
             state.agent_totals.seconds_running += elapsed;
             drop(state);
+
+            // Persist claimed removal (best-effort)
+            if let Some(ref store) = self.store {
+                if let Err(e) = store.remove_claimed(issue_id) {
+                    debug!(error = %e, "failed to remove persisted claimed marker");
+                }
+            }
 
             // Abort and remove the worker handle
             if let Some(handle) = self.worker_handles.write().await.remove(issue_id) {
@@ -10093,6 +10224,8 @@ mod tests {
         log_entries: Mutex<Vec<(String, LogEntry)>>,
         agent_totals: Mutex<Option<AgentTotals>>,
         completed: Mutex<Vec<String>>,
+        claimed: Mutex<Vec<String>>,
+        waiting: Mutex<Vec<crate::model::WaitingEntry>>,
         /// When true, load_agent_totals returns an error.
         fail_load_totals: bool,
         /// When true, load_completed_ids returns an error.
@@ -10105,6 +10238,10 @@ mod tests {
         fail_mark_completed: bool,
         /// When true, save_log_entry returns an error.
         fail_save_log_entry: bool,
+        /// When true, load_claimed_ids returns an error.
+        fail_load_claimed: bool,
+        /// When true, load_waiting returns an error.
+        fail_load_waiting: bool,
     }
 
     impl MockStore {
@@ -10114,12 +10251,16 @@ mod tests {
                 log_entries: Mutex::new(Vec::new()),
                 agent_totals: Mutex::new(None),
                 completed: Mutex::new(Vec::new()),
+                claimed: Mutex::new(Vec::new()),
+                waiting: Mutex::new(Vec::new()),
                 fail_load_totals: false,
                 fail_load_completed: false,
                 fail_save_session: false,
                 fail_save_totals: false,
                 fail_mark_completed: false,
                 fail_save_log_entry: false,
+                fail_load_claimed: false,
+                fail_load_waiting: false,
             }
         }
 
@@ -10163,6 +10304,26 @@ mod tests {
             self
         }
 
+        fn with_fail_load_claimed(mut self) -> Self {
+            self.fail_load_claimed = true;
+            self
+        }
+
+        fn with_fail_load_waiting(mut self) -> Self {
+            self.fail_load_waiting = true;
+            self
+        }
+
+        fn with_claimed(self, ids: Vec<String>) -> Self {
+            *self.claimed.lock().unwrap() = ids;
+            self
+        }
+
+        fn with_waiting(self, entries: Vec<crate::model::WaitingEntry>) -> Self {
+            *self.waiting.lock().unwrap() = entries;
+            self
+        }
+
         fn saved_sessions(&self) -> Vec<PersistedSession> {
             self.sessions.lock().unwrap().clone()
         }
@@ -10177,6 +10338,14 @@ mod tests {
 
         fn completed_ids(&self) -> Vec<String> {
             self.completed.lock().unwrap().clone()
+        }
+
+        fn claimed_ids(&self) -> Vec<String> {
+            self.claimed.lock().unwrap().clone()
+        }
+
+        fn waiting_entries(&self) -> Vec<crate::model::WaitingEntry> {
+            self.waiting.lock().unwrap().clone()
         }
     }
 
@@ -10253,6 +10422,48 @@ mod tests {
                 return Err(persistence::PersistenceError::LockPoisoned);
             }
             Ok(self.completed.lock().unwrap().clone())
+        }
+
+        fn save_claimed(&self, issue_id: &str) -> persistence::Result<()> {
+            let mut claimed = self.claimed.lock().unwrap();
+            if !claimed.contains(&issue_id.to_string()) {
+                claimed.push(issue_id.to_string());
+            }
+            Ok(())
+        }
+
+        fn remove_claimed(&self, issue_id: &str) -> persistence::Result<()> {
+            self.claimed.lock().unwrap().retain(|id| id != issue_id);
+            Ok(())
+        }
+
+        fn load_claimed_ids(&self) -> persistence::Result<Vec<String>> {
+            if self.fail_load_claimed {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
+            Ok(self.claimed.lock().unwrap().clone())
+        }
+
+        fn save_waiting(&self, entry: &crate::model::WaitingEntry) -> persistence::Result<()> {
+            let mut waiting = self.waiting.lock().unwrap();
+            waiting.retain(|e| e.issue_id != entry.issue_id);
+            waiting.push(entry.clone());
+            Ok(())
+        }
+
+        fn remove_waiting(&self, issue_id: &str) -> persistence::Result<()> {
+            self.waiting
+                .lock()
+                .unwrap()
+                .retain(|e| e.issue_id != issue_id);
+            Ok(())
+        }
+
+        fn load_waiting(&self) -> persistence::Result<Vec<crate::model::WaitingEntry>> {
+            if self.fail_load_waiting {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
+            Ok(self.waiting.lock().unwrap().clone())
         }
     }
 
@@ -10350,6 +10561,64 @@ mod tests {
         let state = orch.state.read().await;
         assert_eq!(state.completed_count(), 0);
         assert!(logs_contain("failed to load persisted completed issues"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_with_store_loads_claimed_ids() {
+        let store =
+            Arc::new(MockStore::new().with_claimed(vec!["id-x".to_string(), "id-y".to_string()]));
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        assert!(state.claimed.contains("id-x"));
+        assert!(state.claimed.contains("id-y"));
+        assert!(logs_contain("restored persisted claimed issues"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_with_store_handles_claimed_error() {
+        let store = Arc::new(MockStore::new().with_fail_load_claimed());
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        assert!(state.claimed.is_empty());
+        assert!(logs_contain("failed to load persisted claimed issues"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_with_store_loads_waiting_entries() {
+        let entry = crate::model::WaitingEntry {
+            issue_id: "id-w".to_string(),
+            identifier: "PROJ-W".to_string(),
+            pr_number: 99,
+            branch: "symphony/proj-w".to_string(),
+            started_waiting_at: Utc::now(),
+        };
+        let store = Arc::new(MockStore::new().with_waiting(vec![entry]));
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        assert!(state.waiting_for_review.contains_key("id-w"));
+        let w = state.waiting_for_review.get("id-w").unwrap();
+        assert_eq!(w.pr_number, 99);
+        assert_eq!(w.branch, "symphony/proj-w");
+        assert!(logs_contain(
+            "restored persisted waiting_for_review entries"
+        ));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_with_store_handles_waiting_error() {
+        let store = Arc::new(MockStore::new().with_fail_load_waiting());
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        assert!(state.waiting_for_review.is_empty());
+        assert!(logs_contain("failed to load persisted waiting entries"));
     }
 
     // ── store_handle ────────────────────────────────────────────────
