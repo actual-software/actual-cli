@@ -74,8 +74,11 @@ fn run_with_path(args: &ConfigArgs, path: &Path) -> Result<(), ActualError> {
         }
         ConfigAction::Set(args) => {
             let mut cfg = config::paths::load_from(path)?;
-            config::dotpath::set(&mut cfg, &args.key, &args.value)?;
+            let warning = config::dotpath::set(&mut cfg, &args.key, &args.value)?;
             config::paths::save_to(&cfg, path)?;
+            if let Some(msg) = warning {
+                eprintln!("{msg}");
+            }
             let display_value = if SECRET_KEYS.contains(&args.key.as_str()) {
                 "[redacted]".to_string()
             } else {
