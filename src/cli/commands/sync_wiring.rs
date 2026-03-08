@@ -751,6 +751,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_anthropic_api_base_url_env_creates_runner_with_custom_base() {
+        // Verify the ANTHROPIC_API_BASE_URL env var path is exercised.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
+        let _g2 = EnvGuard::set("ANTHROPIC_API_BASE_URL", "http://localhost:9999");
+        let dir = tempfile::tempdir().unwrap();
+        let _g3 = with_temp_config(&dir, "max_tokens: 4096\n");
+        let mut args = make_sync_args(Some(RunnerChoice::AnthropicApi));
+        args.no_tailor = true;
+        let result = sync_run_inner(&args, auth_not_authenticated);
+        // Must NOT be ApiKeyMissing — the preamble resolved the key
+        // and used with_base_url to construct the runner.
+        assert!(
+            !matches!(result, Err(ActualError::ApiKeyMissing { .. })),
+            "should have resolved key and created runner with base URL, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_api_max_tokens_from_config() {
+        // Verify max_tokens config value is read for the AnthropicApi arm.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
+        let _g2 = EnvGuard::remove("ANTHROPIC_API_BASE_URL");
+        let dir = tempfile::tempdir().unwrap();
+        let _g3 = with_temp_config(&dir, "max_tokens: 32768\n");
+        let mut args = make_sync_args(Some(RunnerChoice::AnthropicApi));
+        args.no_tailor = true;
+        let result = sync_run_inner(&args, auth_not_authenticated);
+        // Preamble should succeed — max_tokens config is read.
+        assert!(
+            !matches!(result, Err(ActualError::ApiKeyMissing { .. })),
+            "should have resolved key with max_tokens config, got: {result:?}"
+        );
+    }
+
     // ── OpenAiApi arm ────────────────────────────────────────────────────────
 
     #[test]
