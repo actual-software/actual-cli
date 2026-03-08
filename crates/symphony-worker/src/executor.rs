@@ -877,6 +877,20 @@ mod tests {
         wait_for_shutdown(&mut rx).await;
     }
 
+    #[tokio::test]
+    async fn test_wait_for_shutdown_false_then_true() {
+        let (tx, mut rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            // Send false first — changed() fires but value is still false, loop continues
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            let _ = tx.send(false);
+            // Then send true — changed() fires and value is true, returns
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            let _ = tx.send(true);
+        });
+        wait_for_shutdown(&mut rx).await;
+    }
+
     // ---- run_agent_loop direct tests (without worktree management) ---------
 
     #[traced_test]
