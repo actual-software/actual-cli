@@ -106,7 +106,7 @@ fn is_adr_section_marker(trimmed: &str) -> bool {
 fn parse_adr_section_start(trimmed: &str) -> Option<String> {
     let rest = trimmed.strip_prefix(ADR_SECTION_START_PREFIX)?;
     let id = rest.strip_suffix(ADR_SECTION_START_SUFFIX)?;
-    if id.is_empty() {
+    if id.is_empty() || id.contains(char::is_whitespace) {
         return None;
     }
     Some(id.to_string())
@@ -116,7 +116,7 @@ fn parse_adr_section_start(trimmed: &str) -> Option<String> {
 fn parse_adr_section_end(trimmed: &str) -> Option<String> {
     let rest = trimmed.strip_prefix(ADR_SECTION_END_PREFIX)?;
     let id = rest.strip_suffix(ADR_SECTION_END_SUFFIX)?;
-    if id.is_empty() {
+    if id.is_empty() || id.contains(char::is_whitespace) {
         return None;
     }
     Some(id.to_string())
@@ -1216,6 +1216,96 @@ mod tests {
         assert!(
             result.contains("User note"),
             "user content should be preserved: {result}"
+        );
+    }
+
+    // --- whitespace-in-ID rejection tests ---
+
+    #[test]
+    fn test_is_adr_section_marker_rejects_whitespace_in_id_start() {
+        assert!(
+            !is_adr_section_marker("<!-- adr:my custom id start -->"),
+            "ID with spaces should be rejected in start marker"
+        );
+    }
+
+    #[test]
+    fn test_is_adr_section_marker_rejects_whitespace_in_id_end() {
+        assert!(
+            !is_adr_section_marker("<!-- adr:my custom id end -->"),
+            "ID with spaces should be rejected in end marker"
+        );
+    }
+
+    #[test]
+    fn test_parse_adr_section_start_rejects_whitespace_in_id() {
+        assert_eq!(
+            parse_adr_section_start("<!-- adr:has space start -->"),
+            None,
+            "ID with whitespace should return None"
+        );
+    }
+
+    #[test]
+    fn test_parse_adr_section_end_rejects_whitespace_in_id() {
+        assert_eq!(
+            parse_adr_section_end("<!-- adr:has space end -->"),
+            None,
+            "ID with whitespace should return None"
+        );
+    }
+
+    #[test]
+    fn test_strip_managed_metadata_preserves_whitespace_id_markers() {
+        let content = "# Title\n<!-- adr:my custom note start -->\nUser note\n<!-- adr:my custom note end -->\nMore content";
+        let result = strip_managed_metadata(content);
+        assert!(
+            result.contains("<!-- adr:my custom note start -->"),
+            "whitespace-ID start marker should be preserved: {result}"
+        );
+        assert!(
+            result.contains("<!-- adr:my custom note end -->"),
+            "whitespace-ID end marker should be preserved: {result}"
+        );
+        assert!(
+            result.contains("User note"),
+            "user content should be preserved: {result}"
+        );
+    }
+
+    #[test]
+    fn test_strip_adr_section_markers_preserves_whitespace_id_markers() {
+        let content = "<!-- adr:has space start -->\nUser content\n<!-- adr:has space end -->\n<!-- adr:valid-id start -->\nManaged\n<!-- adr:valid-id end -->";
+        let result = strip_adr_section_markers(content);
+        assert!(
+            result.contains("<!-- adr:has space start -->"),
+            "whitespace-ID start marker should be preserved: {result}"
+        );
+        assert!(
+            result.contains("<!-- adr:has space end -->"),
+            "whitespace-ID end marker should be preserved: {result}"
+        );
+        assert!(
+            !result.contains("<!-- adr:valid-id start -->"),
+            "valid start marker should be stripped: {result}"
+        );
+    }
+
+    #[test]
+    fn test_extract_adr_sections_ignores_whitespace_id() {
+        let content = "<!-- adr:has space start -->\nSome content\n<!-- adr:has space end -->";
+        let sections = extract_adr_sections(content);
+        assert!(
+            sections.is_empty(),
+            "whitespace ID sections should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_is_adr_section_marker_rejects_tab_in_id() {
+        assert!(
+            !is_adr_section_marker("<!-- adr:has\ttab start -->"),
+            "ID with tab should be rejected"
         );
     }
 }
