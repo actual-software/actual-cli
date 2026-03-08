@@ -62,6 +62,12 @@ pub trait StateStore: Send + Sync {
     fn load_agent_totals(&self) -> Result<AgentTotals>;
     fn mark_completed(&self, issue_id: &str) -> Result<()>;
     fn load_completed_ids(&self) -> Result<Vec<String>>;
+    fn save_claimed(&self, issue_id: &str) -> Result<()>;
+    fn remove_claimed(&self, issue_id: &str) -> Result<()>;
+    fn load_claimed_ids(&self) -> Result<Vec<String>>;
+    fn save_waiting(&self, entry: &crate::model::WaitingEntry) -> Result<()>;
+    fn remove_waiting(&self, issue_id: &str) -> Result<()>;
+    fn load_waiting(&self) -> Result<Vec<crate::model::WaitingEntry>>;
 }
 
 // ── SqliteStore ─────────────────────────────────────────────────────────
@@ -134,6 +140,19 @@ impl SqliteStore {
             CREATE TABLE IF NOT EXISTS completed_issues (
                 issue_id TEXT PRIMARY KEY,
                 completed_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS claimed_issues (
+                issue_id TEXT PRIMARY KEY,
+                claimed_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS waiting_issues (
+                issue_id TEXT PRIMARY KEY,
+                identifier TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                branch TEXT NOT NULL,
+                started_waiting_at TEXT NOT NULL
             );";
         conn.execute_batch(schema)?;
 
@@ -359,6 +378,93 @@ impl StateStore for SqliteStore {
             ids.push(row?);
         }
         Ok(ids)
+    }
+
+    fn save_claimed(&self, issue_id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO claimed_issues (issue_id, claimed_at)
+             VALUES (?1, ?2)",
+            params![issue_id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    fn remove_claimed(&self, issue_id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM claimed_issues WHERE issue_id = ?1",
+            params![issue_id],
+        )?;
+        Ok(())
+    }
+
+    fn load_claimed_ids(&self) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT issue_id FROM claimed_issues ORDER BY claimed_at")?;
+
+        let rows = stmt.query_map([], |row| row.get(0))?;
+
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row?);
+        }
+        Ok(ids)
+    }
+
+    fn save_waiting(&self, entry: &crate::model::WaitingEntry) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO waiting_issues
+             (issue_id, identifier, pr_number, branch, started_waiting_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                entry.issue_id,
+                entry.identifier,
+                entry.pr_number as i64,
+                entry.branch,
+                entry.started_waiting_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn remove_waiting(&self, issue_id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM waiting_issues WHERE issue_id = ?1",
+            params![issue_id],
+        )?;
+        Ok(())
+    }
+
+    fn load_waiting(&self) -> Result<Vec<crate::model::WaitingEntry>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT issue_id, identifier, pr_number, branch, started_waiting_at
+             FROM waiting_issues ORDER BY started_waiting_at",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let ts_str: String = row.get(4)?;
+            let started_waiting_at = chrono::DateTime::parse_from_rfc3339(&ts_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+
+            Ok(crate::model::WaitingEntry {
+                issue_id: row.get(0)?,
+                identifier: row.get(1)?,
+                pr_number: row.get::<_, i64>(2)? as u64,
+                branch: row.get(3)?,
+                started_waiting_at,
+            })
+        })?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row?);
+        }
+        Ok(entries)
     }
 }
 
@@ -727,6 +833,198 @@ mod tests {
         let store = SqliteStore::in_memory().unwrap();
         let ids = store.load_completed_ids().unwrap();
         assert!(ids.is_empty());
+    }
+
+    // ── Claimed issues ────────────────────────────────────────────────
+
+    #[test]
+    fn save_and_load_claimed() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.save_claimed("issue-1").unwrap();
+        store.save_claimed("issue-2").unwrap();
+
+        let ids = store.load_claimed_ids().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"issue-1".to_string()));
+        assert!(ids.contains(&"issue-2".to_string()));
+    }
+
+    #[test]
+    fn save_claimed_duplicate_is_idempotent() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.save_claimed("issue-1").unwrap();
+        store.save_claimed("issue-1").unwrap();
+
+        let ids = store.load_claimed_ids().unwrap();
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn remove_claimed_removes_it() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.save_claimed("issue-1").unwrap();
+        store.save_claimed("issue-2").unwrap();
+
+        store.remove_claimed("issue-1").unwrap();
+
+        let ids = store.load_claimed_ids().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], "issue-2");
+    }
+
+    #[test]
+    fn remove_claimed_nonexistent_is_ok() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.remove_claimed("nonexistent").unwrap();
+    }
+
+    #[test]
+    fn load_claimed_ids_empty() {
+        let store = SqliteStore::in_memory().unwrap();
+        let ids = store.load_claimed_ids().unwrap();
+        assert!(ids.is_empty());
+    }
+
+    // ── Waiting issues ──────────────────────────────────────────────
+
+    #[test]
+    fn save_and_load_waiting() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry = crate::model::WaitingEntry {
+            issue_id: "issue-1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+        };
+        store.save_waiting(&entry).unwrap();
+
+        let loaded = store.load_waiting().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].issue_id, "issue-1");
+        assert_eq!(loaded[0].identifier, "PROJ-1");
+        assert_eq!(loaded[0].pr_number, 42);
+        assert_eq!(loaded[0].branch, "symphony/proj-1");
+    }
+
+    #[test]
+    fn save_waiting_upserts_on_duplicate() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry1 = crate::model::WaitingEntry {
+            issue_id: "issue-1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+        };
+        store.save_waiting(&entry1).unwrap();
+
+        let entry2 = crate::model::WaitingEntry {
+            issue_id: "issue-1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 99,
+            branch: "symphony/proj-1-v2".to_string(),
+            started_waiting_at: Utc::now(),
+        };
+        store.save_waiting(&entry2).unwrap();
+
+        let loaded = store.load_waiting().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].pr_number, 99);
+        assert_eq!(loaded[0].branch, "symphony/proj-1-v2");
+    }
+
+    #[test]
+    fn remove_waiting_removes_it() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry = crate::model::WaitingEntry {
+            issue_id: "issue-1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+        };
+        store.save_waiting(&entry).unwrap();
+
+        store.remove_waiting("issue-1").unwrap();
+
+        let loaded = store.load_waiting().unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn remove_waiting_nonexistent_is_ok() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.remove_waiting("nonexistent").unwrap();
+    }
+
+    #[test]
+    fn load_waiting_empty() {
+        let store = SqliteStore::in_memory().unwrap();
+        let loaded = store.load_waiting().unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_waiting_multiple_ordered_by_started_waiting_at() {
+        let store = SqliteStore::in_memory().unwrap();
+        let now = Utc::now();
+        let entry1 = crate::model::WaitingEntry {
+            issue_id: "issue-2".to_string(),
+            identifier: "PROJ-2".to_string(),
+            pr_number: 2,
+            branch: "symphony/proj-2".to_string(),
+            started_waiting_at: now + chrono::Duration::seconds(10),
+        };
+        let entry2 = crate::model::WaitingEntry {
+            issue_id: "issue-1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 1,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: now,
+        };
+        store.save_waiting(&entry1).unwrap();
+        store.save_waiting(&entry2).unwrap();
+
+        let loaded = store.load_waiting().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].issue_id, "issue-1"); // earlier
+        assert_eq!(loaded[1].issue_id, "issue-2"); // later
+    }
+
+    #[test]
+    fn claimed_and_waiting_persist_across_reopen() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_owned();
+
+        // Write data
+        {
+            let store = SqliteStore::new(&path).unwrap();
+            store.save_claimed("issue-1").unwrap();
+            store.save_claimed("issue-2").unwrap();
+            let entry = crate::model::WaitingEntry {
+                issue_id: "issue-3".to_string(),
+                identifier: "PROJ-3".to_string(),
+                pr_number: 55,
+                branch: "symphony/proj-3".to_string(),
+                started_waiting_at: Utc::now(),
+            };
+            store.save_waiting(&entry).unwrap();
+        }
+
+        // Re-open and verify
+        {
+            let store = SqliteStore::new(&path).unwrap();
+            let claimed = store.load_claimed_ids().unwrap();
+            assert_eq!(claimed.len(), 2);
+            assert!(claimed.contains(&"issue-1".to_string()));
+            assert!(claimed.contains(&"issue-2".to_string()));
+
+            let waiting = store.load_waiting().unwrap();
+            assert_eq!(waiting.len(), 1);
+            assert_eq!(waiting[0].issue_id, "issue-3");
+            assert_eq!(waiting[0].pr_number, 55);
+        }
     }
 
     // ── PersistedSession serde ──────────────────────────────────────────
