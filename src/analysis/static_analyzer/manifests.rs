@@ -12,14 +12,11 @@ const MAX_MANIFEST_SIZE: u64 = 10 * 1024 * 1024;
 /// or exceeds [`MAX_MANIFEST_SIZE`].  This prevents OOM on adversarial repos
 /// that contain abnormally large manifest files.
 fn read_manifest_file(path: &Path) -> Option<String> {
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_MANIFEST_SIZE => {
-            return None;
-        }
-        Err(_) => return None,
-        _ => {}
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() as u64 > MAX_MANIFEST_SIZE {
+        return None;
     }
-    std::fs::read_to_string(path).ok()
+    String::from_utf8(bytes).ok()
 }
 
 /// Which manifest file produced a dependency.
@@ -2340,6 +2337,17 @@ require github.com/another/indirect v4.0.0 // indirect
     fn test_read_manifest_file_returns_none_for_missing_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nonexistent.txt");
+
+        let result = super::read_manifest_file(&path);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_read_manifest_file_returns_none_for_invalid_utf8() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("invalid_utf8.txt");
+        // 0xFF 0xFE is not valid UTF-8
+        fs::write(&path, &[0xFF, 0xFE, 0x00, 0x01]).unwrap();
 
         let result = super::read_manifest_file(&path);
         assert!(result.is_none());
