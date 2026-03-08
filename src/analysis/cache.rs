@@ -161,7 +161,15 @@ pub fn get_git_branch(repo_path: &Path) -> Option<String> {
 /// When this returns `true`, the caller should skip persisting the cache entry.
 fn is_analysis_cache_oversized(cached: &CachedAnalysis) -> bool {
     use crate::config::types::CACHE_MAX_SIZE_BYTES;
-    let serialized_size = serde_yml::to_string(cached).map(|s| s.len()).unwrap_or(0);
+    let serialized_size = match serde_yml::to_string(cached) {
+        Ok(s) => s.len(),
+        Err(e) => {
+            tracing::warn!(
+                "failed to serialize analysis cache for size check: {e}; treating as oversized"
+            );
+            return true;
+        }
+    };
     serialized_size > CACHE_MAX_SIZE_BYTES
 }
 
