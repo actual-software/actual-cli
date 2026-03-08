@@ -340,18 +340,27 @@ fn strip_markdown_json_fences(s: &str) -> &str {
 /// [timestamp] ERROR: unexpected status 400 Bad Request: {"detail":"The 'gpt-5.2' model is not supported..."}
 /// ```
 ///
-/// This function searches for `"detail":"..."` patterns in the combined
-/// stdout+stderr output and returns the extracted message. Returns `None`
-/// if no error detail is found.
+/// This function searches for JSON fragments containing a `"detail"` field in
+/// the combined stdout+stderr output, using `serde_json` for robust parsing.
+/// Returns `None` if no error detail is found.
 fn extract_codex_error_detail(output: &str) -> Option<String> {
-    // Look for {"detail":"..."} JSON fragments in the output
-    if let Some(pos) = output.find("\"detail\":\"") {
-        let start = pos + "\"detail\":\"".len();
-        if let Some(end) = output[start..].find('"') {
-            let detail = &output[start..start + end];
-            if !detail.is_empty() {
-                return Some(detail.to_string());
+    // Try to find and parse JSON fragments containing a "detail" field.
+    // Codex CLI embeds error JSON like {"detail":"..."} in its log output.
+    let mut search_from = 0;
+    while let Some(open) = output[search_from..].find('{') {
+        let open = search_from + open;
+        if let Some(close_offset) = output[open..].find('}') {
+            let candidate = &output[open..=open + close_offset];
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(candidate) {
+                if let Some(detail) = val.get("detail").and_then(|d| d.as_str()) {
+                    if !detail.is_empty() {
+                        return Some(detail.to_string());
+                    }
+                }
             }
+            search_from = open + 1;
+        } else {
+            break;
         }
     }
 
@@ -1102,6 +1111,21 @@ echo "" > "$OUTPUT_FILE"
         assert!(detail.is_none());
     }
 
+    #[test]
+    fn test_extract_error_detail_escaped_quotes() {
+        // Escaped quotes in the detail value — old string parsing would truncate
+        let output = r#"[ts] ERROR: status 400: {"detail":"Model \"gpt-5\" is not supported"}"#;
+        let detail = extract_codex_error_detail(output).unwrap();
+        assert_eq!(detail, r#"Model "gpt-5" is not supported"#);
+    }
+
+    #[test]
+    fn test_extract_error_detail_spaces_around_colon() {
+        let output = r#"{"detail" : "spaced out error"}"#;
+        let detail = extract_codex_error_detail(output).unwrap();
+        assert_eq!(detail, "spaced out error");
+    }
+
     // ---- strip_markdown_json_fences: bare fences without newline ----
 
     #[test]
@@ -1125,13 +1149,13 @@ echo "" > "$OUTPUT_FILE"
 
     #[test]
     fn test_extract_error_detail_malformed_no_closing_quote() {
-        // "detail":" found but no closing quote — the inner find('"') returns None,
+        // Malformed JSON (no closing brace) — serde_json parse fails,
         // falls through to the ERROR line fallback.
         let output = "\"detail\":\"unterminated\n] ERROR: fallback error";
         let detail = extract_codex_error_detail(output).unwrap();
         assert_eq!(detail, "fallback error");
 
-        // Case where there is no closing quote AND no ERROR fallback → None
+        // Malformed JSON with no ERROR fallback → None
         let output2 = "\"detail\":\"no closing quote here";
         assert!(extract_codex_error_detail(output2).is_none());
     }
