@@ -29,7 +29,9 @@ pub struct InvocationOptions {
     pub skip_permissions: bool,
     /// Optional maximum tokens for the response.
     ///
-    /// When set, emits `--max-tokens <n>` in the CLI args.
+    /// **API runners only.** The Anthropic API runner reads this field directly
+    /// in its own `run_raw_json` implementation. The Claude CLI does not
+    /// support `--max-tokens`, so [`to_args()`] intentionally ignores it.
     pub max_tokens: Option<u32>,
 }
 
@@ -130,10 +132,11 @@ impl InvocationOptions {
             args.push(budget.to_string());
         }
 
-        if let Some(tokens) = self.max_tokens {
-            args.push("--max-tokens".to_string());
-            args.push(tokens.to_string());
-        }
+        // NOTE: max_tokens is intentionally NOT emitted here. The Claude CLI
+        // does not accept `--max-tokens` (only `--max-budget-usd`). Passing it
+        // causes exit code 1, which breaks the stdin pipe before the prompt can
+        // be written. API runners (Anthropic, OpenAI) read the field directly
+        // in their own run_raw_json implementations.
 
         args
     }
@@ -335,11 +338,12 @@ mod tests {
     }
 
     #[test]
-    fn test_to_args_includes_max_tokens_when_set() {
+    fn test_to_args_omits_max_tokens_even_when_set() {
+        // max_tokens is API-only; the CLI does not support --max-tokens.
         let mut opts = InvocationOptions::for_review(None);
         opts.max_tokens = Some(16000);
         let args = opts.to_args();
-        assert_arg_value(&args, "--max-tokens", "16000");
+        assert!(!args.contains(&"--max-tokens".to_string()));
     }
 
     /// Assert that `--flag value` appears as consecutive elements.

@@ -74,7 +74,10 @@ pub(crate) fn runner_candidates(model: &str) -> Vec<RunnerChoice> {
         return vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi];
     }
     if model.contains("claude") {
-        return vec![RunnerChoice::AnthropicApi, RunnerChoice::ClaudeCli];
+        // CLI runners are preferred over API runners: they handle auth,
+        // session management, and tool use natively. API runners are
+        // fallbacks for when the CLI binary is not installed.
+        return vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi];
     }
     // is_openai_model and is_codex_model are mutually exclusive (is_openai_model calls !is_codex_model)
     if is_openai_model(model) {
@@ -455,7 +458,7 @@ pub struct CrArgs {
     #[arg(long, value_parser = parse_budget, allow_hyphen_values = true)]
     pub max_budget_usd: Option<f64>,
 
-    /// Maximum tokens for each LLM response (default: 16000)
+    /// Maximum tokens for each LLM response (API runners only; ignored by CLI runners)
     #[arg(long, default_value = "16000")]
     pub max_tokens: u32,
 
@@ -1128,13 +1131,14 @@ mod parse_tests {
 
     #[test]
     fn test_infer_from_model_anthropic_full_ids() {
+        // CLI runners are preferred over API runners for all Claude models.
         assert_eq!(
             RunnerChoice::infer_from_model("claude-sonnet-4-6").unwrap(),
-            RunnerChoice::AnthropicApi
+            RunnerChoice::ClaudeCli
         );
         assert_eq!(
             RunnerChoice::infer_from_model("claude-opus-4").unwrap(),
-            RunnerChoice::AnthropicApi
+            RunnerChoice::ClaudeCli
         );
     }
 
@@ -1230,13 +1234,14 @@ mod parse_tests {
 
     #[test]
     fn test_runner_candidates_claude_full_ids() {
+        // CLI runners are preferred over API runners for all Claude models.
         assert_eq!(
             runner_candidates("claude-sonnet-4-6"),
-            vec![RunnerChoice::AnthropicApi, RunnerChoice::ClaudeCli]
+            vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi]
         );
         assert_eq!(
             runner_candidates("claude-opus-4"),
-            vec![RunnerChoice::AnthropicApi, RunnerChoice::ClaudeCli]
+            vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi]
         );
     }
 

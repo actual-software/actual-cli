@@ -327,6 +327,9 @@ async fn run_subprocess<T: DeserializeOwned>(
     let mut cmd = Command::new(binary_path);
     cmd.arg("--print");
     cmd.args(args);
+    // Clear CLAUDECODE env var to prevent the subprocess from detecting a nested
+    // Claude Code session and altering its behaviour (e.g., refusing to start).
+    cmd.env_remove("CLAUDECODE");
     // When the timeout fires, the `wait_with_output` future is dropped, which drops
     // the `Child` it owns. With `kill_on_drop(true)`, tokio sends SIGKILL to the child
     // on drop, preventing orphaned processes.
@@ -458,6 +461,8 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
     let mut cmd = Command::new(binary_path);
     cmd.arg("--print");
     cmd.args(args);
+    // Clear CLAUDECODE env var to prevent nested session detection.
+    cmd.env_remove("CLAUDECODE");
     cmd.kill_on_drop(true);
 
     let stdin_mode = if stdin_prompt.is_some() {

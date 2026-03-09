@@ -1216,9 +1216,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_detect_args_model_anthropic_full_returns_anthropic_api() {
+    fn auto_detect_args_model_anthropic_full_falls_back_to_api() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
+        // Point CLAUDE_BINARY to a non-existent path so ClaudeCli probe fails,
+        // exercising the fallback to AnthropicApi.
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
         let result = auto_detect_runner(Some("claude-sonnet-4-6"), None, &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
@@ -1247,9 +1250,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_detect_cfg_model_anthropic_returns_anthropic_api() {
+    fn auto_detect_cfg_model_anthropic_falls_back_to_api() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant");
+        // Force ClaudeCli probe failure so we exercise the AnthropicApi fallback.
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant");
         let result = auto_detect_runner(None, Some("claude-sonnet-4-6"), &default_cfg());
         assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
@@ -1257,9 +1262,11 @@ mod tests {
     #[test]
     fn auto_detect_args_model_overrides_cfg_model() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant");
+        // Force ClaudeCli probe failure so we exercise the AnthropicApi fallback.
+        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
+        let _g2 = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant");
         let result = auto_detect_runner(Some("claude-sonnet-4-6"), None, &default_cfg());
-        // args_model wins → AnthropicApi
+        // args_model wins → ClaudeCli tried first (now preferred), fails → AnthropicApi
         assert_eq!(result.unwrap(), RunnerChoice::AnthropicApi);
     }
 
