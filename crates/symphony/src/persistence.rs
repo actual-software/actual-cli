@@ -152,9 +152,16 @@ impl SqliteStore {
                 identifier TEXT NOT NULL,
                 pr_number INTEGER NOT NULL,
                 branch TEXT NOT NULL,
-                started_waiting_at TEXT NOT NULL
+                started_waiting_at TEXT NOT NULL,
+                session_id TEXT
             );";
         conn.execute_batch(schema)?;
+
+        // Migration: add session_id column to existing waiting_issues tables.
+        // ALTER TABLE ... ADD COLUMN is a no-op if the column already exists in
+        // newer databases, but for databases created before this column was added
+        // we need to add it. We ignore errors (column already exists).
+        let _ = conn.execute_batch("ALTER TABLE waiting_issues ADD COLUMN session_id TEXT;");
 
         Ok(())
     }
@@ -416,14 +423,15 @@ impl StateStore for SqliteStore {
         let conn = self.lock()?;
         conn.execute(
             "INSERT OR REPLACE INTO waiting_issues
-             (issue_id, identifier, pr_number, branch, started_waiting_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (issue_id, identifier, pr_number, branch, started_waiting_at, session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 entry.issue_id,
                 entry.identifier,
                 entry.pr_number as i64,
                 entry.branch,
                 entry.started_waiting_at.to_rfc3339(),
+                entry.session_id,
             ],
         )?;
         Ok(())
@@ -441,7 +449,7 @@ impl StateStore for SqliteStore {
     fn load_waiting(&self) -> Result<Vec<crate::model::WaitingEntry>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT issue_id, identifier, pr_number, branch, started_waiting_at
+            "SELECT issue_id, identifier, pr_number, branch, started_waiting_at, session_id
              FROM waiting_issues ORDER BY started_waiting_at",
         )?;
 
@@ -457,6 +465,7 @@ impl StateStore for SqliteStore {
                 pr_number: row.get::<_, i64>(2)? as u64,
                 branch: row.get(3)?,
                 started_waiting_at,
+                session_id: row.get(5)?,
             })
         })?;
 
@@ -896,6 +905,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         store.save_waiting(&entry).unwrap();
 
@@ -905,6 +915,7 @@ mod tests {
         assert_eq!(loaded[0].identifier, "PROJ-1");
         assert_eq!(loaded[0].pr_number, 42);
         assert_eq!(loaded[0].branch, "symphony/proj-1");
+        assert_eq!(loaded[0].session_id, None);
     }
 
     #[test]
@@ -916,6 +927,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: Some("sess-abc".to_string()),
         };
         store.save_waiting(&entry1).unwrap();
 
@@ -925,6 +937,7 @@ mod tests {
             pr_number: 99,
             branch: "symphony/proj-1-v2".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: Some("sess-def".to_string()),
         };
         store.save_waiting(&entry2).unwrap();
 
@@ -943,6 +956,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         store.save_waiting(&entry).unwrap();
 
@@ -975,6 +989,7 @@ mod tests {
             pr_number: 2,
             branch: "symphony/proj-2".to_string(),
             started_waiting_at: now + chrono::Duration::seconds(10),
+            session_id: Some("sess-2".to_string()),
         };
         let entry2 = crate::model::WaitingEntry {
             issue_id: "issue-1".to_string(),
@@ -982,6 +997,7 @@ mod tests {
             pr_number: 1,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: now,
+            session_id: None,
         };
         store.save_waiting(&entry1).unwrap();
         store.save_waiting(&entry2).unwrap();
@@ -1008,6 +1024,7 @@ mod tests {
                 pr_number: 55,
                 branch: "symphony/proj-3".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: Some("sess-persist".to_string()),
             };
             store.save_waiting(&entry).unwrap();
         }
@@ -1217,5 +1234,46 @@ mod tests {
                 total_tokens: t,
             }),
         }
+    }
+
+    // ── Waiting issues with session_id ───────────────────────────────
+
+    #[test]
+    fn save_and_load_waiting_with_session_id() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry = crate::model::WaitingEntry {
+            issue_id: "issue-1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+            session_id: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+        };
+        store.save_waiting(&entry).unwrap();
+
+        let loaded = store.load_waiting().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].session_id,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
+
+    #[test]
+    fn save_and_load_waiting_without_session_id() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry = crate::model::WaitingEntry {
+            issue_id: "issue-1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+            session_id: None,
+        };
+        store.save_waiting(&entry).unwrap();
+
+        let loaded = store.load_waiting().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].session_id, None);
     }
 }
