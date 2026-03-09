@@ -1324,9 +1324,15 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
 .log-badge.user {{ background:rgba(100,181,246,0.15); color:#90caf9; }}
 .log-msg {{ color:var(--text); word-break:break-word; flex:1; }}
 .log-tokens {{ color:var(--text-dim); white-space:nowrap; }}
+.table-responsive {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
 @media (max-width:768px) {{
   .stats {{ grid-template-columns:repeat(2,1fr); grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); }}
   .header {{ flex-direction:column; gap:12px; }}
+  .table-responsive {{ margin:0 -16px; padding:0 16px; }}
+  .col-session, .col-tokens {{ display:none; }}
+  .log-panel-body {{ max-height:250px; }}
+  .log-entry {{ gap:6px; }}
+  .log-ts {{ min-width:50px; font-size:11px; }}
 }}
 .filter-bar {{ padding:10px 20px; border-bottom:1px solid var(--border); }}
 .filter-bar input {{ width:100%; max-width:360px; background:var(--surface2); border:1px solid var(--border); color:var(--text); padding:7px 12px; border-radius:var(--radius); font-size:13px; outline:none; }}
@@ -1533,22 +1539,22 @@ function applyRunningFilter() {{
       : '<div class="empty-state"><div class="icon">No running sessions</div><p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p></div>';
     return;
   }}
-  let h = '<table><thead><tr><th>Issue</th><th>State</th>';
+  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>State</th>';
   if (runningMode === 'distributed') h += '<th>Worker</th>';
-  h += '<th>Session</th><th>Turns</th><th>Last Event</th><th>Tokens</th><th>Started</th></tr></thead><tbody>';
+  h += '<th class="col-session">Session</th><th>Turns</th><th>Last Event</th><th class="col-tokens">Tokens</th><th>Started</th></tr></thead><tbody>';
   for (const r of items) {{
     h += '<tr onclick="openLogPanel(\''+esc(r.issue_identifier)+'\')" title="Click to view live logs">';
     h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
     h += '<td><span class="state-badge active">'+esc(r.state)+'</span></td>';
     if (runningMode === 'distributed') h += '<td class="mono">'+(r.worker_id ? esc(r.worker_id) : '-')+'</td>';
-    h += '<td class="mono">'+(r.session_id ? esc(r.session_id).slice(0,12) : '-')+'</td>';
+    h += '<td class="mono col-session">'+(r.session_id ? esc(r.session_id).slice(0,12) : '-')+'</td>';
     h += '<td>'+r.turn_count+'</td>';
     h += '<td>'+(r.last_event ? esc(r.last_event) : '-')+'</td>';
-    h += '<td class="mono">'+fmt(r.total_tokens)+'</td>';
+    h += '<td class="mono col-tokens">'+fmt(r.total_tokens)+'</td>';
     h += '<td>'+ago(r.started_at)+'</td>';
     h += '</tr>';
   }}
-  h += '</tbody></table>';
+  h += '</tbody></table></div>';
   el.innerHTML = h;
 }}
 
@@ -1559,10 +1565,10 @@ function renderWorkers(items) {{
     el.innerHTML = '<div class="empty-state"><div class="icon">No workers connected</div><p>Workers will appear here when they register with the orchestrator.</p></div>';
     return;
   }}
-  let h = '<table><thead><tr><th>Worker ID</th><th>Status</th><th>Active Jobs</th><th>Max Jobs</th><th>Last Heartbeat</th><th>Registered</th></tr></thead><tbody>';
+  let h = '<div class="table-responsive"><table><thead><tr><th class="col-session">Worker ID</th><th>Status</th><th>Active Jobs</th><th>Max Jobs</th><th>Last Heartbeat</th><th>Registered</th></tr></thead><tbody>';
   for (const w of items) {{
     h += '<tr>';
-    h += '<td class="mono"><strong>'+esc(w.worker_id)+'</strong></td>';
+    h += '<td class="mono col-session"><strong>'+esc(w.worker_id)+'</strong></td>';
     h += '<td><span class="state-badge '+esc(w.status)+'">'+esc(w.status)+'</span></td>';
     h += '<td class="mono">'+w.active_jobs.map(j => esc(j)).join(', ')+'</td>';
     h += '<td>'+w.max_concurrent_jobs+'</td>';
@@ -1570,7 +1576,7 @@ function renderWorkers(items) {{
     h += '<td>'+ago(w.registered_at)+'</td>';
     h += '</tr>';
   }}
-  h += '</tbody></table>';
+  h += '</tbody></table></div>';
   el.innerHTML = h;
 }}
 
@@ -1581,7 +1587,7 @@ function renderPendingJobs(items) {{
     el.innerHTML = '<div class="empty-state"><div class="icon">No pending jobs</div><p>Jobs waiting to be claimed by workers will appear here.</p></div>';
     return;
   }}
-  let h = '<table><thead><tr><th>Issue</th><th>Attempt</th><th>Prompt Preview</th></tr></thead><tbody>';
+  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>Attempt</th><th>Prompt Preview</th></tr></thead><tbody>';
   for (const j of items) {{
     h += '<tr>';
     h += '<td class="mono"><strong>'+esc(j.issue_identifier)+'</strong></td>';
@@ -1589,7 +1595,7 @@ function renderPendingJobs(items) {{
     h += '<td>'+esc(j.prompt_preview)+'</td>';
     h += '</tr>';
   }}
-  h += '</tbody></table>';
+  h += '</tbody></table></div>';
   el.innerHTML = h;
 }}
 
@@ -1600,7 +1606,7 @@ function renderRetrying(items) {{
     el.innerHTML = '<div class="empty-state"><div class="icon">No retries pending</div><p>Failed or timed-out sessions will appear here with their retry schedule.</p></div>';
     return;
   }}
-  let h = '<table><thead><tr><th>Issue</th><th>Attempt</th><th>Retry In</th><th>Error</th><th></th></tr></thead><tbody>';
+  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>Attempt</th><th>Retry In</th><th>Error</th><th></th></tr></thead><tbody>';
   for (const r of items) {{
     const dueIn = Math.max(0, r.due_at_ms - Date.now());
     const dueStr = dueIn > 0 ? fmtTime(dueIn/1000) : 'now';
@@ -1612,7 +1618,7 @@ function renderRetrying(items) {{
     h += '<td><button class="btn btn-danger" onclick="removeRetry(\''+esc(r.identifier)+'\')">Remove</button></td>';
     h += '</tr>';
   }}
-  h += '</tbody></table>';
+  h += '</tbody></table></div>';
   el.innerHTML = h;
 }}
 
@@ -1623,7 +1629,7 @@ function renderWaiting(items) {{
     el.innerHTML = '<div class="empty-state"><div class="icon">No PRs waiting</div><p>Issues waiting for PR review or merge will appear here.</p></div>';
     return;
   }}
-  let h = '<table><thead><tr><th>Issue</th><th>PR</th><th>Branch</th><th>Waiting</th></tr></thead><tbody>';
+  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>PR</th><th>Branch</th><th>Waiting</th></tr></thead><tbody>';
   for (const w of items) {{
     h += '<tr>';
     h += '<td class="mono"><strong>'+esc(w.identifier)+'</strong></td>';
@@ -1632,7 +1638,7 @@ function renderWaiting(items) {{
     h += '<td>'+ago(w.started_waiting_at)+'</td>';
     h += '</tr>';
   }}
-  h += '</tbody></table>';
+  h += '</tbody></table></div>';
   el.innerHTML = h;
 }}
 
@@ -1656,18 +1662,18 @@ function renderCompleted(items) {{
     el.innerHTML = '<div class="empty-state"><div class="icon">No completed runs</div><p>Finished agent sessions will appear here.</p></div>';
     return;
   }}
-  let h = '<table><thead><tr><th>Issue</th><th>Outcome</th><th>Duration</th><th>Tokens</th><th>Turns</th><th>Completed</th></tr></thead><tbody>';
+  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>Outcome</th><th>Duration</th><th class="col-tokens">Tokens</th><th>Turns</th><th>Completed</th></tr></thead><tbody>';
   for (const r of items) {{
     h += '<tr>';
     h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
     h += '<td><span class="state-badge '+esc(r.outcome)+'">'+esc(r.outcome)+'</span></td>';
     h += '<td>'+fmtDuration(r.duration_seconds)+'</td>';
-    h += '<td class="mono">'+fmt(r.total_tokens)+'</td>';
+    h += '<td class="mono col-tokens">'+fmt(r.total_tokens)+'</td>';
     h += '<td>'+r.turn_count+'</td>';
     h += '<td>'+ago(r.completed_at)+'</td>';
     h += '</tr>';
   }}
-  h += '</tbody></table>';
+  h += '</tbody></table></div>';
   el.innerHTML = h;
 }}
 
@@ -6173,5 +6179,518 @@ mod tests {
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"worker_id\":null"));
+    }
+
+    // ── Responsive table tests (ACTCLI-95) ──────────────────────────
+
+    #[test]
+    fn test_responsive_table_css_class_exists() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        assert!(html.contains(".table-responsive"));
+    }
+
+    #[test]
+    fn test_responsive_table_overflow_x_style() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        assert!(html.contains("overflow-x:auto"));
+        assert!(html.contains("-webkit-overflow-scrolling:touch"));
+    }
+
+    #[test]
+    fn test_responsive_col_session_css_class_exists() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        assert!(html.contains(".col-session"));
+    }
+
+    #[test]
+    fn test_responsive_col_tokens_css_class_exists() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        assert!(html.contains(".col-tokens"));
+    }
+
+    #[test]
+    fn test_responsive_media_query_hides_columns() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // The media query should contain display:none for col-session and col-tokens
+        assert!(html.contains(".col-session, .col-tokens { display:none; }"));
+    }
+
+    #[test]
+    fn test_responsive_log_panel_max_height_in_media_query() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // Media query should reduce log-panel-body max-height
+        assert!(html.contains(".log-panel-body { max-height:250px; }"));
+    }
+
+    #[test]
+    fn test_responsive_log_entry_gap_in_media_query() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        assert!(html.contains(".log-entry { gap:6px; }"));
+    }
+
+    #[test]
+    fn test_responsive_log_ts_in_media_query() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        assert!(html.contains(".log-ts { min-width:50px; font-size:11px; }"));
+    }
+
+    #[test]
+    fn test_responsive_table_responsive_margin_in_media_query() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        assert!(html.contains(".table-responsive { margin:0 -16px; padding:0 16px; }"));
+    }
+
+    #[test]
+    fn test_responsive_running_table_wrapper() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderRunning JS function should wrap table in table-responsive div
+        assert!(html.contains(r#"'<div class="table-responsive"><table>"#));
+        assert!(html.contains(r#"'</tbody></table></div>'"#));
+    }
+
+    #[test]
+    fn test_responsive_running_col_session_on_th() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderRunning should have col-session on Session header
+        assert!(html.contains(r#"<th class="col-session">Session</th>"#));
+    }
+
+    #[test]
+    fn test_responsive_running_col_tokens_on_th() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderRunning should have col-tokens on Tokens header
+        assert!(html.contains(r#"<th class="col-tokens">Tokens</th>"#));
+    }
+
+    #[test]
+    fn test_responsive_running_col_session_on_td() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderRunning should have col-session on session td
+        assert!(html.contains(r#"<td class="mono col-session">"#));
+    }
+
+    #[test]
+    fn test_responsive_running_col_tokens_on_td() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderRunning should have col-tokens on tokens td
+        assert!(html.contains(r#"<td class="mono col-tokens">"#));
+    }
+
+    #[test]
+    fn test_responsive_completed_col_tokens_on_th() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderCompleted should have col-tokens on Tokens header
+        assert!(html.contains(r#"<th class="col-tokens">Tokens</th>"#));
+    }
+
+    #[test]
+    fn test_responsive_completed_col_tokens_on_td() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderCompleted should have col-tokens on tokens td
+        assert!(html.contains(r#"<td class="mono col-tokens">"#));
+    }
+
+    #[test]
+    fn test_responsive_workers_col_session_on_th() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderWorkers should have col-session on Worker ID header
+        assert!(html.contains(r#"<th class="col-session">Worker ID</th>"#));
+    }
+
+    #[test]
+    fn test_responsive_workers_col_session_on_td() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderWorkers should have col-session on worker id td
+        assert!(html.contains(r#"<td class="mono col-session">"#));
+    }
+
+    #[test]
+    fn test_responsive_retrying_table_wrapper() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderRetrying should wrap table in table-responsive div
+        assert!(html.contains(
+            r#"'<div class="table-responsive"><table><thead><tr><th>Issue</th><th>Attempt</th><th>Retry In</th>"#
+        ));
+    }
+
+    #[test]
+    fn test_responsive_waiting_table_wrapper() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderWaiting should wrap table in table-responsive div
+        assert!(html.contains(
+            r#"'<div class="table-responsive"><table><thead><tr><th>Issue</th><th>PR</th>"#
+        ));
+    }
+
+    #[test]
+    fn test_responsive_pending_jobs_table_wrapper() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderPendingJobs should wrap table in table-responsive div
+        assert!(html.contains(
+            r#"'<div class="table-responsive"><table><thead><tr><th>Issue</th><th>Attempt</th><th>Prompt Preview</th>"#
+        ));
+    }
+
+    #[test]
+    fn test_responsive_completed_table_wrapper() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderCompleted should wrap table in table-responsive div
+        assert!(html.contains(
+            r#"'<div class="table-responsive"><table><thead><tr><th>Issue</th><th>Outcome</th>"#
+        ));
+    }
+
+    #[test]
+    fn test_responsive_workers_table_wrapper() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // renderWorkers should wrap table in table-responsive div
+        assert!(html.contains(
+            r#"'<div class="table-responsive"><table><thead><tr><th class="col-session">Worker ID</th>"#
+        ));
     }
 }
