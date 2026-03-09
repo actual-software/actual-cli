@@ -13,6 +13,11 @@ use crate::cli::ui::terminal::TerminalIO;
 use crate::error::ActualError;
 
 /// Production terminal backed by `console::Term`.
+///
+/// Uses **stderr** so that interactive prompts (dialoguer) go to the same
+/// stream as the pipeline's progress output.  This avoids stdout/stderr
+/// interleaving in plain (non-TUI) mode and keeps stdout clean for
+/// machine-readable output (e.g. piped to `jq`).
 pub struct RealTerminal {
     term: console::Term,
 }
@@ -20,7 +25,7 @@ pub struct RealTerminal {
 impl Default for RealTerminal {
     fn default() -> Self {
         Self {
-            term: console::Term::stdout(),
+            term: console::Term::stderr(),
         }
     }
 }
@@ -54,7 +59,7 @@ impl TerminalIO for RealTerminal {
         DialoguerConfirm::new()
             .with_prompt(prompt)
             .default(false)
-            .interact_opt()
+            .interact_on_opt(&self.term)
             .map_err(|e| terminal_io_error("confirmation failed", e))
     }
 

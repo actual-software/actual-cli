@@ -20,8 +20,9 @@ use super::log::LogPane;
 use super::steps::{StepStatus, StepsPane};
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::RepoAnalysis;
-use crate::branding::banner::BANNER;
+use crate::branding::banner::{print_banner, BANNER};
 use crate::cli::ui::confirm::{format_project_summary_plain, prompt_project_confirmation};
+use crate::cli::ui::header::render_header_bar;
 use crate::cli::ui::progress::SyncPhase;
 use crate::cli::ui::terminal::TerminalIO;
 
@@ -586,6 +587,15 @@ impl TuiRenderer {
             // Attempt TUI setup; fall back to Plain on any failure (e.g. not a real TTY).
             Self::try_setup_tui().unwrap_or(Mode::Plain)
         };
+        // In plain mode, print the banner and header bar so the user sees
+        // the same branding context as in TUI mode.  In TUI mode these are
+        // rendered as ratatui widgets inside the alternate screen.
+        if matches!(mode, Mode::Plain) {
+            print_banner(false);
+            let width = crate::cli::ui::term_size::terminal_width();
+            eprint!("{}", render_header_bar(width, version, None));
+        }
+
         Self {
             mode,
             steps,
