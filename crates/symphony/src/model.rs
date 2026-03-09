@@ -108,9 +108,36 @@ pub struct WaitingEntry {
     pub session_id: Option<String>,
 }
 
+/// Outcome of a completed agent run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum CompletionOutcome {
+    /// Worker exited normally and issue reached terminal state.
+    Success,
+    /// Worker exited normally and issue is in review.
+    InReview,
+    /// Worker exited normally but issue needs continuation retry.
+    Retry,
+    /// Worker failed, timed out, stalled, or was cancelled.
+    Failed,
+}
+
+/// Record of a completed agent run, capturing session metrics and outcome.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionRecord {
+    pub issue_id: String,
+    pub identifier: String,
+    pub outcome: CompletionOutcome,
+    pub duration_seconds: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turn_count: u32,
+    pub completed_at: DateTime<Utc>,
+}
+
 /// Maximum number of completed issue IDs to retain for observability.
 /// Older entries are evicted in FIFO order to prevent unbounded growth.
-const MAX_COMPLETED_ENTRIES: usize = 1000;
+pub const MAX_COMPLETED_ENTRIES: usize = 1000;
 
 /// Orchestrator runtime state.
 pub struct OrchestratorState {
@@ -124,6 +151,8 @@ pub struct OrchestratorState {
     /// Bounded set of recently-completed issue IDs (FIFO eviction).
     completed_set: HashSet<String>,
     completed_order: VecDeque<String>,
+    /// Bounded history of completion records (FIFO eviction at MAX_COMPLETED_ENTRIES).
+    completion_history: VecDeque<CompletionRecord>,
     pub agent_totals: AgentTotals,
     pub rate_limits: Option<serde_json::Value>,
     /// Per-issue broadcast channels for SSE event streaming.
@@ -146,6 +175,10 @@ impl std::fmt::Debug for OrchestratorState {
             .field("claimed", &self.claimed)
             .field("retry_attempts", &self.retry_attempts)
             .field("waiting_for_review", &self.waiting_for_review)
+            .field(
+                "completion_history",
+                &format!("<{} records>", self.completion_history.len()),
+            )
             .field("agent_totals", &self.agent_totals)
             .field("rate_limits", &self.rate_limits)
             .field(
@@ -176,6 +209,7 @@ impl OrchestratorState {
             waiting_for_review: HashMap::new(),
             completed_set: HashSet::new(),
             completed_order: VecDeque::new(),
+            completion_history: VecDeque::new(),
             agent_totals: AgentTotals::default(),
             rate_limits: None,
             event_broadcasts: HashMap::new(),
@@ -206,6 +240,20 @@ impl OrchestratorState {
     /// Number of completed entries.
     pub fn completed_count(&self) -> usize {
         self.completed_set.len()
+    }
+
+    /// Add a completion record to the history. Evicts the oldest record
+    /// if the history exceeds `MAX_COMPLETED_ENTRIES`.
+    pub fn add_completion(&mut self, record: CompletionRecord) {
+        self.completion_history.push_back(record);
+        while self.completion_history.len() > MAX_COMPLETED_ENTRIES {
+            self.completion_history.pop_front();
+        }
+    }
+
+    /// Returns a reference to the completion history.
+    pub fn completion_history(&self) -> &VecDeque<CompletionRecord> {
+        &self.completion_history
     }
 
     pub fn running_count(&self) -> usize {
@@ -854,5 +902,137 @@ mod tests {
                 log_seq: 0,
             },
         );
+    }
+
+    fn make_completion_record(issue_id: &str, outcome: CompletionOutcome) -> CompletionRecord {
+        CompletionRecord {
+            issue_id: issue_id.to_string(),
+            identifier: format!("TST-{issue_id}"),
+            outcome,
+            duration_seconds: 60.0,
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            turn_count: 3,
+            completed_at: Utc::now(),
+        }
+    }
+
+    // ── CompletionOutcome ───────────────────────────────────────────
+
+    #[test]
+    fn completion_outcome_serialization_roundtrip() {
+        for outcome in [
+            CompletionOutcome::Success,
+            CompletionOutcome::InReview,
+            CompletionOutcome::Retry,
+            CompletionOutcome::Failed,
+        ] {
+            let json = serde_json::to_string(&outcome).unwrap();
+            let deserialized: CompletionOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, outcome);
+        }
+    }
+
+    #[test]
+    fn completion_outcome_debug_and_clone() {
+        let outcome = CompletionOutcome::Success;
+        let cloned = outcome.clone();
+        assert_eq!(outcome, cloned);
+        let debug = format!("{:?}", outcome);
+        assert!(debug.contains("Success"));
+    }
+
+    #[test]
+    fn completion_outcome_partial_eq() {
+        assert_eq!(CompletionOutcome::Success, CompletionOutcome::Success);
+        assert_ne!(CompletionOutcome::Success, CompletionOutcome::Failed);
+        assert_ne!(CompletionOutcome::InReview, CompletionOutcome::Retry);
+    }
+
+    // ── CompletionRecord ────────────────────────────────────────────
+
+    #[test]
+    fn completion_record_serialization_roundtrip() {
+        let record = make_completion_record("id1", CompletionOutcome::Success);
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: CompletionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.issue_id, "id1");
+        assert_eq!(deserialized.identifier, "TST-id1");
+        assert_eq!(deserialized.outcome, CompletionOutcome::Success);
+        assert!((deserialized.duration_seconds - 60.0).abs() < f64::EPSILON);
+        assert_eq!(deserialized.input_tokens, 100);
+        assert_eq!(deserialized.output_tokens, 50);
+        assert_eq!(deserialized.total_tokens, 150);
+        assert_eq!(deserialized.turn_count, 3);
+    }
+
+    #[test]
+    fn completion_record_debug_and_clone() {
+        let record = make_completion_record("id1", CompletionOutcome::InReview);
+        let cloned = record.clone();
+        assert_eq!(cloned.issue_id, "id1");
+        assert_eq!(cloned.outcome, CompletionOutcome::InReview);
+        let debug = format!("{:?}", record);
+        assert!(debug.contains("CompletionRecord"));
+        assert!(debug.contains("InReview"));
+    }
+
+    // ── add_completion / completion_history ──────────────────────────
+
+    #[test]
+    fn add_completion_record_basic() {
+        let mut state = OrchestratorState::new(1000, 2);
+        let record = make_completion_record("id1", CompletionOutcome::Success);
+        state.add_completion(record);
+        assert_eq!(state.completion_history().len(), 1);
+        assert_eq!(state.completion_history()[0].issue_id, "id1");
+    }
+
+    #[test]
+    fn add_completion_multiple_records() {
+        let mut state = OrchestratorState::new(1000, 2);
+        state.add_completion(make_completion_record("id1", CompletionOutcome::Success));
+        state.add_completion(make_completion_record("id2", CompletionOutcome::Failed));
+        state.add_completion(make_completion_record("id3", CompletionOutcome::InReview));
+        assert_eq!(state.completion_history().len(), 3);
+        assert_eq!(state.completion_history()[0].issue_id, "id1");
+        assert_eq!(state.completion_history()[2].issue_id, "id3");
+    }
+
+    #[test]
+    fn completion_history_bounded_eviction() {
+        let mut state = OrchestratorState::new(1000, 2);
+        for i in 0..MAX_COMPLETED_ENTRIES + 10 {
+            state.add_completion(make_completion_record(
+                &format!("id-{i}"),
+                CompletionOutcome::Success,
+            ));
+        }
+        assert_eq!(state.completion_history().len(), MAX_COMPLETED_ENTRIES);
+        // Oldest entries should be evicted
+        assert_eq!(state.completion_history()[0].issue_id, "id-10");
+        let last = MAX_COMPLETED_ENTRIES + 9;
+        assert_eq!(
+            state.completion_history().back().unwrap().issue_id,
+            format!("id-{last}")
+        );
+    }
+
+    #[test]
+    fn completion_history_empty_by_default() {
+        let state = OrchestratorState::new(1000, 2);
+        assert!(state.completion_history().is_empty());
+    }
+
+    // ── Debug impl includes completion_history ──────────────────────
+
+    #[test]
+    fn orchestrator_state_debug_includes_completion_history() {
+        let mut state = OrchestratorState::new(5000, 4);
+        state.add_completion(make_completion_record("id1", CompletionOutcome::Success));
+        let debug = format!("{:?}", state);
+        assert!(debug.contains("completion_history"));
+        assert!(debug.contains("<1 records>"));
     }
 }
