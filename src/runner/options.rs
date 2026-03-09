@@ -59,6 +59,22 @@ impl InvocationOptions {
         }
     }
 
+    /// Create options for code review lens invocations.
+    ///
+    /// Reviews are read-only (no Write/Edit) and use 1 max turn (single response).
+    /// `skip_permissions` is `true` because no tools are enabled at all.
+    pub fn for_review(model_override: Option<&str>) -> Self {
+        Self {
+            model: model_override.unwrap_or(DEFAULT_MODEL).to_string(),
+            max_turns: 1,
+            tools: "".to_string(),
+            allowed_tools: vec![],
+            json_schema: None,
+            max_budget_usd: None,
+            skip_permissions: true,
+        }
+    }
+
     /// Convert to CLI argument list for `ClaudeRunner::run()`.
     ///
     /// The `--print` flag is NOT included — it is added by
@@ -251,6 +267,45 @@ mod tests {
         let debug = format!("{opts:?}");
         assert!(debug.contains("InvocationOptions"));
         assert!(debug.contains("sonnet"));
+    }
+
+    #[test]
+    fn test_for_review_max_turns_is_one() {
+        let opts = InvocationOptions::for_review(None);
+        assert_eq!(opts.max_turns, 1);
+    }
+
+    #[test]
+    fn test_for_review_no_tools() {
+        let opts = InvocationOptions::for_review(None);
+        assert!(opts.tools.is_empty());
+        assert!(opts.allowed_tools.is_empty());
+    }
+
+    #[test]
+    fn test_for_review_skip_permissions() {
+        let opts = InvocationOptions::for_review(None);
+        assert!(opts.skip_permissions);
+    }
+
+    #[test]
+    fn test_for_review_default_model() {
+        let opts = InvocationOptions::for_review(None);
+        let args = opts.to_args();
+        assert_arg_value(&args, "--model", "sonnet");
+    }
+
+    #[test]
+    fn test_for_review_model_override() {
+        let opts = InvocationOptions::for_review(Some("opus"));
+        let args = opts.to_args();
+        assert_arg_value(&args, "--model", "opus");
+    }
+
+    #[test]
+    fn test_for_review_no_json_schema_by_default() {
+        let opts = InvocationOptions::for_review(None);
+        assert!(opts.json_schema.is_none());
     }
 
     /// Assert that `--flag value` appears as consecutive elements.
