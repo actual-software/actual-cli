@@ -948,20 +948,66 @@ impl Orchestrator {
                         // Remove claim label when entering review (best-effort)
                         self.remove_claim_label(issue_id, &issue_identifier).await;
                     } else {
-                        // Record completion with Retry outcome
-                        let mut record = completion_template;
-                        record.outcome = CompletionOutcome::Retry;
-                        let mut state = self.state.write().await;
-                        self.persist_completion_record(&mut state, record);
-                        // §8.1: Schedule a short continuation retry (1000ms)
-                        self.schedule_retry_inner(
-                            &mut state,
-                            issue_id.to_string(),
-                            0, // continuation, not a failure retry
-                            identifier,
-                            None,
-                            1_000, // 1 second
-                        );
+                        // Issue is not terminal and not "In Review". Check if the
+                        // worker left behind an open PR — if so, the agent likely
+                        // ran out of turns before transitioning the Linear issue.
+                        // The orchestrator transitions it instead of looping forever.
+                        let pr_found = {
+                            let config = self.config.read().await;
+                            if let Some(github_config) = &config.github {
+                                let branch = format!(
+                                    "{}{}",
+                                    github_config.branch_prefix,
+                                    issue_identifier.to_lowercase()
+                                );
+                                let github = GitHubClient::new(github_config, self.http.clone());
+                                match github.find_open_pr(&branch).await {
+                                    Ok(Some(pr)) if pr.state == "open" => {
+                                        info!(issue_id = %issue_id, issue_identifier = %issue_identifier, pr_number = pr.number, "worker completed with open PR but issue not In Review — orchestrator transitioning");
+                                        transition_to_in_review(
+                                            issue_id,
+                                            &issue_identifier,
+                                            &config.tracker,
+                                            &self.http,
+                                        )
+                                        .await;
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                            } else {
+                                false
+                            }
+                        };
+
+                        if pr_found {
+                            // Treat as "In Review" — add to waiting_for_review
+                            self.add_to_waiting_for_review(
+                                issue_id,
+                                &issue_identifier,
+                                exit_session_id.as_deref(),
+                            )
+                            .await;
+                            let mut record = completion_template;
+                            record.outcome = CompletionOutcome::InReview;
+                            self.persist_completion_record(&mut *self.state.write().await, record);
+                            self.remove_claim_label(issue_id, &issue_identifier).await;
+                        } else {
+                            // No PR — schedule a continuation retry
+                            let mut record = completion_template;
+                            record.outcome = CompletionOutcome::Retry;
+                            let mut state = self.state.write().await;
+                            self.persist_completion_record(&mut state, record);
+                            // §8.1: Schedule a short continuation retry (1000ms)
+                            self.schedule_retry_inner(
+                                &mut state,
+                                issue_id.to_string(),
+                                0, // continuation, not a failure retry
+                                identifier,
+                                None,
+                                1_000, // 1 second
+                            );
+                        }
                     }
                 }
                 WorkerExitReason::Failed(err) => {
@@ -13459,5 +13505,251 @@ mod tests {
     #[test]
     fn test_dead_worker_timeout_constant() {
         assert_eq!(DEAD_WORKER_TIMEOUT_SECS, 120);
+    }
+
+    // ── on_worker_exit: else branch — PR-check-and-transition ───────
+
+    /// When the issue is NOT terminal and NOT "In Review", but an open PR
+    /// exists on GitHub, the orchestrator should transition the issue to
+    /// "In Review" itself and add it to waiting_for_review.
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_else_pr_found_transitions_to_in_review() {
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Linear: refresh returns "In Progress" (not terminal, not In Review)
+        let _linear_refresh = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Progress")]))
+            .create_async()
+            .await;
+
+        // Linear: resolve "In Review" state ID (for transition_to_in_review)
+        let _linear_workflow = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("WorkflowStates".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "workflowStates": {
+                            "nodes": [
+                                { "id": "state-in-review", "name": "In Review" }
+                            ]
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: issueUpdate mutation (for transition_to_in_review)
+        let _linear_update = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("issueUpdate".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "issueUpdate": { "success": true }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // GitHub: find_open_pr returns an open PR
+        let _pr_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 99,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert running entry with "In Progress" state
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.is_completed("id1"));
+        // Should be in waiting_for_review — NOT in retry queue
+        assert!(state.waiting_for_review.contains_key("id1"));
+        assert!(!state.retry_attempts.contains_key("id1"));
+        let entry = state.waiting_for_review.get("id1").unwrap();
+        assert_eq!(entry.pr_number, 99);
+        assert_eq!(entry.identifier, "PROJ-1");
+        assert_eq!(entry.branch, "symphony/proj-1");
+        assert!(logs_contain(
+            "worker completed with open PR but issue not In Review"
+        ));
+    }
+
+    /// When the issue is NOT terminal and NOT "In Review", and no PR exists
+    /// on GitHub, the orchestrator should schedule a continuation retry.
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_else_no_pr_retries() {
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Linear: refresh returns "In Progress"
+        let _linear_refresh = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Progress")]))
+            .create_async()
+            .await;
+
+        // GitHub: find_open_pr returns empty list
+        let _pr_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.is_completed("id1"));
+        // Should be in retry queue — NOT in waiting_for_review
+        assert!(!state.waiting_for_review.contains_key("id1"));
+        assert!(state.retry_attempts.contains_key("id1"));
+        let retry = state.retry_attempts.get("id1").unwrap();
+        assert_eq!(retry.attempt, 0); // continuation retry
+    }
+
+    /// When the issue is NOT terminal and NOT "In Review", and the GitHub
+    /// API returns an error, the orchestrator should fall back to retry.
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_else_github_api_error_retries() {
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Linear: refresh returns "In Progress"
+        let _linear_refresh = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Progress")]))
+            .create_async()
+            .await;
+
+        // GitHub: API returns 500 error
+        let _pr_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.is_completed("id1"));
+        // Should be in retry queue (GitHub error → pr_found = false)
+        assert!(!state.waiting_for_review.contains_key("id1"));
+        assert!(state.retry_attempts.contains_key("id1"));
+        let retry = state.retry_attempts.get("id1").unwrap();
+        assert_eq!(retry.attempt, 0); // continuation retry
+    }
+
+    /// When the issue is NOT terminal and NOT "In Review", and there is
+    /// no GitHub config, the orchestrator should schedule a retry.
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_else_no_github_config_retries() {
+        let mut linear_server = mockito::Server::new_async().await;
+
+        // Linear: refresh returns "In Progress"
+        let _linear_refresh = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Progress")]))
+            .create_async()
+            .await;
+
+        let config = test_config_with_endpoint(&linear_server.url());
+        // No github config
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.is_completed("id1"));
+        // Should be in retry queue (no github config → pr_found = false)
+        assert!(!state.waiting_for_review.contains_key("id1"));
+        assert!(state.retry_attempts.contains_key("id1"));
+        let retry = state.retry_attempts.get("id1").unwrap();
+        assert_eq!(retry.attempt, 0);
     }
 }
