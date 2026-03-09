@@ -1,3 +1,5 @@
+pub mod adr_reader;
+pub mod diff;
 pub mod schemas;
 pub mod types;
 
