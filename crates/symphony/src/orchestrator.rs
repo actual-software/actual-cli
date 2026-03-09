@@ -1563,7 +1563,9 @@ impl Orchestrator {
 
         // Dispatch with attempt=None (cleanup is a fresh single turn)
         // skip_state_transition=true: issue is already in "Merged" state
-        self.dispatch_issue(issue, None, true, None).await;
+        // resume_session_id: resume the original agent session if available
+        self.dispatch_issue(issue, None, true, entry.session_id.clone())
+            .await;
     }
 
     async fn reconcile_stalls(&self) {
@@ -10425,6 +10427,27 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("merged"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_dispatch_cleanup_passes_session_id() {
+        let config = test_config();
+        let orch = Orchestrator::new(config.clone(), "{{ issue.identifier }}".to_string());
+
+        let entry = crate::model::WaitingEntry {
+            issue_id: "id1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+            session_id: Some("sess-abc-123".to_string()),
+        };
+
+        orch.dispatch_cleanup(&entry, &config.tracker).await;
+
+        let state = orch.state.read().await;
+        assert!(state.running.contains_key("id1"));
     }
 
     // ── log_transition_error ─────────────────────────────────────
