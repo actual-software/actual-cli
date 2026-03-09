@@ -81,6 +81,9 @@ pub enum ActualError {
 
     #[error("Actual AI API is being updated and will be available shortly")]
     ServiceUnavailable,
+
+    #[error("Code review failed: {0}")]
+    CodeReviewError(String),
 }
 
 impl ActualError {

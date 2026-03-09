@@ -14,6 +14,36 @@ pub enum ReviewerLens {
     SreEngineer,
 }
 
+impl ReviewerLens {
+    /// Human-readable name for display in the signal matrix.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::PrincipalEngineer => "Principal Engineer",
+            Self::ProgramManager => "Program Manager",
+            Self::ProductManager => "Product Manager",
+            Self::SecurityEngineer => "Security Engineer",
+            Self::PragmaticEngineer => "Pragmatic Engineer",
+            Self::OssMaintainer => "OSS Maintainer",
+            Self::TestEngineer => "Test Engineer",
+            Self::SreEngineer => "SRE Engineer",
+        }
+    }
+
+    /// All 8 lenses in canonical order.
+    pub fn all() -> &'static [ReviewerLens] {
+        &[
+            Self::PrincipalEngineer,
+            Self::ProgramManager,
+            Self::ProductManager,
+            Self::SecurityEngineer,
+            Self::PragmaticEngineer,
+            Self::OssMaintainer,
+            Self::TestEngineer,
+            Self::SreEngineer,
+        ]
+    }
+}
+
 /// Risk signal levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -22,6 +52,28 @@ pub enum Signal {
     Green,
     Yellow,
     Red,
+}
+
+impl Signal {
+    /// Short icon label for the signal matrix.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Red => "RED",
+            Self::Yellow => "YLW",
+            Self::Green => "GRN",
+            Self::Gray => "N/A",
+        }
+    }
+
+    /// Human-readable display string.
+    pub fn display(&self) -> &'static str {
+        match self {
+            Self::Red => "Red",
+            Self::Yellow => "Yellow",
+            Self::Green => "Green",
+            Self::Gray => "Gray",
+        }
+    }
 }
 
 /// A single finding within a lens review.
@@ -100,6 +152,26 @@ pub enum Decision {
     Proceed,
     ProceedWithMitigation,
     BlockOrEscalate,
+}
+
+impl Decision {
+    /// Human-readable display string.
+    pub fn display(&self) -> &'static str {
+        match self {
+            Self::Proceed => "Proceed",
+            Self::ProceedWithMitigation => "Proceed With Mitigation",
+            Self::BlockOrEscalate => "Block or Escalate",
+        }
+    }
+
+    /// Derive the decision from the overall signal.
+    pub fn from_signal(signal: Signal) -> Self {
+        match signal {
+            Signal::Green | Signal::Gray => Self::Proceed,
+            Signal::Yellow => Self::ProceedWithMitigation,
+            Signal::Red => Self::BlockOrEscalate,
+        }
+    }
 }
 
 /// Metadata recorded with every review execution.
