@@ -43,7 +43,7 @@ pub fn build_agent_command(
         // Default: claude -p with stream-json for structured output.
         // Use max_turns from config instead of a hardcoded value.
         let c = format!(
-            "{base_command} -p --output-format stream-json --dangerously-skip-permissions --max-turns {max_turns}"
+            "{base_command} -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns {max_turns}"
         );
         // If the base command already had --max-turns, rewrite it to match config.
         rewrite_max_turns(&c, max_turns)
@@ -354,6 +354,7 @@ mod tests {
         assert!(cmd.contains("claude"));
         assert!(cmd.contains("-p"));
         assert!(cmd.contains("--output-format stream-json"));
+        assert!(cmd.contains("--verbose"));
     }
 
     #[test]
