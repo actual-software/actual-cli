@@ -1,4 +1,6 @@
+pub mod adr_reader;
 pub mod aggregation;
+pub mod diff;
 pub mod display;
 pub mod pipeline;
 pub mod schemas;
