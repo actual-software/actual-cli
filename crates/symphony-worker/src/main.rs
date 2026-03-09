@@ -1,8 +1,12 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::Parser;
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use symphony::agent_process;
+use symphony::protocol::AgentEvent;
 use symphony_worker::client::HttpOrchestratorClient;
 use symphony_worker::config::WorkerConfig;
 use symphony_worker::executor::{AgentHandle, AgentLauncher};
@@ -54,44 +58,108 @@ struct Cli {
 }
 
 // ---------------------------------------------------------------------------
-// Real AgentLauncher (placeholder — delegates to claude CLI)
+// ClaudeAgentLauncher — spawns real Claude CLI subprocesses
 // ---------------------------------------------------------------------------
 
-struct RealAgentLauncher {
-    _agent_command: String,
+struct ClaudeAgentLauncher {
+    agent_command: String,
+    max_turns: u32,
 }
 
-struct RealAgentHandle;
+struct ClaudeAgentHandle {
+    child: tokio::process::Child,
+}
+
+impl Drop for ClaudeAgentHandle {
+    fn drop(&mut self) {
+        // Best-effort SIGKILL to prevent orphaned processes.
+        // `start_kill` is non-async and sends SIGKILL immediately.
+        // Returns Err if the child has already exited — that is fine.
+        let _ = self.child.start_kill();
+    }
+}
+
+/// Log agent launch details.
+fn log_agent_launch(issue_identifier: &str, command: &str) {
+    info!(issue = %issue_identifier, command = %command, "launching claude agent subprocess");
+}
 
 #[async_trait::async_trait]
-impl AgentHandle for RealAgentHandle {
-    async fn wait_with_timeout(&mut self, _timeout_ms: u64) -> Result<bool, String> {
-        // TODO: implement real agent waiting
-        Ok(true)
+impl AgentHandle for ClaudeAgentHandle {
+    async fn wait_with_timeout(&mut self, timeout_ms: u64) -> Result<bool, String> {
+        let timeout = std::time::Duration::from_millis(timeout_ms);
+        match tokio::time::timeout(timeout, self.child.wait()).await {
+            Ok(Ok(status)) => Ok(status.success()),
+            Ok(Err(e)) => Err(format!("process wait error: {e}")),
+            Err(_) => Ok(false), // Timeout — still running
+        }
     }
 
     async fn kill(&mut self) {
-        // TODO: implement real agent kill
+        let _ = self.child.kill().await;
     }
 }
 
 #[async_trait::async_trait]
-impl AgentLauncher for RealAgentLauncher {
+impl AgentLauncher for ClaudeAgentLauncher {
     async fn launch_agent(
         &self,
-        _workspace_path: &std::path::Path,
-        _prompt: &str,
-        _issue_identifier: &str,
+        workspace_path: &std::path::Path,
+        prompt: &str,
+        issue_identifier: &str,
     ) -> Result<
         (
             Box<dyn AgentHandle>,
-            tokio::sync::mpsc::Receiver<symphony::protocol::AgentEvent>,
+            tokio::sync::mpsc::Receiver<AgentEvent>,
         ),
         String,
     > {
-        // TODO: implement real agent launching
-        let (_tx, rx) = tokio::sync::mpsc::channel(1);
-        Ok((Box::new(RealAgentHandle), rx))
+        let full_command =
+            agent_process::build_agent_command(&self.agent_command, self.max_turns, None, None);
+
+        log_agent_launch(issue_identifier, &full_command);
+
+        let mut child =
+            agent_process::spawn_agent_process(&full_command, workspace_path, &HashMap::new())
+                .map_err(|e| format!("failed to spawn agent: {e}"))?;
+
+        // Write prompt to stdin
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "stdin was not piped".to_string())?;
+        let prompt_bytes = prompt.as_bytes().to_vec();
+        tokio::spawn(agent_process::write_prompt_to_stdin(stdin, prompt_bytes));
+
+        let pid = child.id();
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "stdout was not piped".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "stderr was not piped".to_string())?;
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
+
+        // Spawn stdout reader
+        let tx_clone = event_tx.clone();
+        tokio::spawn(agent_process::read_stdout_lines(stdout, tx_clone));
+
+        // Spawn stderr reader (diagnostic only)
+        tokio::spawn(agent_process::read_stderr_lines(stderr));
+
+        // Emit initial SessionStarted event
+        let _ = event_tx
+            .send(AgentEvent::SessionStarted {
+                session_id: format!("claude-{}", pid.unwrap_or(0)),
+                pid,
+            })
+            .await;
+
+        Ok((Box::new(ClaudeAgentHandle { child }), event_rx))
     }
 }
 
@@ -135,8 +203,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = HttpOrchestratorClient::new(cli.orchestrator_url, cli.auth_token, worker_id);
     let git = RealGitCommandRunner;
-    let launcher = RealAgentLauncher {
-        _agent_command: cli.agent_command,
+    let launcher = ClaudeAgentLauncher {
+        agent_command: cli.agent_command,
+        max_turns: cli.max_turns,
     };
 
     // Set up shutdown signal
