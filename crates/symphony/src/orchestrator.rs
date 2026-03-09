@@ -426,7 +426,8 @@ impl Orchestrator {
         // Drop state lock before async GitHub call
         drop(state);
 
-        // PR dedup: skip if an open PR already exists for this issue's branch
+        // PR dedup: skip only if an open PR exists AND is healthy (no conflicts,
+        // CI passing). If the PR has problems, dispatch an agent to fix it.
         if let Some(ref github_config) = config.github {
             let branch = format!(
                 "{}{}",
@@ -434,13 +435,27 @@ impl Orchestrator {
                 issue.identifier.to_lowercase()
             );
             let github = GitHubClient::new(github_config, self.http.clone());
-            let pr_check = github.find_open_pr(&branch).await;
-            if let Err(e) = &pr_check {
+            let pr_result = github.find_open_pr(&branch).await;
+            if let Err(e) = &pr_result {
                 warn!(issue_id = %issue.id, error = %e, "failed to check for existing PR, proceeding with dispatch");
             }
-            if let Ok(Some(_pr)) = pr_check {
-                info!(issue_id = %issue.id, branch = %branch, "skipping dispatch: open PR already exists");
-                return false;
+            if let Ok(Some(pr)) = pr_result {
+                // PR exists — check its health via the detail endpoint
+                // (the list endpoint doesn't return mergeable/mergeable_state)
+                match github.get_pr_details(pr.number).await {
+                    Ok(details) => {
+                        let is_clean =
+                            details.mergeable == Some(true) && is_pr_state_clean(&details);
+                        if is_clean {
+                            info!(issue_id = %issue.id, branch = %branch, pr_number = pr.number, "skipping dispatch: open PR is clean");
+                            return false;
+                        }
+                        info!(issue_id = %issue.id, branch = %branch, pr_number = pr.number, mergeable = ?details.mergeable, mergeable_state = ?details.mergeable_state, "dispatching: open PR needs attention");
+                    }
+                    Err(e) => {
+                        warn!(issue_id = %issue.id, pr_number = pr.number, error = %e, "failed to get PR details, dispatching to be safe");
+                    }
+                }
             }
         }
 
@@ -2205,6 +2220,17 @@ fn is_done_state(state: &str) -> bool {
     s == "done" || s == "merged"
 }
 
+/// Check if a PR's `mergeable_state` indicates it is healthy (no conflicts,
+/// CI passing, no blocked branch protection rules). GitHub's `mergeable_state`
+/// can be: `clean`, `dirty`, `unstable`, `blocked`, `behind`, `draft`, `unknown`.
+/// We only consider `clean` as healthy.
+fn is_pr_state_clean(pr: &crate::github::PrInfo) -> bool {
+    pr.mergeable_state
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("clean"))
+        .unwrap_or(false)
+}
+
 /// Check if the worker's branch has an open PR with green CI.
 /// If so, transition the issue to "In Review" and return true to stop the worker.
 /// Uses the GitHub API client when configured, falls back to `gh` CLI.
@@ -3330,8 +3356,8 @@ mod tests {
     async fn test_should_dispatch_open_pr_exists() {
         let mut server = mockito::Server::new_async().await;
 
-        // Mock GitHub API returning an open PR
-        let _mock = server
+        // Mock: find_open_pr returns an open PR
+        let _list_mock = server
             .mock("GET", "/repos/test-owner/test-repo/pulls")
             .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
                 "state".to_string(),
@@ -3342,11 +3368,26 @@ mod tests {
             .with_body(
                 serde_json::json!([{
                     "number": 42,
+                    "state": "open"
+                }])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Mock: get_pr_details returns clean PR
+        let _detail_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "number": 42,
                     "state": "open",
                     "mergeable": true,
                     "mergeable_state": "clean",
                     "merged": false
-                }])
+                })
                 .to_string(),
             )
             .create_async()
@@ -3357,10 +3398,193 @@ mod tests {
         let orch = Orchestrator::new(config.clone(), "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        assert!(
-            !orch.should_dispatch(&issue, &config).await,
-            "should not dispatch when an open PR exists"
-        );
+        assert!(!orch.should_dispatch(&issue, &config).await);
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_open_pr_dirty() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock: find_open_pr returns an open PR
+        let _list_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{ "number": 42, "state": "open" }]).to_string())
+            .create_async()
+            .await;
+
+        // Mock: get_pr_details returns dirty (merge conflict)
+        let _detail_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": false,
+                    "mergeable_state": "dirty",
+                    "merged": false
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(test_github_config(&server.url()));
+        let orch = Orchestrator::new(config.clone(), "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(orch.should_dispatch(&issue, &config).await);
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_open_pr_unstable() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _list_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{ "number": 42, "state": "open" }]).to_string())
+            .create_async()
+            .await;
+
+        // Mock: CI failing (unstable)
+        let _detail_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "unstable",
+                    "merged": false
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(test_github_config(&server.url()));
+        let orch = Orchestrator::new(config.clone(), "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(orch.should_dispatch(&issue, &config).await);
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_open_pr_blocked() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _list_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{ "number": 42, "state": "open" }]).to_string())
+            .create_async()
+            .await;
+
+        // Mock: blocked by branch protection
+        let _detail_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "blocked",
+                    "merged": false
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(test_github_config(&server.url()));
+        let orch = Orchestrator::new(config.clone(), "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(orch.should_dispatch(&issue, &config).await);
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_open_pr_mergeable_null() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _list_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{ "number": 42, "state": "open" }]).to_string())
+            .create_async()
+            .await;
+
+        // Mock: GitHub hasn't computed mergeable yet (null)
+        let _detail_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls/42")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "number": 42,
+                    "state": "open",
+                    "mergeable": null,
+                    "mergeable_state": "unknown",
+                    "merged": false
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(test_github_config(&server.url()));
+        let orch = Orchestrator::new(config.clone(), "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(orch.should_dispatch(&issue, &config).await);
+    }
+
+    #[tokio::test]
+    async fn test_should_dispatch_open_pr_details_api_error() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _list_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{ "number": 42, "state": "open" }]).to_string())
+            .create_async()
+            .await;
+
+        // Mock: get_pr_details fails
+        let _detail_mock = server
+            .mock("GET", "/repos/test-owner/test-repo/pulls/42")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(test_github_config(&server.url()));
+        let orch = Orchestrator::new(config.clone(), "template".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        assert!(orch.should_dispatch(&issue, &config).await);
     }
 
     #[tokio::test]
@@ -3381,17 +3605,14 @@ mod tests {
         let orch = Orchestrator::new(config.clone(), "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        assert!(
-            orch.should_dispatch(&issue, &config).await,
-            "should dispatch when no open PR exists"
-        );
+        assert!(orch.should_dispatch(&issue, &config).await);
     }
 
     #[tokio::test]
     async fn test_should_dispatch_github_api_error_proceeds() {
         let mut server = mockito::Server::new_async().await;
 
-        // Mock GitHub API returning error
+        // Mock GitHub API returning error on list
         let _mock = server
             .mock("GET", "/repos/test-owner/test-repo/pulls")
             .with_status(500)
@@ -3404,10 +3625,7 @@ mod tests {
         let orch = Orchestrator::new(config.clone(), "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        assert!(
-            orch.should_dispatch(&issue, &config).await,
-            "should proceed with dispatch when GitHub API errors"
-        );
+        assert!(orch.should_dispatch(&issue, &config).await);
     }
 
     #[tokio::test]
@@ -3416,10 +3634,7 @@ mod tests {
         let config = orch.config.read().await;
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        assert!(
-            orch.should_dispatch(&issue, &config).await,
-            "should dispatch when no GitHub config is set"
-        );
+        assert!(orch.should_dispatch(&issue, &config).await);
     }
 
     // ── should_dispatch: waiting_for_review guard ──────────────────
@@ -13751,5 +13966,67 @@ mod tests {
         assert!(state.retry_attempts.contains_key("id1"));
         let retry = state.retry_attempts.get("id1").unwrap();
         assert_eq!(retry.attempt, 0);
+    }
+
+    // ── is_pr_state_clean ───────────────────────────────────────────
+
+    #[test]
+    fn test_is_pr_state_clean_clean() {
+        let pr = crate::github::PrInfo {
+            number: 1,
+            state: "open".to_string(),
+            mergeable: Some(true),
+            mergeable_state: Some("clean".to_string()),
+            merged: None,
+        };
+        assert!(is_pr_state_clean(&pr));
+    }
+
+    #[test]
+    fn test_is_pr_state_clean_dirty() {
+        let pr = crate::github::PrInfo {
+            number: 1,
+            state: "open".to_string(),
+            mergeable: Some(false),
+            mergeable_state: Some("dirty".to_string()),
+            merged: None,
+        };
+        assert!(!is_pr_state_clean(&pr));
+    }
+
+    #[test]
+    fn test_is_pr_state_clean_unstable() {
+        let pr = crate::github::PrInfo {
+            number: 1,
+            state: "open".to_string(),
+            mergeable: Some(true),
+            mergeable_state: Some("unstable".to_string()),
+            merged: None,
+        };
+        assert!(!is_pr_state_clean(&pr));
+    }
+
+    #[test]
+    fn test_is_pr_state_clean_none() {
+        let pr = crate::github::PrInfo {
+            number: 1,
+            state: "open".to_string(),
+            mergeable: None,
+            mergeable_state: None,
+            merged: None,
+        };
+        assert!(!is_pr_state_clean(&pr));
+    }
+
+    #[test]
+    fn test_is_pr_state_clean_case_insensitive() {
+        let pr = crate::github::PrInfo {
+            number: 1,
+            state: "open".to_string(),
+            mergeable: Some(true),
+            mergeable_state: Some("CLEAN".to_string()),
+            merged: None,
+        };
+        assert!(is_pr_state_clean(&pr));
     }
 }
