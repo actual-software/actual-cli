@@ -904,12 +904,7 @@ impl Orchestrator {
                                 .map(|i| i.state.clone())
                                 .unwrap_or_else(|| cached_state.clone()),
                             Err(e) => {
-                                warn!(
-                                    issue_id = %issue_id,
-                                    issue_identifier = %identifier,
-                                    error = %e,
-                                    "failed to refresh issue state on worker exit, using cached state"
-                                );
+                                warn!(issue_id = %issue_id, issue_identifier = %identifier, error = %e, "failed to refresh issue state on worker exit, using cached state");
                                 cached_state.clone()
                             }
                         }
@@ -1644,12 +1639,7 @@ impl Orchestrator {
             updated_at: Some(Utc::now()),
         };
 
-        info!(
-            issue_id = %entry.issue_id,
-            issue_identifier = %entry.identifier,
-            resume_session_id = ?entry.session_id,
-            "dispatching cleanup agent turn"
-        );
+        info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, resume_session_id = ?entry.session_id, "dispatching cleanup agent turn");
 
         // Dispatch with attempt=None, skip_state_transition=true (already "Merged").
         // If a session_id was persisted from before the review, resume that session
@@ -1778,12 +1768,7 @@ impl Orchestrator {
                         .get(&issue.id)
                         .and_then(|e| e.session.session_id.clone())
                 };
-                info!(
-                    issue_id = %issue.id,
-                    issue_identifier = %issue.identifier,
-                    session_id = ?session_id,
-                    "issue is In Review, killing worker and moving to waiting_for_review"
-                );
+                info!(issue_id = %issue.id, issue_identifier = %issue.identifier, session_id = ?session_id, "issue is In Review, killing worker and moving to waiting_for_review");
                 self.terminate_running_issue(&issue.id, false).await;
                 self.add_to_waiting_for_review(&issue.id, &issue.identifier, session_id.as_deref())
                     .await;
@@ -4794,15 +4779,9 @@ mod tests {
 
         let state = orch.state.read().await;
         // Issue should NOT be in running anymore
-        assert!(
-            !state.running.contains_key("id1"),
-            "issue should be removed from running"
-        );
+        assert!(!state.running.contains_key("id1"));
         // Issue should be in waiting_for_review
-        assert!(
-            state.waiting_for_review.contains_key("id1"),
-            "issue should be in waiting_for_review"
-        );
+        assert!(state.waiting_for_review.contains_key("id1"));
         let entry = state.waiting_for_review.get("id1").unwrap();
         assert_eq!(entry.pr_number, 99);
         assert_eq!(entry.identifier, "PROJ-1");
@@ -4866,20 +4845,10 @@ mod tests {
         orch.reconcile_tracker_states().await;
 
         let state = orch.state.read().await;
-        assert!(
-            !state.running.contains_key("id1"),
-            "issue should be removed from running"
-        );
-        assert!(
-            state.waiting_for_review.contains_key("id1"),
-            "issue should be in waiting_for_review"
-        );
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.waiting_for_review.contains_key("id1"));
         let waiting = state.waiting_for_review.get("id1").unwrap();
-        assert_eq!(
-            waiting.session_id,
-            Some("sess-123".to_string()),
-            "session_id should be preserved in WaitingEntry"
-        );
+        assert_eq!(waiting.session_id, Some("sess-123".to_string()));
     }
 
     // ── on_retry_fired (with mockito) ────────────────────────────────
@@ -8505,14 +8474,8 @@ mod tests {
         assert!(!state.running.contains_key("id1"));
         assert!(state.is_completed("id1"));
         // Should be in waiting_for_review — NOT in retry queue
-        assert!(
-            state.waiting_for_review.contains_key("id1"),
-            "issue should be in waiting_for_review after state refresh"
-        );
-        assert!(
-            !state.retry_attempts.contains_key("id1"),
-            "issue should NOT be in retry queue when refresh shows In Review"
-        );
+        assert!(state.waiting_for_review.contains_key("id1"));
+        assert!(!state.retry_attempts.contains_key("id1"));
         let entry = state.waiting_for_review.get("id1").unwrap();
         assert_eq!(entry.pr_number, 42);
     }
@@ -10752,6 +10715,12 @@ mod tests {
         fail_save_waiting: bool,
         /// When true, remove_waiting returns an error.
         fail_remove_waiting: bool,
+        /// Preloaded completion history records returned by load_completion_history.
+        completion_history: Mutex<Vec<crate::model::CompletionRecord>>,
+        /// When true, load_completion_history returns an error.
+        fail_load_completion_history: bool,
+        /// When true, save_completion_record returns an error.
+        fail_save_completion_record: bool,
     }
 
     impl MockStore {
@@ -10775,6 +10744,9 @@ mod tests {
                 fail_remove_claimed: false,
                 fail_save_waiting: false,
                 fail_remove_waiting: false,
+                completion_history: Mutex::new(Vec::new()),
+                fail_load_completion_history: false,
+                fail_save_completion_record: false,
             }
         }
 
@@ -10845,6 +10817,21 @@ mod tests {
 
         fn with_fail_remove_waiting(mut self) -> Self {
             self.fail_remove_waiting = true;
+            self
+        }
+
+        fn with_completion_history(self, records: Vec<crate::model::CompletionRecord>) -> Self {
+            *self.completion_history.lock().unwrap() = records;
+            self
+        }
+
+        fn with_fail_load_completion_history(mut self) -> Self {
+            self.fail_load_completion_history = true;
+            self
+        }
+
+        fn with_fail_save_completion_record(mut self) -> Self {
+            self.fail_save_completion_record = true;
             self
         }
 
@@ -11016,13 +11003,19 @@ mod tests {
             &self,
             _record: &crate::model::CompletionRecord,
         ) -> persistence::Result<()> {
+            if self.fail_save_completion_record {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
             Ok(())
         }
 
         fn load_completion_history(
             &self,
         ) -> persistence::Result<Vec<crate::model::CompletionRecord>> {
-            Ok(Vec::new())
+            if self.fail_load_completion_history {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
+            Ok(self.completion_history.lock().unwrap().clone())
         }
     }
 
@@ -11179,6 +11172,75 @@ mod tests {
         let state = orch.state.read().await;
         assert!(state.waiting_for_review.is_empty());
         assert!(logs_contain("failed to load persisted waiting entries"));
+    }
+
+    #[tokio::test]
+    async fn test_with_store_loads_completion_history() {
+        let records = vec![
+            crate::model::CompletionRecord {
+                issue_id: "id1".to_string(),
+                identifier: "PROJ-1".to_string(),
+                outcome: crate::model::CompletionOutcome::Success,
+                duration_seconds: 60.0,
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                turn_count: 3,
+                completed_at: Utc::now(),
+            },
+            crate::model::CompletionRecord {
+                issue_id: "id2".to_string(),
+                identifier: "PROJ-2".to_string(),
+                outcome: crate::model::CompletionOutcome::Failed,
+                duration_seconds: 30.0,
+                input_tokens: 80,
+                output_tokens: 40,
+                total_tokens: 120,
+                turn_count: 2,
+                completed_at: Utc::now(),
+            },
+        ];
+        let store = Arc::new(MockStore::new().with_completion_history(records));
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        assert_eq!(state.completion_history().len(), 2);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_with_store_handles_completion_history_error() {
+        let store = Arc::new(MockStore::new().with_fail_load_completion_history());
+        let orch = test_orchestrator().with_store(store).await;
+
+        let state = orch.state.read().await;
+        assert!(state.completion_history().is_empty());
+        assert!(logs_contain("failed to load persisted completion history"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_persist_completion_record_save_error_is_best_effort() {
+        let store = Arc::new(MockStore::new().with_fail_save_completion_record());
+        let orch = test_orchestrator_with_store(store);
+
+        let record = crate::model::CompletionRecord {
+            issue_id: "id1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            outcome: crate::model::CompletionOutcome::Success,
+            duration_seconds: 60.0,
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            turn_count: 3,
+            completed_at: Utc::now(),
+        };
+        let mut state = orch.state.write().await;
+        orch.persist_completion_record(&mut state, record);
+
+        // Record is still added to in-memory state even if persist fails
+        assert_eq!(state.completion_history().len(), 1);
+        assert!(logs_contain("failed to persist completion record"));
     }
 
     // ── store_handle ────────────────────────────────────────────────
@@ -12086,10 +12148,7 @@ mod tests {
         // add_to_waiting_for_review failed, so NOT in waiting
         assert!(!state.waiting_for_review.contains_key("id1"));
         // Should have scheduled a retry (30s delay)
-        assert!(
-            state.retry_attempts.contains_key("id1"),
-            "should schedule retry when add_to_waiting_for_review fails"
-        );
+        assert!(state.retry_attempts.contains_key("id1"));
         let retry = state.retry_attempts.get("id1").unwrap();
         assert_eq!(retry.attempt, 0);
         assert_eq!(
@@ -12247,14 +12306,8 @@ mod tests {
         orch.reconcile_pr_lifecycle().await;
 
         // Both should be removed from the store
-        assert!(
-            !store.waiting_entries().iter().any(|e| e.issue_id == "id1"),
-            "no PR path should remove persisted waiting entry"
-        );
-        assert!(
-            !store.claimed_ids().contains(&"id1".to_string()),
-            "no PR path should remove persisted claimed marker"
-        );
+        assert!(!store.waiting_entries().iter().any(|e| e.issue_id == "id1"));
+        assert!(!store.claimed_ids().contains(&"id1".to_string()));
     }
 
     // ── reconcile_pr_lifecycle: auto-merge success persists store removal ─
@@ -12465,14 +12518,8 @@ mod tests {
         orch.reconcile_pr_lifecycle().await;
 
         // Both should be removed from the store
-        assert!(
-            !store.waiting_entries().iter().any(|e| e.issue_id == "id1"),
-            "stale waiting entry should remove persisted waiting entry"
-        );
-        assert!(
-            !store.claimed_ids().contains(&"id1".to_string()),
-            "stale waiting entry should remove persisted claimed marker"
-        );
+        assert!(!store.waiting_entries().iter().any(|e| e.issue_id == "id1"));
+        assert!(!store.claimed_ids().contains(&"id1".to_string()));
     }
 
     // ── on_worker_exit Normal In Review with store: verifies save_waiting ─
@@ -12517,11 +12564,7 @@ mod tests {
 
         // store.save_waiting should have been called via add_to_waiting_for_review
         let entries = store.waiting_entries();
-        assert_eq!(
-            entries.len(),
-            1,
-            "on_worker_exit Normal In Review should persist waiting entry"
-        );
+        assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].issue_id, "id1");
         assert_eq!(entries[0].pr_number, 42);
     }
