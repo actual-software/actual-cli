@@ -322,6 +322,29 @@ impl OrchestratorState {
         entry.alive = true;
     }
 
+    /// Record that a worker has claimed a job.
+    ///
+    /// Adds the issue identifier to the worker's `active_jobs` list so
+    /// the dashboard can show which worker is executing each session.
+    pub fn record_worker_claim(&mut self, worker_id: &str, issue_identifier: &str) {
+        if let Some(worker) = self.tracked_workers.get_mut(worker_id) {
+            if !worker.active_jobs.contains(&issue_identifier.to_string()) {
+                worker.active_jobs.push(issue_identifier.to_string());
+            }
+        }
+    }
+
+    /// Clear a worker's claim on a job (e.g. when the job completes).
+    ///
+    /// Removes the issue identifier from every tracked worker's
+    /// `active_jobs` list. Uses a linear scan since in practice each
+    /// worker has very few active jobs.
+    pub fn clear_worker_claim(&mut self, issue_identifier: &str) {
+        for worker in self.tracked_workers.values_mut() {
+            worker.active_jobs.retain(|j| j != issue_identifier);
+        }
+    }
+
     /// Mark a worker as dead.
     pub fn mark_worker_dead(&mut self, worker_id: &str) {
         if let Some(entry) = self.tracked_workers.get_mut(worker_id) {
@@ -1054,6 +1077,107 @@ mod tests {
         let mut state = OrchestratorState::new(5000, 4);
         state.mark_worker_dead("no-such-worker");
         assert!(state.tracked_workers.is_empty());
+    }
+
+    // ── record_worker_claim / clear_worker_claim ────────────────────
+
+    #[test]
+    fn record_worker_claim_adds_job() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+        state.register_worker(&reg);
+        state.record_worker_claim("w-1", "TST-42");
+        let w = state.tracked_workers.get("w-1").unwrap();
+        assert_eq!(w.active_jobs, vec!["TST-42".to_string()]);
+    }
+
+    #[test]
+    fn record_worker_claim_no_duplicate() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+        state.register_worker(&reg);
+        state.record_worker_claim("w-1", "TST-42");
+        state.record_worker_claim("w-1", "TST-42");
+        let w = state.tracked_workers.get("w-1").unwrap();
+        assert_eq!(w.active_jobs.len(), 1);
+    }
+
+    #[test]
+    fn record_worker_claim_unknown_worker_is_noop() {
+        let mut state = OrchestratorState::new(5000, 4);
+        state.record_worker_claim("no-such-worker", "TST-42");
+        assert!(state.tracked_workers.is_empty());
+    }
+
+    #[test]
+    fn clear_worker_claim_removes_job() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 2,
+        };
+        state.register_worker(&reg);
+        state.record_worker_claim("w-1", "TST-42");
+        state.record_worker_claim("w-1", "TST-43");
+        state.clear_worker_claim("TST-42");
+        let w = state.tracked_workers.get("w-1").unwrap();
+        assert_eq!(w.active_jobs, vec!["TST-43".to_string()]);
+    }
+
+    #[test]
+    fn clear_worker_claim_scans_all_workers() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let reg1 = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+        let reg2 = WorkerRegistration {
+            worker_id: "w-2".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+        state.register_worker(&reg1);
+        state.register_worker(&reg2);
+        state.record_worker_claim("w-1", "TST-42");
+        state.record_worker_claim("w-2", "TST-42");
+        state.clear_worker_claim("TST-42");
+        assert!(state
+            .tracked_workers
+            .get("w-1")
+            .unwrap()
+            .active_jobs
+            .is_empty());
+        assert!(state
+            .tracked_workers
+            .get("w-2")
+            .unwrap()
+            .active_jobs
+            .is_empty());
+    }
+
+    #[test]
+    fn clear_worker_claim_nonexistent_job_is_noop() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+        state.register_worker(&reg);
+        state.record_worker_claim("w-1", "TST-42");
+        state.clear_worker_claim("TST-99");
+        let w = state.tracked_workers.get("w-1").unwrap();
+        assert_eq!(w.active_jobs, vec!["TST-42".to_string()]);
     }
 
     #[test]
