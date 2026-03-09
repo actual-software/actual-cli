@@ -1328,6 +1328,10 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
   .stats {{ grid-template-columns:repeat(2,1fr); grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); }}
   .header {{ flex-direction:column; gap:12px; }}
 }}
+.filter-bar {{ padding:10px 20px; border-bottom:1px solid var(--border); }}
+.filter-bar input {{ width:100%; max-width:360px; background:var(--surface2); border:1px solid var(--border); color:var(--text); padding:7px 12px; border-radius:var(--radius); font-size:13px; outline:none; }}
+.filter-bar input::placeholder {{ color:var(--text-dim); }}
+.filter-bar input:focus {{ border-color:var(--accent); }}
 </style>
 </head>
 <body>
@@ -1378,6 +1382,9 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
   <div class="section">
     <div class="section-header">
       <h2>Running Sessions <span class="badge" id="runningBadge">0</span></h2>
+    </div>
+    <div class="filter-bar">
+      <input id="runningFilter" type="text" placeholder="Filter by issue, state, or event…" oninput="filterRunning(this.value)" />
     </div>
     <div id="runningContent">
       <div class="empty-state">
@@ -1495,21 +1502,45 @@ function ago(iso) {{
 
 function esc(s) {{ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }}
 
+let runningItems = [];
+let runningMode = '';
+
 function renderRunning(items, mode) {{
-  const el = document.getElementById('runningContent');
+  runningItems = items;
+  runningMode = mode;
   document.getElementById('runningBadge').textContent = items.length;
+  applyRunningFilter();
+}}
+
+function filterRunning(q) {{
+  applyRunningFilter();
+}}
+
+function applyRunningFilter() {{
+  const el = document.getElementById('runningContent');
+  const filterEl = document.getElementById('runningFilter');
+  const q = filterEl ? filterEl.value.toLowerCase() : '';
+  const items = q
+    ? runningItems.filter(r =>
+        r.issue_identifier.toLowerCase().includes(q) ||
+        r.state.toLowerCase().includes(q) ||
+        (r.last_event && r.last_event.toLowerCase().includes(q))
+      )
+    : runningItems;
   if (!items.length) {{
-    el.innerHTML = '<div class="empty-state"><div class="icon">No running sessions</div><p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p></div>';
+    el.innerHTML = runningItems.length
+      ? '<div class="empty-state"><div class="icon">No matches</div><p>No sessions match your filter.</p></div>'
+      : '<div class="empty-state"><div class="icon">No running sessions</div><p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p></div>';
     return;
   }}
   let h = '<table><thead><tr><th>Issue</th><th>State</th>';
-  if (mode === 'distributed') h += '<th>Worker</th>';
+  if (runningMode === 'distributed') h += '<th>Worker</th>';
   h += '<th>Session</th><th>Turns</th><th>Last Event</th><th>Tokens</th><th>Started</th></tr></thead><tbody>';
   for (const r of items) {{
     h += '<tr onclick="openLogPanel(\''+esc(r.issue_identifier)+'\')" title="Click to view live logs">';
     h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
     h += '<td><span class="state-badge active">'+esc(r.state)+'</span></td>';
-    if (mode === 'distributed') h += '<td class="mono">'+(r.worker_id ? esc(r.worker_id) : '-')+'</td>';
+    if (runningMode === 'distributed') h += '<td class="mono">'+(r.worker_id ? esc(r.worker_id) : '-')+'</td>';
     h += '<td class="mono">'+(r.session_id ? esc(r.session_id).slice(0,12) : '-')+'</td>';
     h += '<td>'+r.turn_count+'</td>';
     h += '<td>'+(r.last_event ? esc(r.last_event) : '-')+'</td>';
@@ -2016,6 +2047,40 @@ mod tests {
         assert!(html.contains("const INITIAL"));
         // Verify auto-polling JS is present
         assert!(html.contains("/api/v1/state"));
+        // Verify filter input is present
+        assert!(html.contains(r#"id="runningFilter""#));
+        assert!(html.contains("filterRunning"));
+        assert!(html.contains("applyRunningFilter"));
+    }
+
+    #[test]
+    fn test_render_dashboard_filter_input_present() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+        // Filter input element
+        assert!(html.contains(r#"id="runningFilter""#));
+        assert!(html.contains(r#"type="text""#));
+        assert!(html.contains("Filter by issue"));
+        assert!(html.contains("oninput=\"filterRunning(this.value)\""));
+        // JS filter functions
+        assert!(html.contains("function filterRunning(q)"));
+        assert!(html.contains("function applyRunningFilter()"));
+        // Filter bar CSS
+        assert!(html.contains(".filter-bar"));
     }
 
     #[test]
