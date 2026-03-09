@@ -34,7 +34,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder — compile the symphony-worker binary
 # ---------------------------------------------------------------------------
-FROM rust:1.87-bookworm AS builder
+FROM rust:1-bookworm AS builder
 
 WORKDIR /build
 
