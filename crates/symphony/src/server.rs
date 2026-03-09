@@ -115,7 +115,8 @@ pub struct StateResponse {
     pub retrying: Vec<RetryInfo>,
     pub waiting: Vec<WaitingInfo>,
     pub completed: Vec<CompletedInfo>,
-    pub codex_totals: TotalsInfo,
+    #[serde(alias = "codex_totals")]
+    pub agent_totals: TotalsInfo,
     pub rate_limits: Option<serde_json::Value>,
     pub workers: Vec<WorkerInfo>,
     pub pending_jobs: Vec<PendingJobInfo>,
@@ -556,7 +557,7 @@ async fn handle_state(State(state): State<AppState>) -> impl IntoResponse {
         retrying: snapshot.retrying,
         waiting: snapshot.waiting,
         completed: snapshot.completed,
-        codex_totals: snapshot.totals,
+        agent_totals: snapshot.totals,
         rate_limits,
         workers: snapshot.workers,
         pending_jobs: snapshot.pending_jobs,
@@ -659,7 +660,7 @@ fn build_state_response(state: &OrchestratorState, deployment_mode: &str) -> Sta
         retrying: snapshot.retrying,
         waiting: snapshot.waiting,
         completed: snapshot.completed,
-        codex_totals: snapshot.totals,
+        agent_totals: snapshot.totals,
         rate_limits,
         workers: snapshot.workers,
         pending_jobs: snapshot.pending_jobs,
@@ -1225,7 +1226,7 @@ pub fn render_dashboard(
         "retrying": retrying,
         "waiting": waiting,
         "completed": completed,
-        "codex_totals": totals,
+        "agent_totals": totals,
         "rate_limits": rate_limits,
         "workers": workers,
         "pending_jobs": pending_jobs,
@@ -1687,7 +1688,7 @@ function renderRateLimits(rl) {{
 }}
 
 function update(data) {{
-  const t = data.codex_totals || {{}};
+  const t = data.agent_totals || {{}};
   const mode = data.deployment_mode || 'local';
   document.getElementById('countRunning').textContent = (data.counts||{{}}).running || 0;
   document.getElementById('countRetrying').textContent = (data.counts||{{}}).retrying || 0;
@@ -2635,9 +2636,9 @@ mod tests {
         assert_eq!(json["counts"]["retrying"], 0);
         assert!(json["running"].is_array());
         assert!(json["retrying"].is_array());
-        assert_eq!(json["codex_totals"]["input_tokens"], 0);
-        assert_eq!(json["codex_totals"]["output_tokens"], 0);
-        assert_eq!(json["codex_totals"]["total_tokens"], 0);
+        assert_eq!(json["agent_totals"]["input_tokens"], 0);
+        assert_eq!(json["agent_totals"]["output_tokens"], 0);
+        assert_eq!(json["agent_totals"]["total_tokens"], 0);
         assert!(json["rate_limits"].is_null());
     }
 
@@ -3113,7 +3114,7 @@ mod tests {
             retrying: vec![],
             waiting: vec![],
             completed: vec![],
-            codex_totals: TotalsInfo {
+            agent_totals: TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
@@ -3130,7 +3131,7 @@ mod tests {
         assert!(json.contains("counts"));
         assert!(json.contains("running"));
         assert!(json.contains("completed"));
-        assert!(json.contains("codex_totals"));
+        assert!(json.contains("agent_totals"));
         assert!(json.contains("PROJ-1"));
     }
 
@@ -4500,7 +4501,7 @@ mod tests {
         assert!(response.running.is_empty());
         assert!(response.retrying.is_empty());
         assert!(response.completed.is_empty());
-        assert_eq!(response.codex_totals.input_tokens, 0);
+        assert_eq!(response.agent_totals.input_tokens, 0);
         assert!(response.rate_limits.is_none());
     }
 
@@ -4537,7 +4538,7 @@ mod tests {
         let response = build_state_response(&state, "local");
         assert_eq!(response.counts.running, 1);
         assert_eq!(response.running[0].issue_identifier, "PROJ-1");
-        assert_eq!(response.codex_totals.input_tokens, 500);
+        assert_eq!(response.agent_totals.input_tokens, 500);
         assert_eq!(response.rate_limits.unwrap()["remaining"], 10);
     }
 
@@ -4548,7 +4549,7 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("generated_at"));
         assert!(json.contains("counts"));
-        assert!(json.contains("codex_totals"));
+        assert!(json.contains("agent_totals"));
     }
 
     // ── state_broadcast_to_json ────────────────────────────────────
@@ -4561,7 +4562,7 @@ mod tests {
         assert!(json.is_some());
         let json_str = json.unwrap();
         assert!(json_str.contains("generated_at"));
-        assert!(json_str.contains("codex_totals"));
+        assert!(json_str.contains("agent_totals"));
     }
 
     #[test]
@@ -4632,7 +4633,7 @@ mod tests {
         if let Ok(Ok(text)) = body {
             assert!(text.contains("PROJ-1"));
             assert!(text.contains("generated_at"));
-            assert!(text.contains("codex_totals"));
+            assert!(text.contains("agent_totals"));
         }
     }
 
@@ -4877,7 +4878,7 @@ mod tests {
                 started_waiting_at: "2025-01-01T00:00:00Z".to_string(),
             }],
             completed: vec![],
-            codex_totals: TotalsInfo {
+            agent_totals: TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
@@ -4913,7 +4914,7 @@ mod tests {
             retrying: vec![],
             waiting: vec![],
             completed: vec![],
-            codex_totals: TotalsInfo {
+            agent_totals: TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
@@ -5737,7 +5738,7 @@ mod tests {
             retrying: vec![],
             waiting: vec![],
             completed: vec![],
-            codex_totals: TotalsInfo {
+            agent_totals: TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
