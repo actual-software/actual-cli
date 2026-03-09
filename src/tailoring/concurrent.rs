@@ -703,18 +703,23 @@ mod tests {
         assert_eq!(output.files.len(), 4);
     }
 
-    // --- Test 4: root CLAUDE.md content from multiple projects is concatenated ---
+    // --- Test 4: root CLAUDE.md content from multiple projects is merged ---
 
     #[tokio::test]
     async fn test_root_claude_md_concatenated() {
         let projects = vec![make_project("a"), make_project("b"), make_project("c")];
-        let adrs = vec![make_adr("adr-001")];
+        let adrs = vec![
+            make_adr("adr-001"),
+            make_adr("adr-002"),
+            make_adr("adr-003"),
+        ];
 
-        // All three projects produce content for root CLAUDE.md
+        // Each project produces content for root CLAUDE.md with a distinct adr_id,
+        // so all three sections are preserved as separate entries after merge.
         let responses = vec![
             make_output_json("CLAUDE.md", "Rules from project A", &["adr-001"]),
-            make_output_json("CLAUDE.md", "Rules from project B", &["adr-001"]),
-            make_output_json("CLAUDE.md", "Rules from project C", &["adr-001"]),
+            make_output_json("CLAUDE.md", "Rules from project B", &["adr-002"]),
+            make_output_json("CLAUDE.md", "Rules from project C", &["adr-003"]),
         ];
 
         let runner = ConcurrentMockRunner::new(responses, Duration::from_millis(10));
@@ -737,7 +742,7 @@ mod tests {
         assert_eq!(output.files.len(), 1);
         assert_eq!(output.files[0].path, "CLAUDE.md");
 
-        // Content from all three projects should be concatenated with "\n\n"
+        // Content from all three projects should be present (different adr_ids = separate sections)
         let content = &output.files[0].content();
         assert!(
             content.contains("Rules from project A"),
@@ -752,14 +757,14 @@ mod tests {
             "missing content from project C in: {content}"
         );
 
-        // Verify the concatenation separator: order depends on concurrent execution.
+        // Verify the section separator: order depends on concurrent execution.
         // Use bitwise OR to ensure both sides are always evaluated (avoids
         // short-circuit region that LLVM marks as uncovered).
         let has_a_then_b = content.contains("Rules from project A\n\nRules from project B");
         let has_b_then_a = content.contains("Rules from project B\n\nRules from project A");
         assert!(
             has_a_then_b | has_b_then_a,
-            "expected content concatenated with newlines, got: {content}"
+            "expected content sections joined with newlines, got: {content}"
         );
     }
 
