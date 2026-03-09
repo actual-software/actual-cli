@@ -59,11 +59,12 @@ pub async fn synthesize_cross_lens<R: TailoringRunner>(
     diff: &DiffContext,
     model: Option<&str>,
     max_budget_usd: Option<f64>,
+    max_tokens: Option<u32>,
 ) -> Result<CrossLensSynthesis, ActualError> {
     let prompt = build_synthesis_prompt(reviews, aggregated, diff);
     let schema = CROSS_LENS_SYNTHESIS_SCHEMA;
     runner
-        .run_raw_json(&prompt, schema, model, max_budget_usd)
+        .run_raw_json(&prompt, schema, model, max_budget_usd, max_tokens)
         .await
 }
 

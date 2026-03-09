@@ -1,4 +1,4 @@
-use super::types::{AggregatedResult, Decision, LensReview, ReviewerLens, Signal};
+use super::types::{AggregatedResult, Decision, LensReview, Signal};
 
 impl Signal {
     /// Maps a signal to its corresponding decision per the Change Risk Signaling Policy.
@@ -29,18 +29,14 @@ pub fn aggregate_signals(reviews: &[LensReview]) -> AggregatedResult {
 
     let (overall_signal, decision) = if non_gray.is_empty() {
         (Signal::Green, Decision::Proceed)
-    } else if reviews.iter().any(|r| {
-        r.signal == Signal::Red
-            && matches!(
-                r.lens,
-                ReviewerLens::SecurityEngineer | ReviewerLens::SreEngineer
-            )
-    }) {
-        (Signal::Red, Decision::BlockOrEscalate)
     } else if non_gray.iter().any(|r| r.signal == Signal::Red) {
+        // Any Red signal (including security/SRE auto-block) escalates to Red.
         (Signal::Red, Decision::BlockOrEscalate)
     } else {
-        let yellow_count = non_gray.iter().filter(|r| r.signal == Signal::Yellow).count();
+        let yellow_count = non_gray
+            .iter()
+            .filter(|r| r.signal == Signal::Yellow)
+            .count();
         if yellow_count >= 3 {
             (Signal::Red, Decision::BlockOrEscalate)
         } else if yellow_count > 0 {
@@ -189,7 +185,10 @@ mod tests {
     #[test]
     fn signal_to_decision_mapping() {
         assert_eq!(Signal::Red.to_decision(), Decision::BlockOrEscalate);
-        assert_eq!(Signal::Yellow.to_decision(), Decision::ProceedWithMitigation);
+        assert_eq!(
+            Signal::Yellow.to_decision(),
+            Decision::ProceedWithMitigation
+        );
         assert_eq!(Signal::Green.to_decision(), Decision::Proceed);
         assert_eq!(Signal::Gray.to_decision(), Decision::Proceed);
     }

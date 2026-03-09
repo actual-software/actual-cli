@@ -4,20 +4,6 @@ use crate::error::ActualError;
 use crate::runner::subprocess::TailoringRunner;
 
 impl ReviewerLens {
-    /// All 8 reviewer lenses in canonical order.
-    pub fn all() -> &'static [ReviewerLens] {
-        &[
-            ReviewerLens::PrincipalEngineer,
-            ReviewerLens::ProgramManager,
-            ReviewerLens::ProductManager,
-            ReviewerLens::SecurityEngineer,
-            ReviewerLens::PragmaticEngineer,
-            ReviewerLens::OssMaintainer,
-            ReviewerLens::TestEngineer,
-            ReviewerLens::SreEngineer,
-        ]
-    }
-
     /// Human-readable name for this lens.
     pub fn name(&self) -> &'static str {
         match self {
@@ -148,6 +134,7 @@ pub async fn run_parallel_reviews<R: TailoringRunner>(
     lenses: &[ReviewerLens],
     model: Option<&str>,
     max_budget_usd: Option<f64>,
+    max_tokens: Option<u32>,
 ) -> Result<Vec<LensReview>, ActualError> {
     let futures: Vec<_> = lenses
         .iter()
@@ -155,7 +142,13 @@ pub async fn run_parallel_reviews<R: TailoringRunner>(
             let prompt = build_lens_prompt(lens, diff, adrs);
             async move {
                 let review: LensReview = runner
-                    .run_raw_json(&prompt, LENS_REVIEW_SCHEMA, model, max_budget_usd)
+                    .run_raw_json(
+                        &prompt,
+                        LENS_REVIEW_SCHEMA,
+                        model,
+                        max_budget_usd,
+                        max_tokens,
+                    )
                     .await?;
                 Ok::<LensReview, ActualError>(review)
             }

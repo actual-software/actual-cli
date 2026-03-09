@@ -27,6 +27,10 @@ pub struct InvocationOptions {
     /// (e.g., tailoring uses Read/Write/Edit/Glob/Grep). Profiles that include
     /// Bash or WebFetch must leave this `false` so the user is prompted.
     pub skip_permissions: bool,
+    /// Optional maximum tokens for the response.
+    ///
+    /// When set, emits `--max-tokens <n>` in the CLI args.
+    pub max_tokens: Option<u32>,
 }
 
 /// Default model for the Claude CLI runner.
@@ -56,6 +60,7 @@ impl InvocationOptions {
             json_schema: None,
             max_budget_usd: None,
             skip_permissions: true,
+            max_tokens: None,
         }
     }
 
@@ -72,6 +77,7 @@ impl InvocationOptions {
             json_schema: None,
             max_budget_usd: None,
             skip_permissions: true,
+            max_tokens: None,
         }
     }
 
@@ -122,6 +128,11 @@ impl InvocationOptions {
         if let Some(budget) = self.max_budget_usd {
             args.push("--max-budget-usd".to_string());
             args.push(budget.to_string());
+        }
+
+        if let Some(tokens) = self.max_tokens {
+            args.push("--max-tokens".to_string());
+            args.push(tokens.to_string());
         }
 
         args
@@ -306,6 +317,29 @@ mod tests {
     fn test_for_review_no_json_schema_by_default() {
         let opts = InvocationOptions::for_review(None);
         assert!(opts.json_schema.is_none());
+    }
+
+    #[test]
+    fn test_max_tokens_none_by_default() {
+        let tailoring = InvocationOptions::for_tailoring(None);
+        assert!(tailoring.max_tokens.is_none());
+        let review = InvocationOptions::for_review(None);
+        assert!(review.max_tokens.is_none());
+    }
+
+    #[test]
+    fn test_to_args_omits_max_tokens_when_none() {
+        let opts = InvocationOptions::for_review(None);
+        let args = opts.to_args();
+        assert!(!args.contains(&"--max-tokens".to_string()));
+    }
+
+    #[test]
+    fn test_to_args_includes_max_tokens_when_set() {
+        let mut opts = InvocationOptions::for_review(None);
+        opts.max_tokens = Some(16000);
+        let args = opts.to_args();
+        assert_arg_value(&args, "--max-tokens", "16000");
     }
 
     /// Assert that `--flag value` appears as consecutive elements.
