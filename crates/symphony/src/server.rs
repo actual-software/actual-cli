@@ -29,10 +29,11 @@ pub struct AppState {
 
 /// Start the HTTP dashboard/API server.
 ///
-/// Binds to `127.0.0.1:{port}`. If port is 0, an ephemeral port is chosen
-/// and the actual port is logged.
+/// Binds to `{bind_address}:{port}`. If port is 0, an ephemeral port is chosen
+/// and the actual address is logged.
 pub async fn start_server(
     port: u16,
+    bind_address: &str,
     state: Arc<RwLock<OrchestratorState>>,
     config: Arc<RwLock<ServiceConfig>>,
     msg_tx: mpsc::Sender<OrchestratorMessage>,
@@ -48,10 +49,10 @@ pub async fn start_server(
 
     let app = build_router(app_state);
 
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("{bind_address}:{port}");
     let listener = TcpListener::bind(&addr).await?;
     let local_addr = listener.local_addr()?;
-    info!(port = local_addr.port(), "HTTP server listening");
+    info!(address = %local_addr, "HTTP server listening");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
@@ -1249,7 +1250,10 @@ mod tests {
                 turn_timeout_ms: 3_600_000,
                 stall_timeout_ms: 300_000,
             },
-            server: ServerConfig { port: None },
+            server: ServerConfig {
+                port: None,
+                bind: None,
+            },
             deployment: DeploymentConfig {
                 mode: DeploymentMode::Local,
                 auth_token: None,
@@ -2047,6 +2051,7 @@ mod tests {
         let job_notify = Arc::new(tokio::sync::Notify::new());
         let handle = tokio::spawn(start_server(
             0,
+            "127.0.0.1",
             state_arc,
             config_arc,
             msg_tx,

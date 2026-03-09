@@ -154,6 +154,7 @@ All configuration lives in the YAML front matter of `WORKFLOW.md`. Changes to th
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `port` | integer | (none) | Port for the HTTP dashboard/API. If omitted, the server is not started. Use `0` for an ephemeral port |
+| `bind` | string | `127.0.0.1` | IP address to bind the HTTP server to. Use `0.0.0.0` to listen on all interfaces |
 
 ## CLI
 
@@ -165,10 +166,11 @@ symphony [OPTIONS] [WORKFLOW_PATH]
 |-----------------|------|---------|-------------|
 | `WORKFLOW_PATH` | positional | `WORKFLOW.md` | Path to the workflow file |
 | `--port` | integer | (none) | Start HTTP dashboard on this port. Overrides `server.port` in WORKFLOW.md |
+| `--bind` | string | `127.0.0.1` | Bind address for the HTTP dashboard. Overrides `server.bind` in WORKFLOW.md. Use `0.0.0.0` to listen on all interfaces |
 
 ## HTTP Dashboard & API
 
-When `--port` or `server.port` is configured, Symphony starts an HTTP server on `127.0.0.1:{port}` with a live web dashboard and JSON API.
+When `--port` or `server.port` is configured, Symphony starts an HTTP server on `{bind}:{port}` (default `127.0.0.1`) with a live web dashboard and JSON API. Use `--bind 0.0.0.0` or `server.bind: "0.0.0.0"` to listen on all interfaces.
 
 ### Dashboard (GET /)
 

@@ -2354,7 +2354,10 @@ mod tests {
                 turn_timeout_ms: 3_600_000,
                 stall_timeout_ms: 300_000,
             },
-            server: ServerConfig { port: None },
+            server: ServerConfig {
+                port: None,
+                bind: None,
+            },
             deployment: DeploymentConfig {
                 mode: DeploymentMode::Local,
                 auth_token: None,
