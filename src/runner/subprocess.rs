@@ -42,6 +42,26 @@ pub trait TailoringRunner: Send + Sync {
         max_budget_usd: Option<f64>,
     ) -> Result<TailoringOutput, ActualError>;
 
+    /// Run a prompt with a JSON schema and deserialize the result into `T`.
+    ///
+    /// Unlike [`run_tailoring`], which always returns [`TailoringOutput`], this
+    /// method is generic over the return type, making it suitable for any
+    /// structured output use case (e.g., code review lenses).
+    ///
+    /// The default implementation returns an error — implementors must opt in.
+    async fn run_raw_json<T: DeserializeOwned + Send>(
+        &self,
+        prompt: &str,
+        schema: &str,
+        model_override: Option<&str>,
+        max_budget_usd: Option<f64>,
+    ) -> Result<T, ActualError> {
+        let _ = (prompt, schema, model_override, max_budget_usd);
+        Err(ActualError::InternalError(
+            "run_raw_json not implemented for this runner".to_string(),
+        ))
+    }
+
     /// Register a channel for streaming subprocess events (tool calls, stderr lines).
     ///
     /// Each message is a human-readable summary line such as
@@ -634,6 +654,34 @@ impl TailoringRunner for CliClaudeRunner {
         use crate::runner::options::InvocationOptions;
 
         let mut opts = InvocationOptions::for_tailoring(model_override);
+        if let Some(t) = self.max_turns_override {
+            opts.max_turns = t;
+        }
+        opts.json_schema = Some(schema.to_string());
+        opts.max_budget_usd = max_budget_usd;
+
+        let mut args = opts.to_args();
+        args.push("-p".to_string());
+        args.push(prompt.to_string());
+
+        let event_tx = self
+            .event_tx
+            .lock()
+            .expect("event_tx mutex poisoned")
+            .clone();
+        run_subprocess_streaming(&self.binary_path, self.timeout, &args, event_tx).await
+    }
+
+    async fn run_raw_json<T: DeserializeOwned + Send>(
+        &self,
+        prompt: &str,
+        schema: &str,
+        model_override: Option<&str>,
+        max_budget_usd: Option<f64>,
+    ) -> Result<T, ActualError> {
+        use crate::runner::options::InvocationOptions;
+
+        let mut opts = InvocationOptions::for_review(model_override);
         if let Some(t) = self.max_turns_override {
             opts.max_turns = t;
         }

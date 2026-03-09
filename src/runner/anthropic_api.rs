@@ -443,6 +443,106 @@ impl TailoringRunner for AnthropicApiRunner {
         let output: TailoringOutput = serde_json::from_value(tool_input)?;
         Ok(output)
     }
+
+    async fn run_raw_json<T: serde::de::DeserializeOwned + Send>(
+        &self,
+        prompt: &str,
+        schema: &str,
+        model_override: Option<&str>,
+        _max_budget_usd: Option<f64>,
+    ) -> Result<T, ActualError> {
+        let event_tx = self.event_tx.lock().unwrap().clone();
+        let model = model_override.unwrap_or(&self.model);
+        let schema_value: Value = serde_json::from_str(schema)?;
+
+        if let Some(ref tx) = event_tx {
+            let _ = tx.send(format!(
+                "Sending review request to Anthropic API (model: {model})..."
+            ));
+        }
+
+        let request_body = serde_json::json!({
+            "model": model,
+            "max_tokens": self.max_tokens,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "tools": [
+                {
+                    "name": "return_result",
+                    "description": "Return the structured result",
+                    "input_schema": schema_value
+                }
+            ],
+            "tool_choice": {
+                "type": "tool",
+                "name": "return_result"
+            }
+        });
+
+        let response = self.post_messages(request_body, event_tx.as_ref()).await?;
+
+        if let Some(ref tx) = event_tx {
+            let _ = tx.send("Response received from Anthropic API".to_string());
+        }
+
+        let truncated = response
+            .get("stop_reason")
+            .and_then(Value::as_str)
+            .is_some_and(|r| r == "max_tokens");
+
+        if truncated {
+            tracing::warn!(
+                "Anthropic API response was truncated (stop_reason=max_tokens, \
+                 limit={}). Consider increasing max_tokens in your config.",
+                self.max_tokens
+            );
+        }
+
+        let content_blocks: Vec<ContentBlock> = match response.get("content") {
+            Some(c) => {
+                serde_json::from_value(c.clone()).map_err(|e| ActualError::RunnerFailed {
+                    message: format!("Failed to parse API response content blocks: {e}"),
+                    stderr: String::new(),
+                })?
+            }
+            None => Vec::new(),
+        };
+
+        let tool_input = content_blocks
+            .into_iter()
+            .find(|block| {
+                block.block_type == "tool_use" && block.name.as_deref() == Some("return_result")
+            })
+            .and_then(|block| block.input);
+
+        let tool_input = match tool_input {
+            Some(input) => input,
+            None if truncated => {
+                return Err(ActualError::RunnerFailed {
+                    message: format!(
+                        "Anthropic API response was truncated at {} tokens and \
+                         did not contain a complete structured result. \
+                         Increase max_tokens in your config to fix this.",
+                        self.max_tokens
+                    ),
+                    stderr: String::new(),
+                });
+            }
+            None => {
+                return Err(ActualError::RunnerFailed {
+                    message: "Anthropic API did not return structured result".to_string(),
+                    stderr: String::new(),
+                });
+            }
+        };
+
+        let output: T = serde_json::from_value(tool_input)?;
+        Ok(output)
+    }
 }
 
 #[cfg(test)]
@@ -1731,5 +1831,95 @@ mod tests {
         let result: Result<Vec<u8>, String> = Err("connection reset".to_string());
         let body = extract_error_body(result, 4096);
         assert_eq!(body, "<body read error: connection reset>");
+    }
+
+    // Tests for run_raw_json
+
+    #[tokio::test]
+    async fn test_run_raw_json_valid_response() {
+        let mut server = Server::new_async().await;
+        let review_json = serde_json::json!({
+            "signal": "green",
+            "findings": []
+        });
+        let response_body = anthropic_tool_use_response(review_json);
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result: Result<Value, _> = runner
+            .run_raw_json("Review this code", schema, None, None)
+            .await;
+
+        mock.assert_async().await;
+        let output = result.expect("expected Ok");
+        assert_eq!(output["signal"], "green");
+    }
+
+    #[tokio::test]
+    async fn test_run_raw_json_no_tool_use_block() {
+        let mut server = Server::new_async().await;
+        let response_body = serde_json::json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I cannot help with that."}
+            ],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 50, "output_tokens": 20}
+        });
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result: Result<Value, _> = runner
+            .run_raw_json("Review this code", schema, None, None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_raw_json_model_override() {
+        let mut server = Server::new_async().await;
+        let review_json = serde_json::json!({"signal": "yellow"});
+        let response_body = anthropic_tool_use_response(review_json);
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"model":"claude-opus-4-6"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body.to_string())
+            .create_async()
+            .await;
+
+        let runner = make_runner(&server.url());
+        let schema = r#"{"type":"object"}"#;
+        let result: Result<Value, _> = runner
+            .run_raw_json("Review", schema, Some("claude-opus-4-6"), None)
+            .await;
+
+        mock.assert_async().await;
+        assert!(result.is_ok());
     }
 }
