@@ -346,11 +346,17 @@ pub fn parse_fallback_message(json: &serde_json::Value, msg_type: &str) -> Vec<A
                     Some(s.to_string())
                 };
             }
-            // Structured form — collect text blocks from content array
+            // Structured form — collect text from content array items.
+            // Items can be text blocks ({"type":"text","text":"..."}) or
+            // tool_result blocks ({"type":"tool_result","content":"..."}).
             v.get("content").and_then(|c| c.as_array()).and_then(|arr| {
                 let texts: Vec<&str> = arr
                     .iter()
-                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                    .filter_map(|item| {
+                        item.get("text")
+                            .and_then(|t| t.as_str())
+                            .or_else(|| item.get("content").and_then(|c| c.as_str()))
+                    })
                     .collect();
                 if texts.is_empty() {
                     None
@@ -725,13 +731,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_fallback_structured_message_content() {
+    fn test_parse_fallback_structured_message_text_field() {
         let json = serde_json::json!({
             "type": "user",
             "message": {
                 "content": [
-                    { "type": "tool_result", "text": "file contents here" },
-                    { "type": "tool_result", "text": "second result" }
+                    { "type": "text", "text": "hello world" },
+                    { "type": "text", "text": "second line" }
                 ]
             }
         });
@@ -739,7 +745,26 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert!(
             matches!(&events[0], AgentEvent::AgentMessage { event_type, message }
-            if event_type == "user" && message.as_deref() == Some("file contents here\nsecond result"))
+            if event_type == "user" && message.as_deref() == Some("hello world\nsecond line"))
+        );
+    }
+
+    #[test]
+    fn test_parse_fallback_structured_tool_result_content_string() {
+        // Real Claude CLI structure: tool_result blocks use "content" (string), not "text"
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    { "type": "tool_result", "tool_use_id": "abc", "content": "file contents here" }
+                ]
+            }
+        });
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AgentEvent::AgentMessage { event_type, message }
+            if event_type == "user" && message.as_deref() == Some("file contents here"))
         );
     }
 
