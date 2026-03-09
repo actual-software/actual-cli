@@ -177,6 +177,13 @@ RUN echo "Host *\n    StrictHostKeyChecking accept-new\n    UserKnownHostsFile ~
     > /home/worker/.ssh/config && \
     chmod 600 /home/worker/.ssh/config
 
+# Create a clean .claude configuration for the worker.
+# Do NOT mount the host's ~/.claude — it contains hooks, plugins, and
+# session-env entries that reference host-only paths and break the agent's
+# Bash/Read/Write/Edit tools inside the container.
+RUN mkdir -p /home/worker/.claude && \
+    echo '{"skipDangerousModePermissionPrompt": true}' > /home/worker/.claude/settings.json
+
 # No ports exposed — the worker is an outbound-only client that connects
 # to the orchestrator via ORCHESTRATOR_URL.
 

@@ -23,8 +23,8 @@ services:
     build:
       context: .
       dockerfile: docker/worker.Dockerfile
-    volumes:
-      - ~/.claude:/home/worker/.claude:ro
+    deploy:
+      replicas: 5
     env_file: .env.local
     environment:
       - ORCHESTRATOR_URL=http://orchestrator:7070
