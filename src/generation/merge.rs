@@ -8,8 +8,10 @@ use crate::tailoring::types::{
 
 /// Merge multiple [`TailoringOutput`]s into a single combined output.
 ///
-/// - Overlapping file paths (same `path`): sections are merged (deduplicated by
-///   `adr_id`, last occurrence wins), and `reasoning` strings are combined with `"; "`.
+/// - Overlapping file paths (same `path`): sections are merged by `adr_id`. When the
+///   same `adr_id` appears in multiple outputs for the same path, their content is
+///   concatenated with `"\n\n"`. New `adr_id`s are appended in encounter order.
+///   `reasoning` strings are combined with `"; "`.
 /// - Different file paths: both are included in the result.
 /// - `skipped_adrs` are deduplicated by `id` (first occurrence wins).
 /// - `summary` is recomputed from deduplicated data: `applicable` counts unique ADR IDs
@@ -25,16 +27,16 @@ pub fn merge_outputs(outputs: Vec<TailoringOutput>) -> TailoringOutput {
             file_map
                 .entry(file.path.clone())
                 .and_modify(|existing| {
-                    // Merge sections by adr_id: if same adr_id exists,
-                    // concatenate content; otherwise append new section.
+                    // Merge sections: same adr_id → concatenate content; new adr_id → append.
                     for section in &file.sections {
                         if let Some(pos) = existing
                             .sections
                             .iter()
                             .position(|s| s.adr_id == section.adr_id)
                         {
-                            // Same adr_id: last occurrence wins (replace content)
-                            existing.sections[pos].content = section.content.clone();
+                            // Same adr_id: concatenate content from both outputs
+                            existing.sections[pos].content.push_str("\n\n");
+                            existing.sections[pos].content.push_str(&section.content);
                         } else {
                             existing.sections.push(section.clone());
                         }
@@ -285,16 +287,16 @@ mod tests {
         let file = &merged.files[0];
         assert_eq!(file.path, "CLAUDE.md");
 
-        // adr_ids deduplicated, preserving insertion order; adr-002 content replaced by batch 2
+        // adr_ids deduplicated, preserving insertion order
         assert_eq!(file.adr_ids(), vec!["adr-001", "adr-002", "adr-003"]);
 
-        // Last occurrence wins: adr-002 content from batch 2 replaces batch 1
+        // Same adr_id from two outputs → content concatenated with "\n\n"
         let adr002 = file
             .sections
             .iter()
             .find(|s| s.adr_id == "adr-002")
             .unwrap();
-        assert_eq!(adr002.content, "# Batch 2 rules");
+        assert_eq!(adr002.content, "# Batch 1 rules\n\n# Batch 2 rules");
 
         // Reasoning combined with "; "
         assert_eq!(file.reasoning, "First batch; Second batch");
@@ -307,9 +309,9 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_outputs_duplicate_adr_id_last_wins() {
+    fn test_merge_outputs_duplicate_adr_id_content_concatenated() {
         // When the same adr_id appears in multiple outputs for the same file path,
-        // the last occurrence should win (content is replaced, not concatenated).
+        // the content from both outputs should be concatenated with "\n\n".
         let out1 = make_output(
             vec![FileOutput {
                 path: "CLAUDE.md".to_string(),
@@ -340,12 +342,10 @@ mod tests {
         // Only one section with the shared adr_id
         assert_eq!(file.sections.len(), 1);
         assert_eq!(file.sections[0].adr_id, "adr-dup");
-        // Last occurrence wins: content from out2
-        assert_eq!(file.sections[0].content, "Second content");
-        // No concatenation: "First content" must not appear
-        assert!(
-            !file.sections[0].content.contains("First content"),
-            "first content should not appear; last occurrence wins: {}",
+        // Content from both outputs concatenated with "\n\n"
+        assert_eq!(
+            file.sections[0].content, "First content\n\nSecond content",
+            "expected concatenated content: {}",
             file.sections[0].content
         );
     }
