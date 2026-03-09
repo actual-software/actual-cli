@@ -950,6 +950,9 @@ impl TuiRenderer {
                     })
                     .unwrap_or((20, 80));
                 let n_steps = self.steps.steps.len();
+                if n_steps == 0 {
+                    break;
+                }
                 let cur = self.selected_step.unwrap_or(self.active_step);
                 let log_idx = self.selected_step.unwrap_or(self.active_step);
                 let max = self.logs[log_idx].max_scroll_wrapped(log_height, log_width);
@@ -2067,6 +2070,21 @@ mod tests {
         r.wait_for_keypress_impl(&mut source);
         assert!(!r.hint, "hint should be reset after keypress");
         assert!(source.events.is_empty(), "event should be consumed");
+    }
+
+    #[test]
+    fn test_wait_for_keypress_empty_steps_does_not_panic() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // Replace steps with an empty list to exercise the n_steps == 0 guard.
+        r.steps = StepsPane::new(&[]);
+        // MockEventSource with no events — the guard breaks before reading any key.
+        let mut source = MockEventSource::new(vec![]);
+        r.wait_for_keypress_impl(&mut source);
+        assert!(!r.hint, "hint should be reset after empty-steps break");
+        assert_eq!(r.scroll_offset, 0);
+        assert!(r.selected_step.is_none());
     }
 
     // ── confirm_project tests ──
