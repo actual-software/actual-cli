@@ -72,6 +72,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(handle_dashboard))
         .route("/api/v1/state", get(handle_state))
+        .route("/api/v1/state/stream", get(handle_state_stream))
         .route("/api/v1/refresh", post(handle_refresh))
         .route("/api/v1/work", get(handle_claim_work))
         .route(
@@ -410,6 +411,23 @@ pub struct LogsResponse {
     pub logs: Vec<LogEntry>,
 }
 
+/// Build a full `StateResponse` from the current orchestrator state.
+fn build_state_response(state: &OrchestratorState) -> StateResponse {
+    let (running, retrying, totals) = build_snapshot(state);
+    let rate_limits = state.rate_limits.clone();
+    StateResponse {
+        generated_at: Utc::now().to_rfc3339(),
+        counts: StateCounts {
+            running: running.len(),
+            retrying: retrying.len(),
+        },
+        running,
+        retrying,
+        codex_totals: totals,
+        rate_limits,
+    }
+}
+
 /// Convert a broadcast stream result into an optional SSE event.
 ///
 /// Returns `Some` for successfully received entries and `None` for
@@ -431,6 +449,52 @@ fn format_sse_event(entry: &LogEntry) -> Result<Event, Infallible> {
         .event(&entry.event_type)
         .data(data)
         .id(entry.seq.to_string()))
+}
+
+/// GET /api/v1/state/stream — SSE stream for global state changes.
+///
+/// Sends an initial snapshot immediately on connection, then streams
+/// new snapshots whenever the orchestrator state changes.
+async fn handle_state_stream(State(state): State<AppState>) -> Response {
+    let rx = {
+        let orch = state.orchestrator_state.read().await;
+        orch.state_broadcast.subscribe()
+    };
+
+    // Build and send initial snapshot
+    let initial = {
+        let orch = state.orchestrator_state.read().await;
+        build_state_response(&orch)
+    };
+
+    let initial_json = serde_json::to_string(&initial).unwrap_or_default();
+    let initial_event = Event::default().data(initial_json);
+    let initial_stream =
+        tokio_stream::iter(std::iter::once(Ok::<Event, Infallible>(initial_event)));
+
+    let state_clone = state.orchestrator_state.clone();
+    let live_stream = BroadcastStream::new(rx)
+        .then(move |result| {
+            let sc = state_clone.clone();
+            async move {
+                match result {
+                    Ok(()) => {
+                        let orch = sc.read().await;
+                        let snapshot = build_state_response(&orch);
+                        let json = serde_json::to_string(&snapshot).ok();
+                        json.map(|j| Ok(Event::default().data(j)))
+                    }
+                    Err(_) => None,
+                }
+            }
+        })
+        .filter_map(|opt| opt);
+
+    let combined = initial_stream.chain(live_stream);
+
+    Sse::new(combined)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
 }
 
 /// GET /api/v1/:issue_identifier/stream — SSE event stream.
@@ -1091,18 +1155,46 @@ function update(data) {{
   lastFetch = Date.now();
 }}
 
+let stateEvtSource = null;
+let pollTimer = null;
+
+function startSSE() {{
+  stateEvtSource = new EventSource('/api/v1/state/stream');
+  stateEvtSource.onmessage = function(e) {{
+    try {{
+      const data = JSON.parse(e.data);
+      update(data);
+      document.getElementById('statusDot').style.background = 'var(--green)';
+      document.getElementById('statusText').textContent = 'Live (SSE)';
+    }} catch(err) {{ /* ignore parse errors */ }}
+  }};
+  stateEvtSource.onerror = function() {{
+    stateEvtSource.close();
+    stateEvtSource = null;
+    startPolling();
+  }};
+  if (pollTimer) {{ clearInterval(pollTimer); pollTimer = null; }}
+}}
+
 async function poll() {{
   try {{
     const r = await fetch('/api/v1/state');
     if (r.ok) {{
       update(await r.json());
       document.getElementById('statusDot').style.background = 'var(--green)';
-      document.getElementById('statusText').textContent = 'Connected';
+      document.getElementById('statusText').textContent = 'Polling (fallback)';
     }}
   }} catch(e) {{
     document.getElementById('statusDot').style.background = 'var(--red)';
     document.getElementById('statusText').textContent = 'Disconnected';
   }}
+}}
+
+function startPolling() {{
+  document.getElementById('statusText').textContent = 'Polling (fallback)';
+  poll();
+  pollTimer = setInterval(poll, 3000);
+  setTimeout(function() {{ if (!stateEvtSource) startSSE(); }}, 10000);
 }}
 
 async function triggerRefresh() {{
@@ -1187,8 +1279,8 @@ function appendLogEntry(entry) {{
 
 // Initial render from server-embedded data
 update(INITIAL);
-// Start polling every 3 seconds
-setInterval(poll, 3000);
+// Start SSE (falls back to polling on error)
+startSSE();
 </script>
 </body>
 </html>"##,
@@ -3549,5 +3641,235 @@ mod tests {
         assert!(html.contains("removeRetry"));
         assert!(html.contains("remove-retry"));
         assert!(html.contains("btn-danger"));
+    }
+
+    // ── build_state_response ─────────────────────────────────────────
+
+    #[test]
+    fn test_build_state_response_empty() {
+        let state = OrchestratorState::new(5000, 3);
+        let response = build_state_response(&state);
+        assert!(response.generated_at.contains("T"));
+        assert_eq!(response.counts.running, 0);
+        assert_eq!(response.counts.retrying, 0);
+        assert!(response.running.is_empty());
+        assert!(response.retrying.is_empty());
+        assert_eq!(response.codex_totals.input_tokens, 0);
+        assert!(response.rate_limits.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_state_response_with_data() {
+        let mut state = OrchestratorState::new(5000, 3);
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        state.running.insert(
+            "id1".to_string(),
+            RunningEntry {
+                issue: make_issue("id1", "PROJ-1", "Todo"),
+                identifier: "PROJ-1".to_string(),
+                session: LiveSession {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    total_tokens: 150,
+                    ..LiveSession::default()
+                },
+                retry_attempt: None,
+                started_at: Utc::now(),
+                cancel_tx,
+                event_log: std::collections::VecDeque::new(),
+                log_seq: 0,
+            },
+        );
+        state.agent_totals = AgentTotals {
+            input_tokens: 500,
+            output_tokens: 200,
+            total_tokens: 700,
+            seconds_running: 100.0,
+        };
+        state.rate_limits = Some(serde_json::json!({"remaining": 10}));
+
+        let response = build_state_response(&state);
+        assert_eq!(response.counts.running, 1);
+        assert_eq!(response.running[0].issue_identifier, "PROJ-1");
+        assert_eq!(response.codex_totals.input_tokens, 500);
+        assert_eq!(response.rate_limits.unwrap()["remaining"], 10);
+    }
+
+    #[test]
+    fn test_build_state_response_serializes_to_json() {
+        let state = OrchestratorState::new(5000, 3);
+        let response = build_state_response(&state);
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("generated_at"));
+        assert!(json.contains("counts"));
+        assert!(json.contains("codex_totals"));
+    }
+
+    // ── State SSE stream endpoint ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_state_stream_returns_sse_content_type() {
+        let app_state = test_app_state();
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/state/stream")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(content_type.contains("text/event-stream"));
+    }
+
+    #[tokio::test]
+    async fn test_state_stream_sends_initial_snapshot() {
+        let app_state = test_app_state();
+        insert_running(&app_state, "id1", "PROJ-1", "Todo").await;
+
+        let app = build_router(app_state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        let resp = client
+            .get(format!("http://{addr}/api/v1/state/stream"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(content_type.contains("text/event-stream"));
+
+        // Read partial body (initial snapshot should be there)
+        let body = tokio::time::timeout(std::time::Duration::from_secs(1), resp.text()).await;
+        if let Ok(Ok(text)) = body {
+            assert!(text.contains("PROJ-1"));
+            assert!(text.contains("generated_at"));
+            assert!(text.contains("codex_totals"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_state_stream_sends_live_updates() {
+        let app_state = test_app_state();
+
+        let app = build_router(app_state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Spawn a background task that triggers a state change after a delay
+        let state_clone = app_state.orchestrator_state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let state = state_clone.read().await;
+            state.notify_state_change();
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        let resp = client
+            .get(format!("http://{addr}/api/v1/state/stream"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+
+        // Read body — should contain at least the initial snapshot
+        let body = tokio::time::timeout(std::time::Duration::from_secs(1), resp.text()).await;
+        if let Ok(Ok(text)) = body {
+            assert!(text.contains("generated_at"));
+        }
+    }
+
+    // ── Dashboard SSE JS ─────────────────────────────────────────────
+
+    #[test]
+    fn test_dashboard_contains_sse_js() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        // SSE-related functions
+        assert!(html.contains("startSSE"));
+        assert!(html.contains("startPolling"));
+        assert!(html.contains("stateEvtSource"));
+        assert!(html.contains("/api/v1/state/stream"));
+        assert!(html.contains("Live (SSE)"));
+        assert!(html.contains("Polling (fallback)"));
+    }
+
+    #[test]
+    fn test_dashboard_sse_fallback_to_polling() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        // Polling fallback
+        assert!(html.contains("pollTimer"));
+        assert!(html.contains("setInterval(poll, 3000)"));
+        // SSE reconnection logic
+        assert!(html.contains("setTimeout"));
+        assert!(html.contains("startSSE()"));
+    }
+
+    #[test]
+    fn test_dashboard_initial_render_uses_sse() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        // Should start with SSE, not setInterval(poll)
+        assert!(html.contains("startSSE()"));
+        // Old polling-only pattern should be gone
+        assert!(!html.contains("setInterval(poll, 3000);\n</script>"));
     }
 }

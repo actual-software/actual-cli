@@ -15,6 +15,11 @@ pub const MAX_LOG_ENTRIES: usize = 500;
 /// Broadcast channel capacity for per-issue event streaming.
 pub const BROADCAST_CHANNEL_CAPACITY: usize = 256;
 
+/// Broadcast channel capacity for global state-change notifications.
+/// State changes are less frequent than per-issue events, so a smaller
+/// capacity suffices.
+pub const STATE_BROADCAST_CAPACITY: usize = 64;
+
 /// A timestamped log entry for per-issue event history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -127,6 +132,9 @@ pub struct OrchestratorState {
     pub pending_jobs: VecDeque<WorkAssignment>,
     /// Notifier to wake long-polling workers when new jobs are enqueued.
     pub job_notify: Arc<tokio::sync::Notify>,
+    /// Broadcast channel for global state-change notifications (SSE).
+    /// Sends `()` signals — clients read the full snapshot on each signal.
+    pub state_broadcast: tokio::sync::broadcast::Sender<()>,
 }
 
 impl std::fmt::Debug for OrchestratorState {
@@ -148,12 +156,17 @@ impl std::fmt::Debug for OrchestratorState {
                 "pending_jobs",
                 &format!("<{} pending>", self.pending_jobs.len()),
             )
+            .field(
+                "state_broadcast",
+                &format!("<{} receivers>", self.state_broadcast.receiver_count()),
+            )
             .finish()
     }
 }
 
 impl OrchestratorState {
     pub fn new(poll_interval_ms: u64, max_concurrent_agents: u32) -> Self {
+        let (state_broadcast, _) = tokio::sync::broadcast::channel(STATE_BROADCAST_CAPACITY);
         Self {
             poll_interval_ms,
             max_concurrent_agents,
@@ -168,6 +181,7 @@ impl OrchestratorState {
             event_broadcasts: HashMap::new(),
             pending_jobs: VecDeque::new(),
             job_notify: Arc::new(tokio::sync::Notify::new()),
+            state_broadcast,
         }
     }
 
@@ -201,6 +215,16 @@ impl OrchestratorState {
     pub fn available_slots(&self) -> u32 {
         let running = self.running_count() as u32;
         self.max_concurrent_agents.saturating_sub(running)
+    }
+
+    /// Signal all SSE subscribers that global state has changed.
+    ///
+    /// Sends a `()` signal on the broadcast channel. Subscribers receive
+    /// the signal and then read the current snapshot. The send error is
+    /// intentionally ignored — it simply means there are no active
+    /// subscribers.
+    pub fn notify_state_change(&self) {
+        let _ = self.state_broadcast.send(());
     }
 
     /// Count running issues in a given state (case-insensitive).
@@ -701,6 +725,40 @@ mod tests {
         assert!(debug.contains("waiting_for_review"));
         assert!(debug.contains("pending_jobs"));
         assert!(debug.contains("<0 pending>"));
+        assert!(debug.contains("state_broadcast"));
+        assert!(debug.contains("receivers"));
+    }
+
+    // ── state_broadcast / notify_state_change ──────────────────────
+
+    #[test]
+    fn orchestrator_state_has_state_broadcast() {
+        let state = OrchestratorState::new(5000, 4);
+        // Should be able to subscribe
+        let _rx = state.state_broadcast.subscribe();
+        assert_eq!(state.state_broadcast.receiver_count(), 1);
+    }
+
+    #[test]
+    fn notify_state_change_sends_signal() {
+        let state = OrchestratorState::new(5000, 4);
+        let mut rx = state.state_broadcast.subscribe();
+        state.notify_state_change();
+        // Should receive the signal synchronously
+        let result = rx.try_recv();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn notify_state_change_no_receivers_does_not_panic() {
+        let state = OrchestratorState::new(5000, 4);
+        // No subscribers — should not panic
+        state.notify_state_change();
+    }
+
+    #[test]
+    fn state_broadcast_capacity_constant() {
+        assert_eq!(STATE_BROADCAST_CAPACITY, 64);
     }
 
     // ── WaitingEntry ─────────────────────────────────────────────────
