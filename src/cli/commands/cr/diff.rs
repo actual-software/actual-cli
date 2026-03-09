@@ -43,6 +43,8 @@ pub fn gather_diff(base: &str) -> Result<DiffContext, ActualError> {
         .map(|l| l.to_string())
         .collect();
 
+    let diff_text = truncate_diff(diff_text);
+
     Ok(DiffContext {
         base_branch: base.to_string(),
         head_sha,
@@ -51,6 +53,48 @@ pub fn gather_diff(base: &str) -> Result<DiffContext, ActualError> {
         commit_messages,
         changed_files,
     })
+}
+
+/// Maximum diff size in bytes before truncation (100 KB).
+const MAX_DIFF_BYTES: usize = 100 * 1024;
+
+/// Truncate the diff to at most [`MAX_DIFF_BYTES`] on a newline boundary.
+///
+/// When truncation occurs, a notice is appended so the LLM knows the diff
+/// was cut short. A `tracing::warn!` and `eprintln!` are emitted so the
+/// user sees it both in structured logs and terminal output.
+fn truncate_diff(diff: String) -> String {
+    if diff.len() <= MAX_DIFF_BYTES {
+        return diff;
+    }
+
+    let original_len = diff.len();
+
+    // Find the last newline at or before the limit so we don't cut mid-line.
+    // Include the newline itself (+1) so the truncated text ends cleanly.
+    let cut_point = diff[..MAX_DIFF_BYTES]
+        .rfind('\n')
+        .map(|pos| pos + 1)
+        .unwrap_or(MAX_DIFF_BYTES);
+
+    let truncated = &diff[..cut_point];
+    let omitted = original_len - cut_point;
+
+    tracing::warn!(
+        original_bytes = original_len,
+        truncated_bytes = cut_point,
+        omitted_bytes = omitted,
+        "Diff truncated to stay within size limit"
+    );
+    eprintln!(
+        "Warning: diff truncated from {} to {} bytes ({} bytes omitted)",
+        original_len, cut_point, omitted
+    );
+
+    format!(
+        "{}\n\n[... truncated: {} of {} bytes omitted ...]",
+        truncated, omitted, original_len
+    )
 }
 
 /// Run a git command and return its stdout as a string.
@@ -98,6 +142,55 @@ mod tests {
         assert!(
             err.contains("does not exist") || err.contains("no common ancestor"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_truncate_diff_small_diff_unchanged() {
+        let small = "line1\nline2\nline3\n".to_string();
+        let result = truncate_diff(small.clone());
+        assert_eq!(result, small);
+    }
+
+    #[test]
+    fn test_truncate_diff_large_diff_truncated() {
+        // Create a diff larger than MAX_DIFF_BYTES (100KB)
+        let line = "a".repeat(100) + "\n";
+        let num_lines = (MAX_DIFF_BYTES / line.len()) + 10;
+        let large: String = line.repeat(num_lines);
+        assert!(large.len() > MAX_DIFF_BYTES);
+
+        let result = truncate_diff(large.clone());
+        assert!(result.len() < large.len());
+        assert!(result.contains("[... truncated:"));
+        assert!(result.contains("bytes omitted"));
+    }
+
+    #[test]
+    fn test_truncate_diff_cuts_on_newline_boundary() {
+        // Build a string just over the limit with known newline positions
+        let line = "x".repeat(99) + "\n";
+        let num_lines = (MAX_DIFF_BYTES / line.len()) + 5;
+        let large: String = line.repeat(num_lines);
+        assert!(large.len() > MAX_DIFF_BYTES);
+
+        let result = truncate_diff(large);
+        // The result should contain the truncation notice
+        assert!(result.contains("[... truncated:"));
+        // The truncated body should not cut mid-line — check that the content
+        // before the notice ends with a newline.
+        let notice_pos = result.find("\n\n[... truncated:").unwrap();
+        let body = &result[..notice_pos];
+        assert!(body.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_truncate_diff_exactly_at_limit() {
+        let exact = "a".repeat(MAX_DIFF_BYTES);
+        let result = truncate_diff(exact.clone());
+        assert_eq!(
+            result, exact,
+            "diff at exactly the limit should not be truncated"
         );
     }
 }

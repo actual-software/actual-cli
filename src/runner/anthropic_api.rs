@@ -450,10 +450,12 @@ impl TailoringRunner for AnthropicApiRunner {
         schema: &str,
         model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
+        max_tokens: Option<u32>,
     ) -> Result<T, ActualError> {
         let event_tx = self.event_tx.lock().unwrap().clone();
         let model = model_override.unwrap_or(&self.model);
         let schema_value: Value = serde_json::from_str(schema)?;
+        let effective_max_tokens = max_tokens.unwrap_or(self.max_tokens);
 
         if let Some(ref tx) = event_tx {
             let _ = tx.send(format!(
@@ -463,7 +465,7 @@ impl TailoringRunner for AnthropicApiRunner {
 
         let request_body = serde_json::json!({
             "model": model,
-            "max_tokens": self.max_tokens,
+            "max_tokens": effective_max_tokens,
             "messages": [
                 {
                     "role": "user",
@@ -497,9 +499,16 @@ impl TailoringRunner for AnthropicApiRunner {
         if truncated {
             tracing::warn!(
                 "Anthropic API response was truncated (stop_reason=max_tokens, \
-                 limit={}). Consider increasing max_tokens in your config.",
-                self.max_tokens
+                 limit={}). Consider increasing --max-tokens.",
+                effective_max_tokens
             );
+            if let Some(ref tx) = event_tx {
+                let _ = tx.send(format!(
+                    "Warning: response truncated at {} tokens. \
+                     Consider increasing --max-tokens.",
+                    effective_max_tokens
+                ));
+            }
         }
 
         let content_blocks: Vec<ContentBlock> = match response.get("content") {
@@ -526,8 +535,8 @@ impl TailoringRunner for AnthropicApiRunner {
                     message: format!(
                         "Anthropic API response was truncated at {} tokens and \
                          did not contain a complete structured result. \
-                         Increase max_tokens in your config to fix this.",
-                        self.max_tokens
+                         Increase --max-tokens to fix this.",
+                        effective_max_tokens
                     ),
                     stderr: String::new(),
                 });
@@ -1855,7 +1864,7 @@ mod tests {
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
         let result: Result<Value, _> = runner
-            .run_raw_json("Review this code", schema, None, None)
+            .run_raw_json("Review this code", schema, None, None, None)
             .await;
 
         mock.assert_async().await;
@@ -1889,7 +1898,7 @@ mod tests {
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
         let result: Result<Value, _> = runner
-            .run_raw_json("Review this code", schema, None, None)
+            .run_raw_json("Review this code", schema, None, None, None)
             .await;
 
         mock.assert_async().await;
@@ -1916,7 +1925,7 @@ mod tests {
         let runner = make_runner(&server.url());
         let schema = r#"{"type":"object"}"#;
         let result: Result<Value, _> = runner
-            .run_raw_json("Review", schema, Some("claude-opus-4-6"), None)
+            .run_raw_json("Review", schema, Some("claude-opus-4-6"), None, None)
             .await;
 
         mock.assert_async().await;

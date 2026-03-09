@@ -455,6 +455,10 @@ pub struct CrArgs {
     #[arg(long, value_parser = parse_budget, allow_hyphen_values = true)]
     pub max_budget_usd: Option<f64>,
 
+    /// Maximum tokens for each LLM response (default: 16000)
+    #[arg(long, default_value = "16000")]
+    pub max_tokens: u32,
+
     /// Disable the ratatui TUI and use plain line output
     #[arg(long)]
     pub no_tui: bool,

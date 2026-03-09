@@ -55,8 +55,9 @@ pub trait TailoringRunner: Send + Sync {
         schema: &str,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
+        max_tokens: Option<u32>,
     ) -> Result<T, ActualError> {
-        let _ = (prompt, schema, model_override, max_budget_usd);
+        let _ = (prompt, schema, model_override, max_budget_usd, max_tokens);
         Err(ActualError::InternalError(
             "run_raw_json not implemented for this runner".to_string(),
         ))
@@ -452,18 +453,37 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
     timeout: Duration,
     args: &[String],
     event_tx: Option<UnboundedSender<String>>,
+    stdin_prompt: Option<&str>,
 ) -> Result<T, ActualError> {
     let mut cmd = Command::new(binary_path);
     cmd.arg("--print");
     cmd.args(args);
     cmd.kill_on_drop(true);
 
+    let stdin_mode = if stdin_prompt.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
+
     let mut child = cmd
-        .stdin(std::process::Stdio::null())
+        .stdin(stdin_mode)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| io_err("Failed to spawn Claude Code", e))?;
+
+    // Write prompt to stdin if provided, then drop to signal EOF.
+    if let Some(prompt) = stdin_prompt {
+        use tokio::io::AsyncWriteExt;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .map_err(|e| io_err("Failed to write prompt to stdin", e))?;
+            // Dropping stdin closes the pipe, signalling EOF to the subprocess.
+        }
+    }
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
@@ -660,16 +680,21 @@ impl TailoringRunner for CliClaudeRunner {
         opts.json_schema = Some(schema.to_string());
         opts.max_budget_usd = max_budget_usd;
 
-        let mut args = opts.to_args();
-        args.push("-p".to_string());
-        args.push(prompt.to_string());
+        let args = opts.to_args();
 
         let event_tx = self
             .event_tx
             .lock()
             .expect("event_tx mutex poisoned")
             .clone();
-        run_subprocess_streaming(&self.binary_path, self.timeout, &args, event_tx).await
+        run_subprocess_streaming(
+            &self.binary_path,
+            self.timeout,
+            &args,
+            event_tx,
+            Some(prompt),
+        )
+        .await
     }
 
     async fn run_raw_json<T: DeserializeOwned + Send>(
@@ -678,6 +703,7 @@ impl TailoringRunner for CliClaudeRunner {
         schema: &str,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
+        max_tokens: Option<u32>,
     ) -> Result<T, ActualError> {
         use crate::runner::options::InvocationOptions;
 
@@ -687,17 +713,23 @@ impl TailoringRunner for CliClaudeRunner {
         }
         opts.json_schema = Some(schema.to_string());
         opts.max_budget_usd = max_budget_usd;
+        opts.max_tokens = max_tokens;
 
-        let mut args = opts.to_args();
-        args.push("-p".to_string());
-        args.push(prompt.to_string());
+        let args = opts.to_args();
 
         let event_tx = self
             .event_tx
             .lock()
             .expect("event_tx mutex poisoned")
             .clone();
-        run_subprocess_streaming(&self.binary_path, self.timeout, &args, event_tx).await
+        run_subprocess_streaming(
+            &self.binary_path,
+            self.timeout,
+            &args,
+            event_tx,
+            Some(prompt),
+        )
+        .await
     }
 
     fn set_event_tx(&self, tx: UnboundedSender<String>) {
@@ -780,9 +812,8 @@ mod tests {
         .to_string()
     }
 
-    /// Verify that `CliClaudeRunner::run_tailoring` passes `--json-schema` and `-p`
-    /// args correctly, constructing the right subprocess invocation from a
-    /// `(prompt, schema)` pair.
+    /// Verify that `CliClaudeRunner::run_tailoring` passes `--json-schema` via args
+    /// and pipes the prompt via stdin (not `-p` arg).
     #[tokio::test]
     #[cfg(unix)]
     async fn test_cli_runner_run_tailoring_passes_prompt_and_schema() {
@@ -790,8 +821,10 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let args_file = dir.path().join("captured-args.txt");
-        // Script captures all args to a file, then emits a minimal valid TailoringOutput
-        // wrapped in a stream-json result envelope (required by run_subprocess_streaming).
+        let stdin_file = dir.path().join("captured-stdin.txt");
+        // Script captures all args to a file, reads stdin to another file,
+        // then emits a minimal valid TailoringOutput wrapped in a stream-json
+        // result envelope (required by run_subprocess_streaming).
         let tailoring_json = serde_json::json!({
             "files": [],
             "skipped_adrs": [],
@@ -804,9 +837,10 @@ mod tests {
         });
         let result_line = stream_result_line(tailoring_json);
         let script_content = format!(
-            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{}'\n",
-            args_file.display(),
-            result_line
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{args}\"; done\ncat > \"{stdin}\"\necho '{result}'\n",
+            args = args_file.display(),
+            stdin = stdin_file.display(),
+            result = result_line
         );
         let script = dir.path().join("fake-claude.sh");
         std::fs::write(&script, script_content).unwrap();
@@ -838,12 +872,15 @@ mod tests {
             .expect("--json-schema flag should be present");
         assert_eq!(lines[schema_pos + 1], schema);
 
-        // Should contain -p with our prompt
-        let prompt_pos = lines
-            .iter()
-            .position(|&l| l == "-p")
-            .expect("-p flag should be present");
-        assert_eq!(lines[prompt_pos + 1], prompt);
+        // -p should NOT be in the args (prompt is piped via stdin)
+        assert!(
+            !lines.contains(&"-p"),
+            "prompt should be piped via stdin, not passed as -p arg"
+        );
+
+        // Verify the prompt was piped via stdin
+        let captured_stdin = std::fs::read_to_string(&stdin_file).unwrap();
+        assert_eq!(captured_stdin, prompt);
     }
 
     /// Verify that `with_max_turns` overrides the `--max-turns` arg passed to the subprocess.
@@ -866,7 +903,7 @@ mod tests {
         });
         let result_line = stream_result_line(tailoring_json);
         let script_content = format!(
-            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{}'\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\ncat > /dev/null\necho '{}'\n",
             args_file.display(),
             result_line
         );
@@ -1616,7 +1653,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let result: Result<serde_json::Value, _> =
-            run_subprocess_streaming(&script, Duration::from_secs(5), &[], None).await;
+            run_subprocess_streaming(&script, Duration::from_secs(5), &[], None, None).await;
         let (message, _) = subprocess_failed(result.unwrap_err());
         assert!(
             message.contains("exited without producing a result"),
@@ -1635,7 +1672,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let result: Result<serde_json::Value, _> =
-            run_subprocess_streaming(&script, Duration::from_millis(100), &[], None).await;
+            run_subprocess_streaming(&script, Duration::from_millis(100), &[], None, None).await;
         assert_eq!(timeout_seconds(result.unwrap_err()), 0);
     }
 
@@ -1663,7 +1700,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let _result: crate::tailoring::types::TailoringOutput =
-            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx))
+            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx), None)
                 .await
                 .unwrap();
 
@@ -1694,7 +1731,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let result: Result<serde_json::Value, _> =
-            run_subprocess_streaming(&script, Duration::from_secs(5), &[], None).await;
+            run_subprocess_streaming(&script, Duration::from_secs(5), &[], None, None).await;
         let (message, _) = subprocess_failed(result.unwrap_err());
         assert!(message.contains("returned an error"));
         assert!(message.contains("Something went wrong"));
@@ -1721,7 +1758,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let result: Result<serde_json::Value, _> =
-            run_subprocess_streaming(&script, Duration::from_secs(5), &[], None).await;
+            run_subprocess_streaming(&script, Duration::from_secs(5), &[], None, None).await;
         let (message, _) = subprocess_failed(result.unwrap_err());
         assert!(message.contains("missing structured_output"));
     }
@@ -1771,7 +1808,7 @@ mod tests {
         })
         .to_string();
         let script_content = format!(
-            "#!/bin/sh\necho '{}'\necho '{}'\necho '{}'\n",
+            "#!/bin/sh\ncat > /dev/null\necho '{}'\necho '{}'\necho '{}'\n",
             system_line, tool_line, result_line
         );
         std::fs::write(&script, script_content).unwrap();
@@ -1818,7 +1855,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let result: Result<serde_json::Value, _> =
-            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx)).await;
+            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx), None).await;
 
         let err = result.unwrap_err();
         assert!(
@@ -1870,7 +1907,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let _result: crate::tailoring::types::TailoringOutput =
-            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx))
+            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx), None)
                 .await
                 .unwrap();
 
@@ -1915,7 +1952,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let result: Result<serde_json::Value, _> =
-            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx)).await;
+            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx), None).await;
 
         let err = result.unwrap_err();
         assert!(
