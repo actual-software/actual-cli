@@ -251,7 +251,7 @@ fn detect_workspace_json(root: &Path) -> Result<Option<MonorepoInfo>, std::io::E
                 };
                 let rel = canonical
                     .strip_prefix(&canonical_root)
-                    .expect("starts_with already verified")
+                    .ok()?
                     .to_string_lossy()
                     .to_string();
                 let name = extract_project_name(&canonical);
@@ -415,7 +415,7 @@ fn detect_go_workspace(root: &Path) -> Result<Option<MonorepoInfo>, std::io::Err
             };
             let rel = canonical
                 .strip_prefix(&canonical_root)
-                .expect("starts_with already verified")
+                .ok()?
                 .to_string_lossy()
                 .to_string();
             let name = extract_project_name(&canonical);
@@ -501,12 +501,13 @@ fn expand_glob_patterns(root: &Path, patterns: &[String]) -> Vec<ProjectInfo> {
             Ok(c) if c.starts_with(&canonical_root) => c,
             _ => continue,
         };
-        // strip_prefix is guaranteed to succeed after starts_with
-        let rel = canonical_entry
+        let Some(rel) = canonical_entry
             .strip_prefix(&canonical_root)
-            .expect("starts_with already verified")
-            .to_string_lossy()
-            .to_string();
+            .ok()
+            .map(|r| r.to_string_lossy().to_string())
+        else {
+            continue;
+        };
         if rel.is_empty() {
             continue;
         }
