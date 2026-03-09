@@ -247,7 +247,7 @@ Full snapshot of orchestrator state.
       "error": "turn timeout"
     }
   ],
-  "codex_totals": {
+  "agent_totals": {
     "input_tokens": 150000,
     "output_tokens": 80000,
     "total_tokens": 230000,
