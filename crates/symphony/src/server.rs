@@ -1,6 +1,8 @@
 use crate::config::ServiceConfig;
-use crate::model::{LogEntry, OrchestratorState, RetryEntry, WaitingEntry};
-use crate::protocol::{OrchestratorMessage, WorkResult, WorkerEventPayload};
+use crate::model::{LogEntry, OrchestratorState, RetryEntry, TrackedWorker, WaitingEntry};
+use crate::protocol::{
+    OrchestratorMessage, WorkResult, WorkerEventPayload, WorkerHeartbeat, WorkerRegistration,
+};
 use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -93,6 +95,8 @@ pub fn build_router(state: AppState) -> Router {
             post(handle_remove_retry),
         )
         .route("/api/v1/{issue_identifier}", get(handle_issue_detail))
+        .route("/api/v1/heartbeat", post(handle_heartbeat))
+        .route("/api/v1/workers/register", post(handle_worker_register))
         .route("/healthz", get(handle_healthz))
         .route("/readyz", get(handle_readyz))
         .fallback(handle_fallback)
@@ -833,6 +837,78 @@ async fn handle_remove_retry(
     };
 
     (StatusCode::OK, axum::Json(response)).into_response()
+}
+
+/// POST /api/v1/heartbeat — Worker sends periodic heartbeat.
+async fn handle_heartbeat(
+    _worker: AuthenticatedWorker,
+    State(state): State<AppState>,
+    axum::Json(heartbeat): axum::Json<WorkerHeartbeat>,
+) -> Response {
+    let mut orch = state.orchestrator_state.write().await;
+    let worker_id = heartbeat.worker_id.clone();
+    match orch.workers.get_mut(&worker_id) {
+        Some(tracked) => {
+            tracked.last_heartbeat = heartbeat.timestamp;
+            tracked.active_jobs = heartbeat.active_jobs;
+            tracked.alive = true;
+        }
+        None => {
+            orch.workers.insert(
+                worker_id.clone(),
+                TrackedWorker {
+                    worker_id: worker_id.clone(),
+                    last_heartbeat: heartbeat.timestamp,
+                    active_jobs: heartbeat.active_jobs,
+                    registered_at: Utc::now(),
+                    capabilities: vec![],
+                    max_concurrent_jobs: 1,
+                    alive: true,
+                },
+            );
+        }
+    }
+    info!(worker_id = %worker_id, "heartbeat received");
+    StatusCode::OK.into_response()
+}
+
+/// POST /api/v1/workers/register — Worker registers on startup.
+async fn handle_worker_register(
+    _worker: AuthenticatedWorker,
+    State(state): State<AppState>,
+    axum::Json(registration): axum::Json<WorkerRegistration>,
+) -> Response {
+    let mut orch = state.orchestrator_state.write().await;
+    let worker_id = registration.worker_id.clone();
+    let now = Utc::now();
+    match orch.workers.get_mut(&worker_id) {
+        Some(tracked) => {
+            tracked.capabilities = registration.capabilities;
+            tracked.max_concurrent_jobs = registration.max_concurrent_jobs;
+            tracked.last_heartbeat = now;
+            tracked.alive = true;
+        }
+        None => {
+            orch.workers.insert(
+                worker_id.clone(),
+                TrackedWorker {
+                    worker_id: worker_id.clone(),
+                    last_heartbeat: now,
+                    active_jobs: vec![],
+                    registered_at: now,
+                    capabilities: registration.capabilities,
+                    max_concurrent_jobs: registration.max_concurrent_jobs,
+                    alive: true,
+                },
+            );
+        }
+    }
+    info!(worker_id = %worker_id, "worker registered");
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({"worker_id": worker_id})),
+    )
+        .into_response()
 }
 
 // ── Health check endpoints ────────────────────────────────────────────
@@ -4368,5 +4444,173 @@ mod tests {
         // Verify initial counts in JSON
         let count_str = "\"waiting\":2";
         assert!(html.contains(count_str));
+    }
+
+    // ── handle_heartbeat tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_handle_heartbeat_creates_new_worker() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state.clone());
+
+        let heartbeat = serde_json::json!({
+            "worker_id": "w-1",
+            "active_jobs": ["TST-1"],
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/heartbeat")
+            .header("Authorization", "Bearer secret-token")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&heartbeat).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify worker was created
+        let orch = app_state.orchestrator_state.read().await;
+        assert!(orch.workers.contains_key("w-1"));
+        assert!(orch.workers["w-1"].alive);
+        assert_eq!(orch.workers["w-1"].active_jobs, vec!["TST-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_heartbeat_updates_existing_worker() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+
+        // Pre-insert a worker
+        {
+            let mut orch = app_state.orchestrator_state.write().await;
+            orch.workers.insert(
+                "w-1".to_string(),
+                crate::model::TrackedWorker {
+                    worker_id: "w-1".to_string(),
+                    last_heartbeat: chrono::Utc::now() - chrono::Duration::seconds(60),
+                    active_jobs: vec!["TST-OLD".to_string()],
+                    registered_at: chrono::Utc::now(),
+                    capabilities: vec!["rust".to_string()],
+                    max_concurrent_jobs: 2,
+                    alive: false,
+                },
+            );
+        }
+
+        let app = build_router(app_state.clone());
+
+        let heartbeat = serde_json::json!({
+            "worker_id": "w-1",
+            "active_jobs": ["TST-NEW"],
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/heartbeat")
+            .header("Authorization", "Bearer secret-token")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&heartbeat).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify worker was updated
+        let orch = app_state.orchestrator_state.read().await;
+        assert!(orch.workers["w-1"].alive);
+        assert_eq!(orch.workers["w-1"].active_jobs, vec!["TST-NEW".to_string()]);
+        // capabilities should be preserved
+        assert_eq!(orch.workers["w-1"].capabilities, vec!["rust".to_string()]);
+    }
+
+    // ── handle_worker_register tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_handle_worker_register_new_worker() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state.clone());
+
+        let registration = serde_json::json!({
+            "worker_id": "w-2",
+            "capabilities": ["rust", "python"],
+            "max_concurrent_jobs": 3,
+        });
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/workers/register")
+            .header("Authorization", "Bearer secret-token")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&registration).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["worker_id"], "w-2");
+
+        // Verify worker was created
+        let orch = app_state.orchestrator_state.read().await;
+        assert!(orch.workers.contains_key("w-2"));
+        assert!(orch.workers["w-2"].alive);
+        assert_eq!(
+            orch.workers["w-2"].capabilities,
+            vec!["rust".to_string(), "python".to_string()]
+        );
+        assert_eq!(orch.workers["w-2"].max_concurrent_jobs, 3);
+    }
+
+    #[tokio::test]
+    async fn test_handle_worker_register_updates_existing() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+
+        // Pre-insert a worker
+        {
+            let mut orch = app_state.orchestrator_state.write().await;
+            orch.workers.insert(
+                "w-2".to_string(),
+                crate::model::TrackedWorker {
+                    worker_id: "w-2".to_string(),
+                    last_heartbeat: chrono::Utc::now() - chrono::Duration::seconds(300),
+                    active_jobs: vec!["TST-1".to_string()],
+                    registered_at: chrono::Utc::now(),
+                    capabilities: vec!["old".to_string()],
+                    max_concurrent_jobs: 1,
+                    alive: false,
+                },
+            );
+        }
+
+        let app = build_router(app_state.clone());
+
+        let registration = serde_json::json!({
+            "worker_id": "w-2",
+            "capabilities": ["new-cap"],
+            "max_concurrent_jobs": 5,
+        });
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/workers/register")
+            .header("Authorization", "Bearer secret-token")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&registration).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify worker was updated
+        let orch = app_state.orchestrator_state.read().await;
+        assert!(orch.workers["w-2"].alive);
+        assert_eq!(
+            orch.workers["w-2"].capabilities,
+            vec!["new-cap".to_string()]
+        );
+        assert_eq!(orch.workers["w-2"].max_concurrent_jobs, 5);
     }
 }

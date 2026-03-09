@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 // Re-export protocol types for backward compatibility.
 pub use crate::protocol::{
-    AgentEvent, LiveSession, RunningEntry, WorkAssignment, WorkerExitReason,
+    AgentEvent, LiveSession, RunningEntry, TrackedWorker, WorkAssignment, WorkerExitReason,
 };
 
 /// Maximum number of log entries to retain per running issue.
@@ -112,6 +112,10 @@ pub struct WaitingEntry {
 /// Older entries are evicted in FIFO order to prevent unbounded growth.
 const MAX_COMPLETED_ENTRIES: usize = 1000;
 
+/// Heartbeat timeout in seconds. Workers that miss heartbeats for longer
+/// than this duration are marked as dead and their jobs are re-enqueued.
+pub const HEARTBEAT_TIMEOUT_SECS: i64 = 120;
+
 /// Orchestrator runtime state.
 pub struct OrchestratorState {
     pub poll_interval_ms: u64,
@@ -135,6 +139,8 @@ pub struct OrchestratorState {
     /// Broadcast channel for global state-change notifications (SSE).
     /// Sends `()` signals — clients read the full snapshot on each signal.
     pub state_broadcast: tokio::sync::broadcast::Sender<()>,
+    /// Tracked remote workers, keyed by worker_id.
+    pub workers: HashMap<String, TrackedWorker>,
 }
 
 impl std::fmt::Debug for OrchestratorState {
@@ -160,6 +166,7 @@ impl std::fmt::Debug for OrchestratorState {
                 "state_broadcast",
                 &format!("<{} receivers>", self.state_broadcast.receiver_count()),
             )
+            .field("workers", &format!("<{} tracked>", self.workers.len()))
             .finish()
     }
 }
@@ -182,6 +189,7 @@ impl OrchestratorState {
             pending_jobs: VecDeque::new(),
             job_notify: Arc::new(tokio::sync::Notify::new()),
             state_broadcast,
+            workers: HashMap::new(),
         }
     }
 
@@ -854,5 +862,50 @@ mod tests {
                 log_seq: 0,
             },
         );
+    }
+
+    // ── workers HashMap ─────────────────────────────────────────────
+
+    #[test]
+    fn orchestrator_state_workers_empty_on_init() {
+        let state = OrchestratorState::new(5000, 4);
+        assert!(state.workers.is_empty());
+    }
+
+    #[test]
+    fn orchestrator_state_workers_insert_and_get() {
+        let mut state = OrchestratorState::new(5000, 4);
+        state.workers.insert(
+            "w-1".to_string(),
+            TrackedWorker {
+                worker_id: "w-1".to_string(),
+                last_heartbeat: Utc::now(),
+                active_jobs: vec!["TST-1".to_string()],
+                registered_at: Utc::now(),
+                capabilities: vec!["rust".to_string()],
+                max_concurrent_jobs: 2,
+                alive: true,
+            },
+        );
+        assert_eq!(state.workers.len(), 1);
+        assert!(state.workers.contains_key("w-1"));
+        assert!(state.workers["w-1"].alive);
+    }
+
+    // ── HEARTBEAT_TIMEOUT_SECS ──────────────────────────────────────
+
+    #[test]
+    fn heartbeat_timeout_secs_value() {
+        assert_eq!(HEARTBEAT_TIMEOUT_SECS, 120);
+    }
+
+    // ── Debug impl includes workers ─────────────────────────────────
+
+    #[test]
+    fn orchestrator_state_debug_includes_workers() {
+        let state = OrchestratorState::new(5000, 4);
+        let debug = format!("{:?}", state);
+        assert!(debug.contains("workers"));
+        assert!(debug.contains("<0 tracked>"));
     }
 }

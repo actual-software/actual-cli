@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use symphony::protocol::{
-    AgentEvent, WorkAssignment, WorkResult, WorkerEventPayload, WorkerExitReason,
+    AgentEvent, WorkAssignment, WorkResult, WorkerEventPayload, WorkerExitReason, WorkerHeartbeat,
+    WorkerRegistration,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,6 +36,8 @@ pub trait OrchestratorClient: Send + Sync {
         issue_identifier: &str,
         reason: WorkerExitReason,
     ) -> Result<(), ClientError>;
+    async fn send_heartbeat(&self, heartbeat: WorkerHeartbeat) -> Result<(), ClientError>;
+    async fn send_register(&self, registration: WorkerRegistration) -> Result<(), ClientError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +145,48 @@ impl OrchestratorClient for HttpOrchestratorClient {
             .bearer_auth(&self.auth_token)
             .header("X-Worker-ID", &self.worker_id)
             .json(&payload)
+            .send()
+            .await
+            .map_err(map_request_error)?;
+
+        let (status, body) = read_response_body(resp).await?;
+
+        if status == 200 {
+            Ok(())
+        } else {
+            Err(ClientError::BadStatus { status, body })
+        }
+    }
+
+    async fn send_heartbeat(&self, heartbeat: WorkerHeartbeat) -> Result<(), ClientError> {
+        let url = format!("{}/api/v1/heartbeat", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.auth_token)
+            .header("X-Worker-ID", &self.worker_id)
+            .json(&heartbeat)
+            .send()
+            .await
+            .map_err(map_request_error)?;
+
+        let (status, body) = read_response_body(resp).await?;
+
+        if status == 200 {
+            Ok(())
+        } else {
+            Err(ClientError::BadStatus { status, body })
+        }
+    }
+
+    async fn send_register(&self, registration: WorkerRegistration) -> Result<(), ClientError> {
+        let url = format!("{}/api/v1/workers/register", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.auth_token)
+            .header("X-Worker-ID", &self.worker_id)
+            .json(&registration)
             .send()
             .await
             .map_err(map_request_error)?;
@@ -506,5 +551,177 @@ mod tests {
         assert_eq!(client.base_url, "http://localhost");
         assert_eq!(client.auth_token, "t");
         assert_eq!(client.worker_id, "w");
+    }
+
+    // ---- send_heartbeat tests -------------------------------------------
+
+    #[tokio::test]
+    async fn test_send_heartbeat_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/heartbeat")
+            .match_header("Authorization", "Bearer test-token")
+            .match_header("X-Worker-ID", "worker-1")
+            .with_status(200)
+            .with_body("")
+            .create_async()
+            .await;
+
+        let client = HttpOrchestratorClient::new(
+            server.url(),
+            "test-token".to_string(),
+            "worker-1".to_string(),
+        );
+
+        let heartbeat = WorkerHeartbeat {
+            worker_id: "worker-1".to_string(),
+            active_jobs: vec!["TST-1".to_string()],
+            timestamp: chrono::Utc::now(),
+        };
+        let result = client.send_heartbeat(heartbeat).await;
+        assert!(result.is_ok());
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_send_heartbeat_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/heartbeat")
+            .with_status(500)
+            .with_body("server error")
+            .create_async()
+            .await;
+
+        let client = HttpOrchestratorClient::new(
+            server.url(),
+            "test-token".to_string(),
+            "worker-1".to_string(),
+        );
+
+        let heartbeat = WorkerHeartbeat {
+            worker_id: "worker-1".to_string(),
+            active_jobs: vec![],
+            timestamp: chrono::Utc::now(),
+        };
+        let result = client.send_heartbeat(heartbeat).await;
+        assert!(result.is_err());
+        match &result.unwrap_err() {
+            ClientError::BadStatus { status, body } => {
+                assert_eq!(*status, 500);
+                assert_eq!(body, "server error");
+            }
+            other => panic!("expected BadStatus, got {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_send_heartbeat_network_error() {
+        let client = HttpOrchestratorClient::new(
+            "http://127.0.0.1:1".to_string(),
+            "test-token".to_string(),
+            "worker-1".to_string(),
+        );
+
+        let heartbeat = WorkerHeartbeat {
+            worker_id: "worker-1".to_string(),
+            active_jobs: vec![],
+            timestamp: chrono::Utc::now(),
+        };
+        let result = client.send_heartbeat(heartbeat).await;
+        assert!(result.is_err());
+        match &result.unwrap_err() {
+            ClientError::RequestFailed { .. } => {}
+            other => panic!("expected RequestFailed, got {:?}", other),
+        }
+    }
+
+    // ---- send_register tests -------------------------------------------
+
+    #[tokio::test]
+    async fn test_send_register_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/workers/register")
+            .match_header("Authorization", "Bearer test-token")
+            .match_header("X-Worker-ID", "worker-1")
+            .with_status(200)
+            .with_body(r#"{"worker_id": "worker-1"}"#)
+            .create_async()
+            .await;
+
+        let client = HttpOrchestratorClient::new(
+            server.url(),
+            "test-token".to_string(),
+            "worker-1".to_string(),
+        );
+
+        let registration = WorkerRegistration {
+            worker_id: "worker-1".to_string(),
+            capabilities: vec!["rust".to_string()],
+            max_concurrent_jobs: 2,
+        };
+        let result = client.send_register(registration).await;
+        assert!(result.is_ok());
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_send_register_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/workers/register")
+            .with_status(500)
+            .with_body("server error")
+            .create_async()
+            .await;
+
+        let client = HttpOrchestratorClient::new(
+            server.url(),
+            "test-token".to_string(),
+            "worker-1".to_string(),
+        );
+
+        let registration = WorkerRegistration {
+            worker_id: "worker-1".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+        let result = client.send_register(registration).await;
+        assert!(result.is_err());
+        match &result.unwrap_err() {
+            ClientError::BadStatus { status, body } => {
+                assert_eq!(*status, 500);
+                assert_eq!(body, "server error");
+            }
+            other => panic!("expected BadStatus, got {:?}", other),
+        }
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_send_register_network_error() {
+        let client = HttpOrchestratorClient::new(
+            "http://127.0.0.1:1".to_string(),
+            "test-token".to_string(),
+            "worker-1".to_string(),
+        );
+
+        let registration = WorkerRegistration {
+            worker_id: "worker-1".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+        let result = client.send_register(registration).await;
+        assert!(result.is_err());
+        match &result.unwrap_err() {
+            ClientError::RequestFailed { .. } => {}
+            other => panic!("expected RequestFailed, got {:?}", other),
+        }
     }
 }

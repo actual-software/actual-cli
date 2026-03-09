@@ -39,6 +39,16 @@ fn map_worker_result(result: Result<()>) -> WorkerExitReason {
     }
 }
 
+/// Log dead worker detection.
+fn log_dead_worker(worker_id: &str) {
+    warn!(worker_id = %worker_id, "worker missed heartbeat, marking as dead");
+}
+
+/// Log re-enqueue of a job from a dead worker.
+fn log_reenqueue_job(job_id: &str, worker_id: &str) {
+    warn!(job_id = %job_id, worker_id = %worker_id, "re-enqueuing job from dead worker");
+}
+
 /// Default timeout for draining workers during shutdown (30 seconds).
 const SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 30;
 
@@ -1270,6 +1280,9 @@ impl Orchestrator {
 
         // Part D: PR lifecycle management (auto-merge and post-merge cleanup)
         self.reconcile_pr_lifecycle().await;
+
+        // Part E: Dead worker detection
+        self.reconcile_dead_workers().await;
     }
 
     async fn reconcile_pr_conflicts(&self) {
@@ -1669,6 +1682,49 @@ impl Orchestrator {
                 info!(issue_id = %issue.id, issue_identifier = %issue.identifier, state = %issue.state, "issue neither active nor terminal, stopping worker");
                 self.terminate_running_issue(&issue.id, false).await;
             }
+        }
+    }
+
+    async fn reconcile_dead_workers(&self) {
+        use crate::model::HEARTBEAT_TIMEOUT_SECS;
+
+        let mut state = self.state.write().await;
+        let now = Utc::now();
+        let mut any_dead = false;
+
+        let worker_ids: Vec<String> = state.workers.keys().cloned().collect();
+        for worker_id in worker_ids {
+            let (is_dead, active_jobs) = {
+                let worker = &state.workers[&worker_id];
+                if !worker.alive {
+                    continue;
+                }
+                let elapsed = now
+                    .signed_duration_since(worker.last_heartbeat)
+                    .num_seconds();
+                if elapsed > HEARTBEAT_TIMEOUT_SECS {
+                    (true, worker.active_jobs.clone())
+                } else {
+                    (false, vec![])
+                }
+            };
+
+            if is_dead {
+                log_dead_worker(&worker_id);
+                if let Some(worker) = state.workers.get_mut(&worker_id) {
+                    worker.alive = false;
+                }
+                for job_id in &active_jobs {
+                    if state.claimed.remove(job_id) {
+                        log_reenqueue_job(job_id, &worker_id);
+                    }
+                }
+                any_dead = true;
+            }
+        }
+
+        if any_dead {
+            state.notify_state_change();
         }
     }
 
@@ -12871,5 +12927,146 @@ mod tests {
 
         assert!(logs_contain("failed to remove persisted waiting entry"));
         assert!(logs_contain("failed to remove persisted claimed marker"));
+    }
+
+    // ── reconcile_dead_workers ──────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_no_workers() {
+        let orch = test_orchestrator();
+        orch.reconcile_dead_workers().await;
+
+        let state = orch.state.read().await;
+        assert!(state.workers.is_empty());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_recent_heartbeat_stays_alive() {
+        let orch = test_orchestrator();
+
+        // Insert a worker with a recent heartbeat
+        {
+            let mut state = orch.state.write().await;
+            state.workers.insert(
+                "w-1".to_string(),
+                crate::protocol::TrackedWorker {
+                    worker_id: "w-1".to_string(),
+                    last_heartbeat: Utc::now(),
+                    active_jobs: vec!["TST-1".to_string()],
+                    registered_at: Utc::now(),
+                    capabilities: vec![],
+                    max_concurrent_jobs: 1,
+                    alive: true,
+                },
+            );
+        }
+
+        orch.reconcile_dead_workers().await;
+
+        let state = orch.state.read().await;
+        assert!(state.workers["w-1"].alive);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_marks_dead_and_reenqueues() {
+        let orch = test_orchestrator();
+
+        // Insert a worker with an old heartbeat
+        let old_time = Utc::now() - chrono::Duration::seconds(200);
+        {
+            let mut state = orch.state.write().await;
+            state.workers.insert(
+                "w-dead".to_string(),
+                crate::protocol::TrackedWorker {
+                    worker_id: "w-dead".to_string(),
+                    last_heartbeat: old_time,
+                    active_jobs: vec!["job-1".to_string(), "job-2".to_string()],
+                    registered_at: old_time,
+                    capabilities: vec![],
+                    max_concurrent_jobs: 2,
+                    alive: true,
+                },
+            );
+            // Add jobs to claimed set
+            state.claimed.insert("job-1".to_string());
+            state.claimed.insert("job-2".to_string());
+        }
+
+        orch.reconcile_dead_workers().await;
+
+        let state = orch.state.read().await;
+        assert!(!state.workers["w-dead"].alive);
+        // Jobs should be removed from claimed set
+        assert!(!state.claimed.contains("job-1"));
+        assert!(!state.claimed.contains("job-2"));
+        assert!(logs_contain("worker missed heartbeat"));
+        assert!(logs_contain("re-enqueuing job"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_already_dead_skipped() {
+        let orch = test_orchestrator();
+
+        // Insert a worker already marked as dead
+        let old_time = Utc::now() - chrono::Duration::seconds(200);
+        {
+            let mut state = orch.state.write().await;
+            state.workers.insert(
+                "w-dead".to_string(),
+                crate::protocol::TrackedWorker {
+                    worker_id: "w-dead".to_string(),
+                    last_heartbeat: old_time,
+                    active_jobs: vec!["job-1".to_string()],
+                    registered_at: old_time,
+                    capabilities: vec![],
+                    max_concurrent_jobs: 1,
+                    alive: false,
+                },
+            );
+            state.claimed.insert("job-1".to_string());
+        }
+
+        orch.reconcile_dead_workers().await;
+
+        let state = orch.state.read().await;
+        // Should remain dead, job should NOT be re-enqueued (already processed)
+        assert!(!state.workers["w-dead"].alive);
+        // claimed should still contain job-1 because the worker was already dead
+        assert!(state.claimed.contains("job-1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_job_not_in_claimed() {
+        let orch = test_orchestrator();
+
+        // Worker has active_jobs but they're not in claimed (already handled)
+        let old_time = Utc::now() - chrono::Duration::seconds(200);
+        {
+            let mut state = orch.state.write().await;
+            state.workers.insert(
+                "w-dead".to_string(),
+                crate::protocol::TrackedWorker {
+                    worker_id: "w-dead".to_string(),
+                    last_heartbeat: old_time,
+                    active_jobs: vec!["not-claimed".to_string()],
+                    registered_at: old_time,
+                    capabilities: vec![],
+                    max_concurrent_jobs: 1,
+                    alive: true,
+                },
+            );
+            // Don't add "not-claimed" to claimed set
+        }
+
+        orch.reconcile_dead_workers().await;
+
+        let state = orch.state.read().await;
+        assert!(!state.workers["w-dead"].alive);
+        assert!(logs_contain("worker missed heartbeat"));
     }
 }

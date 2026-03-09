@@ -1,5 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
 
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::client::OrchestratorClient;
@@ -44,9 +46,80 @@ fn log_base_clone_error(reason: &str) {
     warn!(reason = %reason, "failed to ensure base clone");
 }
 
+fn log_heartbeat_sent() {
+    info!("heartbeat sent to orchestrator");
+}
+
+fn log_heartbeat_error(reason: &str) {
+    warn!(reason = %reason, "failed to send heartbeat");
+}
+
+fn log_heartbeat_task_stopped() {
+    info!("heartbeat background task stopped");
+}
+
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
+
+/// Shared state for tracking active jobs across the main loop and heartbeat task.
+pub type ActiveJobs = Arc<RwLock<Vec<String>>>;
+
+/// Default heartbeat interval in seconds.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+
+/// Spawn a background heartbeat task with the default interval.
+/// Returns a `JoinHandle` that resolves when the task exits.
+pub fn spawn_heartbeat_task<C: OrchestratorClient + 'static>(
+    client: Arc<C>,
+    worker_id: String,
+    active_jobs: ActiveJobs,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_heartbeat_task_with_interval(
+        client,
+        worker_id,
+        active_jobs,
+        shutdown_rx,
+        HEARTBEAT_INTERVAL_SECS,
+    )
+}
+
+/// Spawn a background heartbeat task with a custom interval (for testing).
+/// Returns a `JoinHandle` that resolves when the task exits.
+pub fn spawn_heartbeat_task_with_interval<C: OrchestratorClient + 'static>(
+    client: Arc<C>,
+    worker_id: String,
+    active_jobs: ActiveJobs,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    interval_secs: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let should_stop = tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)) => false,
+                _ = wait_for_shutdown_or_change(&mut shutdown_rx) => *shutdown_rx.borrow(),
+            };
+
+            if should_stop {
+                log_heartbeat_task_stopped();
+                break;
+            }
+
+            let jobs = active_jobs.read().await.clone();
+            let heartbeat = symphony::protocol::WorkerHeartbeat {
+                worker_id: worker_id.clone(),
+                active_jobs: jobs,
+                timestamp: chrono::Utc::now(),
+            };
+
+            match client.send_heartbeat(heartbeat).await {
+                Ok(()) => log_heartbeat_sent(),
+                Err(e) => log_heartbeat_error(&e.to_string()),
+            }
+        }
+    })
+}
 
 pub async fn run_main_loop<C, G, A>(
     client: &C,
@@ -71,6 +144,7 @@ where
         return Err(Box::new(e));
     }
 
+    let active_jobs: ActiveJobs = Arc::new(RwLock::new(Vec::new()));
     let mut backoff_ms = config.poll_backoff_base_ms;
 
     // 2. Main loop
@@ -88,6 +162,12 @@ where
                 // Reset backoff on successful claim
                 backoff_ms = config.poll_backoff_base_ms;
 
+                // Track active job
+                {
+                    let mut jobs = active_jobs.write().await;
+                    jobs.push(assignment.issue_identifier.clone());
+                }
+
                 // Create a per-job shutdown receiver
                 let job_shutdown_rx = shutdown_rx.clone();
 
@@ -103,6 +183,13 @@ where
                     job_shutdown_rx,
                 )
                 .await;
+
+                // Remove completed job from active tracking
+                {
+                    let mut jobs = active_jobs.write().await;
+                    jobs.retain(|j| j != &assignment.issue_identifier);
+                }
+
                 let cancelled = match job_result {
                     Ok(()) => false,
                     Err(ref e) => {
@@ -523,6 +610,122 @@ mod tests {
         assert!(result.is_ok());
         assert!(logs_contain("no work available"));
         assert!(logs_contain("shutdown signal received"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_spawn_heartbeat_task_sends_heartbeat() {
+        use crate::client::MockOrchestratorClient;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let mut client = MockOrchestratorClient::new();
+        let send_count = Arc::new(AtomicU32::new(0));
+        let sc = send_count.clone();
+        client.expect_send_heartbeat().returning(move |_hb| {
+            sc.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        // Mock other required methods (automock generates all)
+        client.expect_claim_work().returning(|| Ok(None));
+        client.expect_send_event().returning(|_, _| Ok(()));
+        client.expect_send_complete().returning(|_, _| Ok(()));
+        client.expect_send_register().returning(|_| Ok(()));
+
+        let client = Arc::new(client);
+        let active_jobs: ActiveJobs = Arc::new(RwLock::new(vec!["TST-1".to_string()]));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        // Use a 1-second interval for fast test
+        let handle = spawn_heartbeat_task_with_interval(
+            client,
+            "w-1".to_string(),
+            active_jobs,
+            shutdown_rx,
+            1, // 1 second interval
+        );
+
+        // Wait a bit longer than the interval
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+        // Should have sent at least 1 heartbeat
+        assert!(send_count.load(Ordering::SeqCst) >= 1);
+        assert!(logs_contain("heartbeat sent"));
+
+        // Shut down
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_spawn_heartbeat_task_stops_on_shutdown() {
+        use crate::client::MockOrchestratorClient;
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_send_heartbeat().returning(|_| Ok(()));
+        client.expect_claim_work().returning(|| Ok(None));
+        client.expect_send_event().returning(|_, _| Ok(()));
+        client.expect_send_complete().returning(|_, _| Ok(()));
+        client.expect_send_register().returning(|_| Ok(()));
+
+        let client = Arc::new(client);
+        let active_jobs: ActiveJobs = Arc::new(RwLock::new(vec![]));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let handle = spawn_heartbeat_task_with_interval(
+            client,
+            "w-1".to_string(),
+            active_jobs,
+            shutdown_rx,
+            1, // 1 second interval
+        );
+
+        // Signal shutdown immediately
+        let _ = shutdown_tx.send(true);
+
+        // Task should exit promptly
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(3), handle)
+            .await
+            .expect("heartbeat task should stop within timeout");
+
+        assert!(logs_contain("heartbeat background task stopped"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_spawn_heartbeat_task_handles_error() {
+        use crate::client::{ClientError, MockOrchestratorClient};
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_send_heartbeat().returning(|_| {
+            Err(ClientError::RequestFailed {
+                reason: "connection refused".to_string(),
+            })
+        });
+        client.expect_claim_work().returning(|| Ok(None));
+        client.expect_send_event().returning(|_, _| Ok(()));
+        client.expect_send_complete().returning(|_, _| Ok(()));
+        client.expect_send_register().returning(|_| Ok(()));
+
+        let client = Arc::new(client);
+        let active_jobs: ActiveJobs = Arc::new(RwLock::new(vec![]));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        let handle = spawn_heartbeat_task_with_interval(
+            client,
+            "w-1".to_string(),
+            active_jobs,
+            shutdown_rx,
+            1, // 1 second interval
+        );
+
+        // Wait for heartbeat to fire and fail
+        tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+        assert!(logs_contain("failed to send heartbeat"));
+
+        let _ = shutdown_tx.send(true);
+        let _ = handle.await;
     }
 
     #[traced_test]
