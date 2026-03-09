@@ -25,6 +25,10 @@ struct Cli {
     #[arg(long)]
     port: Option<u16>,
 
+    /// Bind address for HTTP dashboard (overrides server.bind in WORKFLOW.md)
+    #[arg(long)]
+    bind: Option<String>,
+
     /// Run as MCP server (stdio transport for Linear tools)
     #[arg(long)]
     mcp_server: bool,
@@ -111,8 +115,16 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
     // Keep lock_file alive for the duration of the process
     let _lock_file = lock_file;
 
-    // Resolve HTTP server port: CLI flag overrides config
+    // Resolve HTTP server port and bind address: CLI flags override config
     let server_port = cli.port.or(config.server.port);
+    let bind_address = cli
+        .bind
+        .or(config.server.bind.clone())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    if bind_address == "0.0.0.0" && config.deployment.auth_token.is_none() {
+        warn!("Binding to 0.0.0.0 without authentication — the dashboard will be accessible from any network interface");
+    }
 
     info!(
         workflow = %workflow_path.display(),
@@ -165,8 +177,16 @@ async fn run(cli: Cli) -> Result<(), SymphonyError> {
             let _ = rx.changed().await;
         };
         tokio::spawn(async move {
-            if let Err(e) =
-                server::start_server(port, state, config, msg_tx, job_notify, server_shutdown).await
+            if let Err(e) = server::start_server(
+                port,
+                &bind_address,
+                state,
+                config,
+                msg_tx,
+                job_notify,
+                server_shutdown,
+            )
+            .await
             {
                 error!(error = %e, "HTTP server failed");
             }

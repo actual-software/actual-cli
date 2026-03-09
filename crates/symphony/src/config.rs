@@ -69,6 +69,7 @@ impl std::fmt::Debug for GitHubConfig {
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub port: Option<u16>,
+    pub bind: Option<String>,
 }
 
 #[derive(Clone)]
@@ -533,7 +534,16 @@ fn parse_server_config(root: &serde_yml::Value) -> ServerConfig {
         }
     });
 
-    ServerConfig { port }
+    let bind = get_yaml_str(root, &["server", "bind"]).and_then(|s| {
+        let trimmed = s.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    ServerConfig { port, bind }
 }
 
 /// Check if a state is in a list (case-insensitive, trimmed).
@@ -1126,6 +1136,55 @@ server: {}
         let wf = parse_workflow(content).unwrap();
         let config = ServiceConfig::from_workflow(&wf).unwrap();
         assert!(config.server.port.is_none());
+    }
+
+    // --- server bind config tests ---
+
+    #[test]
+    fn test_server_bind_configured() {
+        let content = r#"---
+server:
+  bind: "0.0.0.0"
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.server.bind, Some("0.0.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_server_bind_not_configured() {
+        let content = r#"---
+server: {}
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config.server.bind.is_none());
+    }
+
+    #[test]
+    fn test_server_bind_localhost() {
+        let content = r#"---
+server:
+  bind: "127.0.0.1"
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert_eq!(config.server.bind, Some("127.0.0.1".to_string()));
+    }
+
+    #[test]
+    fn test_server_bind_empty_string() {
+        let content = r#"---
+server:
+  bind: ""
+---
+"#;
+        let wf = parse_workflow(content).unwrap();
+        let config = ServiceConfig::from_workflow(&wf).unwrap();
+        assert!(config.server.bind.is_none());
     }
 
     // --- deployment config tests ---
