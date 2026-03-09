@@ -1,0 +1,48 @@
+# Build artifacts (large, not needed in build context)
+target/
+
+# Git history (not needed for building)
+.git/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git worktrees
+.worktrees/
+
+# Environment files (secrets — never include in Docker context)
+.env
+.env.local
+
+# CI/CD and docs (not needed for building)
+.github/
+docs/
+promo/
+site/
+benches/
+
+# Test captures and coverage
+tui-test-captures/
+coverage-report/
+lcov.info
+
+# npm platform binaries (populated by CI, not needed for worker build)
+npm/
+
+# Serena memories
+.serena/memories/
+
+# Audit/check scratch dirs
+.audit/
+.check/
+
+# Session recordings
+*.cast
