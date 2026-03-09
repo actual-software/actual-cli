@@ -287,6 +287,9 @@ fn is_likely_text_file(path: &Path) -> bool {
             Err(_) => return false,
         };
         let sample = &buf[..n];
+        if sample.is_empty() {
+            return true;
+        }
         // If more than 30% non-text bytes, treat as binary.
         let non_text = sample
             .iter()
@@ -1097,6 +1100,18 @@ mod tests {
         assert!(
             !is_likely_text_file(&dir_path),
             "should return false when read fails after successful open"
+        );
+    }
+
+    // Test 47: is_likely_text_file returns true for empty files
+    #[test]
+    fn test_is_likely_text_file_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("empty.txt");
+        fs::write(&path, b"").unwrap();
+        assert!(
+            is_likely_text_file(&path),
+            "empty files should be classified as text"
         );
     }
 
