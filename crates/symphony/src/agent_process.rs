@@ -262,34 +262,55 @@ pub fn parse_result_message(json: &serde_json::Value) -> Vec<AgentEvent> {
 }
 
 /// Parse an "assistant" type message.
+///
+/// Emits a `Notification` for any text content and an `AgentMessage`
+/// (with `event_type = "tool_use"`) for each tool-use block so that
+/// tool invocations show up in the Event Log.
 pub fn parse_assistant_message(json: &serde_json::Value) -> Vec<AgentEvent> {
-    let message = json
-        .get("message")
-        .and_then(|v| {
-            // Could be a string or an object with content
-            v.as_str().map(|s| s.to_string()).or_else(|| {
-                v.get("content").and_then(|c| c.as_array()).and_then(|arr| {
-                    arr.iter()
-                        .filter_map(|item| {
-                            if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                item.get("text")
-                                    .and_then(|t| t.as_str())
-                                    .map(|s| s.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .next()
-                })
-            })
-        })
-        .unwrap_or_default();
+    let mut events = Vec::new();
 
-    if !message.is_empty() {
-        vec![AgentEvent::Notification { message }]
-    } else {
-        vec![]
+    if let Some(msg_val) = json.get("message") {
+        // Simple string form: "message": "some text"
+        if let Some(s) = msg_val.as_str() {
+            if !s.is_empty() {
+                events.push(AgentEvent::Notification {
+                    message: s.to_string(),
+                });
+            }
+            return events;
+        }
+
+        // Structured form: "message": { "content": [...] }
+        if let Some(arr) = msg_val.get("content").and_then(|c| c.as_array()) {
+            for item in arr {
+                let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match item_type {
+                    "text" => {
+                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                            if !text.is_empty() {
+                                events.push(AgentEvent::Notification {
+                                    message: text.to_string(),
+                                });
+                            }
+                        }
+                    }
+                    "tool_use" => {
+                        let tool_name = item
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("unknown");
+                        events.push(AgentEvent::AgentMessage {
+                            event_type: "tool_use".to_string(),
+                            message: Some(format!("Using tool: {tool_name}")),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
+
+    events
 }
 
 /// Parse a message with an unrecognised type, checking for usage data.
@@ -590,9 +611,13 @@ mod tests {
             }
         });
         let events = parse_agent_message(&json);
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         assert!(
             matches!(&events[0], AgentEvent::Notification { message } if message == "Here is the result")
+        );
+        assert!(
+            matches!(&events[1], AgentEvent::AgentMessage { event_type, message }
+                if event_type == "tool_use" && message.as_deref() == Some("Using tool: bash"))
         );
     }
 
@@ -713,8 +738,14 @@ mod tests {
                 ]
             }
         });
-        // All items are non-text, so filter_map yields nothing -> message is empty -> empty Vec
-        assert!(parse_agent_message(&json).is_empty());
+        // tool_use blocks produce AgentMessage events; tool_result is an unknown
+        // content block type (not a top-level message type) so it's ignored here.
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AgentEvent::AgentMessage { event_type, message }
+                if event_type == "tool_use" && message.as_deref() == Some("Using tool: bash"))
+        );
     }
 
     // ---- spawn_agent_process tests ----
