@@ -451,6 +451,23 @@ fn format_sse_event(entry: &LogEntry) -> Result<Event, Infallible> {
         .id(entry.seq.to_string()))
 }
 
+/// Convert a state broadcast result into an optional `StateResponse` JSON.
+///
+/// Returns `Some(json_string)` for successful signals (after reading
+/// the current state snapshot) and `None` for lagged/closed errors.
+fn state_broadcast_to_json(
+    result: &Result<(), tokio_stream::wrappers::errors::BroadcastStreamRecvError>,
+    state: &OrchestratorState,
+) -> Option<String> {
+    match result {
+        Ok(()) => {
+            let snapshot = build_state_response(state);
+            serde_json::to_string(&snapshot).ok()
+        }
+        Err(_) => None,
+    }
+}
+
 /// GET /api/v1/state/stream — SSE stream for global state changes.
 ///
 /// Sends an initial snapshot immediately on connection, then streams
@@ -477,15 +494,8 @@ async fn handle_state_stream(State(state): State<AppState>) -> Response {
         .then(move |result| {
             let sc = state_clone.clone();
             async move {
-                match result {
-                    Ok(()) => {
-                        let orch = sc.read().await;
-                        let snapshot = build_state_response(&orch);
-                        let json = serde_json::to_string(&snapshot).ok();
-                        json.map(|j| Ok(Event::default().data(j)))
-                    }
-                    Err(_) => None,
-                }
+                let orch = sc.read().await;
+                state_broadcast_to_json(&result, &orch).map(|j| Ok(Event::default().data(j)))
             }
         })
         .filter_map(|opt| opt);
@@ -3703,6 +3713,28 @@ mod tests {
         assert!(json.contains("generated_at"));
         assert!(json.contains("counts"));
         assert!(json.contains("codex_totals"));
+    }
+
+    // ── state_broadcast_to_json ────────────────────────────────────
+
+    #[test]
+    fn test_state_broadcast_to_json_ok() {
+        let state = OrchestratorState::new(5000, 3);
+        let result = Ok(());
+        let json = state_broadcast_to_json(&result, &state);
+        assert!(json.is_some());
+        let json_str = json.unwrap();
+        assert!(json_str.contains("generated_at"));
+        assert!(json_str.contains("codex_totals"));
+    }
+
+    #[test]
+    fn test_state_broadcast_to_json_err_lagged() {
+        use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+        let state = OrchestratorState::new(5000, 3);
+        let result = Err(BroadcastStreamRecvError::Lagged(5));
+        let json = state_broadcast_to_json(&result, &state);
+        assert!(json.is_none());
     }
 
     // ── State SSE stream endpoint ───────────────────────────────────
