@@ -752,27 +752,13 @@ async fn handle_healthz(State(state): State<AppState>) -> impl IntoResponse {
 
 /// GET /readyz — Readiness probe (unauthenticated).
 ///
-/// Returns 200 if the orchestrator is accepting work (RwLock readable,
-/// running agents < max_concurrent_agents). Returns 503 otherwise.
+/// Returns 200 if the orchestrator is accepting work (running agents
+/// < max_concurrent_agents). Returns 503 otherwise.
 async fn handle_readyz(State(state): State<AppState>) -> Response {
-    let orch_state = match tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        state.orchestrator_state.read(),
-    )
-    .await
-    {
-        Ok(guard) => guard,
-        Err(_) => {
-            let response = ReadyzResponse {
-                status: "not_ready".to_string(),
-                reason: Some("orchestrator state lock timed out".to_string()),
-            };
-            return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(response)).into_response();
-        }
-    };
-
+    let orch_state = state.orchestrator_state.read().await;
     let running_count = orch_state.running.len() as u32;
     let max = orch_state.max_concurrent_agents;
+    drop(orch_state);
 
     if running_count >= max {
         let response = ReadyzResponse {
