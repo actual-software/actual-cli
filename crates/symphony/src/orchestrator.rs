@@ -8385,6 +8385,54 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
+    async fn test_on_worker_exit_normal_in_review_preserves_session_id() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _pr_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config();
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert running entry with a session_id
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Review").await;
+        {
+            let mut state = orch.state.write().await;
+            if let Some(entry) = state.running.get_mut("id1") {
+                entry.session.session_id = Some("sess-xyz-789".to_string());
+            }
+        }
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(state.waiting_for_review.contains_key("id1"));
+        let entry = state.waiting_for_review.get("id1").unwrap();
+        assert_eq!(entry.session_id, Some("sess-xyz-789".to_string()));
+    }
+
+    #[traced_test]
+    #[tokio::test]
     async fn test_on_worker_exit_normal_in_review_no_github_config() {
         let orch = test_orchestrator(); // no github config
 
