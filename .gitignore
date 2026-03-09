@@ -44,3 +44,9 @@ npm/actual-darwin-arm64/bin/actual
 npm/actual-darwin-x64/bin/actual
 npm/actual-linux-x64/bin/actual
 npm/actual-linux-arm64/bin/actual
+
+# Gas Town (added by gt)
+.runtime/
+.claude/commands/
+.logs/
+.beads/
