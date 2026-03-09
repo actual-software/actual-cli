@@ -155,13 +155,11 @@ pub(crate) async fn fetch_openai_models_async(
     let is_local =
         base_url.starts_with("http://localhost") || base_url.starts_with("http://127.0.0.1");
 
-    // reqwest::Client::builder().build() is infallible for standard configurations;
-    // the only failure mode is a TLS backend issue which cannot occur here.
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .https_only(!is_local)
         .build()
-        .expect("reqwest client build failed");
+        .map_err(|e| ActualError::InternalError(format!("reqwest client build: {e}")))?;
 
     let url = format!("{base_url}/v1/models");
     let response = client
@@ -253,7 +251,7 @@ pub(crate) async fn fetch_anthropic_models_async(
         .timeout(timeout)
         .https_only(!is_local)
         .build()
-        .expect("reqwest client build failed");
+        .map_err(|e| ActualError::InternalError(format!("reqwest client build: {e}")))?;
 
     const MAX_PAGES: usize = 50;
 
@@ -327,6 +325,17 @@ pub(crate) async fn fetch_anthropic_models_async(
 // Generic cached model fetcher
 // ---------------------------------------------------------------------------
 
+/// Build a single-threaded tokio runtime for cache fetching.
+///
+/// Returns the runtime on success, or a human-readable warning message on
+/// failure (the only realistic failure mode is an OS-level I/O driver issue).
+fn build_cache_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime build failed: {e}"))
+}
+
 /// Unified cache-check-fetch-persist logic for any provider.
 ///
 /// Both `get_openai_models` and `get_anthropic_models` delegate to this
@@ -347,6 +356,36 @@ fn get_models_cached<F, Fut>(
 where
     F: FnOnce(String, String, std::time::Duration) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<String>, crate::error::ActualError>>,
+{
+    get_models_cached_with_runtime(
+        env_var_name,
+        config_key,
+        default_base_url,
+        base_url,
+        cache_getter,
+        cache_setter,
+        fetcher,
+        build_cache_runtime,
+    )
+}
+
+/// Inner implementation of [`get_models_cached`] with an injectable runtime
+/// builder so tests can exercise the runtime-build-failure path.
+#[allow(clippy::too_many_arguments)]
+fn get_models_cached_with_runtime<F, Fut, R>(
+    env_var_name: &str,
+    config_key: Option<&str>,
+    default_base_url: &str,
+    base_url: Option<&str>,
+    cache_getter: impl Fn(&ModelCacheFile) -> &ProviderCache,
+    cache_setter: impl FnOnce(&mut ModelCacheFile, ProviderCache),
+    fetcher: F,
+    runtime_builder: R,
+) -> Vec<String>
+where
+    F: FnOnce(String, String, std::time::Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>, crate::error::ActualError>>,
+    R: FnOnce() -> Result<tokio::runtime::Runtime, String>,
 {
     // Resolve API key (env var takes priority)
     let api_key = std::env::var(env_var_name)
@@ -375,13 +414,13 @@ where
     let url = base_url.unwrap_or(default_base_url).to_string();
     let timeout = std::time::Duration::from_secs(FETCH_TIMEOUT_SECS);
 
-    // tokio::runtime::Builder::new_current_thread().enable_all().build() is
-    // infallible in practice (only fails if the OS cannot create an I/O driver,
-    // which would be a catastrophic system-level failure).
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime build failed");
+    let rt = match runtime_builder() {
+        Ok(rt) => rt,
+        Err(msg) => {
+            tracing::warn!("{msg}");
+            return Vec::new();
+        }
+    };
 
     match rt.block_on(fetcher(api_key, url, timeout)) {
         Ok(models) => {
@@ -1512,5 +1551,44 @@ mod tests {
         let result = read_cached_anthropic_models();
         assert!(result.contains(&"claude-cached-1".to_string()));
         assert!(result.contains(&"claude-cached-2".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // build_cache_runtime / get_models_cached_with_runtime
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_cache_runtime_succeeds() {
+        // In any normal environment, building the runtime always succeeds.
+        // This exercises the Ok path and the map_err closure type.
+        let rt = build_cache_runtime();
+        assert!(rt.is_ok(), "expected runtime to build successfully");
+    }
+
+    #[test]
+    fn test_get_models_cached_with_runtime_error_returns_empty() {
+        // Exercises the Err branch in get_models_cached_with_runtime by
+        // injecting a runtime builder that always fails.
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _no_key = TEnvGuard::remove("OPENAI_API_KEY");
+
+        let result = get_models_cached_with_runtime(
+            "OPENAI_API_KEY",
+            Some("sk-test"),
+            "https://api.openai.com",
+            Some("http://127.0.0.1:1"),
+            |file| &file.openai,
+            |file, pc| file.openai = pc,
+            |api_key, url, timeout| async move {
+                fetch_openai_models_async(&api_key, &url, timeout).await
+            },
+            || Err("synthetic runtime build failure".to_string()),
+        );
+        assert!(
+            result.is_empty(),
+            "runtime build failure should return empty vec"
+        );
     }
 }
