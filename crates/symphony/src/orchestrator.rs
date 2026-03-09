@@ -646,7 +646,12 @@ impl Orchestrator {
     }
 
     /// Add an "In Review" issue to waiting_for_review by looking up its PR.
-    async fn add_to_waiting_for_review(&self, issue_id: &str, identifier: &str) {
+    async fn add_to_waiting_for_review(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        session_id: Option<String>,
+    ) {
         let config = self.config.read().await;
         let github_config = match &config.github {
             Some(c) => c.clone(),
@@ -693,7 +698,7 @@ impl Orchestrator {
             pr_number,
             branch,
             started_waiting_at: Utc::now(),
-            session_id: None,
+            session_id,
         };
         let mut state = self.state.write().await;
         state
@@ -813,6 +818,7 @@ impl Orchestrator {
                     entry.identifier.clone(),
                     entry.issue.state.clone(),
                     entry.issue.id.clone(),
+                    entry.session.session_id.clone(),
                 ))
             } else {
                 None
@@ -829,7 +835,7 @@ impl Orchestrator {
                         }
                     }
 
-                    let (issue_identifier, cached_state, entry_issue_id) =
+                    let (issue_identifier, cached_state, entry_issue_id, worker_session_id) =
                         normal_exit_data.expect("set when Normal");
 
                     // Drop the write lock before making async HTTP calls
@@ -863,8 +869,12 @@ impl Orchestrator {
                         // Cleanup completed — issue already transitioned, nothing more to do
                         info!(issue_id = %issue_id, issue_identifier = %identifier, "cleanup worker completed, issue already in terminal state");
                     } else if is_in_review_state(&issue_state) {
-                        self.add_to_waiting_for_review(issue_id, &issue_identifier)
-                            .await;
+                        self.add_to_waiting_for_review(
+                            issue_id,
+                            &issue_identifier,
+                            worker_session_id.clone(),
+                        )
+                        .await;
                         // Verify the entry was added; if not (GitHub API failed), schedule a retry
                         let state = self.state.read().await;
                         if !state.waiting_for_review.contains_key(issue_id) {
@@ -1617,6 +1627,20 @@ impl Orchestrator {
                     state.mark_completed(issue.id.clone());
                 }
                 self.terminate_running_issue(&issue.id, true).await;
+            } else if is_in_review_state(&issue.state) {
+                // Issue moved to "In Review" — kill the worker and add to waiting_for_review
+                // so we can resume the session when the PR merges.
+                info!(issue_id = %issue.id, issue_identifier = %issue.identifier, "issue moved to In Review, killing worker and adding to waiting");
+                let session_id = {
+                    let state = self.state.read().await;
+                    state
+                        .running
+                        .get(&issue.id)
+                        .and_then(|e| e.session.session_id.clone())
+                };
+                self.terminate_running_issue(&issue.id, false).await;
+                self.add_to_waiting_for_review(&issue.id, &issue.identifier, session_id)
+                    .await;
             } else if state_matches(&issue.state, &config.tracker.active_states) {
                 let mut state = self.state.write().await;
                 if let Some(entry) = state.running.get_mut(&issue.id) {
@@ -4544,6 +4568,126 @@ mod tests {
         assert!(state.running.contains_key("id1"));
 
         mock.assert_async().await;
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_tracker_states_in_review_kills_and_waits() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Linear API: return "In Review" state for the running issue
+        let _linear_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Review")]))
+            .create_async()
+            .await;
+
+        // GitHub API: find_open_pr returns PR #42
+        let _gh_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert running entry with a session_id set
+        let cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+        {
+            let mut state = orch.state.write().await;
+            if let Some(entry) = state.running.get_mut("id1") {
+                entry.session.session_id = Some("sess-abc-123".to_string());
+            }
+        }
+
+        orch.reconcile_tracker_states().await;
+
+        let state = orch.state.read().await;
+        // Worker should be terminated
+        assert!(!state.running.contains_key("id1"));
+        // Should be in waiting_for_review
+        assert!(state.waiting_for_review.contains_key("id1"));
+        let entry = state.waiting_for_review.get("id1").unwrap();
+        assert_eq!(entry.pr_number, 42);
+        assert_eq!(entry.session_id, Some("sess-abc-123".to_string()));
+        drop(state);
+
+        // cancel_tx should have been sent
+        assert!(cancel_rx.await.is_ok());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_tracker_states_in_review_no_session_id() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _linear_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Review")]))
+            .create_async()
+            .await;
+
+        let _gh_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 42,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert running entry WITHOUT session_id
+        let cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+
+        orch.reconcile_tracker_states().await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        assert!(state.waiting_for_review.contains_key("id1"));
+        let entry = state.waiting_for_review.get("id1").unwrap();
+        assert_eq!(entry.session_id, None);
+        drop(state);
+
+        assert!(cancel_rx.await.is_ok());
     }
 
     #[tokio::test]
@@ -11481,7 +11625,7 @@ mod tests {
         });
         let orch = Orchestrator::new(config, "template".to_string());
 
-        orch.add_to_waiting_for_review("id1", "PROJ-1").await;
+        orch.add_to_waiting_for_review("id1", "PROJ-1", None).await;
 
         // Should have detected merged PR and transitioned
         assert!(logs_contain("PR already merged"));
@@ -11696,7 +11840,7 @@ mod tests {
         let mut orch = Orchestrator::new(config, "template".to_string());
         orch.store = Some(store.clone());
 
-        orch.add_to_waiting_for_review("id1", "PROJ-1").await;
+        orch.add_to_waiting_for_review("id1", "PROJ-1", None).await;
 
         // store.save_waiting should have been called
         let entries = store.waiting_entries();
@@ -12243,7 +12387,7 @@ mod tests {
 
         let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Review").await;
 
-        orch.add_to_waiting_for_review("id1", "PROJ-1").await;
+        orch.add_to_waiting_for_review("id1", "PROJ-1", None).await;
 
         // Should still be added to in-memory waiting despite store error
         let state = orch.state.read().await;
