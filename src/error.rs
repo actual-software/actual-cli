@@ -81,6 +81,18 @@ pub enum ActualError {
 
     #[error("Actual AI API is being updated and will be available shortly")]
     ServiceUnavailable,
+
+    #[error("Code review failed: {0}")]
+    CodeReviewError(String),
+
+    #[error("No changes to review between '{base}' and HEAD")]
+    NoDiffFound { base: String },
+
+    #[error("Lens '{lens}' failed: {message}")]
+    LensFailure { lens: String, message: String },
+
+    #[error("Cross-lens synthesis failed: {0}")]
+    SynthesisFailure(String),
 }
 
 impl ActualError {

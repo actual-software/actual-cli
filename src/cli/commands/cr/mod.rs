@@ -1,3 +1,4 @@
+pub mod aggregation;
 pub mod schemas;
 pub mod types;
 

@@ -103,7 +103,7 @@ pub enum Decision {
 }
 
 /// Metadata recorded with every review execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewMetadata {
     pub timestamp_utc: String,
     pub head_sha: String,
