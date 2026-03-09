@@ -1751,6 +1751,9 @@ impl Orchestrator {
             state.agent_totals.seconds_running += elapsed;
             drop(state);
 
+            // Remove the "symphony-claimed" label from Linear (best-effort)
+            self.remove_claim_label(issue_id, &entry.identifier).await;
+
             // Persist claimed removal (best-effort)
             if let Some(ref store) = self.store {
                 if let Err(e) = store.remove_claimed(issue_id) {
@@ -4556,11 +4559,14 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_tracker_states_terminal_issue_removed() {
         let mut server = mockito::Server::new_async().await;
+        // expect_at_least(1): the state query is always made; terminate_running_issue
+        // now also calls remove_claim_label which makes a second POST.
         let mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(mock_states_response(&[("id1", "PROJ-1", "Done")]))
+            .expect_at_least(1)
             .create_async()
             .await;
 
@@ -4609,6 +4615,8 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_tracker_states_neither_active_nor_terminal() {
         let mut server = mockito::Server::new_async().await;
+        // expect_at_least(1): the state query is always made; terminate_running_issue
+        // now also calls remove_claim_label which makes a second POST.
         let mock = server
             .mock("POST", "/")
             .with_status(200)
@@ -4616,6 +4624,7 @@ mod tests {
             .with_body(mock_states_response(&[(
                 "id1", "PROJ-1", "On Hold", // Not active, not terminal
             )]))
+            .expect_at_least(1)
             .create_async()
             .await;
 
@@ -5203,11 +5212,14 @@ mod tests {
     #[tokio::test]
     async fn test_reconcile_stalls_and_tracker_states() {
         let mut server = mockito::Server::new_async().await;
+        // expect_at_least(1): the state query is always made; terminate_running_issue
+        // now also calls remove_claim_label for the stalled entry (second POST).
         let mock = server
             .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(mock_states_response(&[("id2", "PROJ-2", "In Progress")]))
+            .expect_at_least(1)
             .create_async()
             .await;
 
