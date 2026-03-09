@@ -68,12 +68,13 @@ impl InvocationOptions {
 
     /// Create options for code review lens invocations.
     ///
-    /// Reviews are read-only (no Write/Edit) and use 1 max turn (single response).
+    /// Reviews are read-only (no Write/Edit) and use 2 max turns: one for reasoning
+    /// and one for the StructuredOutput tool call when --json-schema is used.
     /// `skip_permissions` is `true` because no tools are enabled at all.
     pub fn for_review(model_override: Option<&str>) -> Self {
         Self {
             model: model_override.unwrap_or(DEFAULT_MODEL).to_string(),
-            max_turns: 1,
+            max_turns: 2,
             tools: "".to_string(),
             allowed_tools: vec![],
             json_schema: None,
@@ -284,9 +285,9 @@ mod tests {
     }
 
     #[test]
-    fn test_for_review_max_turns_is_one() {
+    fn test_for_review_max_turns_is_two() {
         let opts = InvocationOptions::for_review(None);
-        assert_eq!(opts.max_turns, 1);
+        assert_eq!(opts.max_turns, 2);
     }
 
     #[test]
