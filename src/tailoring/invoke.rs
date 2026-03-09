@@ -234,6 +234,15 @@ pub(crate) fn validate_and_filter_output(
         deduped.reverse();
         file.sections = deduped;
     }
+    // Remove files whose sections were all filtered out (e.g. all ADR IDs were hallucinated)
+    let before = output.files.len();
+    output.files.retain(|f| !f.sections.is_empty());
+    let removed = before - output.files.len();
+    if removed > 0 {
+        tracing::warn!(
+            "removed {removed} file(s) with no remaining sections after filtering hallucinated ADR IDs"
+        );
+    }
     Ok(output)
 }
 
@@ -553,7 +562,10 @@ mod tests {
         .await;
 
         let output = result.unwrap();
-        assert!(output.files[0].sections.is_empty());
+        assert!(
+            output.files.is_empty(),
+            "files with all sections filtered out should be excluded"
+        );
     }
 
     #[tokio::test]
