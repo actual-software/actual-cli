@@ -73,9 +73,12 @@ USER symphony
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:7070/healthz || exit 1
 
+# Set working directory so WORKFLOW.md mount at /app/WORKFLOW.md is found
+WORKDIR /app
+
 # Default entrypoint; bind to 0.0.0.0 so the server is accessible outside the
 # container (the default 127.0.0.1 would not be reachable from the host).
 # WORKFLOW.md and environment variables (LINEAR_API_KEY, GITHUB_TOKEN,
 # ANTHROPIC_API_KEY) must be provided at runtime.
 ENTRYPOINT ["symphony"]
-CMD ["--bind", "0.0.0.0:7070"]
+CMD []

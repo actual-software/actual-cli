@@ -24,15 +24,13 @@ services:
       context: .
       dockerfile: docker/worker.Dockerfile
     volumes:
-      - ~/.ssh:/root/.ssh:ro
-      - ~/.claude:/root/.claude:ro
+      - ~/.claude:/home/worker/.claude:ro
     env_file: .env.local
     environment:
       - ORCHESTRATOR_URL=http://orchestrator:7070
-      - AUTH_TOKEN
-      - ANTHROPIC_API_KEY
-      - GITHUB_TOKEN
-      - LINEAR_API_KEY
+      - REPO_URL=https://github.com/actual-software/actual-cli.git
+      - BASE_CLONE_PATH=/tmp/worker-base
+      - WORKTREE_ROOT=/tmp/worker-worktrees
       - RUST_LOG=info
     depends_on:
       orchestrator:

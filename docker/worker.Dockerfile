@@ -34,7 +34,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Builder — compile the symphony-worker binary
 # ---------------------------------------------------------------------------
-FROM rust:1.87-bookworm AS builder
+FROM rust:1-bookworm AS builder
 
 WORKDIR /build
 
@@ -180,4 +180,24 @@ RUN echo "Host *\n    StrictHostKeyChecking accept-new\n    UserKnownHostsFile ~
 # No ports exposed — the worker is an outbound-only client that connects
 # to the orchestrator via ORCHESTRATOR_URL.
 
-ENTRYPOINT ["symphony-worker"]
+# Entrypoint script: configure git credentials from GITHUB_TOKEN, then exec worker.
+COPY --chown=worker:worker --chmod=755 <<'ENTRYPOINT_SCRIPT' /usr/local/bin/worker-entrypoint.sh
+#!/bin/bash
+set -e
+# Configure git to use GITHUB_TOKEN for HTTPS clones/pushes
+if [ -n "$GITHUB_TOKEN" ]; then
+    git config --global credential.helper store
+    echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
+    chmod 600 ~/.git-credentials
+fi
+# Configure git identity from env vars
+if [ -n "$GIT_USER_NAME" ]; then
+    git config --global user.name "$GIT_USER_NAME"
+fi
+if [ -n "$GIT_USER_EMAIL" ]; then
+    git config --global user.email "$GIT_USER_EMAIL"
+fi
+exec symphony-worker "$@"
+ENTRYPOINT_SCRIPT
+
+ENTRYPOINT ["worker-entrypoint.sh"]
