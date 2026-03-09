@@ -7,6 +7,7 @@ use crate::cli::commands::cr::types::*;
 use crate::error::ActualError;
 use crate::runner::subprocess::TailoringRunner;
 
+use super::diff::gather_diff;
 use super::display;
 use super::schemas::{CROSS_LENS_SYNTHESIS_SCHEMA, LENS_REVIEW_SCHEMA};
 
@@ -98,50 +99,6 @@ pub async fn run_review<R: TailoringRunner>(
     };
 
     Ok(exit_code)
-}
-
-// ── Phase 1: Git Diff ──
-
-/// Gather the diff context between the base branch and HEAD.
-fn gather_diff(base: &str) -> Result<DiffContext, ActualError> {
-    let head_sha = run_git(&["rev-parse", "HEAD"])?;
-    let diff_text = run_git(&["diff", &format!("{base}...HEAD")])?;
-    let diff_stat = run_git(&["diff", &format!("{base}...HEAD"), "--stat"])?;
-    let commit_messages = run_git(&["log", &format!("{base}..HEAD"), "--oneline"])?;
-    let changed_files_raw = run_git(&["diff", &format!("{base}...HEAD"), "--name-only"])?;
-    let changed_files: Vec<String> = changed_files_raw
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect();
-
-    Ok(DiffContext {
-        base_branch: base.to_string(),
-        head_sha: head_sha.trim().to_string(),
-        diff_text,
-        diff_stat,
-        commit_messages,
-        changed_files,
-    })
-}
-
-/// Run a git command and return stdout.
-fn run_git(args: &[&str]) -> Result<String, ActualError> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .output()
-        .map_err(|e| ActualError::CodeReviewError(format!("Failed to run git: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ActualError::CodeReviewError(format!(
-            "git {} failed: {}",
-            args.join(" "),
-            stderr.trim()
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 // ── Phase 2: ADR Reading ──
