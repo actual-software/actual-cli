@@ -1,4 +1,4 @@
-use crate::config::ServiceConfig;
+use crate::config::{DeploymentMode, ServiceConfig};
 use crate::model::{CompletionOutcome, LogEntry, OrchestratorState, RetryEntry, WaitingEntry};
 use crate::protocol::{
     OrchestratorMessage, WorkResult, WorkerEventPayload, WorkerHeartbeat, WorkerRegistration,
@@ -117,6 +117,28 @@ pub struct StateResponse {
     pub completed: Vec<CompletedInfo>,
     pub codex_totals: TotalsInfo,
     pub rate_limits: Option<serde_json::Value>,
+    pub workers: Vec<WorkerInfo>,
+    pub pending_jobs: Vec<PendingJobInfo>,
+    pub deployment_mode: String,
+}
+
+/// Information about a connected worker for the dashboard.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerInfo {
+    pub worker_id: String,
+    pub status: String,
+    pub last_heartbeat: String,
+    pub active_jobs: Vec<String>,
+    pub max_concurrent_jobs: u32,
+    pub registered_at: String,
+}
+
+/// Information about a pending job waiting to be claimed.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingJobInfo {
+    pub issue_identifier: String,
+    pub prompt_preview: String,
+    pub attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +176,7 @@ pub struct RunningInfo {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+    pub worker_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -237,20 +260,27 @@ pub struct ErrorDetail {
 
 // ── Snapshot builder ─────────────────────────────────────────────────
 
+/// Result of `build_snapshot` containing all dashboard data.
+struct SnapshotResult {
+    running: Vec<RunningInfo>,
+    retrying: Vec<RetryInfo>,
+    waiting: Vec<WaitingInfo>,
+    completed: Vec<CompletedInfo>,
+    totals: TotalsInfo,
+    workers: Vec<WorkerInfo>,
+    pending_jobs: Vec<PendingJobInfo>,
+}
+
 /// Build a state snapshot from the shared orchestrator state.
 ///
 /// Computes live `seconds_running` by adding elapsed time from active sessions
 /// to the cumulative total.
-fn build_snapshot(
-    state: &OrchestratorState,
-) -> (
-    Vec<RunningInfo>,
-    Vec<RetryInfo>,
-    Vec<WaitingInfo>,
-    Vec<CompletedInfo>,
-    TotalsInfo,
-) {
-    let running: Vec<RunningInfo> = state.running.values().map(map_running_entry).collect();
+fn build_snapshot(state: &OrchestratorState, deployment_mode: &str) -> SnapshotResult {
+    let running: Vec<RunningInfo> = state
+        .running
+        .values()
+        .map(|entry| map_running_entry(entry, &state.tracked_workers, deployment_mode))
+        .collect();
 
     let retrying: Vec<RetryInfo> = state.retry_attempts.values().map(map_retry_entry).collect();
 
@@ -280,7 +310,92 @@ fn build_snapshot(
         seconds_running: state.agent_totals.seconds_running + active_seconds,
     };
 
-    (running, retrying, waiting, completed, totals)
+    let workers: Vec<WorkerInfo> = state
+        .tracked_workers
+        .values()
+        .map(map_tracked_worker)
+        .collect();
+
+    let pending_jobs: Vec<PendingJobInfo> =
+        state.pending_jobs.iter().map(map_work_assignment).collect();
+
+    SnapshotResult {
+        running,
+        retrying,
+        waiting,
+        completed,
+        totals,
+        workers,
+        pending_jobs,
+    }
+}
+
+/// Compute worker status from alive flag and last_heartbeat age.
+///
+/// - Dead: `!alive`
+/// - Stale: alive but last heartbeat > 60s ago
+/// - Healthy: alive and last heartbeat <= 60s ago
+fn compute_worker_status(alive: bool, last_heartbeat: chrono::DateTime<Utc>) -> &'static str {
+    if !alive {
+        return "dead";
+    }
+    let age = Utc::now()
+        .signed_duration_since(last_heartbeat)
+        .num_seconds();
+    if age > 60 {
+        "stale"
+    } else {
+        "healthy"
+    }
+}
+
+/// Map a `TrackedWorker` to a `WorkerInfo` for JSON serialization.
+fn map_tracked_worker(worker: &crate::protocol::TrackedWorker) -> WorkerInfo {
+    WorkerInfo {
+        worker_id: worker.worker_id.clone(),
+        status: compute_worker_status(worker.alive, worker.last_heartbeat).to_string(),
+        last_heartbeat: format_datetime(worker.last_heartbeat),
+        active_jobs: worker.active_jobs.clone(),
+        max_concurrent_jobs: worker.max_concurrent_jobs,
+        registered_at: format_datetime(worker.registered_at),
+    }
+}
+
+/// Map a `WorkAssignment` to a `PendingJobInfo` for JSON serialization.
+fn map_work_assignment(assignment: &crate::protocol::WorkAssignment) -> PendingJobInfo {
+    PendingJobInfo {
+        issue_identifier: assignment.issue_identifier.clone(),
+        prompt_preview: truncate_prompt(&assignment.prompt, 80),
+        attempt: assignment.attempt,
+    }
+}
+
+/// Truncate a string to `max_len` characters, appending "..." if truncated.
+fn truncate_prompt(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len])
+    }
+}
+
+/// Look up which worker is executing a given issue identifier.
+fn find_worker_for_identifier(
+    tracked_workers: &std::collections::HashMap<String, crate::protocol::TrackedWorker>,
+    identifier: &str,
+) -> Option<String> {
+    tracked_workers
+        .values()
+        .find(|w| w.active_jobs.iter().any(|j| j == identifier))
+        .map(|w| w.worker_id.clone())
+}
+
+/// Get the deployment mode as a string.
+fn deployment_mode_string(mode: &DeploymentMode) -> String {
+    match mode {
+        DeploymentMode::Distributed => "distributed".to_string(),
+        DeploymentMode::Local => "local".to_string(),
+    }
 }
 
 /// Map a `CompletionRecord` to a `CompletedInfo` for JSON serialization.
@@ -342,7 +457,16 @@ fn format_datetime(dt: chrono::DateTime<Utc>) -> String {
 }
 
 /// Map a `RunningEntry` to a `RunningInfo` for JSON serialization.
-fn map_running_entry(entry: &crate::model::RunningEntry) -> RunningInfo {
+fn map_running_entry(
+    entry: &crate::model::RunningEntry,
+    tracked_workers: &std::collections::HashMap<String, crate::protocol::TrackedWorker>,
+    deployment_mode: &str,
+) -> RunningInfo {
+    let worker_id = if deployment_mode == "distributed" {
+        find_worker_for_identifier(tracked_workers, &entry.identifier)
+    } else {
+        None
+    };
     RunningInfo {
         issue_id: entry.issue.id.clone(),
         issue_identifier: entry.identifier.clone(),
@@ -356,6 +480,7 @@ fn map_running_entry(entry: &crate::model::RunningEntry) -> RunningInfo {
         input_tokens: entry.session.input_tokens,
         output_tokens: entry.session.output_tokens,
         total_tokens: entry.session.total_tokens,
+        worker_id,
     }
 }
 
@@ -385,43 +510,57 @@ fn map_waiting_entry(entry: &WaitingEntry) -> WaitingInfo {
 
 /// GET / — HTML dashboard.
 async fn handle_dashboard(State(state): State<AppState>) -> Html<String> {
+    let config = state.config.read().await;
+    let mode = deployment_mode_string(&config.deployment.mode);
+    drop(config);
+
     let orch_state = state.orchestrator_state.read().await;
-    let (running, retrying, waiting, completed, totals) = build_snapshot(&orch_state);
+    let snapshot = build_snapshot(&orch_state, &mode);
     let rate_limits = orch_state.rate_limits.clone();
     drop(orch_state);
 
     let html = render_dashboard(
-        &running,
-        &retrying,
-        &waiting,
-        &completed,
-        &totals,
+        &snapshot.running,
+        &snapshot.retrying,
+        &snapshot.waiting,
+        &snapshot.completed,
+        &snapshot.totals,
         &rate_limits,
+        &snapshot.workers,
+        &snapshot.pending_jobs,
+        &mode,
     );
     Html(html)
 }
 
 /// GET /api/v1/state — JSON state snapshot.
 async fn handle_state(State(state): State<AppState>) -> impl IntoResponse {
+    let config = state.config.read().await;
+    let mode = deployment_mode_string(&config.deployment.mode);
+    drop(config);
+
     let orch_state = state.orchestrator_state.read().await;
-    let (running, retrying, waiting, completed, totals) = build_snapshot(&orch_state);
+    let snapshot = build_snapshot(&orch_state, &mode);
     let rate_limits = orch_state.rate_limits.clone();
     drop(orch_state);
 
     let response = StateResponse {
         generated_at: Utc::now().to_rfc3339(),
         counts: StateCounts {
-            running: running.len(),
-            retrying: retrying.len(),
-            waiting: waiting.len(),
-            completed: completed.len(),
+            running: snapshot.running.len(),
+            retrying: snapshot.retrying.len(),
+            waiting: snapshot.waiting.len(),
+            completed: snapshot.completed.len(),
         },
-        running,
-        retrying,
-        waiting,
-        completed,
-        codex_totals: totals,
+        running: snapshot.running,
+        retrying: snapshot.retrying,
+        waiting: snapshot.waiting,
+        completed: snapshot.completed,
+        codex_totals: snapshot.totals,
         rate_limits,
+        workers: snapshot.workers,
+        pending_jobs: snapshot.pending_jobs,
+        deployment_mode: mode,
     };
 
     axum::Json(response)
@@ -505,23 +644,26 @@ pub struct LogsResponse {
 }
 
 /// Build a full `StateResponse` from the current orchestrator state.
-fn build_state_response(state: &OrchestratorState) -> StateResponse {
-    let (running, retrying, waiting, completed, totals) = build_snapshot(state);
+fn build_state_response(state: &OrchestratorState, deployment_mode: &str) -> StateResponse {
+    let snapshot = build_snapshot(state, deployment_mode);
     let rate_limits = state.rate_limits.clone();
     StateResponse {
         generated_at: Utc::now().to_rfc3339(),
         counts: StateCounts {
-            running: running.len(),
-            retrying: retrying.len(),
-            waiting: waiting.len(),
-            completed: completed.len(),
+            running: snapshot.running.len(),
+            retrying: snapshot.retrying.len(),
+            waiting: snapshot.waiting.len(),
+            completed: snapshot.completed.len(),
         },
-        running,
-        retrying,
-        waiting,
-        completed,
-        codex_totals: totals,
+        running: snapshot.running,
+        retrying: snapshot.retrying,
+        waiting: snapshot.waiting,
+        completed: snapshot.completed,
+        codex_totals: snapshot.totals,
         rate_limits,
+        workers: snapshot.workers,
+        pending_jobs: snapshot.pending_jobs,
+        deployment_mode: deployment_mode.to_string(),
     }
 }
 
@@ -555,10 +697,11 @@ fn format_sse_event(entry: &LogEntry) -> Result<Event, Infallible> {
 fn state_broadcast_to_json(
     result: &Result<(), tokio_stream::wrappers::errors::BroadcastStreamRecvError>,
     state: &OrchestratorState,
+    deployment_mode: &str,
 ) -> Option<String> {
     match result {
         Ok(()) => {
-            let snapshot = build_state_response(state);
+            let snapshot = build_state_response(state, deployment_mode);
             serde_json::to_string(&snapshot).ok()
         }
         Err(_) => None,
@@ -570,6 +713,10 @@ fn state_broadcast_to_json(
 /// Sends an initial snapshot immediately on connection, then streams
 /// new snapshots whenever the orchestrator state changes.
 async fn handle_state_stream(State(state): State<AppState>) -> Response {
+    let config = state.config.read().await;
+    let mode = deployment_mode_string(&config.deployment.mode);
+    drop(config);
+
     let rx = {
         let orch = state.orchestrator_state.read().await;
         orch.state_broadcast.subscribe()
@@ -578,7 +725,7 @@ async fn handle_state_stream(State(state): State<AppState>) -> Response {
     // Build and send initial snapshot
     let initial = {
         let orch = state.orchestrator_state.read().await;
-        build_state_response(&orch)
+        build_state_response(&orch, &mode)
     };
 
     let initial_json = serde_json::to_string(&initial).unwrap_or_default();
@@ -587,12 +734,14 @@ async fn handle_state_stream(State(state): State<AppState>) -> Response {
         tokio_stream::iter(std::iter::once(Ok::<Event, Infallible>(initial_event)));
 
     let state_clone = state.orchestrator_state.clone();
+    let mode_clone = mode;
     let live_stream = BroadcastStream::new(rx)
         .then(move |result| {
             let sc = state_clone.clone();
+            let m = mode_clone.clone();
             async move {
                 let orch = sc.read().await;
-                state_broadcast_to_json(&result, &orch).map(|j| Ok(Event::default().data(j)))
+                state_broadcast_to_json(&result, &orch, &m).map(|j| Ok(Event::default().data(j)))
             }
         })
         .filter_map(|opt| opt);
@@ -1039,6 +1188,7 @@ async fn handle_fallback(method: Method) -> Response {
 /// The initial page includes server-rendered data for the first paint,
 /// then JavaScript takes over and polls `/api/v1/state` every 3 seconds
 /// for live updates.
+#[allow(clippy::too_many_arguments)]
 pub fn render_dashboard(
     running: &[RunningInfo],
     retrying: &[RetryInfo],
@@ -1046,6 +1196,9 @@ pub fn render_dashboard(
     completed: &[CompletedInfo],
     totals: &TotalsInfo,
     rate_limits: &Option<serde_json::Value>,
+    workers: &[WorkerInfo],
+    pending_jobs: &[PendingJobInfo],
+    deployment_mode: &str,
 ) -> String {
     let mut html = String::with_capacity(16384);
 
@@ -1057,6 +1210,9 @@ pub fn render_dashboard(
         "completed": completed,
         "codex_totals": totals,
         "rate_limits": rate_limits,
+        "workers": workers,
+        "pending_jobs": pending_jobs,
+        "deployment_mode": deployment_mode,
         "counts": { "running": running.len(), "retrying": retrying.len(), "waiting": waiting.len(), "completed": completed.len() },
     });
 
@@ -1118,6 +1274,9 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
 .state-badge.success {{ background:rgba(0,230,118,0.15); color:var(--green); }}
 .state-badge.in_review {{ background:rgba(0,212,255,0.15); color:var(--accent); }}
 .state-badge.failed {{ background:rgba(255,82,82,0.15); color:var(--red); }}
+.state-badge.healthy {{ background:rgba(0,230,118,0.15); color:var(--green); }}
+.state-badge.stale {{ background:rgba(255,171,0,0.15); color:var(--amber); }}
+.state-badge.dead {{ background:rgba(255,82,82,0.15); color:var(--red); }}
 .empty-state {{ padding:40px 20px; text-align:center; color:var(--text-dim); }}
 .empty-state .icon {{ font-size:32px; margin-bottom:12px; }}
 .empty-state p {{ font-size:13px; line-height:1.6; }}
@@ -1240,6 +1399,30 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
     </div>
   </div>
 
+  <div class="section" id="workersSection" style="display:none;">
+    <div class="section-header">
+      <h2>Connected Workers <span class="badge" id="workersBadge">0</span></h2>
+    </div>
+    <div id="workersContent">
+      <div class="empty-state">
+        <div class="icon">No workers connected</div>
+        <p>Workers will appear here when they register with the orchestrator.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="pendingJobsSection" style="display:none;">
+    <div class="section-header">
+      <h2>Job Queue <span class="badge" id="pendingJobsBadge">0</span></h2>
+    </div>
+    <div id="pendingJobsContent">
+      <div class="empty-state">
+        <div class="icon">No pending jobs</div>
+        <p>Jobs waiting to be claimed by workers will appear here.</p>
+      </div>
+    </div>
+  </div>
+
   <div class="section" id="completedSection">
     <div class="section-header" style="cursor:pointer;" onclick="toggleCompleted()">
       <h2>Completed / History <span class="badge" id="completedBadge">0</span></h2>
@@ -1292,23 +1475,67 @@ function ago(iso) {{
 
 function esc(s) {{ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }}
 
-function renderRunning(items) {{
+function renderRunning(items, mode) {{
   const el = document.getElementById('runningContent');
   document.getElementById('runningBadge').textContent = items.length;
   if (!items.length) {{
     el.innerHTML = '<div class="empty-state"><div class="icon">No running sessions</div><p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p></div>';
     return;
   }}
-  let h = '<table><thead><tr><th>Issue</th><th>State</th><th>Session</th><th>Turns</th><th>Last Event</th><th>Tokens</th><th>Started</th></tr></thead><tbody>';
+  let h = '<table><thead><tr><th>Issue</th><th>State</th>';
+  if (mode === 'distributed') h += '<th>Worker</th>';
+  h += '<th>Session</th><th>Turns</th><th>Last Event</th><th>Tokens</th><th>Started</th></tr></thead><tbody>';
   for (const r of items) {{
     h += '<tr onclick="openLogPanel(\''+esc(r.issue_identifier)+'\')" title="Click to view live logs">';
     h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
     h += '<td><span class="state-badge active">'+esc(r.state)+'</span></td>';
+    if (mode === 'distributed') h += '<td class="mono">'+(r.worker_id ? esc(r.worker_id) : '-')+'</td>';
     h += '<td class="mono">'+(r.session_id ? esc(r.session_id).slice(0,12) : '-')+'</td>';
     h += '<td>'+r.turn_count+'</td>';
     h += '<td>'+(r.last_event ? esc(r.last_event) : '-')+'</td>';
     h += '<td class="mono">'+fmt(r.total_tokens)+'</td>';
     h += '<td>'+ago(r.started_at)+'</td>';
+    h += '</tr>';
+  }}
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}}
+
+function renderWorkers(items) {{
+  const el = document.getElementById('workersContent');
+  document.getElementById('workersBadge').textContent = items.length;
+  if (!items.length) {{
+    el.innerHTML = '<div class="empty-state"><div class="icon">No workers connected</div><p>Workers will appear here when they register with the orchestrator.</p></div>';
+    return;
+  }}
+  let h = '<table><thead><tr><th>Worker ID</th><th>Status</th><th>Active Jobs</th><th>Max Jobs</th><th>Last Heartbeat</th><th>Registered</th></tr></thead><tbody>';
+  for (const w of items) {{
+    h += '<tr>';
+    h += '<td class="mono"><strong>'+esc(w.worker_id)+'</strong></td>';
+    h += '<td><span class="state-badge '+esc(w.status)+'">'+esc(w.status)+'</span></td>';
+    h += '<td class="mono">'+w.active_jobs.map(j => esc(j)).join(', ')+'</td>';
+    h += '<td>'+w.max_concurrent_jobs+'</td>';
+    h += '<td>'+ago(w.last_heartbeat)+'</td>';
+    h += '<td>'+ago(w.registered_at)+'</td>';
+    h += '</tr>';
+  }}
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}}
+
+function renderPendingJobs(items) {{
+  const el = document.getElementById('pendingJobsContent');
+  document.getElementById('pendingJobsBadge').textContent = items.length;
+  if (!items.length) {{
+    el.innerHTML = '<div class="empty-state"><div class="icon">No pending jobs</div><p>Jobs waiting to be claimed by workers will appear here.</p></div>';
+    return;
+  }}
+  let h = '<table><thead><tr><th>Issue</th><th>Attempt</th><th>Prompt Preview</th></tr></thead><tbody>';
+  for (const j of items) {{
+    h += '<tr>';
+    h += '<td class="mono"><strong>'+esc(j.issue_identifier)+'</strong></td>';
+    h += '<td>'+(j.attempt != null ? '#'+j.attempt : '-')+'</td>';
+    h += '<td>'+esc(j.prompt_preview)+'</td>';
     h += '</tr>';
   }}
   h += '</tbody></table>';
@@ -1404,6 +1631,7 @@ function renderRateLimits(rl) {{
 
 function update(data) {{
   const t = data.codex_totals || {{}};
+  const mode = data.deployment_mode || 'local';
   document.getElementById('countRunning').textContent = (data.counts||{{}}).running || 0;
   document.getElementById('countRetrying').textContent = (data.counts||{{}}).retrying || 0;
   document.getElementById('countWaiting').textContent = (data.counts||{{}}).waiting || 0;
@@ -1412,11 +1640,20 @@ function update(data) {{
   document.getElementById('inputTokens').textContent = fmt(t.input_tokens || 0) + ' in';
   document.getElementById('outputTokens').textContent = fmt(t.output_tokens || 0) + ' out';
   document.getElementById('runtime').textContent = fmtTime(t.seconds_running || 0);
-  renderRunning(data.running || []);
+  renderRunning(data.running || [], mode);
   renderRetrying(data.retrying || []);
   renderWaiting(data.waiting || []);
   renderCompleted(data.completed || []);
   renderRateLimits(data.rate_limits);
+  if (mode === 'distributed') {{
+    document.getElementById('workersSection').style.display = '';
+    document.getElementById('pendingJobsSection').style.display = '';
+    renderWorkers(data.workers || []);
+    renderPendingJobs(data.pending_jobs || []);
+  }} else {{
+    document.getElementById('workersSection').style.display = 'none';
+    document.getElementById('pendingJobsSection').style.display = 'none';
+  }}
   lastFetch = Date.now();
 }}
 
@@ -1748,6 +1985,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("Symphony"));
@@ -1779,6 +2019,7 @@ mod tests {
             input_tokens: 1000,
             output_tokens: 500,
             total_tokens: 1500,
+            worker_id: None,
         }];
 
         let html = render_dashboard(
@@ -1793,6 +2034,9 @@ mod tests {
                 seconds_running: 60.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         // Data is embedded in the JSON initial state
@@ -1823,6 +2067,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("PROJ-2"));
@@ -1845,6 +2092,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &rate_limits,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("requests_remaining"));
@@ -1866,6 +2116,7 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             total_tokens: 0,
+            worker_id: None,
         }];
 
         let html = render_dashboard(
@@ -1880,6 +2131,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("PROJ-1"));
@@ -1907,6 +2161,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("PROJ-1"));
@@ -1937,6 +2194,9 @@ mod tests {
                 seconds_running: 120.5,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("PROJ-C1"));
@@ -2153,15 +2413,17 @@ mod tests {
     #[test]
     fn test_build_snapshot_empty() {
         let state = OrchestratorState::new(5000, 3);
-        let (running, retrying, waiting, completed, totals) = build_snapshot(&state);
-        assert!(running.is_empty());
-        assert!(retrying.is_empty());
-        assert!(waiting.is_empty());
-        assert!(completed.is_empty());
-        assert_eq!(totals.input_tokens, 0);
-        assert_eq!(totals.output_tokens, 0);
-        assert_eq!(totals.total_tokens, 0);
-        assert!(totals.seconds_running >= 0.0);
+        let snap = build_snapshot(&state, "local");
+        assert!(snap.running.is_empty());
+        assert!(snap.retrying.is_empty());
+        assert!(snap.waiting.is_empty());
+        assert!(snap.completed.is_empty());
+        assert_eq!(snap.totals.input_tokens, 0);
+        assert_eq!(snap.totals.output_tokens, 0);
+        assert_eq!(snap.totals.total_tokens, 0);
+        assert!(snap.totals.seconds_running >= 0.0);
+        assert!(snap.workers.is_empty());
+        assert!(snap.pending_jobs.is_empty());
     }
 
     #[tokio::test]
@@ -2194,17 +2456,17 @@ mod tests {
             seconds_running: 100.0,
         };
 
-        let (running, retrying, waiting, _completed, totals) = build_snapshot(&state);
-        assert_eq!(running.len(), 1);
-        assert_eq!(running[0].issue_identifier, "PROJ-1");
-        assert_eq!(running[0].input_tokens, 100);
-        assert!(retrying.is_empty());
-        assert!(waiting.is_empty());
-        assert_eq!(totals.input_tokens, 500);
-        assert_eq!(totals.output_tokens, 200);
-        assert_eq!(totals.total_tokens, 700);
+        let snap = build_snapshot(&state, "local");
+        assert_eq!(snap.running.len(), 1);
+        assert_eq!(snap.running[0].issue_identifier, "PROJ-1");
+        assert_eq!(snap.running[0].input_tokens, 100);
+        assert!(snap.retrying.is_empty());
+        assert!(snap.waiting.is_empty());
+        assert_eq!(snap.totals.input_tokens, 500);
+        assert_eq!(snap.totals.output_tokens, 200);
+        assert_eq!(snap.totals.total_tokens, 700);
         // seconds_running includes active session time
-        assert!(totals.seconds_running >= 100.0);
+        assert!(snap.totals.seconds_running >= 100.0);
     }
 
     #[tokio::test]
@@ -2221,10 +2483,10 @@ mod tests {
             },
         );
 
-        let (_running, retrying, _waiting, _completed, _totals) = build_snapshot(&state);
-        assert_eq!(retrying.len(), 1);
-        assert_eq!(retrying[0].identifier, "PROJ-1");
-        assert_eq!(retrying[0].attempt, 2);
+        let snap = build_snapshot(&state, "local");
+        assert_eq!(snap.retrying.len(), 1);
+        assert_eq!(snap.retrying[0].identifier, "PROJ-1");
+        assert_eq!(snap.retrying[0].attempt, 2);
     }
 
     // ── Integration tests (axum) ─────────────────────────────────────
@@ -2678,7 +2940,8 @@ mod tests {
             log_seq: 0,
         };
 
-        let info = map_running_entry(&entry);
+        let workers = std::collections::HashMap::new();
+        let info = map_running_entry(&entry, &workers, "local");
         assert_eq!(info.issue_id, "id1");
         assert_eq!(info.issue_identifier, "PROJ-1");
         assert_eq!(info.state, "Todo");
@@ -2688,6 +2951,7 @@ mod tests {
         assert_eq!(info.output_tokens, 50);
         assert_eq!(info.total_tokens, 150);
         assert!(info.last_event_at.is_some());
+        assert!(info.worker_id.is_none());
     }
 
     #[test]
@@ -2759,6 +3023,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
+                worker_id: None,
             }],
             retrying: vec![],
             waiting: vec![],
@@ -2770,6 +3035,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             rate_limits: None,
+            workers: vec![],
+            pending_jobs: vec![],
+            deployment_mode: "local".to_string(),
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -3229,6 +3497,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("logPanel"));
@@ -3254,6 +3525,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("log-panel"));
@@ -4118,6 +4392,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("removeRetry"));
@@ -4130,7 +4407,7 @@ mod tests {
     #[test]
     fn test_build_state_response_empty() {
         let state = OrchestratorState::new(5000, 3);
-        let response = build_state_response(&state);
+        let response = build_state_response(&state, "local");
         assert!(response.generated_at.contains("T"));
         assert_eq!(response.counts.running, 0);
         assert_eq!(response.counts.retrying, 0);
@@ -4172,7 +4449,7 @@ mod tests {
         };
         state.rate_limits = Some(serde_json::json!({"remaining": 10}));
 
-        let response = build_state_response(&state);
+        let response = build_state_response(&state, "local");
         assert_eq!(response.counts.running, 1);
         assert_eq!(response.running[0].issue_identifier, "PROJ-1");
         assert_eq!(response.codex_totals.input_tokens, 500);
@@ -4182,7 +4459,7 @@ mod tests {
     #[test]
     fn test_build_state_response_serializes_to_json() {
         let state = OrchestratorState::new(5000, 3);
-        let response = build_state_response(&state);
+        let response = build_state_response(&state, "local");
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("generated_at"));
         assert!(json.contains("counts"));
@@ -4195,7 +4472,7 @@ mod tests {
     fn test_state_broadcast_to_json_ok() {
         let state = OrchestratorState::new(5000, 3);
         let result = Ok(());
-        let json = state_broadcast_to_json(&result, &state);
+        let json = state_broadcast_to_json(&result, &state, "local");
         assert!(json.is_some());
         let json_str = json.unwrap();
         assert!(json_str.contains("generated_at"));
@@ -4207,7 +4484,7 @@ mod tests {
         use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
         let state = OrchestratorState::new(5000, 3);
         let result = Err(BroadcastStreamRecvError::Lagged(5));
-        let json = state_broadcast_to_json(&result, &state);
+        let json = state_broadcast_to_json(&result, &state, "local");
         assert!(json.is_none());
     }
 
@@ -4328,6 +4605,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         // SSE-related functions
@@ -4353,6 +4633,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         // Polling fallback
@@ -4377,6 +4660,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         // Should start with SSE, not setInterval(poll)
@@ -4446,6 +4732,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         // Verify waiting data is embedded in the initial JSON
@@ -4472,6 +4761,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("No PRs waiting"));
@@ -4507,6 +4799,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             rate_limits: None,
+            workers: vec![],
+            pending_jobs: vec![],
+            deployment_mode: "local".to_string(),
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -4540,6 +4835,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             rate_limits: None,
+            workers: vec![],
+            pending_jobs: vec![],
+            deployment_mode: "local".to_string(),
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -4563,11 +4861,11 @@ mod tests {
             },
         );
 
-        let (_running, _retrying, waiting, _completed, _totals) = build_snapshot(&state);
-        assert_eq!(waiting.len(), 1);
-        assert_eq!(waiting[0].identifier, "PROJ-W1");
-        assert_eq!(waiting[0].pr_number, 42);
-        assert_eq!(waiting[0].branch, "symphony/proj-w1");
+        let snap = build_snapshot(&state, "local");
+        assert_eq!(snap.waiting.len(), 1);
+        assert_eq!(snap.waiting[0].identifier, "PROJ-W1");
+        assert_eq!(snap.waiting[0].pr_number, 42);
+        assert_eq!(snap.waiting[0].branch, "symphony/proj-w1");
     }
 
     #[test]
@@ -4585,7 +4883,7 @@ mod tests {
             },
         );
 
-        let response = build_state_response(&state);
+        let response = build_state_response(&state, "local");
         assert_eq!(response.counts.waiting, 1);
         assert_eq!(response.waiting.len(), 1);
         assert_eq!(response.waiting[0].identifier, "PROJ-W1");
@@ -4706,6 +5004,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         // Verify the renderWaiting JS function is present
@@ -4750,6 +5051,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            "local",
         );
 
         assert!(html.contains("PROJ-W1"));
@@ -4925,5 +5229,870 @@ mod tests {
         let w = orch.tracked_workers.get("w-3").unwrap();
         assert!(w.capabilities.is_empty());
         assert_eq!(w.max_concurrent_jobs, 1);
+    }
+
+    // ── WorkerInfo tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_worker_info_debug_clone_serialize() {
+        let info = WorkerInfo {
+            worker_id: "w-1".to_string(),
+            status: "healthy".to_string(),
+            last_heartbeat: "2025-01-01T00:00:00Z".to_string(),
+            active_jobs: vec!["TST-1".to_string()],
+            max_concurrent_jobs: 4,
+            registered_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("WorkerInfo"));
+        assert!(debug.contains("w-1"));
+
+        let cloned = info.clone();
+        assert_eq!(cloned.worker_id, "w-1");
+        assert_eq!(cloned.status, "healthy");
+        assert_eq!(cloned.max_concurrent_jobs, 4);
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("w-1"));
+        assert!(json.contains("healthy"));
+        assert!(json.contains("TST-1"));
+    }
+
+    // ── PendingJobInfo tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_pending_job_info_debug_clone_serialize() {
+        let info = PendingJobInfo {
+            issue_identifier: "TST-42".to_string(),
+            prompt_preview: "Fix the bug in main.rs".to_string(),
+            attempt: Some(2),
+        };
+
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("PendingJobInfo"));
+        assert!(debug.contains("TST-42"));
+
+        let cloned = info.clone();
+        assert_eq!(cloned.issue_identifier, "TST-42");
+        assert_eq!(cloned.attempt, Some(2));
+
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("TST-42"));
+        assert!(json.contains("Fix the bug"));
+    }
+
+    #[test]
+    fn test_pending_job_info_no_attempt() {
+        let info = PendingJobInfo {
+            issue_identifier: "TST-1".to_string(),
+            prompt_preview: "Do stuff".to_string(),
+            attempt: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("null"));
+    }
+
+    // ── compute_worker_status tests ─────────────────────────────────
+
+    #[test]
+    fn test_compute_worker_status_healthy() {
+        let status = compute_worker_status(true, Utc::now());
+        assert_eq!(status, "healthy");
+    }
+
+    #[test]
+    fn test_compute_worker_status_stale() {
+        let old = Utc::now() - chrono::Duration::seconds(90);
+        let status = compute_worker_status(true, old);
+        assert_eq!(status, "stale");
+    }
+
+    #[test]
+    fn test_compute_worker_status_dead() {
+        let status = compute_worker_status(false, Utc::now());
+        assert_eq!(status, "dead");
+    }
+
+    #[test]
+    fn test_compute_worker_status_dead_with_old_heartbeat() {
+        let old = Utc::now() - chrono::Duration::seconds(300);
+        let status = compute_worker_status(false, old);
+        assert_eq!(status, "dead");
+    }
+
+    // ── truncate_prompt tests ────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_prompt_short() {
+        assert_eq!(truncate_prompt("short", 80), "short");
+    }
+
+    #[test]
+    fn test_truncate_prompt_exact_length() {
+        let s = "a".repeat(80);
+        assert_eq!(truncate_prompt(&s, 80), s);
+    }
+
+    #[test]
+    fn test_truncate_prompt_long() {
+        let s = "a".repeat(100);
+        let result = truncate_prompt(&s, 80);
+        assert_eq!(result.len(), 83); // 80 + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_prompt_empty() {
+        assert_eq!(truncate_prompt("", 80), "");
+    }
+
+    // ── deployment_mode_string tests ─────────────────────────────────
+
+    #[test]
+    fn test_deployment_mode_string_local() {
+        assert_eq!(deployment_mode_string(&DeploymentMode::Local), "local");
+    }
+
+    #[test]
+    fn test_deployment_mode_string_distributed() {
+        assert_eq!(
+            deployment_mode_string(&DeploymentMode::Distributed),
+            "distributed"
+        );
+    }
+
+    // ── map_tracked_worker tests ─────────────────────────────────────
+
+    #[test]
+    fn test_map_tracked_worker_healthy() {
+        use crate::protocol::TrackedWorker;
+        let now = Utc::now();
+        let tw = TrackedWorker {
+            worker_id: "w-1".to_string(),
+            last_heartbeat: now,
+            active_jobs: vec!["TST-1".to_string(), "TST-2".to_string()],
+            registered_at: now,
+            capabilities: vec!["rust".to_string()],
+            max_concurrent_jobs: 4,
+            alive: true,
+        };
+        let info = map_tracked_worker(&tw);
+        assert_eq!(info.worker_id, "w-1");
+        assert_eq!(info.status, "healthy");
+        assert_eq!(info.active_jobs.len(), 2);
+        assert_eq!(info.max_concurrent_jobs, 4);
+        assert!(info.last_heartbeat.contains("T"));
+        assert!(info.registered_at.contains("T"));
+    }
+
+    #[test]
+    fn test_map_tracked_worker_stale() {
+        use crate::protocol::TrackedWorker;
+        let old = Utc::now() - chrono::Duration::seconds(90);
+        let tw = TrackedWorker {
+            worker_id: "w-2".to_string(),
+            last_heartbeat: old,
+            active_jobs: vec![],
+            registered_at: old,
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+            alive: true,
+        };
+        let info = map_tracked_worker(&tw);
+        assert_eq!(info.status, "stale");
+    }
+
+    #[test]
+    fn test_map_tracked_worker_dead() {
+        use crate::protocol::TrackedWorker;
+        let now = Utc::now();
+        let tw = TrackedWorker {
+            worker_id: "w-3".to_string(),
+            last_heartbeat: now,
+            active_jobs: vec![],
+            registered_at: now,
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+            alive: false,
+        };
+        let info = map_tracked_worker(&tw);
+        assert_eq!(info.status, "dead");
+    }
+
+    // ── map_work_assignment tests ────────────────────────────────────
+
+    #[test]
+    fn test_map_work_assignment() {
+        let assignment = crate::protocol::WorkAssignment {
+            issue_id: "id1".to_string(),
+            issue_identifier: "TST-42".to_string(),
+            prompt: "Fix the bug in main.rs and update tests".to_string(),
+            attempt: Some(2),
+            workspace_path: Some("/tmp/ws".to_string()),
+        };
+        let info = map_work_assignment(&assignment);
+        assert_eq!(info.issue_identifier, "TST-42");
+        assert_eq!(info.attempt, Some(2));
+        assert_eq!(
+            info.prompt_preview,
+            "Fix the bug in main.rs and update tests"
+        );
+    }
+
+    #[test]
+    fn test_map_work_assignment_long_prompt() {
+        let long_prompt = "a".repeat(200);
+        let assignment = crate::protocol::WorkAssignment {
+            issue_id: "id1".to_string(),
+            issue_identifier: "TST-1".to_string(),
+            prompt: long_prompt,
+            attempt: None,
+            workspace_path: None,
+        };
+        let info = map_work_assignment(&assignment);
+        assert_eq!(info.prompt_preview.len(), 83); // 80 + "..."
+        assert!(info.prompt_preview.ends_with("..."));
+        assert!(info.attempt.is_none());
+    }
+
+    // ── find_worker_for_identifier tests ─────────────────────────────
+
+    #[test]
+    fn test_find_worker_for_identifier_found() {
+        use crate::protocol::TrackedWorker;
+        let mut workers = std::collections::HashMap::new();
+        workers.insert(
+            "w-1".to_string(),
+            TrackedWorker {
+                worker_id: "w-1".to_string(),
+                last_heartbeat: Utc::now(),
+                active_jobs: vec!["TST-1".to_string(), "TST-2".to_string()],
+                registered_at: Utc::now(),
+                capabilities: vec![],
+                max_concurrent_jobs: 2,
+                alive: true,
+            },
+        );
+        let result = find_worker_for_identifier(&workers, "TST-1");
+        assert_eq!(result, Some("w-1".to_string()));
+    }
+
+    #[test]
+    fn test_find_worker_for_identifier_not_found() {
+        use crate::protocol::TrackedWorker;
+        let mut workers = std::collections::HashMap::new();
+        workers.insert(
+            "w-1".to_string(),
+            TrackedWorker {
+                worker_id: "w-1".to_string(),
+                last_heartbeat: Utc::now(),
+                active_jobs: vec!["TST-1".to_string()],
+                registered_at: Utc::now(),
+                capabilities: vec![],
+                max_concurrent_jobs: 1,
+                alive: true,
+            },
+        );
+        let result = find_worker_for_identifier(&workers, "TST-99");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_worker_for_identifier_empty_workers() {
+        let workers = std::collections::HashMap::new();
+        let result = find_worker_for_identifier(&workers, "TST-1");
+        assert!(result.is_none());
+    }
+
+    // ── map_running_entry with worker lookup tests ───────────────────
+
+    #[tokio::test]
+    async fn test_map_running_entry_distributed_with_worker() {
+        use crate::protocol::TrackedWorker;
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        let entry = RunningEntry {
+            issue: make_issue("id1", "PROJ-1", "In Progress"),
+            identifier: "PROJ-1".to_string(),
+            session: LiveSession::default(),
+            retry_attempt: None,
+            started_at: Utc::now(),
+            cancel_tx,
+            event_log: std::collections::VecDeque::new(),
+            log_seq: 0,
+        };
+
+        let mut workers = std::collections::HashMap::new();
+        workers.insert(
+            "w-1".to_string(),
+            TrackedWorker {
+                worker_id: "w-1".to_string(),
+                last_heartbeat: Utc::now(),
+                active_jobs: vec!["PROJ-1".to_string()],
+                registered_at: Utc::now(),
+                capabilities: vec![],
+                max_concurrent_jobs: 2,
+                alive: true,
+            },
+        );
+
+        let info = map_running_entry(&entry, &workers, "distributed");
+        assert_eq!(info.worker_id, Some("w-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_map_running_entry_distributed_no_worker() {
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        let entry = RunningEntry {
+            issue: make_issue("id1", "PROJ-1", "In Progress"),
+            identifier: "PROJ-1".to_string(),
+            session: LiveSession::default(),
+            retry_attempt: None,
+            started_at: Utc::now(),
+            cancel_tx,
+            event_log: std::collections::VecDeque::new(),
+            log_seq: 0,
+        };
+
+        let workers = std::collections::HashMap::new();
+        let info = map_running_entry(&entry, &workers, "distributed");
+        assert!(info.worker_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_map_running_entry_local_no_worker_lookup() {
+        use crate::protocol::TrackedWorker;
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        let entry = RunningEntry {
+            issue: make_issue("id1", "PROJ-1", "In Progress"),
+            identifier: "PROJ-1".to_string(),
+            session: LiveSession::default(),
+            retry_attempt: None,
+            started_at: Utc::now(),
+            cancel_tx,
+            event_log: std::collections::VecDeque::new(),
+            log_seq: 0,
+        };
+
+        // Even though a worker has this job, local mode should not set worker_id
+        let mut workers = std::collections::HashMap::new();
+        workers.insert(
+            "w-1".to_string(),
+            TrackedWorker {
+                worker_id: "w-1".to_string(),
+                last_heartbeat: Utc::now(),
+                active_jobs: vec!["PROJ-1".to_string()],
+                registered_at: Utc::now(),
+                capabilities: vec![],
+                max_concurrent_jobs: 1,
+                alive: true,
+            },
+        );
+
+        let info = map_running_entry(&entry, &workers, "local");
+        assert!(info.worker_id.is_none());
+    }
+
+    // ── build_snapshot with workers and pending_jobs ─────────────────
+
+    #[test]
+    fn test_build_snapshot_with_workers() {
+        use crate::protocol::TrackedWorker;
+        let mut state = OrchestratorState::new(5000, 3);
+        state.tracked_workers.insert(
+            "w-1".to_string(),
+            TrackedWorker {
+                worker_id: "w-1".to_string(),
+                last_heartbeat: Utc::now(),
+                active_jobs: vec!["TST-1".to_string()],
+                registered_at: Utc::now(),
+                capabilities: vec!["rust".to_string()],
+                max_concurrent_jobs: 4,
+                alive: true,
+            },
+        );
+
+        let snap = build_snapshot(&state, "distributed");
+        assert_eq!(snap.workers.len(), 1);
+        assert_eq!(snap.workers[0].worker_id, "w-1");
+        assert_eq!(snap.workers[0].status, "healthy");
+    }
+
+    #[test]
+    fn test_build_snapshot_with_pending_jobs() {
+        let mut state = OrchestratorState::new(5000, 3);
+        state.pending_jobs.push_back(WorkAssignment {
+            issue_id: "id1".to_string(),
+            issue_identifier: "TST-1".to_string(),
+            prompt: "Fix the bug".to_string(),
+            attempt: Some(1),
+            workspace_path: None,
+        });
+
+        let snap = build_snapshot(&state, "distributed");
+        assert_eq!(snap.pending_jobs.len(), 1);
+        assert_eq!(snap.pending_jobs[0].issue_identifier, "TST-1");
+        assert_eq!(snap.pending_jobs[0].prompt_preview, "Fix the bug");
+        assert_eq!(snap.pending_jobs[0].attempt, Some(1));
+    }
+
+    // ── StateResponse with new fields ────────────────────────────────
+
+    #[test]
+    fn test_state_response_includes_workers_and_pending_jobs() {
+        let response = StateResponse {
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            counts: StateCounts {
+                running: 0,
+                retrying: 0,
+                waiting: 0,
+                completed: 0,
+            },
+            running: vec![],
+            retrying: vec![],
+            waiting: vec![],
+            completed: vec![],
+            codex_totals: TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            rate_limits: None,
+            workers: vec![WorkerInfo {
+                worker_id: "w-1".to_string(),
+                status: "healthy".to_string(),
+                last_heartbeat: "2025-01-01T00:00:00Z".to_string(),
+                active_jobs: vec!["TST-1".to_string()],
+                max_concurrent_jobs: 4,
+                registered_at: "2025-01-01T00:00:00Z".to_string(),
+            }],
+            pending_jobs: vec![PendingJobInfo {
+                issue_identifier: "TST-2".to_string(),
+                prompt_preview: "Fix bug".to_string(),
+                attempt: None,
+            }],
+            deployment_mode: "distributed".to_string(),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"workers\""));
+        assert!(json.contains("w-1"));
+        assert!(json.contains("\"pending_jobs\""));
+        assert!(json.contains("TST-2"));
+        assert!(json.contains("\"deployment_mode\":\"distributed\""));
+    }
+
+    // ── API: state endpoint includes new fields ──────────────────────
+
+    #[tokio::test]
+    async fn test_get_state_includes_deployment_mode() {
+        let app_state = test_app_state();
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/state")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["deployment_mode"], "local");
+        assert!(json["workers"].is_array());
+        assert!(json["workers"].as_array().unwrap().is_empty());
+        assert!(json["pending_jobs"].is_array());
+        assert!(json["pending_jobs"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_state_distributed_with_workers() {
+        let app_state = test_app_state();
+
+        // Set deployment mode to distributed
+        {
+            let mut config = app_state.config.write().await;
+            config.deployment.mode = DeploymentMode::Distributed;
+        }
+
+        // Add a tracked worker
+        {
+            use crate::protocol::TrackedWorker;
+            let mut orch = app_state.orchestrator_state.write().await;
+            orch.tracked_workers.insert(
+                "w-1".to_string(),
+                TrackedWorker {
+                    worker_id: "w-1".to_string(),
+                    last_heartbeat: Utc::now(),
+                    active_jobs: vec!["TST-1".to_string()],
+                    registered_at: Utc::now(),
+                    capabilities: vec!["rust".to_string()],
+                    max_concurrent_jobs: 4,
+                    alive: true,
+                },
+            );
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/state")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["deployment_mode"], "distributed");
+        assert_eq!(json["workers"].as_array().unwrap().len(), 1);
+        assert_eq!(json["workers"][0]["worker_id"], "w-1");
+        assert_eq!(json["workers"][0]["status"], "healthy");
+    }
+
+    #[tokio::test]
+    async fn test_get_state_distributed_with_pending_jobs() {
+        let app_state = test_app_state();
+
+        // Set deployment mode to distributed
+        {
+            let mut config = app_state.config.write().await;
+            config.deployment.mode = DeploymentMode::Distributed;
+        }
+
+        // Add a pending job
+        {
+            let mut orch = app_state.orchestrator_state.write().await;
+            orch.pending_jobs.push_back(WorkAssignment {
+                issue_id: "id1".to_string(),
+                issue_identifier: "TST-42".to_string(),
+                prompt: "Implement the feature described in the issue".to_string(),
+                attempt: Some(1),
+                workspace_path: None,
+            });
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/state")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["pending_jobs"].as_array().unwrap().len(), 1);
+        assert_eq!(json["pending_jobs"][0]["issue_identifier"], "TST-42");
+        assert_eq!(json["pending_jobs"][0]["attempt"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_state_distributed_running_with_worker_id() {
+        let app_state = test_app_state();
+
+        // Set deployment mode to distributed
+        {
+            let mut config = app_state.config.write().await;
+            config.deployment.mode = DeploymentMode::Distributed;
+        }
+
+        // Add a running entry
+        insert_running(&app_state, "id1", "PROJ-1", "In Progress").await;
+
+        // Add a tracked worker that has PROJ-1 in its active_jobs
+        {
+            use crate::protocol::TrackedWorker;
+            let mut orch = app_state.orchestrator_state.write().await;
+            orch.tracked_workers.insert(
+                "w-1".to_string(),
+                TrackedWorker {
+                    worker_id: "w-1".to_string(),
+                    last_heartbeat: Utc::now(),
+                    active_jobs: vec!["PROJ-1".to_string()],
+                    registered_at: Utc::now(),
+                    capabilities: vec![],
+                    max_concurrent_jobs: 2,
+                    alive: true,
+                },
+            );
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/state")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["running"][0]["worker_id"], "w-1");
+    }
+
+    // ── Dashboard: distributed mode sections ─────────────────────────
+
+    #[test]
+    fn test_render_dashboard_distributed_shows_workers_section() {
+        let workers = vec![WorkerInfo {
+            worker_id: "w-1".to_string(),
+            status: "healthy".to_string(),
+            last_heartbeat: "2025-01-01T00:00:00Z".to_string(),
+            active_jobs: vec!["TST-1".to_string()],
+            max_concurrent_jobs: 4,
+            registered_at: "2025-01-01T00:00:00Z".to_string(),
+        }];
+
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &workers,
+            &[],
+            "distributed",
+        );
+
+        assert!(html.contains("workersSection"));
+        assert!(html.contains("Connected Workers"));
+        assert!(html.contains("renderWorkers"));
+        assert!(html.contains("w-1"));
+        assert!(html.contains("distributed"));
+    }
+
+    #[test]
+    fn test_render_dashboard_distributed_shows_pending_jobs_section() {
+        let pending = vec![PendingJobInfo {
+            issue_identifier: "TST-42".to_string(),
+            prompt_preview: "Fix the bug...".to_string(),
+            attempt: Some(1),
+        }];
+
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &pending,
+            "distributed",
+        );
+
+        assert!(html.contains("pendingJobsSection"));
+        assert!(html.contains("Job Queue"));
+        assert!(html.contains("renderPendingJobs"));
+        assert!(html.contains("TST-42"));
+    }
+
+    #[test]
+    fn test_render_dashboard_local_hides_worker_sections() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+
+        // Sections exist in HTML but are hidden by default
+        assert!(html.contains("workersSection"));
+        assert!(html.contains("style=\"display:none;\""));
+        // The JS should handle visibility based on mode
+        assert!(html.contains("deployment_mode"));
+    }
+
+    #[test]
+    fn test_render_dashboard_distributed_worker_column_in_running() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "distributed",
+        );
+
+        // JS function should add Worker column in distributed mode
+        assert!(html.contains("Worker"));
+        assert!(html.contains("worker_id"));
+    }
+
+    #[test]
+    fn test_render_dashboard_contains_worker_status_css() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+
+        assert!(html.contains(".state-badge.healthy"));
+        assert!(html.contains(".state-badge.stale"));
+        assert!(html.contains(".state-badge.dead"));
+    }
+
+    // ── build_state_response with distributed mode ───────────────────
+
+    #[test]
+    fn test_build_state_response_distributed() {
+        use crate::protocol::TrackedWorker;
+        let mut state = OrchestratorState::new(5000, 3);
+        state.tracked_workers.insert(
+            "w-1".to_string(),
+            TrackedWorker {
+                worker_id: "w-1".to_string(),
+                last_heartbeat: Utc::now(),
+                active_jobs: vec![],
+                registered_at: Utc::now(),
+                capabilities: vec![],
+                max_concurrent_jobs: 2,
+                alive: true,
+            },
+        );
+        state.pending_jobs.push_back(WorkAssignment {
+            issue_id: "id1".to_string(),
+            issue_identifier: "TST-1".to_string(),
+            prompt: "test".to_string(),
+            attempt: None,
+            workspace_path: None,
+        });
+
+        let response = build_state_response(&state, "distributed");
+        assert_eq!(response.deployment_mode, "distributed");
+        assert_eq!(response.workers.len(), 1);
+        assert_eq!(response.workers[0].worker_id, "w-1");
+        assert_eq!(response.pending_jobs.len(), 1);
+        assert_eq!(response.pending_jobs[0].issue_identifier, "TST-1");
+    }
+
+    // ── Dashboard with distributed mode and running with worker_id ───
+
+    #[tokio::test]
+    async fn test_get_dashboard_distributed() {
+        let app_state = test_app_state();
+
+        // Set deployment mode to distributed
+        {
+            let mut config = app_state.config.write().await;
+            config.deployment.mode = DeploymentMode::Distributed;
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        assert!(body.contains("distributed"));
+        assert!(body.contains("workersSection"));
+        assert!(body.contains("pendingJobsSection"));
+    }
+
+    // ── SnapshotResult tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_result_empty_distributed() {
+        let state = OrchestratorState::new(5000, 3);
+        let snap = build_snapshot(&state, "distributed");
+        assert!(snap.running.is_empty());
+        assert!(snap.retrying.is_empty());
+        assert!(snap.waiting.is_empty());
+        assert!(snap.completed.is_empty());
+        assert!(snap.workers.is_empty());
+        assert!(snap.pending_jobs.is_empty());
+    }
+
+    // ── RunningInfo with worker_id serialization ─────────────────────
+
+    #[test]
+    fn test_running_info_with_worker_id() {
+        let info = RunningInfo {
+            issue_id: "id1".to_string(),
+            issue_identifier: "PROJ-1".to_string(),
+            state: "In Progress".to_string(),
+            session_id: None,
+            turn_count: 0,
+            last_event: None,
+            last_message: None,
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            last_event_at: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            worker_id: Some("w-1".to_string()),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"worker_id\":\"w-1\""));
+    }
+
+    #[test]
+    fn test_running_info_without_worker_id() {
+        let info = RunningInfo {
+            issue_id: "id1".to_string(),
+            issue_identifier: "PROJ-1".to_string(),
+            state: "In Progress".to_string(),
+            session_id: None,
+            turn_count: 0,
+            last_event: None,
+            last_message: None,
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            last_event_at: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            worker_id: None,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"worker_id\":null"));
     }
 }
