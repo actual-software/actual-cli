@@ -457,6 +457,7 @@ impl StateStore for SqliteStore {
                 pr_number: row.get::<_, i64>(2)? as u64,
                 branch: row.get(3)?,
                 started_waiting_at,
+                session_id: None,
             })
         })?;
 
@@ -896,6 +897,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         store.save_waiting(&entry).unwrap();
 
@@ -916,6 +918,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         store.save_waiting(&entry1).unwrap();
 
@@ -925,6 +928,7 @@ mod tests {
             pr_number: 99,
             branch: "symphony/proj-1-v2".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         store.save_waiting(&entry2).unwrap();
 
@@ -943,6 +947,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         store.save_waiting(&entry).unwrap();
 
@@ -975,6 +980,7 @@ mod tests {
             pr_number: 2,
             branch: "symphony/proj-2".to_string(),
             started_waiting_at: now + chrono::Duration::seconds(10),
+            session_id: None,
         };
         let entry2 = crate::model::WaitingEntry {
             issue_id: "issue-1".to_string(),
@@ -982,6 +988,7 @@ mod tests {
             pr_number: 1,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: now,
+            session_id: None,
         };
         store.save_waiting(&entry1).unwrap();
         store.save_waiting(&entry2).unwrap();
@@ -1008,6 +1015,7 @@ mod tests {
                 pr_number: 55,
                 branch: "symphony/proj-3".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             };
             store.save_waiting(&entry).unwrap();
         }

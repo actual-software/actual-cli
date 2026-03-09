@@ -610,6 +610,7 @@ mod tests {
                 pr_number: 99,
                 branch: "symphony/tst-3".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             }],
             totals: AgentTotals {
                 input_tokens: 200,

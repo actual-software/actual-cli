@@ -691,6 +691,7 @@ impl Orchestrator {
             pr_number,
             branch,
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         let mut state = self.state.write().await;
         state
@@ -3180,6 +3181,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8060,6 +8062,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8361,6 +8364,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8410,6 +8414,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8511,6 +8516,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8567,6 +8573,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8602,6 +8609,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8672,6 +8680,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8765,6 +8774,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8866,6 +8876,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8973,6 +8984,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9059,6 +9071,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9162,6 +9175,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9236,6 +9250,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9310,6 +9325,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9381,6 +9397,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -10187,6 +10204,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
 
         orch.dispatch_cleanup(&entry, &config.tracker).await;
@@ -10782,6 +10800,7 @@ mod tests {
             pr_number: 99,
             branch: "symphony/proj-w".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         let store = Arc::new(MockStore::new().with_waiting(vec![entry]));
         let orch = test_orchestrator().with_store(store).await;
@@ -11305,6 +11324,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -11781,6 +11801,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -11793,6 +11814,7 @@ mod tests {
                 pr_number: 42,
                 branch: "symphony/proj-1".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             })
             .unwrap();
 
@@ -11850,6 +11872,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -11862,6 +11885,7 @@ mod tests {
                 pr_number: 42,
                 branch: "symphony/proj-1".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             })
             .unwrap();
 
@@ -11974,6 +11998,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -11986,6 +12011,7 @@ mod tests {
                 pr_number: 42,
                 branch: "symphony/proj-1".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             })
             .unwrap();
 
@@ -12065,6 +12091,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -12076,6 +12103,7 @@ mod tests {
                 pr_number: 42,
                 branch: "symphony/proj-1".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             })
             .unwrap();
 
@@ -12368,6 +12396,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -12429,6 +12458,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -12549,6 +12579,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -12627,6 +12658,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
