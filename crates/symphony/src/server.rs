@@ -918,14 +918,14 @@ impl axum::extract::FromRequestParts<AppState> for AuthenticatedWorker {
 }
 
 /// GET /api/v1/work — Long-poll to claim a work assignment.
-async fn handle_claim_work(
-    _worker: AuthenticatedWorker,
-    State(state): State<AppState>,
-) -> Response {
+async fn handle_claim_work(worker: AuthenticatedWorker, State(state): State<AppState>) -> Response {
     // Try immediate pop
     {
         let mut orch = state.orchestrator_state.write().await;
         if let Some(assignment) = orch.pending_jobs.pop_front() {
+            // Record which worker claimed this job
+            orch.record_worker_claim(&worker.worker_id, &assignment.issue_identifier);
+            orch.notify_state_change();
             return (StatusCode::OK, axum::Json(assignment)).into_response();
         }
     }
@@ -945,7 +945,12 @@ async fn handle_claim_work(
     // Notification received — try to pop again
     let mut orch = state.orchestrator_state.write().await;
     match orch.pending_jobs.pop_front() {
-        Some(assignment) => (StatusCode::OK, axum::Json(assignment)).into_response(),
+        Some(assignment) => {
+            // Record which worker claimed this job
+            orch.record_worker_claim(&worker.worker_id, &assignment.issue_identifier);
+            orch.notify_state_change();
+            (StatusCode::OK, axum::Json(assignment)).into_response()
+        }
         None => StatusCode::NO_CONTENT.into_response(),
     }
 }
@@ -1034,6 +1039,14 @@ async fn handle_worker_complete(
             );
         }
     };
+
+    // Clear the worker's claim on this job so the dashboard doesn't
+    // show stale data while the orchestrator processes the completion.
+    {
+        let mut orch = state.orchestrator_state.write().await;
+        orch.clear_worker_claim(&issue_identifier);
+        orch.notify_state_change();
+    }
 
     let msg = OrchestratorMessage::WorkerExited {
         issue_id,

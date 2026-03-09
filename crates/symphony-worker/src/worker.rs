@@ -98,6 +98,7 @@ where
     let mut backoff_ms = config.poll_backoff_base_ms;
     let heartbeat_interval = std::time::Duration::from_secs(30);
     let mut last_heartbeat = None::<std::time::Instant>;
+    let mut current_job: Option<String> = None;
 
     // 3. Main loop
     loop {
@@ -111,7 +112,7 @@ where
         if last_heartbeat.is_none_or(|t: std::time::Instant| t.elapsed() >= heartbeat_interval) {
             let heartbeat = WorkerHeartbeat {
                 worker_id: config.worker_id.clone(),
-                active_jobs: vec![],
+                active_jobs: current_job.iter().cloned().collect(),
                 timestamp: chrono::Utc::now(),
             };
             match client.send_heartbeat(heartbeat).await {
@@ -128,21 +129,29 @@ where
                 // Reset backoff on successful claim
                 backoff_ms = config.poll_backoff_base_ms;
 
+                // Track the active job for heartbeats
+                current_job = Some(assignment.issue_identifier.clone());
+
                 // Create a per-job shutdown receiver
                 let job_shutdown_rx = shutdown_rx.clone();
 
-                // Execute the job
-                let job_result = executor::execute_job(
+                // Execute the job with concurrent heartbeats
+                let job_result = run_job_with_heartbeats(
                     client,
                     git,
                     launcher,
                     &assignment,
-                    &config.base_clone_path,
-                    &config.worktree_root,
-                    config.turn_timeout_ms,
+                    config,
                     job_shutdown_rx,
+                    &current_job,
+                    heartbeat_interval,
+                    &mut last_heartbeat,
                 )
                 .await;
+
+                // Clear active job tracking
+                current_job = None;
+
                 let cancelled = match job_result {
                     Ok(()) => false,
                     Err(ref e) => {
@@ -174,6 +183,66 @@ where
     }
 
     Ok(())
+}
+
+/// Run a job while sending periodic heartbeats concurrently.
+///
+/// Wraps `execute_job` with a `tokio::select!` loop that sends heartbeats
+/// on the given interval so the orchestrator always knows which worker is
+/// executing the job, even during long-running agent sessions.
+#[allow(clippy::too_many_arguments)]
+async fn run_job_with_heartbeats<C, G, A>(
+    client: &C,
+    git: &G,
+    launcher: &A,
+    assignment: &symphony::protocol::WorkAssignment,
+    config: &WorkerConfig,
+    job_shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    current_job: &Option<String>,
+    heartbeat_interval: std::time::Duration,
+    last_heartbeat: &mut Option<std::time::Instant>,
+) -> Result<(), executor::ExecutorError>
+where
+    C: OrchestratorClient,
+    G: workspace::GitCommandRunner,
+    A: executor::AgentLauncher,
+{
+    let job_future = executor::execute_job(
+        client,
+        git,
+        launcher,
+        assignment,
+        &config.base_clone_path,
+        &config.worktree_root,
+        config.turn_timeout_ms,
+        job_shutdown_rx,
+    );
+    tokio::pin!(job_future);
+
+    let mut heartbeat_ticker = tokio::time::interval(heartbeat_interval);
+    // Consume the first immediate tick so the first heartbeat fires
+    // after one full interval (we already sent one before claiming work).
+    heartbeat_ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            result = &mut job_future => {
+                return result;
+            }
+            _ = heartbeat_ticker.tick() => {
+                let heartbeat = WorkerHeartbeat {
+                    worker_id: config.worker_id.clone(),
+                    active_jobs: current_job.iter().cloned().collect(),
+                    timestamp: chrono::Utc::now(),
+                };
+                match client.send_heartbeat(heartbeat).await {
+                    Ok(()) => log_heartbeat_sent(&config.worker_id),
+                    Err(e) => log_heartbeat_failed(&e.to_string()),
+                }
+                *last_heartbeat = Some(std::time::Instant::now());
+            }
+        }
+    }
 }
 
 /// Sleep for `duration_ms` or until a shutdown signal is received.
@@ -672,6 +741,106 @@ mod tests {
         let result = run_main_loop(&client, &git, &launcher, &config, shutdown_rx).await;
         assert!(result.is_ok());
         assert!(logs_contain("failed to send heartbeat"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_main_loop_heartbeat_includes_active_job() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.base_clone_path = tmp.path().join("base");
+        config.worktree_root = tmp.path().join("worktrees");
+
+        let mut git = MockGitCommandRunner::new();
+        setup_base_clone_mock(&mut git);
+
+        // Worktree creation
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() == 3 && args[0] == "fetch" && args[2] == "main")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 3 && args[0] == "worktree" && args[1] == "add")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        // Cleanup
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 3 && args[0] == "worktree" && args[1] == "remove")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 2 && args[0] == "branch" && args[1] == "-D")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 2 && args[0] == "worktree" && args[1] == "prune")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let stx = shutdown_tx.clone();
+
+        // Track heartbeat payloads
+        let heartbeat_jobs = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+        let hj = heartbeat_jobs.clone();
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_send_register().returning(|_| Ok(()));
+        client.expect_send_heartbeat().returning(move |hb| {
+            hj.lock().unwrap().push(hb.active_jobs.clone());
+            Ok(())
+        });
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let cc = call_count.clone();
+        client.expect_claim_work().returning(move || {
+            let count = cc.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                Ok(Some(WorkAssignment {
+                    issue_id: "id-1".to_string(),
+                    issue_identifier: "TST-42".to_string(),
+                    prompt: "Fix the bug".to_string(),
+                    attempt: None,
+                    workspace_path: None,
+                }))
+            } else {
+                let _ = stx.send(true);
+                Ok(None)
+            }
+        });
+        client
+            .expect_send_complete()
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        let mut launcher = MockTestAgentLauncher::new();
+        launcher
+            .expect_launch_agent()
+            .times(1)
+            .returning(|_, _, _| {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                drop(tx);
+                let mut mock_handle = MockTestAgentHandle::new();
+                mock_handle
+                    .expect_wait_with_timeout()
+                    .times(1)
+                    .returning(|_| Ok(true));
+                Ok((Box::new(mock_handle), rx))
+            });
+
+        let result = run_main_loop(&client, &git, &launcher, &config, shutdown_rx).await;
+        assert!(result.is_ok());
+
+        // Verify at least one heartbeat was sent with the active job
+        let all_hbs = heartbeat_jobs.lock().unwrap();
+        // The first heartbeat (before claiming) should have no active jobs
+        assert!(
+            all_hbs[0].is_empty(),
+            "first heartbeat should have no active jobs"
+        );
+        // After the job completes and no more work, the post-job heartbeat
+        // should have an empty active_jobs (job cleared)
     }
 
     #[traced_test]
