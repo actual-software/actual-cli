@@ -789,6 +789,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_parse_assistant_text_block_missing_text_key() {
+        // A "text" block without a "text" key is skipped
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text"}
+                ]
+            }
+        });
+        assert!(parse_agent_message(&json).is_empty());
+    }
+
+    #[test]
+    fn test_parse_assistant_unknown_content_block_type() {
+        // Unknown content block types (e.g. "thinking") are silently skipped
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "..."}
+                ]
+            }
+        });
+        assert!(parse_agent_message(&json).is_empty());
+    }
+
+    #[test]
+    fn test_parse_assistant_message_not_string_or_object() {
+        // "message" is a number (neither string nor object with content) → empty
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": 42
+        });
+        assert!(parse_agent_message(&json).is_empty());
+    }
+
     // ---- spawn_agent_process tests ----
 
     #[test]
