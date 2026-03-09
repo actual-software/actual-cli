@@ -844,6 +844,214 @@ mod tests {
     }
 
     #[traced_test]
+    #[tokio::test(start_paused = true)]
+    async fn test_run_main_loop_heartbeat_during_job_execution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.base_clone_path = tmp.path().join("base");
+        config.worktree_root = tmp.path().join("worktrees");
+
+        let mut git = MockGitCommandRunner::new();
+        setup_base_clone_mock(&mut git);
+
+        // Worktree creation
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() == 3 && args[0] == "fetch" && args[2] == "main")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 3 && args[0] == "worktree" && args[1] == "add")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        // Cleanup
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 3 && args[0] == "worktree" && args[1] == "remove")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 2 && args[0] == "branch" && args[1] == "-D")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 2 && args[0] == "worktree" && args[1] == "prune")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let stx = shutdown_tx.clone();
+
+        let heartbeat_count = Arc::new(AtomicU32::new(0));
+        let hc = heartbeat_count.clone();
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_send_register().returning(|_| Ok(()));
+        client.expect_send_heartbeat().returning(move |_hb| {
+            hc.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let cc = call_count.clone();
+        client.expect_claim_work().returning(move || {
+            let count = cc.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                Ok(Some(WorkAssignment {
+                    issue_id: "id-1".to_string(),
+                    issue_identifier: "TST-42".to_string(),
+                    prompt: "Fix the bug".to_string(),
+                    attempt: None,
+                    workspace_path: None,
+                }))
+            } else {
+                let _ = stx.send(true);
+                Ok(None)
+            }
+        });
+        client
+            .expect_send_complete()
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        let mut launcher = MockTestAgentLauncher::new();
+        launcher
+            .expect_launch_agent()
+            .times(1)
+            .returning(|_, _, _| {
+                let (_tx, rx) = tokio::sync::mpsc::channel(10);
+                // Spawn a task that sleeps long enough for heartbeats to fire.
+                // With paused time, this triggers the heartbeat ticker in
+                // run_job_with_heartbeats without actually waiting 35 seconds.
+                let tx_clone = _tx;
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(65)).await;
+                    drop(tx_clone);
+                });
+                let mut mock_handle = MockTestAgentHandle::new();
+                mock_handle
+                    .expect_wait_with_timeout()
+                    .times(1)
+                    .returning(|_| Ok(true));
+                Ok((Box::new(mock_handle), rx))
+            });
+
+        let result = run_main_loop(&client, &git, &launcher, &config, shutdown_rx).await;
+        assert!(result.is_ok());
+
+        // At least 1 heartbeat before claiming + at least 1 during job execution
+        assert!(
+            heartbeat_count.load(Ordering::SeqCst) >= 2,
+            "expected at least 2 heartbeats (1 pre-claim + 1 during job), got {}",
+            heartbeat_count.load(Ordering::SeqCst)
+        );
+        assert!(logs_contain("sent heartbeat"));
+    }
+
+    #[traced_test]
+    #[tokio::test(start_paused = true)]
+    async fn test_run_main_loop_heartbeat_failure_during_job_execution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.base_clone_path = tmp.path().join("base");
+        config.worktree_root = tmp.path().join("worktrees");
+
+        let mut git = MockGitCommandRunner::new();
+        setup_base_clone_mock(&mut git);
+
+        // Worktree creation
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() == 3 && args[0] == "fetch" && args[2] == "main")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 3 && args[0] == "worktree" && args[1] == "add")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        // Cleanup
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 3 && args[0] == "worktree" && args[1] == "remove")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 2 && args[0] == "branch" && args[1] == "-D")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+        git.expect_run_git()
+            .withf(|_cwd, args| args.len() >= 2 && args[0] == "worktree" && args[1] == "prune")
+            .times(1)
+            .returning(|_, _| Ok(String::new()));
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let stx = shutdown_tx.clone();
+
+        let fail_count = Arc::new(AtomicU32::new(0));
+        let fc = fail_count.clone();
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_send_register().returning(|_| Ok(()));
+        // First heartbeat (pre-claim) succeeds; subsequent ones (during job) fail
+        client.expect_send_heartbeat().returning(move |_hb| {
+            let n = fc.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok(())
+            } else {
+                Err(ClientError::RequestFailed {
+                    reason: "timeout".to_string(),
+                })
+            }
+        });
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let cc = call_count.clone();
+        client.expect_claim_work().returning(move || {
+            let count = cc.fetch_add(1, Ordering::SeqCst);
+            if count == 0 {
+                Ok(Some(WorkAssignment {
+                    issue_id: "id-1".to_string(),
+                    issue_identifier: "TST-42".to_string(),
+                    prompt: "Fix the bug".to_string(),
+                    attempt: None,
+                    workspace_path: None,
+                }))
+            } else {
+                let _ = stx.send(true);
+                Ok(None)
+            }
+        });
+        client
+            .expect_send_complete()
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        let mut launcher = MockTestAgentLauncher::new();
+        launcher
+            .expect_launch_agent()
+            .times(1)
+            .returning(|_, _, _| {
+                let (_tx, rx) = tokio::sync::mpsc::channel(10);
+                // Keep channel open long enough for heartbeat tick to fire
+                let tx_clone = _tx;
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(65)).await;
+                    drop(tx_clone);
+                });
+                let mut mock_handle = MockTestAgentHandle::new();
+                mock_handle
+                    .expect_wait_with_timeout()
+                    .times(1)
+                    .returning(|_| Ok(true));
+                Ok((Box::new(mock_handle), rx))
+            });
+
+        let result = run_main_loop(&client, &git, &launcher, &config, shutdown_rx).await;
+        assert!(result.is_ok());
+
+        // The in-job heartbeat failed, so we should see the failure log
+        assert!(logs_contain("failed to send heartbeat"));
+    }
+
+    #[traced_test]
     #[tokio::test]
     async fn test_run_main_loop_heartbeat_sent_on_first_iteration() {
         let tmp = tempfile::tempdir().unwrap();
