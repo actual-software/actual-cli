@@ -1321,6 +1321,7 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
 .log-badge.rate_limit_event {{ background:rgba(255,171,0,0.2); color:var(--amber); }}
 .log-badge.tool_use {{ background:rgba(171,71,188,0.2); color:#ce93d8; }}
 .log-badge.tool_result {{ background:rgba(171,71,188,0.15); color:#b39ddb; }}
+.log-badge.user {{ background:rgba(100,181,246,0.15); color:#90caf9; }}
 .log-msg {{ color:var(--text); word-break:break-word; flex:1; }}
 .log-tokens {{ color:var(--text-dim); white-space:nowrap; }}
 @media (max-width:768px) {{
