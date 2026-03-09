@@ -5319,6 +5319,39 @@ mod tests {
         ));
     }
 
+    #[traced_test]
+    #[tokio::test]
+    async fn test_startup_cleanup_orphan_no_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        let _terminal_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+
+        let orch = Orchestrator::new(config, "template".to_string());
+        // store is None by default — no persistence
+
+        // Pre-populate in-memory claimed set
+        {
+            let mut state = orch.state.write().await;
+            state.claimed.insert("orphan-1".to_string());
+        }
+
+        orch.startup_cleanup().await;
+
+        // In-memory state should still be cleaned up even without a store
+        let state = orch.state.read().await;
+        assert!(state.claimed.is_empty());
+    }
+
     // ── dispatch_issue ───────────────────────────────────────────────
 
     #[traced_test]
