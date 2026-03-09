@@ -1,3 +1,4 @@
+pub mod aggregation;
 pub mod display;
 pub mod pipeline;
 pub mod schemas;
