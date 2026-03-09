@@ -774,8 +774,25 @@ async fn handle_worker_event(
     Path(issue_identifier): Path<String>,
     axum::Json(payload): axum::Json<WorkerEventPayload>,
 ) -> Response {
+    // Resolve the human-readable identifier (e.g. "ACTCLI-64") to the
+    // internal issue ID (Linear UUID) used as the key in state.running.
+    let issue_id = {
+        let orch = state.orchestrator_state.read().await;
+        find_running_by_identifier(&orch, &issue_identifier).map(|e| e.issue.id.clone())
+    };
+    let issue_id = match issue_id {
+        Some(id) => id,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "issue_not_found",
+                format!("No running issue with identifier '{issue_identifier}'"),
+            );
+        }
+    };
+
     let msg = OrchestratorMessage::AgentUpdate {
-        issue_id: issue_identifier.clone(),
+        issue_id,
         event: payload.event,
     };
     match state.msg_tx.send(msg).await {
@@ -795,8 +812,24 @@ async fn handle_worker_complete(
     Path(issue_identifier): Path<String>,
     axum::Json(payload): axum::Json<WorkResult>,
 ) -> Response {
+    // Resolve the human-readable identifier to the internal issue ID.
+    let issue_id = {
+        let orch = state.orchestrator_state.read().await;
+        find_running_by_identifier(&orch, &issue_identifier).map(|e| e.issue.id.clone())
+    };
+    let issue_id = match issue_id {
+        Some(id) => id,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "issue_not_found",
+                format!("No running issue with identifier '{issue_identifier}'"),
+            );
+        }
+    };
+
     let msg = OrchestratorMessage::WorkerExited {
-        issue_id: issue_identifier.clone(),
+        issue_id,
         reason: payload.reason,
     };
     match state.msg_tx.send(msg).await {
@@ -3303,6 +3336,8 @@ mod tests {
     #[tokio::test]
     async fn test_worker_event_valid() {
         let (app_state, mut rx) = test_app_state_with_auth(Some("secret-token"));
+        // Insert a running entry so the identifier resolves to the UUID.
+        insert_running(&app_state, "uuid-42", "ACTCLI-42", "In Progress").await;
         let app = build_router(app_state);
 
         let payload = serde_json::json!({
@@ -3313,7 +3348,7 @@ mod tests {
 
         let request = axum::http::Request::builder()
             .method("POST")
-            .uri("/api/v1/test-issue-id/events")
+            .uri("/api/v1/ACTCLI-42/events")
             .header("Authorization", "Bearer secret-token")
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_vec(&payload).unwrap()))
@@ -3322,11 +3357,11 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify the message was sent to the channel
+        // Verify the message was sent with the resolved UUID, not the identifier.
         let msg = rx.try_recv().unwrap();
         match msg {
             OrchestratorMessage::AgentUpdate { issue_id, event } => {
-                assert_eq!(issue_id, "test-issue-id");
+                assert_eq!(issue_id, "uuid-42");
                 assert!(matches!(
                     event,
                     crate::protocol::AgentEvent::Notification { .. }
@@ -3334,6 +3369,34 @@ mod tests {
             }
             _ => panic!("Expected AgentUpdate message"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_worker_event_unknown_identifier() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        // No running entry — identifier won't resolve.
+        let app = build_router(app_state);
+
+        let payload = serde_json::json!({
+            "event": {
+                "Notification": { "message": "hello" }
+            }
+        });
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/UNKNOWN-99/events")
+            .header("Authorization", "Bearer secret-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "issue_not_found");
     }
 
     #[tokio::test]
@@ -3373,6 +3436,8 @@ mod tests {
             job_notify: Arc::new(tokio::sync::Notify::new()),
             start_time: std::time::Instant::now(),
         };
+        // Insert a running entry so the identifier resolves.
+        insert_running(&app_state, "uuid-42", "ACTCLI-42", "In Progress").await;
         let app = build_router(app_state);
 
         let payload = serde_json::json!({
@@ -3383,7 +3448,7 @@ mod tests {
 
         let request = axum::http::Request::builder()
             .method("POST")
-            .uri("/api/v1/test-issue-id/events")
+            .uri("/api/v1/ACTCLI-42/events")
             .header("Authorization", "Bearer secret-token")
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_vec(&payload).unwrap()))
@@ -3402,6 +3467,8 @@ mod tests {
     #[tokio::test]
     async fn test_worker_complete_valid() {
         let (app_state, mut rx) = test_app_state_with_auth(Some("secret-token"));
+        // Insert a running entry so the identifier resolves to the UUID.
+        insert_running(&app_state, "uuid-42", "ACTCLI-42", "In Progress").await;
         let app = build_router(app_state);
 
         let payload = serde_json::json!({
@@ -3410,7 +3477,7 @@ mod tests {
 
         let request = axum::http::Request::builder()
             .method("POST")
-            .uri("/api/v1/test-issue-id/complete")
+            .uri("/api/v1/ACTCLI-42/complete")
             .header("Authorization", "Bearer secret-token")
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_vec(&payload).unwrap()))
@@ -3419,11 +3486,11 @@ mod tests {
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        // Verify the message was sent to the channel
+        // Verify the message was sent with the resolved UUID.
         let msg = rx.try_recv().unwrap();
         match msg {
             OrchestratorMessage::WorkerExited { issue_id, reason } => {
-                assert_eq!(issue_id, "test-issue-id");
+                assert_eq!(issue_id, "uuid-42");
                 assert_eq!(reason, crate::protocol::WorkerExitReason::Normal);
             }
             _ => panic!("Expected WorkerExited message"),
@@ -3433,6 +3500,8 @@ mod tests {
     #[tokio::test]
     async fn test_worker_complete_with_failure_reason() {
         let (app_state, mut rx) = test_app_state_with_auth(Some("secret-token"));
+        // Insert a running entry so the identifier resolves.
+        insert_running(&app_state, "uuid-42", "ACTCLI-42", "In Progress").await;
         let app = build_router(app_state);
 
         let payload = serde_json::json!({
@@ -3441,7 +3510,7 @@ mod tests {
 
         let request = axum::http::Request::builder()
             .method("POST")
-            .uri("/api/v1/test-issue-id/complete")
+            .uri("/api/v1/ACTCLI-42/complete")
             .header("Authorization", "Bearer secret-token")
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_vec(&payload).unwrap()))
@@ -3460,6 +3529,32 @@ mod tests {
             }
             _ => panic!("Expected WorkerExited message"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_worker_complete_unknown_identifier() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        // No running entry — identifier won't resolve.
+        let app = build_router(app_state);
+
+        let payload = serde_json::json!({
+            "reason": "Normal"
+        });
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/UNKNOWN-99/complete")
+            .header("Authorization", "Bearer secret-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["error"]["code"], "issue_not_found");
     }
 
     #[tokio::test]
@@ -3497,6 +3592,8 @@ mod tests {
             job_notify: Arc::new(tokio::sync::Notify::new()),
             start_time: std::time::Instant::now(),
         };
+        // Insert a running entry so the identifier resolves.
+        insert_running(&app_state, "uuid-42", "ACTCLI-42", "In Progress").await;
         let app = build_router(app_state);
 
         let payload = serde_json::json!({
@@ -3505,7 +3602,7 @@ mod tests {
 
         let request = axum::http::Request::builder()
             .method("POST")
-            .uri("/api/v1/test-issue-id/complete")
+            .uri("/api/v1/ACTCLI-42/complete")
             .header("Authorization", "Bearer secret-token")
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_vec(&payload).unwrap()))
