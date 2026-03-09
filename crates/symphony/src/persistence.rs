@@ -4,7 +4,7 @@
 //! persists session data, event logs, agent totals, and completed issue IDs
 //! across orchestrator restarts.
 
-use crate::model::{AgentTotals, LogEntry, TokenSnapshot};
+use crate::model::{AgentTotals, CompletionOutcome, CompletionRecord, LogEntry, TokenSnapshot};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -68,6 +68,8 @@ pub trait StateStore: Send + Sync {
     fn save_waiting(&self, entry: &crate::model::WaitingEntry) -> Result<()>;
     fn remove_waiting(&self, issue_id: &str) -> Result<()>;
     fn load_waiting(&self) -> Result<Vec<crate::model::WaitingEntry>>;
+    fn save_completion_record(&self, record: &CompletionRecord) -> Result<()>;
+    fn load_completion_history(&self) -> Result<Vec<CompletionRecord>>;
 }
 
 // ── SqliteStore ─────────────────────────────────────────────────────────
@@ -154,6 +156,18 @@ impl SqliteStore {
                 branch TEXT NOT NULL,
                 started_waiting_at TEXT NOT NULL,
                 session_id TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS completion_history (
+                issue_id TEXT PRIMARY KEY,
+                identifier TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                duration_seconds REAL NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                total_tokens INTEGER NOT NULL,
+                turn_count INTEGER NOT NULL,
+                completed_at TEXT NOT NULL
             );";
         conn.execute_batch(schema)?;
 
@@ -474,6 +488,81 @@ impl StateStore for SqliteStore {
             entries.push(row?);
         }
         Ok(entries)
+    }
+
+    fn save_completion_record(&self, record: &CompletionRecord) -> Result<()> {
+        let conn = self.lock()?;
+        let outcome_str = match record.outcome {
+            CompletionOutcome::Success => "success",
+            CompletionOutcome::InReview => "in_review",
+            CompletionOutcome::Retry => "retry",
+            CompletionOutcome::Failed => "failed",
+        };
+        conn.execute(
+            "INSERT OR REPLACE INTO completion_history
+             (issue_id, identifier, outcome, duration_seconds, input_tokens,
+              output_tokens, total_tokens, turn_count, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                record.issue_id,
+                record.identifier,
+                outcome_str,
+                record.duration_seconds,
+                record.input_tokens as i64,
+                record.output_tokens as i64,
+                record.total_tokens as i64,
+                record.turn_count as i64,
+                record.completed_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_completion_history(&self) -> Result<Vec<CompletionRecord>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT issue_id, identifier, outcome, duration_seconds, input_tokens,
+                    output_tokens, total_tokens, turn_count, completed_at
+             FROM completion_history ORDER BY completed_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let outcome_str: String = row.get(2)?;
+            let outcome = parse_completion_outcome(&outcome_str);
+
+            let ts_str: String = row.get(8)?;
+            let completed_at = chrono::DateTime::parse_from_rfc3339(&ts_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+
+            Ok(CompletionRecord {
+                issue_id: row.get(0)?,
+                identifier: row.get(1)?,
+                outcome,
+                duration_seconds: row.get(3)?,
+                input_tokens: row.get::<_, i64>(4)? as u64,
+                output_tokens: row.get::<_, i64>(5)? as u64,
+                total_tokens: row.get::<_, i64>(6)? as u64,
+                turn_count: row.get::<_, i64>(7)? as u32,
+                completed_at,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+        Ok(records)
+    }
+}
+
+/// Parse a completion outcome string back to the enum.
+fn parse_completion_outcome(s: &str) -> CompletionOutcome {
+    match s {
+        "success" => CompletionOutcome::Success,
+        "in_review" => CompletionOutcome::InReview,
+        "retry" => CompletionOutcome::Retry,
+        _ => CompletionOutcome::Failed,
     }
 }
 
@@ -1275,5 +1364,148 @@ mod tests {
         let loaded = store.load_waiting().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].session_id, None);
+    }
+
+    // ── Completion history ────────────────────────────────────────────
+
+    fn make_completion_record(
+        issue_id: &str,
+        identifier: &str,
+        outcome: CompletionOutcome,
+    ) -> CompletionRecord {
+        use crate::model::CompletionRecord;
+        CompletionRecord {
+            issue_id: issue_id.to_string(),
+            identifier: identifier.to_string(),
+            outcome,
+            duration_seconds: 120.5,
+            input_tokens: 1000,
+            output_tokens: 500,
+            total_tokens: 1500,
+            turn_count: 5,
+            completed_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn save_and_load_completion_record() {
+        let store = SqliteStore::in_memory().unwrap();
+        let record = make_completion_record("issue-1", "TST-1", CompletionOutcome::Success);
+        store.save_completion_record(&record).unwrap();
+
+        let loaded = store.load_completion_history().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].issue_id, "issue-1");
+        assert_eq!(loaded[0].identifier, "TST-1");
+        assert_eq!(loaded[0].outcome, CompletionOutcome::Success);
+        assert!((loaded[0].duration_seconds - 120.5).abs() < f64::EPSILON);
+        assert_eq!(loaded[0].input_tokens, 1000);
+        assert_eq!(loaded[0].output_tokens, 500);
+        assert_eq!(loaded[0].total_tokens, 1500);
+        assert_eq!(loaded[0].turn_count, 5);
+    }
+
+    #[test]
+    fn save_completion_record_upsert() {
+        let store = SqliteStore::in_memory().unwrap();
+        let record1 = make_completion_record("issue-1", "TST-1", CompletionOutcome::Success);
+        store.save_completion_record(&record1).unwrap();
+
+        // Save again with different outcome — should upsert
+        let record2 = make_completion_record("issue-1", "TST-1", CompletionOutcome::Failed);
+        store.save_completion_record(&record2).unwrap();
+
+        let loaded = store.load_completion_history().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].outcome, CompletionOutcome::Failed);
+    }
+
+    #[test]
+    fn load_completion_history_empty() {
+        let store = SqliteStore::in_memory().unwrap();
+        let loaded = store.load_completion_history().unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_completion_history_ordered_by_completed_at_desc() {
+        let store = SqliteStore::in_memory().unwrap();
+
+        // Save records with different completed_at timestamps
+        let mut r1 = make_completion_record("issue-1", "TST-1", CompletionOutcome::Success);
+        r1.completed_at = chrono::DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        store.save_completion_record(&r1).unwrap();
+
+        let mut r2 = make_completion_record("issue-2", "TST-2", CompletionOutcome::InReview);
+        r2.completed_at = chrono::DateTime::parse_from_rfc3339("2025-01-03T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        store.save_completion_record(&r2).unwrap();
+
+        let mut r3 = make_completion_record("issue-3", "TST-3", CompletionOutcome::Failed);
+        r3.completed_at = chrono::DateTime::parse_from_rfc3339("2025-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        store.save_completion_record(&r3).unwrap();
+
+        let loaded = store.load_completion_history().unwrap();
+        assert_eq!(loaded.len(), 3);
+        // Most recent first (DESC order)
+        assert_eq!(loaded[0].issue_id, "issue-2"); // Jan 3
+        assert_eq!(loaded[1].issue_id, "issue-3"); // Jan 2
+        assert_eq!(loaded[2].issue_id, "issue-1"); // Jan 1
+    }
+
+    #[test]
+    fn save_completion_record_all_outcomes() {
+        let store = SqliteStore::in_memory().unwrap();
+
+        for (i, outcome) in [
+            CompletionOutcome::Success,
+            CompletionOutcome::InReview,
+            CompletionOutcome::Retry,
+            CompletionOutcome::Failed,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let record =
+                make_completion_record(&format!("issue-{i}"), &format!("TST-{i}"), outcome.clone());
+            store.save_completion_record(&record).unwrap();
+        }
+
+        let loaded = store.load_completion_history().unwrap();
+        assert_eq!(loaded.len(), 4);
+    }
+
+    #[test]
+    fn parse_completion_outcome_all_variants() {
+        assert_eq!(
+            super::parse_completion_outcome("success"),
+            CompletionOutcome::Success
+        );
+        assert_eq!(
+            super::parse_completion_outcome("in_review"),
+            CompletionOutcome::InReview
+        );
+        assert_eq!(
+            super::parse_completion_outcome("retry"),
+            CompletionOutcome::Retry
+        );
+        assert_eq!(
+            super::parse_completion_outcome("failed"),
+            CompletionOutcome::Failed
+        );
+        // Unknown strings default to Failed
+        assert_eq!(
+            super::parse_completion_outcome("unknown"),
+            CompletionOutcome::Failed
+        );
+        assert_eq!(
+            super::parse_completion_outcome(""),
+            CompletionOutcome::Failed
+        );
     }
 }

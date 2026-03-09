@@ -1,5 +1,5 @@
 use crate::config::ServiceConfig;
-use crate::model::{LogEntry, OrchestratorState, RetryEntry};
+use crate::model::{CompletionOutcome, LogEntry, OrchestratorState, RetryEntry};
 use crate::protocol::{OrchestratorMessage, WorkResult, WorkerEventPayload};
 use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
@@ -109,6 +109,7 @@ pub struct StateResponse {
     pub counts: StateCounts,
     pub running: Vec<RunningInfo>,
     pub retrying: Vec<RetryInfo>,
+    pub completed: Vec<CompletedInfo>,
     pub codex_totals: TotalsInfo,
     pub rate_limits: Option<serde_json::Value>,
 }
@@ -117,6 +118,20 @@ pub struct StateResponse {
 pub struct StateCounts {
     pub running: usize,
     pub retrying: usize,
+    pub completed: usize,
+}
+
+/// Summary of a completed agent run for the dashboard.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompletedInfo {
+    pub issue_identifier: String,
+    pub outcome: String,
+    pub duration_seconds: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub turn_count: u32,
+    pub completed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -211,10 +226,24 @@ pub struct ErrorDetail {
 ///
 /// Computes live `seconds_running` by adding elapsed time from active sessions
 /// to the cumulative total.
-fn build_snapshot(state: &OrchestratorState) -> (Vec<RunningInfo>, Vec<RetryInfo>, TotalsInfo) {
+fn build_snapshot(
+    state: &OrchestratorState,
+) -> (
+    Vec<RunningInfo>,
+    Vec<RetryInfo>,
+    Vec<CompletedInfo>,
+    TotalsInfo,
+) {
     let running: Vec<RunningInfo> = state.running.values().map(map_running_entry).collect();
 
     let retrying: Vec<RetryInfo> = state.retry_attempts.values().map(map_retry_entry).collect();
+
+    let completed: Vec<CompletedInfo> = state
+        .completion_history()
+        .iter()
+        .rev() // most recent first
+        .map(map_completion_record)
+        .collect();
 
     let active_seconds: f64 = state
         .running
@@ -229,7 +258,27 @@ fn build_snapshot(state: &OrchestratorState) -> (Vec<RunningInfo>, Vec<RetryInfo
         seconds_running: state.agent_totals.seconds_running + active_seconds,
     };
 
-    (running, retrying, totals)
+    (running, retrying, completed, totals)
+}
+
+/// Map a `CompletionRecord` to a `CompletedInfo` for JSON serialization.
+fn map_completion_record(record: &crate::model::CompletionRecord) -> CompletedInfo {
+    let outcome = match record.outcome {
+        CompletionOutcome::Success => "success",
+        CompletionOutcome::InReview => "in_review",
+        CompletionOutcome::Retry => "retry",
+        CompletionOutcome::Failed => "failed",
+    };
+    CompletedInfo {
+        issue_identifier: record.identifier.clone(),
+        outcome: outcome.to_string(),
+        duration_seconds: record.duration_seconds,
+        input_tokens: record.input_tokens,
+        output_tokens: record.output_tokens,
+        total_tokens: record.total_tokens,
+        turn_count: record.turn_count,
+        completed_at: format_datetime(record.completed_at),
+    }
 }
 
 /// Compute elapsed seconds for a running entry.
@@ -304,18 +353,18 @@ fn map_retry_entry(entry: &RetryEntry) -> RetryInfo {
 /// GET / — HTML dashboard.
 async fn handle_dashboard(State(state): State<AppState>) -> Html<String> {
     let orch_state = state.orchestrator_state.read().await;
-    let (running, retrying, totals) = build_snapshot(&orch_state);
+    let (running, retrying, completed, totals) = build_snapshot(&orch_state);
     let rate_limits = orch_state.rate_limits.clone();
     drop(orch_state);
 
-    let html = render_dashboard(&running, &retrying, &totals, &rate_limits);
+    let html = render_dashboard(&running, &retrying, &completed, &totals, &rate_limits);
     Html(html)
 }
 
 /// GET /api/v1/state — JSON state snapshot.
 async fn handle_state(State(state): State<AppState>) -> impl IntoResponse {
     let orch_state = state.orchestrator_state.read().await;
-    let (running, retrying, totals) = build_snapshot(&orch_state);
+    let (running, retrying, completed, totals) = build_snapshot(&orch_state);
     let rate_limits = orch_state.rate_limits.clone();
     drop(orch_state);
 
@@ -324,9 +373,11 @@ async fn handle_state(State(state): State<AppState>) -> impl IntoResponse {
         counts: StateCounts {
             running: running.len(),
             retrying: retrying.len(),
+            completed: completed.len(),
         },
         running,
         retrying,
+        completed,
         codex_totals: totals,
         rate_limits,
     };
@@ -413,16 +464,18 @@ pub struct LogsResponse {
 
 /// Build a full `StateResponse` from the current orchestrator state.
 fn build_state_response(state: &OrchestratorState) -> StateResponse {
-    let (running, retrying, totals) = build_snapshot(state);
+    let (running, retrying, completed, totals) = build_snapshot(state);
     let rate_limits = state.rate_limits.clone();
     StateResponse {
         generated_at: Utc::now().to_rfc3339(),
         counts: StateCounts {
             running: running.len(),
             retrying: retrying.len(),
+            completed: completed.len(),
         },
         running,
         retrying,
+        completed,
         codex_totals: totals,
         rate_limits,
     }
@@ -888,6 +941,7 @@ async fn handle_fallback(method: Method) -> Response {
 pub fn render_dashboard(
     running: &[RunningInfo],
     retrying: &[RetryInfo],
+    completed: &[CompletedInfo],
     totals: &TotalsInfo,
     rate_limits: &Option<serde_json::Value>,
 ) -> String {
@@ -897,9 +951,10 @@ pub fn render_dashboard(
     let initial_state = serde_json::json!({
         "running": running,
         "retrying": retrying,
+        "completed": completed,
         "codex_totals": totals,
         "rate_limits": rate_limits,
-        "counts": { "running": running.len(), "retrying": retrying.len() },
+        "counts": { "running": running.len(), "retrying": retrying.len(), "completed": completed.len() },
     });
 
     html.push_str(&format!(
@@ -938,7 +993,7 @@ body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-ser
 .btn-danger {{ color:var(--red); border-color:rgba(255,82,82,0.3); }}
 .btn-danger:hover {{ background:rgba(255,82,82,0.15); border-color:var(--red); }}
 .content {{ max-width:1400px; margin:0 auto; padding:24px; }}
-.stats {{ display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }}
+.stats {{ display:grid; grid-template-columns:repeat(5,1fr); gap:16px; margin-bottom:24px; }}
 .stat-card {{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:20px; }}
 .stat-card .label {{ font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); margin-bottom:8px; }}
 .stat-card .value {{ font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; }}
@@ -957,6 +1012,9 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
 .state-badge {{ display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:500; }}
 .state-badge.active {{ background:rgba(0,230,118,0.15); color:var(--green); }}
 .state-badge.retry {{ background:rgba(255,171,0,0.15); color:var(--amber); }}
+.state-badge.success {{ background:rgba(0,230,118,0.15); color:var(--green); }}
+.state-badge.in_review {{ background:rgba(0,212,255,0.15); color:var(--accent); }}
+.state-badge.failed {{ background:rgba(255,82,82,0.15); color:var(--red); }}
 .empty-state {{ padding:40px 20px; text-align:center; color:var(--text-dim); }}
 .empty-state .icon {{ font-size:32px; margin-bottom:12px; }}
 .empty-state p {{ font-size:13px; line-height:1.6; }}
@@ -985,7 +1043,7 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
 .log-msg {{ color:var(--text); word-break:break-word; flex:1; }}
 .log-tokens {{ color:var(--text-dim); white-space:nowrap; }}
 @media (max-width:768px) {{
-  .stats {{ grid-template-columns:repeat(2,1fr); }}
+  .stats {{ grid-template-columns:repeat(2,1fr); grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); }}
   .header {{ flex-direction:column; gap:12px; }}
 }}
 </style>
@@ -1023,6 +1081,11 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
       <div class="value" id="countRetrying">0</div>
       <div class="sub">in retry queue</div>
     </div>
+    <div class="stat-card">
+      <div class="label">Completed</div>
+      <div class="value" id="countCompleted">0</div>
+      <div class="sub">finished runs</div>
+    </div>
   </div>
 
   <div class="section">
@@ -1053,6 +1116,19 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
       <div class="empty-state">
         <div class="icon">No retries pending</div>
         <p>Failed or timed-out sessions will appear here with their retry schedule.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="completedSection">
+    <div class="section-header" style="cursor:pointer;" onclick="toggleCompleted()">
+      <h2>Completed / History <span class="badge" id="completedBadge">0</span></h2>
+      <span id="completedToggle" style="font-size:12px;color:var(--text-dim);">Show</span>
+    </div>
+    <div id="completedContent" style="display:none;">
+      <div class="empty-state">
+        <div class="icon">No completed runs</div>
+        <p>Finished agent sessions will appear here.</p>
       </div>
     </div>
   </div>
@@ -1142,6 +1218,41 @@ function renderRetrying(items) {{
   el.innerHTML = h;
 }}
 
+let completedVisible = false;
+function toggleCompleted() {{
+  completedVisible = !completedVisible;
+  document.getElementById('completedContent').style.display = completedVisible ? '' : 'none';
+  document.getElementById('completedToggle').textContent = completedVisible ? 'Hide' : 'Show';
+}}
+
+function fmtDuration(s) {{
+  if (s >= 3600) return (s/3600).toFixed(1)+'h';
+  if (s >= 60) return (s/60).toFixed(1)+'m';
+  return s.toFixed(0)+'s';
+}}
+
+function renderCompleted(items) {{
+  const el = document.getElementById('completedContent');
+  document.getElementById('completedBadge').textContent = items.length;
+  if (!items.length) {{
+    el.innerHTML = '<div class="empty-state"><div class="icon">No completed runs</div><p>Finished agent sessions will appear here.</p></div>';
+    return;
+  }}
+  let h = '<table><thead><tr><th>Issue</th><th>Outcome</th><th>Duration</th><th>Tokens</th><th>Turns</th><th>Completed</th></tr></thead><tbody>';
+  for (const r of items) {{
+    h += '<tr>';
+    h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
+    h += '<td><span class="state-badge '+esc(r.outcome)+'">'+esc(r.outcome)+'</span></td>';
+    h += '<td>'+fmtDuration(r.duration_seconds)+'</td>';
+    h += '<td class="mono">'+fmt(r.total_tokens)+'</td>';
+    h += '<td>'+r.turn_count+'</td>';
+    h += '<td>'+ago(r.completed_at)+'</td>';
+    h += '</tr>';
+  }}
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}}
+
 function renderRateLimits(rl) {{
   const el = document.getElementById('rateLimitContent');
   if (!rl) {{
@@ -1155,12 +1266,14 @@ function update(data) {{
   const t = data.codex_totals || {{}};
   document.getElementById('countRunning').textContent = (data.counts||{{}}).running || 0;
   document.getElementById('countRetrying').textContent = (data.counts||{{}}).retrying || 0;
+  document.getElementById('countCompleted').textContent = (data.counts||{{}}).completed || 0;
   document.getElementById('totalTokens').textContent = fmt(t.total_tokens || 0);
   document.getElementById('inputTokens').textContent = fmt(t.input_tokens || 0) + ' in';
   document.getElementById('outputTokens').textContent = fmt(t.output_tokens || 0) + ' out';
   document.getElementById('runtime').textContent = fmtTime(t.seconds_running || 0);
   renderRunning(data.running || []);
   renderRetrying(data.retrying || []);
+  renderCompleted(data.completed || []);
   renderRateLimits(data.rate_limits);
   lastFetch = Date.now();
 }}
@@ -1484,6 +1597,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1498,6 +1612,8 @@ mod tests {
         assert!(html.contains("No running sessions"));
         assert!(html.contains("No retries pending"));
         assert!(html.contains("No rate limit data"));
+        assert!(html.contains("No completed runs"));
+        assert!(html.contains("Completed / History"));
         // Verify initial JSON state is embedded
         assert!(html.contains("const INITIAL"));
         // Verify auto-polling JS is present
@@ -1523,6 +1639,7 @@ mod tests {
 
         let html = render_dashboard(
             &running,
+            &[],
             &[],
             &TotalsInfo {
                 input_tokens: 1000,
@@ -1552,6 +1669,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &retrying,
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1570,6 +1688,7 @@ mod tests {
         let rate_limits = Some(serde_json::json!({"requests_remaining": 42}));
 
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &TotalsInfo {
@@ -1605,6 +1724,7 @@ mod tests {
         let html = render_dashboard(
             &running,
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1630,6 +1750,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &retrying,
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1640,6 +1761,129 @@ mod tests {
         );
 
         assert!(html.contains("PROJ-1"));
+    }
+
+    #[test]
+    fn test_render_dashboard_with_completed() {
+        let completed = vec![CompletedInfo {
+            issue_identifier: "PROJ-C1".to_string(),
+            outcome: "success".to_string(),
+            duration_seconds: 120.5,
+            input_tokens: 1000,
+            output_tokens: 500,
+            total_tokens: 1500,
+            turn_count: 5,
+            completed_at: "2025-01-01T00:00:00Z".to_string(),
+        }];
+
+        let html = render_dashboard(
+            &[],
+            &[],
+            &completed,
+            &TotalsInfo {
+                input_tokens: 1000,
+                output_tokens: 500,
+                total_tokens: 1500,
+                seconds_running: 120.5,
+            },
+            &None,
+        );
+
+        assert!(html.contains("PROJ-C1"));
+        assert!(html.contains("success"));
+        assert!(html.contains("Completed / History"));
+    }
+
+    // ── map_completion_record ───────────────────────────────────────
+
+    #[test]
+    fn test_map_completion_record_success() {
+        use crate::model::{CompletionOutcome, CompletionRecord};
+
+        let record = CompletionRecord {
+            issue_id: "id1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            outcome: CompletionOutcome::Success,
+            duration_seconds: 60.0,
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            turn_count: 3,
+            completed_at: Utc::now(),
+        };
+
+        let info = map_completion_record(&record);
+        assert_eq!(info.issue_identifier, "PROJ-1");
+        assert_eq!(info.outcome, "success");
+        assert!((info.duration_seconds - 60.0).abs() < f64::EPSILON);
+        assert_eq!(info.input_tokens, 100);
+        assert_eq!(info.output_tokens, 50);
+        assert_eq!(info.total_tokens, 150);
+        assert_eq!(info.turn_count, 3);
+    }
+
+    #[test]
+    fn test_map_completion_record_all_outcomes() {
+        use crate::model::{CompletionOutcome, CompletionRecord};
+
+        for (outcome, expected_str) in [
+            (CompletionOutcome::Success, "success"),
+            (CompletionOutcome::InReview, "in_review"),
+            (CompletionOutcome::Retry, "retry"),
+            (CompletionOutcome::Failed, "failed"),
+        ] {
+            let record = CompletionRecord {
+                issue_id: "id".to_string(),
+                identifier: "P-1".to_string(),
+                outcome,
+                duration_seconds: 1.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                turn_count: 0,
+                completed_at: Utc::now(),
+            };
+            let info = map_completion_record(&record);
+            assert_eq!(info.outcome, expected_str);
+        }
+    }
+
+    // ── state response with completed ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_state_with_completed() {
+        use crate::model::{CompletionOutcome, CompletionRecord};
+
+        let app_state = test_app_state();
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            state.add_completion(CompletionRecord {
+                issue_id: "id1".to_string(),
+                identifier: "PROJ-C1".to_string(),
+                outcome: CompletionOutcome::Success,
+                duration_seconds: 60.0,
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                turn_count: 3,
+                completed_at: Utc::now(),
+            });
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/state")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["counts"]["completed"], 1);
+        assert_eq!(json["completed"][0]["issue_identifier"], "PROJ-C1");
+        assert_eq!(json["completed"][0]["outcome"], "success");
     }
 
     // ── format_tokens tests ──────────────────────────────────────────
@@ -1759,9 +2003,10 @@ mod tests {
     #[test]
     fn test_build_snapshot_empty() {
         let state = OrchestratorState::new(5000, 3);
-        let (running, retrying, totals) = build_snapshot(&state);
+        let (running, retrying, completed, totals) = build_snapshot(&state);
         assert!(running.is_empty());
         assert!(retrying.is_empty());
+        assert!(completed.is_empty());
         assert_eq!(totals.input_tokens, 0);
         assert_eq!(totals.output_tokens, 0);
         assert_eq!(totals.total_tokens, 0);
@@ -1798,7 +2043,7 @@ mod tests {
             seconds_running: 100.0,
         };
 
-        let (running, retrying, totals) = build_snapshot(&state);
+        let (running, retrying, _completed, totals) = build_snapshot(&state);
         assert_eq!(running.len(), 1);
         assert_eq!(running[0].issue_identifier, "PROJ-1");
         assert_eq!(running[0].input_tokens, 100);
@@ -1824,7 +2069,7 @@ mod tests {
             },
         );
 
-        let (_running, retrying, _totals) = build_snapshot(&state);
+        let (_running, retrying, _completed, _totals) = build_snapshot(&state);
         assert_eq!(retrying.len(), 1);
         assert_eq!(retrying[0].identifier, "PROJ-1");
         assert_eq!(retrying[0].attempt, 2);
@@ -2346,6 +2591,7 @@ mod tests {
             counts: StateCounts {
                 running: 1,
                 retrying: 0,
+                completed: 0,
             },
             running: vec![RunningInfo {
                 issue_id: "id1".to_string(),
@@ -2362,6 +2608,7 @@ mod tests {
                 total_tokens: 0,
             }],
             retrying: vec![],
+            completed: vec![],
             codex_totals: TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2375,6 +2622,7 @@ mod tests {
         assert!(json.contains("generated_at"));
         assert!(json.contains("counts"));
         assert!(json.contains("running"));
+        assert!(json.contains("completed"));
         assert!(json.contains("codex_totals"));
         assert!(json.contains("PROJ-1"));
     }
@@ -2818,6 +3066,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2839,6 +3088,7 @@ mod tests {
     #[test]
     fn test_dashboard_log_panel_css() {
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &TotalsInfo {
@@ -3639,6 +3889,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3662,8 +3913,10 @@ mod tests {
         assert!(response.generated_at.contains("T"));
         assert_eq!(response.counts.running, 0);
         assert_eq!(response.counts.retrying, 0);
+        assert_eq!(response.counts.completed, 0);
         assert!(response.running.is_empty());
         assert!(response.retrying.is_empty());
+        assert!(response.completed.is_empty());
         assert_eq!(response.codex_totals.input_tokens, 0);
         assert!(response.rate_limits.is_none());
     }
@@ -3845,6 +4098,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3868,6 +4122,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3888,6 +4143,7 @@ mod tests {
     #[test]
     fn test_dashboard_initial_render_uses_sse() {
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &TotalsInfo {
