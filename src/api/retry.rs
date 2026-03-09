@@ -100,7 +100,8 @@ impl Default for RetryConfig {
 
 /// Execute an async operation with retry and exponential backoff.
 ///
-/// Only retries on [`ActualError::ApiError`] (network/5xx errors).
+/// Retries on [`ActualError::ApiError`] (network/5xx errors) and
+/// [`ActualError::ServiceUnavailable`] (HTTP 503 responses).
 /// All other error variants (including [`ActualError::ApiResponseError`]) are
 /// returned immediately without retry.
 pub async fn with_retry<F, Fut, T>(config: &RetryConfig, mut f: F) -> Result<T, ActualError>
@@ -134,6 +135,9 @@ where
             Ok(value) => return Ok(value),
             Err(ActualError::ApiError(msg)) => {
                 last_error = ActualError::ApiError(msg);
+            }
+            Err(ActualError::ServiceUnavailable) => {
+                last_error = ActualError::ServiceUnavailable;
             }
             Err(e) => return Err(e),
         }
@@ -408,6 +412,101 @@ mod tests {
         assert!(
             first_to_second <= max_delay + tolerance,
             "delay should be capped at 30s, not 1000s"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_on_service_unavailable_then_success() {
+        tokio::time::pause();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = Arc::clone(&counter);
+        let config = RetryConfig::default();
+
+        let result: Result<i32, _> = with_retry(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(ActualError::ServiceUnavailable)
+                } else {
+                    Ok(42)
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "should retry once after ServiceUnavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_exhausted_on_service_unavailable() {
+        tokio::time::pause();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = Arc::clone(&counter);
+        let config = RetryConfig::default(); // 3 attempts
+
+        let result: Result<i32, _> = with_retry(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err(ActualError::ServiceUnavailable)
+            }
+        })
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ServiceUnavailable),
+            "expected ServiceUnavailable after exhausting retries"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "should exhaust all 3 attempts"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_retry_on_client_error_after_service_unavailable() {
+        tokio::time::pause();
+
+        let counter = Arc::new(AtomicU32::new(0));
+        let counter_clone = Arc::clone(&counter);
+        let config = RetryConfig::default();
+
+        // ServiceUnavailable then ApiResponseError (non-retryable) — should stop after 2nd call.
+        let result: Result<i32, _> = with_retry(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(ActualError::ServiceUnavailable)
+                } else {
+                    Err(ActualError::ApiResponseError {
+                        code: "400".to_string(),
+                        message: "bad request".to_string(),
+                    })
+                }
+            }
+        })
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiResponseError { .. }),
+            "expected ApiResponseError to propagate immediately"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "should stop retrying on non-retryable error"
         );
     }
 
