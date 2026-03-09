@@ -748,6 +748,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_parse_assistant_no_message_field() {
+        // No "message" key at all → empty events
+        let json = serde_json::json!({
+            "type": "assistant"
+        });
+        assert!(parse_agent_message(&json).is_empty());
+    }
+
+    #[test]
+    fn test_parse_assistant_text_block_empty_string() {
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": ""}
+                ]
+            }
+        });
+        // Empty text string is skipped
+        assert!(parse_agent_message(&json).is_empty());
+    }
+
+    #[test]
+    fn test_parse_assistant_tool_use_without_name() {
+        let json = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use"}
+                ]
+            }
+        });
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AgentEvent::AgentMessage { event_type, message }
+                if event_type == "tool_use" && message.as_deref() == Some("Using tool: unknown"))
+        );
+    }
+
     // ---- spawn_agent_process tests ----
 
     #[test]
