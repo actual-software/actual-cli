@@ -52,11 +52,15 @@ pub(crate) fn resolve_cwd() -> std::path::PathBuf {
 
 /// Format a cache age in seconds as a human-readable string.
 ///
+/// - < 0 s    → `"just now"` (clock skew)
 /// - < 60 s   → `"Ns ago"`
 /// - < 3600 s → `"Nm ago"`
 /// - < 86400 s → `"Nh ago"`
 /// - ≥ 86400 s → `"Nd ago"`
 fn format_cache_age(age_secs: i64) -> String {
+    if age_secs < 0 {
+        return "just now".to_string();
+    }
     if age_secs < 60 {
         format!("{age_secs}s ago")
     } else if age_secs < 3600 {
@@ -5154,6 +5158,13 @@ mod tests {
     fn test_format_cache_age_days() {
         assert_eq!(format_cache_age(86400), "1d ago");
         assert_eq!(format_cache_age(172800), "2d ago");
+    }
+
+    #[test]
+    fn test_format_cache_age_negative() {
+        assert_eq!(format_cache_age(-1), "just now");
+        assert_eq!(format_cache_age(-300), "just now");
+        assert_eq!(format_cache_age(-86400), "just now");
     }
 
     // ── Gap 6: load_config_with_fallback returns default on error ──
