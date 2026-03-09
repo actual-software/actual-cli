@@ -730,6 +730,59 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
+    async fn test_spawn_heartbeat_task_default_wrapper() {
+        use crate::client::MockOrchestratorClient;
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_send_heartbeat().returning(|_| Ok(()));
+        client.expect_claim_work().returning(|| Ok(None));
+        client.expect_send_event().returning(|_, _| Ok(()));
+        client.expect_send_complete().returning(|_, _| Ok(()));
+        client.expect_send_register().returning(|_| Ok(()));
+
+        let client = Arc::new(client);
+        let active_jobs: ActiveJobs = Arc::new(RwLock::new(vec![]));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        // Use the default spawn_heartbeat_task (not _with_interval)
+        let handle =
+            spawn_heartbeat_task(client, "w-default".to_string(), active_jobs, shutdown_rx);
+
+        // Immediately signal shutdown — we only need to verify the function is
+        // callable and spawns a task; the _with_interval tests cover actual
+        // heartbeat behaviour.
+        let _ = shutdown_tx.send(true);
+
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle)
+            .await
+            .expect("default heartbeat task should stop within timeout");
+
+        assert!(logs_contain("heartbeat background task stopped"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_heartbeat_interval_secs_value() {
+        assert_eq!(HEARTBEAT_INTERVAL_SECS, 30);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_active_jobs_type_alias() {
+        let jobs: ActiveJobs = Arc::new(RwLock::new(Vec::new()));
+        {
+            let mut w = jobs.write().await;
+            w.push("TST-1".to_string());
+        }
+        {
+            let r = jobs.read().await;
+            assert_eq!(r.len(), 1);
+            assert_eq!(r[0], "TST-1");
+        }
+    }
+
+    #[traced_test]
+    #[tokio::test]
     async fn test_run_main_loop_shutdown_during_error_backoff() {
         let tmp = tempfile::tempdir().unwrap();
         let mut config = make_config();
