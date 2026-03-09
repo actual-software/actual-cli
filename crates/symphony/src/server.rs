@@ -25,6 +25,7 @@ pub struct AppState {
     pub config: Arc<RwLock<ServiceConfig>>,
     pub msg_tx: mpsc::Sender<OrchestratorMessage>,
     pub job_notify: Arc<tokio::sync::Notify>,
+    pub start_time: std::time::Instant,
 }
 
 /// Start the HTTP dashboard/API server.
@@ -45,6 +46,7 @@ pub async fn start_server(
         config,
         msg_tx,
         job_notify,
+        start_time: std::time::Instant::now(),
     };
 
     let app = build_router(app_state);
@@ -90,6 +92,8 @@ pub fn build_router(state: AppState) -> Router {
             post(handle_remove_retry),
         )
         .route("/api/v1/{issue_identifier}", get(handle_issue_detail))
+        .route("/healthz", get(handle_healthz))
+        .route("/readyz", get(handle_readyz))
         .fallback(handle_fallback)
         .layer(cors)
         .with_state(state)
@@ -718,6 +722,74 @@ async fn handle_remove_retry(
     (StatusCode::OK, axum::Json(response)).into_response()
 }
 
+// ── Health check endpoints ────────────────────────────────────────────
+
+/// Response for GET /healthz (liveness).
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthzResponse {
+    pub status: String,
+    pub uptime_secs: u64,
+    pub version: String,
+}
+
+/// Response for GET /readyz (readiness) when ready.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadyzResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// GET /healthz — Liveness probe (unauthenticated, no DB queries).
+async fn handle_healthz(State(state): State<AppState>) -> impl IntoResponse {
+    let uptime = state.start_time.elapsed().as_secs();
+    let response = HealthzResponse {
+        status: "ok".to_string(),
+        uptime_secs: uptime,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    (StatusCode::OK, axum::Json(response))
+}
+
+/// GET /readyz — Readiness probe (unauthenticated).
+///
+/// Returns 200 if the orchestrator is accepting work (RwLock readable,
+/// running agents < max_concurrent_agents). Returns 503 otherwise.
+async fn handle_readyz(State(state): State<AppState>) -> Response {
+    let orch_state = match tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        state.orchestrator_state.read(),
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            let response = ReadyzResponse {
+                status: "not_ready".to_string(),
+                reason: Some("orchestrator state lock timed out".to_string()),
+            };
+            return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(response)).into_response();
+        }
+    };
+
+    let running_count = orch_state.running.len() as u32;
+    let max = orch_state.max_concurrent_agents;
+
+    if running_count >= max {
+        let response = ReadyzResponse {
+            status: "not_ready".to_string(),
+            reason: Some(format!("at capacity: {running_count}/{max} agents running")),
+        };
+        return (StatusCode::SERVICE_UNAVAILABLE, axum::Json(response)).into_response();
+    }
+
+    let response = ReadyzResponse {
+        status: "ready".to_string(),
+        reason: None,
+    };
+    (StatusCode::OK, axum::Json(response)).into_response()
+}
+
 /// Build a JSON error response with the given status code, code, and message.
 fn error_response(status: StatusCode, code: &str, message: String) -> Response {
     let body = ErrorResponse {
@@ -1272,6 +1344,7 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             msg_tx,
             job_notify: Arc::new(tokio::sync::Notify::new()),
+            start_time: std::time::Instant::now(),
         }
     }
 
@@ -1874,6 +1947,7 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             msg_tx,
             job_notify: Arc::new(tokio::sync::Notify::new()),
+            start_time: std::time::Instant::now(),
         };
 
         let app = build_router(app_state);
@@ -1908,6 +1982,7 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             msg_tx,
             job_notify: Arc::new(tokio::sync::Notify::new()),
+            start_time: std::time::Instant::now(),
         };
 
         let app = build_router(app_state);
@@ -2790,6 +2865,7 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             msg_tx,
             job_notify: Arc::new(tokio::sync::Notify::new()),
+            start_time: std::time::Instant::now(),
         };
         (app_state, msg_rx)
     }
@@ -3086,6 +3162,7 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             msg_tx,
             job_notify: Arc::new(tokio::sync::Notify::new()),
+            start_time: std::time::Instant::now(),
         };
         let app = build_router(app_state);
 
@@ -3209,6 +3286,7 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             msg_tx,
             job_notify: Arc::new(tokio::sync::Notify::new()),
+            start_time: std::time::Instant::now(),
         };
         let app = build_router(app_state);
 
@@ -3358,6 +3436,112 @@ mod tests {
         assert!(json.contains("\"removed\":true"));
         assert!(json.contains("PROJ-1"));
         assert!(json.contains("id1"));
+    }
+
+    // ── Health check endpoint tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn test_healthz_returns_200_with_expected_json() {
+        let app_state = test_app_state();
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert!(json["uptime_secs"].as_u64().is_some());
+        assert!(json["uptime_secs"].as_u64().unwrap() < 5);
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn test_healthz_does_not_require_auth() {
+        // Configure auth so authenticated endpoints would reject unauthenticated requests
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state);
+
+        // No Authorization header — should still succeed
+        let request = axum::http::Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_readyz_returns_200_when_slots_available() {
+        let app_state = test_app_state();
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "ready");
+        assert!(json.get("reason").is_none() || json["reason"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_readyz_returns_503_when_fully_loaded() {
+        let app_state = test_app_state();
+        // max_concurrent_agents is 3 in test_config, so insert 3 running entries
+        insert_running(&app_state, "id-1", "PROJ-1", "In Progress").await;
+        insert_running(&app_state, "id-2", "PROJ-2", "In Progress").await;
+        insert_running(&app_state, "id-3", "PROJ-3", "In Progress").await;
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "not_ready");
+        assert!(json["reason"].as_str().unwrap().contains("at capacity"));
+    }
+
+    #[tokio::test]
+    async fn test_readyz_does_not_require_auth() {
+        // Configure auth so authenticated endpoints would reject unauthenticated requests
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state);
+
+        // No Authorization header — should still succeed
+        let request = axum::http::Request::builder()
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "ready");
     }
 
     // ── Dashboard contains remove-retry button ───────────────────────
