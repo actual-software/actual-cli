@@ -328,7 +328,7 @@ impl Orchestrator {
             drop(state);
 
             if self.should_dispatch(&issue, &config).await {
-                self.dispatch_issue(issue, None, false).await;
+                self.dispatch_issue(issue, None, false, None).await;
             }
         }
     }
@@ -428,6 +428,7 @@ impl Orchestrator {
         issue: Issue,
         attempt: Option<u32>,
         skip_state_transition: bool,
+        resume_session_id: Option<String>,
     ) {
         let issue_id = issue.id.clone();
         let identifier = issue.identifier.clone();
@@ -548,6 +549,7 @@ impl Orchestrator {
                 http,
                 msg_tx.clone(),
                 cancel_rx,
+                resume_session_id,
             )
             .await;
 
@@ -644,7 +646,12 @@ impl Orchestrator {
     }
 
     /// Add an "In Review" issue to waiting_for_review by looking up its PR.
-    async fn add_to_waiting_for_review(&self, issue_id: &str, identifier: &str) {
+    async fn add_to_waiting_for_review(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        session_id: Option<&str>,
+    ) {
         let config = self.config.read().await;
         let github_config = match &config.github {
             Some(c) => c.clone(),
@@ -691,6 +698,7 @@ impl Orchestrator {
             pr_number,
             branch,
             started_waiting_at: Utc::now(),
+            session_id: session_id.map(|s| s.to_string()),
         };
         let mut state = self.state.write().await;
         state
@@ -810,6 +818,7 @@ impl Orchestrator {
                     entry.identifier.clone(),
                     entry.issue.state.clone(),
                     entry.issue.id.clone(),
+                    entry.session.session_id.clone(),
                 ))
             } else {
                 None
@@ -826,7 +835,7 @@ impl Orchestrator {
                         }
                     }
 
-                    let (issue_identifier, cached_state, entry_issue_id) =
+                    let (issue_identifier, cached_state, entry_issue_id, exit_session_id) =
                         normal_exit_data.expect("set when Normal");
 
                     // Drop the write lock before making async HTTP calls
@@ -860,8 +869,12 @@ impl Orchestrator {
                         // Cleanup completed — issue already transitioned, nothing more to do
                         info!(issue_id = %issue_id, issue_identifier = %identifier, "cleanup worker completed, issue already in terminal state");
                     } else if is_in_review_state(&issue_state) {
-                        self.add_to_waiting_for_review(issue_id, &issue_identifier)
-                            .await;
+                        self.add_to_waiting_for_review(
+                            issue_id,
+                            &issue_identifier,
+                            exit_session_id.as_deref(),
+                        )
+                        .await;
                         // Verify the entry was added; if not (GitHub API failed), schedule a retry
                         let state = self.state.read().await;
                         if !state.waiting_for_review.contains_key(issue_id) {
@@ -1079,7 +1092,7 @@ impl Orchestrator {
                 }
                 drop(state);
 
-                self.dispatch_issue(issue.clone(), Some(entry.attempt), false)
+                self.dispatch_issue(issue.clone(), Some(entry.attempt), false, None)
                     .await;
             }
         }
@@ -1546,11 +1559,18 @@ impl Orchestrator {
             updated_at: Some(Utc::now()),
         };
 
-        info!(issue_id = %entry.issue_id, issue_identifier = %entry.identifier, "dispatching cleanup agent turn");
+        info!(
+            issue_id = %entry.issue_id,
+            issue_identifier = %entry.identifier,
+            resume_session_id = ?entry.session_id,
+            "dispatching cleanup agent turn"
+        );
 
-        // Dispatch with attempt=None (cleanup is a fresh single turn)
-        // skip_state_transition=true: issue is already in "Merged" state
-        self.dispatch_issue(issue, None, true).await;
+        // Dispatch with attempt=None, skip_state_transition=true (already "Merged").
+        // If a session_id was persisted from before the review, resume that session
+        // so the agent has full conversation context for cleanup.
+        self.dispatch_issue(issue, None, true, entry.session_id.clone())
+            .await;
     }
 
     async fn reconcile_stalls(&self) {
@@ -1614,6 +1634,25 @@ impl Orchestrator {
                     state.mark_completed(issue.id.clone());
                 }
                 self.terminate_running_issue(&issue.id, true).await;
+            } else if is_in_review_state(&issue.state) {
+                // Issue moved to "In Review" — kill the worker to stop token spend
+                // and move to waiting_for_review (passive API polling for PR merge).
+                let session_id = {
+                    let state = self.state.read().await;
+                    state
+                        .running
+                        .get(&issue.id)
+                        .and_then(|e| e.session.session_id.clone())
+                };
+                info!(
+                    issue_id = %issue.id,
+                    issue_identifier = %issue.identifier,
+                    session_id = ?session_id,
+                    "issue is In Review, killing worker and moving to waiting_for_review"
+                );
+                self.terminate_running_issue(&issue.id, false).await;
+                self.add_to_waiting_for_review(&issue.id, &issue.identifier, session_id.as_deref())
+                    .await;
             } else if state_matches(&issue.state, &config.tracker.active_states) {
                 let mut state = self.state.write().await;
                 if let Some(entry) = state.running.get_mut(&issue.id) {
@@ -1779,6 +1818,7 @@ fn setup_mcp_config(
 }
 
 /// Run a worker for one issue.
+#[allow(clippy::too_many_arguments)]
 async fn run_worker(
     config: &ServiceConfig,
     prompt_template: &str,
@@ -1787,6 +1827,7 @@ async fn run_worker(
     http: reqwest::Client,
     msg_tx: mpsc::Sender<OrchestratorMessage>,
     mut cancel_rx: oneshot::Receiver<()>,
+    resume_session_id: Option<String>,
 ) -> Result<()> {
     let issue_id = issue.id.clone();
 
@@ -1838,7 +1879,12 @@ async fn run_worker(
             build_continuation_prompt(issue, turn_number, max_turns)
         };
 
-        // Launch agent
+        // Launch agent — resume a prior session on the first turn if session_id provided
+        let resume_id = if turn_number == 1 {
+            resume_session_id.as_deref()
+        } else {
+            None
+        };
         let (mut session, mut event_rx) = AgentSession::launch(
             &config.coding_agent,
             &workspace_result.path,
@@ -1847,6 +1893,7 @@ async fn run_worker(
             &env_vars,
             config.agent.max_turns,
             Some(&mcp_config_path),
+            resume_id,
         )
         .await?;
 
@@ -3180,6 +3227,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -4014,7 +4062,7 @@ mod tests {
         let orch = Orchestrator::new(config, "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         let state = orch.state.read().await;
         assert!(state.event_broadcasts.contains_key("id1"));
@@ -4551,6 +4599,143 @@ mod tests {
         assert!(state.running.is_empty());
     }
 
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_tracker_states_in_review_terminates_worker() {
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Linear returns "In Review" for the running issue
+        let _linear_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Review")]))
+            .create_async()
+            .await;
+
+        // Mock find_open_pr (called by add_to_waiting_for_review)
+        let _pr_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 99,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert a running entry in "In Progress" state
+        let cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+
+        orch.reconcile_tracker_states().await;
+
+        let state = orch.state.read().await;
+        // Issue should NOT be in running anymore
+        assert!(
+            !state.running.contains_key("id1"),
+            "issue should be removed from running"
+        );
+        // Issue should be in waiting_for_review
+        assert!(
+            state.waiting_for_review.contains_key("id1"),
+            "issue should be in waiting_for_review"
+        );
+        let entry = state.waiting_for_review.get("id1").unwrap();
+        assert_eq!(entry.pr_number, 99);
+        assert_eq!(entry.identifier, "PROJ-1");
+        assert_eq!(entry.branch, "symphony/proj-1");
+        drop(state);
+
+        // Cancel signal should have been sent (worker terminated)
+        assert!(cancel_rx.await.is_ok());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_tracker_states_in_review_preserves_session_id() {
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Linear returns "In Review" for the running issue
+        let _linear_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Review")]))
+            .create_async()
+            .await;
+
+        // Mock find_open_pr
+        let _pr_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 77,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert a running entry and set its session_id
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+        {
+            let mut state = orch.state.write().await;
+            let entry = state.running.get_mut("id1").unwrap();
+            entry.session.session_id = Some("sess-123".to_string());
+        }
+
+        orch.reconcile_tracker_states().await;
+
+        let state = orch.state.read().await;
+        assert!(
+            !state.running.contains_key("id1"),
+            "issue should be removed from running"
+        );
+        assert!(
+            state.waiting_for_review.contains_key("id1"),
+            "issue should be in waiting_for_review"
+        );
+        let waiting = state.waiting_for_review.get("id1").unwrap();
+        assert_eq!(
+            waiting.session_id,
+            Some("sess-123".to_string()),
+            "session_id should be preserved in WaitingEntry"
+        );
+    }
+
     // ── on_retry_fired (with mockito) ────────────────────────────────
 
     #[tokio::test]
@@ -4818,7 +5003,7 @@ mod tests {
         let orch = test_orchestrator();
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         let state = orch.state.read().await;
         assert!(state.running.contains_key("id1"));
@@ -4833,7 +5018,7 @@ mod tests {
         let orch = test_orchestrator();
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, Some(3), false).await;
+        orch.dispatch_issue(issue, Some(3), false, None).await;
 
         let state = orch.state.read().await;
         let entry = state.running.get("id1").unwrap();
@@ -4860,7 +5045,7 @@ mod tests {
         }
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, Some(2), false).await;
+        orch.dispatch_issue(issue, Some(2), false, None).await;
 
         let state = orch.state.read().await;
         assert!(!state.retry_attempts.contains_key("id1"));
@@ -5377,7 +5562,7 @@ mod tests {
         let orch = Orchestrator::new(config, "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Give the spawned worker time to run and send WorkerExited message
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -5427,6 +5612,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5466,6 +5652,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5504,6 +5691,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5547,6 +5735,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5644,6 +5833,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5686,6 +5876,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5715,6 +5906,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5746,6 +5938,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5797,6 +5990,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5820,7 +6014,7 @@ mod tests {
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Wait for the worker to timeout and send WorkerExited
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -5842,7 +6036,7 @@ mod tests {
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Give worker time to fail
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -5872,6 +6066,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -6842,7 +7037,7 @@ mod tests {
         };
         let orch = Orchestrator::new(config, "Test prompt {{ issue.identifier }}".to_string());
         let issue = make_issue("dist-1", "DIST-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Issue should be in running state
         let state = orch.state.read().await;
@@ -8060,6 +8255,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8361,6 +8557,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8410,6 +8607,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8511,6 +8709,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8567,6 +8766,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8602,6 +8802,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8672,6 +8873,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8765,6 +8967,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8866,6 +9069,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -8973,6 +9177,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9059,6 +9264,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9162,6 +9368,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9236,6 +9443,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9310,6 +9518,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -9381,6 +9590,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -10187,6 +10397,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
 
         orch.dispatch_cleanup(&entry, &config.tracker).await;
@@ -10338,7 +10549,7 @@ mod tests {
         // Use an invalid Liquid template (unclosed tag) to force render failure
         let orch = Orchestrator::new(config, "{% if issue.identifier %}unclosed".to_string());
         let issue = make_issue("dist-err", "DIST-ERR", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Issue should still be in running/claimed (dispatch adds it before rendering)
         let state = orch.state.read().await;
@@ -10782,6 +10993,7 @@ mod tests {
             pr_number: 99,
             branch: "symphony/proj-w".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         let store = Arc::new(MockStore::new().with_waiting(vec![entry]));
         let orch = test_orchestrator().with_store(store).await;
@@ -11305,6 +11517,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -11345,7 +11558,7 @@ mod tests {
         let orch = Orchestrator::new(config, "template".to_string());
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, None, true).await;
+        orch.dispatch_issue(issue, None, true, None).await;
 
         let state = orch.state.read().await;
         // Issue should still be dispatched (in running and claimed)
@@ -11447,7 +11660,7 @@ mod tests {
         });
         let orch = Orchestrator::new(config, "template".to_string());
 
-        orch.add_to_waiting_for_review("id1", "PROJ-1").await;
+        orch.add_to_waiting_for_review("id1", "PROJ-1", None).await;
 
         // Should have detected merged PR and transitioned
         assert!(logs_contain("PR already merged"));
@@ -11494,7 +11707,7 @@ mod tests {
         let orch = test_orchestrator_with_store(store.clone());
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // store.save_claimed should have been called with "id1"
         assert!(
@@ -11662,7 +11875,7 @@ mod tests {
         let mut orch = Orchestrator::new(config, "template".to_string());
         orch.store = Some(store.clone());
 
-        orch.add_to_waiting_for_review("id1", "PROJ-1").await;
+        orch.add_to_waiting_for_review("id1", "PROJ-1", None).await;
 
         // store.save_waiting should have been called
         let entries = store.waiting_entries();
@@ -11781,6 +11994,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -11793,6 +12007,7 @@ mod tests {
                 pr_number: 42,
                 branch: "symphony/proj-1".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             })
             .unwrap();
 
@@ -11850,6 +12065,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -11862,6 +12078,7 @@ mod tests {
                 pr_number: 42,
                 branch: "symphony/proj-1".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             })
             .unwrap();
 
@@ -11974,6 +12191,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -11986,6 +12204,7 @@ mod tests {
                 pr_number: 42,
                 branch: "symphony/proj-1".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             })
             .unwrap();
 
@@ -12065,6 +12284,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
         }
@@ -12076,6 +12296,7 @@ mod tests {
                 pr_number: 42,
                 branch: "symphony/proj-1".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             })
             .unwrap();
 
@@ -12154,7 +12375,7 @@ mod tests {
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
         // Should not panic even though save_claimed fails
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Issue should still be in running (dispatch succeeded despite store error)
         let state = orch.state.read().await;
@@ -12201,7 +12422,7 @@ mod tests {
 
         let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Review").await;
 
-        orch.add_to_waiting_for_review("id1", "PROJ-1").await;
+        orch.add_to_waiting_for_review("id1", "PROJ-1", None).await;
 
         // Should still be added to in-memory waiting despite store error
         let state = orch.state.read().await;
@@ -12368,6 +12589,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -12429,6 +12651,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -12549,6 +12772,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
@@ -12627,6 +12851,7 @@ mod tests {
                     pr_number: 42,
                     branch: "symphony/proj-1".to_string(),
                     started_waiting_at: Utc::now(),
+                    session_id: None,
                 },
             );
             state.claimed.insert("id1".to_string());
