@@ -6,6 +6,7 @@ use crate::client::OrchestratorClient;
 use crate::config::WorkerConfig;
 use crate::executor::{self, AgentLauncher};
 use crate::workspace::{self, GitCommandRunner};
+use symphony::protocol::{WorkerHeartbeat, WorkerRegistration};
 
 // ---------------------------------------------------------------------------
 // Logging helpers (avoid LLVM coverage splits in tracing macros)
@@ -44,6 +45,18 @@ fn log_base_clone_error(reason: &str) {
     warn!(reason = %reason, "failed to ensure base clone");
 }
 
+fn log_heartbeat_sent(worker_id: &str) {
+    info!(worker_id = %worker_id, "sent heartbeat");
+}
+
+fn log_heartbeat_failed(reason: &str) {
+    warn!(reason = %reason, "failed to send heartbeat");
+}
+
+fn log_register_failed(reason: &str) {
+    warn!(reason = %reason, "failed to register with orchestrator");
+}
+
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
@@ -71,14 +84,41 @@ where
         return Err(Box::new(e));
     }
 
-    let mut backoff_ms = config.poll_backoff_base_ms;
+    // 2. Register with orchestrator
+    let reg = WorkerRegistration {
+        worker_id: config.worker_id.clone(),
+        capabilities: vec![],
+        max_concurrent_jobs: 1,
+    };
+    if let Err(e) = client.send_register(reg).await {
+        log_register_failed(&e.to_string());
+        // Non-fatal — continue anyway
+    }
 
-    // 2. Main loop
+    let mut backoff_ms = config.poll_backoff_base_ms;
+    let heartbeat_interval = std::time::Duration::from_secs(30);
+    let mut last_heartbeat = None::<std::time::Instant>;
+
+    // 3. Main loop
     loop {
         // Check shutdown
         if *shutdown_rx.borrow() {
             log_shutdown();
             break;
+        }
+
+        // Send heartbeat if enough time has passed
+        if last_heartbeat.is_none_or(|t: std::time::Instant| t.elapsed() >= heartbeat_interval) {
+            let heartbeat = WorkerHeartbeat {
+                worker_id: config.worker_id.clone(),
+                active_jobs: vec![],
+                timestamp: chrono::Utc::now(),
+            };
+            match client.send_heartbeat(heartbeat).await {
+                Ok(()) => log_heartbeat_sent(&config.worker_id),
+                Err(e) => log_heartbeat_failed(&e.to_string()),
+            }
+            last_heartbeat = Some(std::time::Instant::now());
         }
 
         // Claim work
@@ -185,6 +225,12 @@ mod tests {
         }
     }
 
+    /// Set up default register/heartbeat mock expectations that accept any calls.
+    fn setup_register_heartbeat_mocks(client: &mut MockOrchestratorClient) {
+        client.expect_send_register().returning(|_| Ok(()));
+        client.expect_send_heartbeat().returning(|_| Ok(()));
+    }
+
     fn setup_base_clone_mock(git: &mut MockGitCommandRunner) {
         // ensure_base_clone: fetch origin (if .git exists) or clone
         // For tests, we'll assume the path doesn't have .git, so it'll try to clone.
@@ -206,7 +252,8 @@ mod tests {
         let mut git = MockGitCommandRunner::new();
         setup_base_clone_mock(&mut git);
 
-        let client = MockOrchestratorClient::new();
+        let mut client = MockOrchestratorClient::new();
+        setup_register_heartbeat_mocks(&mut client);
         let launcher = MockTestAgentLauncher::new();
 
         // Start already shut down
@@ -249,6 +296,7 @@ mod tests {
         setup_base_clone_mock(&mut git);
 
         let mut client = MockOrchestratorClient::new();
+        setup_register_heartbeat_mocks(&mut client);
         let call_count = Arc::new(AtomicU32::new(0));
         let cc = call_count.clone();
         client.expect_claim_work().returning(move || {
@@ -283,6 +331,7 @@ mod tests {
         setup_base_clone_mock(&mut git);
 
         let mut client = MockOrchestratorClient::new();
+        setup_register_heartbeat_mocks(&mut client);
         let call_count = Arc::new(AtomicU32::new(0));
         let cc = call_count.clone();
         client.expect_claim_work().returning(move || {
@@ -353,6 +402,7 @@ mod tests {
         let stx = shutdown_tx.clone();
 
         let mut client = MockOrchestratorClient::new();
+        setup_register_heartbeat_mocks(&mut client);
         let call_count = Arc::new(AtomicU32::new(0));
         let cc = call_count.clone();
         client.expect_claim_work().returning(move || {
@@ -434,6 +484,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         let mut client = MockOrchestratorClient::new();
+        setup_register_heartbeat_mocks(&mut client);
         client.expect_claim_work().times(1).returning(|| {
             Ok(Some(WorkAssignment {
                 issue_id: "id-1".to_string(),
@@ -508,6 +559,7 @@ mod tests {
         setup_base_clone_mock(&mut git);
 
         let mut client = MockOrchestratorClient::new();
+        setup_register_heartbeat_mocks(&mut client);
         client.expect_claim_work().times(1).returning(|| Ok(None));
 
         let launcher = MockTestAgentLauncher::new();
@@ -537,6 +589,7 @@ mod tests {
         setup_base_clone_mock(&mut git);
 
         let mut client = MockOrchestratorClient::new();
+        setup_register_heartbeat_mocks(&mut client);
         client.expect_claim_work().times(1).returning(|| {
             Err(ClientError::RequestFailed {
                 reason: "connection refused".to_string(),
@@ -556,5 +609,97 @@ mod tests {
         assert!(result.is_ok());
         assert!(logs_contain("failed to claim work"));
         assert!(logs_contain("shutdown signal received"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_main_loop_registration_failure_non_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.base_clone_path = tmp.path().join("base");
+
+        let mut git = MockGitCommandRunner::new();
+        setup_base_clone_mock(&mut git);
+
+        let mut client = MockOrchestratorClient::new();
+        // Registration fails
+        client.expect_send_register().returning(|_| {
+            Err(ClientError::RequestFailed {
+                reason: "connection refused".to_string(),
+            })
+        });
+        client.expect_send_heartbeat().returning(|_| Ok(()));
+        let launcher = MockTestAgentLauncher::new();
+
+        // Start already shut down
+        let (_tx, shutdown_rx) = tokio::sync::watch::channel(true);
+
+        let result = run_main_loop(&client, &git, &launcher, &config, shutdown_rx).await;
+        assert!(result.is_ok());
+        assert!(logs_contain("failed to register with orchestrator"));
+        assert!(logs_contain("shutdown signal received"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_main_loop_heartbeat_failure_non_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.base_clone_path = tmp.path().join("base");
+
+        let mut git = MockGitCommandRunner::new();
+        setup_base_clone_mock(&mut git);
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_send_register().returning(|_| Ok(()));
+        // Heartbeat fails
+        client.expect_send_heartbeat().returning(|_| {
+            Err(ClientError::RequestFailed {
+                reason: "connection refused".to_string(),
+            })
+        });
+        client.expect_claim_work().returning(|| Ok(None));
+
+        let launcher = MockTestAgentLauncher::new();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        let result = run_main_loop(&client, &git, &launcher, &config, shutdown_rx).await;
+        assert!(result.is_ok());
+        assert!(logs_contain("failed to send heartbeat"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_main_loop_heartbeat_sent_on_first_iteration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.base_clone_path = tmp.path().join("base");
+
+        let mut git = MockGitCommandRunner::new();
+        setup_base_clone_mock(&mut git);
+
+        let mut client = MockOrchestratorClient::new();
+        client.expect_send_register().returning(|_| Ok(()));
+        client.expect_send_heartbeat().returning(|_| Ok(()));
+        client.expect_claim_work().returning(|| Ok(None));
+
+        let launcher = MockTestAgentLauncher::new();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        let result = run_main_loop(&client, &git, &launcher, &config, shutdown_rx).await;
+        assert!(result.is_ok());
+        assert!(logs_contain("sent heartbeat"));
     }
 }
