@@ -682,12 +682,16 @@ fn broadcast_result_to_sse(
 }
 
 /// Format a single SSE event from a log entry.
+///
+/// We intentionally do NOT set a named SSE `event:` field.  This makes
+/// every event fire the generic `onmessage` handler in the browser,
+/// which means the dashboard automatically receives events of *any*
+/// `event_type` (including dynamic types like `tool_use`, `tool_result`,
+/// etc.) without needing an explicit `addEventListener` for each one.
+/// The `event_type` is still available inside the JSON `data` payload.
 fn format_sse_event(entry: &LogEntry) -> Result<Event, Infallible> {
     let data = serde_json::to_string(entry).unwrap_or_default();
-    Ok(Event::default()
-        .event(&entry.event_type)
-        .data(data)
-        .id(entry.seq.to_string()))
+    Ok(Event::default().data(data).id(entry.seq.to_string()))
 }
 
 /// Convert a state broadcast result into an optional `StateResponse` JSON.
@@ -1302,6 +1306,8 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
 .log-badge.token_usage {{ background:rgba(136,136,136,0.15); color:var(--text-dim); }}
 .log-badge.turn_failed {{ background:rgba(255,82,82,0.2); color:var(--red); }}
 .log-badge.rate_limit_event {{ background:rgba(255,171,0,0.2); color:var(--amber); }}
+.log-badge.tool_use {{ background:rgba(171,71,188,0.2); color:#ce93d8; }}
+.log-badge.tool_result {{ background:rgba(171,71,188,0.15); color:#b39ddb; }}
 .log-msg {{ color:var(--text); word-break:break-word; flex:1; }}
 .log-tokens {{ color:var(--text-dim); white-space:nowrap; }}
 @media (max-width:768px) {{
@@ -1749,12 +1755,6 @@ function openLogPanel(identifier) {{
   panel.classList.add('open');
   currentEventSource = new EventSource('/api/v1/' + encodeURIComponent(identifier) + '/stream');
   currentEventSource.onmessage = function(e) {{ appendLogEntry(JSON.parse(e.data)); }};
-  currentEventSource.addEventListener('session_started', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
-  currentEventSource.addEventListener('turn_completed', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
-  currentEventSource.addEventListener('turn_failed', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
-  currentEventSource.addEventListener('notification', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
-  currentEventSource.addEventListener('token_usage', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
-  currentEventSource.addEventListener('rate_limit_event', function(e) {{ appendLogEntry(JSON.parse(e.data)); }});
   currentEventSource.onerror = function() {{ appendLogEntry({{event_type:'notification',message:'Stream disconnected',seq:0,timestamp:new Date().toISOString()}}); }};
 }}
 
