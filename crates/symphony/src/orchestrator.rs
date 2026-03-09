@@ -328,7 +328,7 @@ impl Orchestrator {
             drop(state);
 
             if self.should_dispatch(&issue, &config).await {
-                self.dispatch_issue(issue, None, false).await;
+                self.dispatch_issue(issue, None, false, None).await;
             }
         }
     }
@@ -428,6 +428,7 @@ impl Orchestrator {
         issue: Issue,
         attempt: Option<u32>,
         skip_state_transition: bool,
+        resume_session_id: Option<String>,
     ) {
         let issue_id = issue.id.clone();
         let identifier = issue.identifier.clone();
@@ -548,6 +549,7 @@ impl Orchestrator {
                 http,
                 msg_tx.clone(),
                 cancel_rx,
+                resume_session_id,
             )
             .await;
 
@@ -1080,7 +1082,7 @@ impl Orchestrator {
                 }
                 drop(state);
 
-                self.dispatch_issue(issue.clone(), Some(entry.attempt), false)
+                self.dispatch_issue(issue.clone(), Some(entry.attempt), false, None)
                     .await;
             }
         }
@@ -1551,7 +1553,7 @@ impl Orchestrator {
 
         // Dispatch with attempt=None (cleanup is a fresh single turn)
         // skip_state_transition=true: issue is already in "Merged" state
-        self.dispatch_issue(issue, None, true).await;
+        self.dispatch_issue(issue, None, true, None).await;
     }
 
     async fn reconcile_stalls(&self) {
@@ -1788,6 +1790,7 @@ async fn run_worker(
     http: reqwest::Client,
     msg_tx: mpsc::Sender<OrchestratorMessage>,
     mut cancel_rx: oneshot::Receiver<()>,
+    resume_session_id: Option<String>,
 ) -> Result<()> {
     let issue_id = issue.id.clone();
 
@@ -1848,6 +1851,7 @@ async fn run_worker(
             &env_vars,
             config.agent.max_turns,
             Some(&mcp_config_path),
+            resume_session_id.as_deref(),
         )
         .await?;
 
@@ -4016,7 +4020,7 @@ mod tests {
         let orch = Orchestrator::new(config, "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         let state = orch.state.read().await;
         assert!(state.event_broadcasts.contains_key("id1"));
@@ -4820,7 +4824,7 @@ mod tests {
         let orch = test_orchestrator();
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         let state = orch.state.read().await;
         assert!(state.running.contains_key("id1"));
@@ -4835,7 +4839,7 @@ mod tests {
         let orch = test_orchestrator();
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, Some(3), false).await;
+        orch.dispatch_issue(issue, Some(3), false, None).await;
 
         let state = orch.state.read().await;
         let entry = state.running.get("id1").unwrap();
@@ -4862,7 +4866,7 @@ mod tests {
         }
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, Some(2), false).await;
+        orch.dispatch_issue(issue, Some(2), false, None).await;
 
         let state = orch.state.read().await;
         assert!(!state.retry_attempts.contains_key("id1"));
@@ -5379,7 +5383,7 @@ mod tests {
         let orch = Orchestrator::new(config, "template".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Give the spawned worker time to run and send WorkerExited message
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -5429,6 +5433,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5468,6 +5473,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5506,6 +5512,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5549,6 +5556,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5646,6 +5654,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5688,6 +5697,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5717,6 +5727,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5748,6 +5759,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5799,6 +5811,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -5822,7 +5835,7 @@ mod tests {
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Wait for the worker to timeout and send WorkerExited
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
@@ -5844,7 +5857,7 @@ mod tests {
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
 
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Give worker time to fail
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -5874,6 +5887,7 @@ mod tests {
             reqwest::Client::new(),
             msg_tx,
             cancel_rx,
+            None,
         )
         .await;
 
@@ -6844,7 +6858,7 @@ mod tests {
         };
         let orch = Orchestrator::new(config, "Test prompt {{ issue.identifier }}".to_string());
         let issue = make_issue("dist-1", "DIST-1", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Issue should be in running state
         let state = orch.state.read().await;
@@ -10356,7 +10370,7 @@ mod tests {
         // Use an invalid Liquid template (unclosed tag) to force render failure
         let orch = Orchestrator::new(config, "{% if issue.identifier %}unclosed".to_string());
         let issue = make_issue("dist-err", "DIST-ERR", "Todo");
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Issue should still be in running/claimed (dispatch adds it before rendering)
         let state = orch.state.read().await;
@@ -11365,7 +11379,7 @@ mod tests {
         let orch = Orchestrator::new(config, "template".to_string());
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, None, true).await;
+        orch.dispatch_issue(issue, None, true, None).await;
 
         let state = orch.state.read().await;
         // Issue should still be dispatched (in running and claimed)
@@ -11514,7 +11528,7 @@ mod tests {
         let orch = test_orchestrator_with_store(store.clone());
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // store.save_claimed should have been called with "id1"
         assert!(
@@ -12182,7 +12196,7 @@ mod tests {
         let issue = make_issue("id1", "PROJ-1", "Todo");
 
         // Should not panic even though save_claimed fails
-        orch.dispatch_issue(issue, None, false).await;
+        orch.dispatch_issue(issue, None, false, None).await;
 
         // Issue should still be in running (dispatch succeeded despite store error)
         let state = orch.state.read().await;

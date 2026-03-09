@@ -47,6 +47,7 @@ impl AgentSession {
         env_vars: &HashMap<String, String>,
         max_turns: u32,
         mcp_config_path: Option<&Path>,
+        resume_session_id: Option<&str>,
     ) -> Result<(Self, mpsc::Receiver<AgentEvent>)> {
         // Validate workspace path
         if !workspace_path.is_dir() {
@@ -59,7 +60,8 @@ impl AgentSession {
 
         // Build the command. The prompt is passed via stdin to avoid shell
         // injection — issue titles/descriptions from Linear are user-controlled.
-        let full_command = build_agent_command(&config.command, max_turns, mcp_config_path);
+        let full_command =
+            build_agent_command(&config.command, max_turns, mcp_config_path, resume_session_id);
 
         log_agent_launch(
             &config.command,
@@ -230,6 +232,7 @@ fn build_agent_command(
     base_command: &str,
     max_turns: u32,
     mcp_config_path: Option<&Path>,
+    resume_session_id: Option<&str>,
 ) -> String {
     // If the command already includes arguments (like -p, --output-format, etc.),
     // we just use it as-is (pass-through mode). Otherwise, we add the standard flags.
@@ -251,6 +254,10 @@ fn build_agent_command(
 
     if let Some(path) = mcp_config_path {
         cmd.push_str(&format!(" --mcp-config {}", path.display()));
+    }
+
+    if let Some(session_id) = resume_session_id {
+        cmd.push_str(&format!(" --resume {session_id}"));
     }
 
     cmd
@@ -423,6 +430,7 @@ mod tests {
             "claude -p --output-format stream-json --dangerously-skip-permissions",
             20,
             None,
+            None,
         );
         assert!(cmd.contains("claude -p"));
         // Prompt is passed via stdin, not in the command
@@ -431,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_bare() {
-        let cmd = build_agent_command("claude", 20, None);
+        let cmd = build_agent_command("claude", 20, None, None);
         assert!(cmd.contains("claude"));
         assert!(cmd.contains("-p"));
         assert!(cmd.contains("--output-format stream-json"));
@@ -440,7 +448,7 @@ mod tests {
     #[test]
     fn test_build_agent_command_no_prompt_in_command() {
         // Verify that the prompt is never embedded in the shell command
-        let cmd = build_agent_command("claude -p", 20, None);
+        let cmd = build_agent_command("claude -p", 20, None, None);
         // Should just be the base command as-is, no prompt appended
         assert_eq!(cmd, "claude -p");
     }
@@ -448,7 +456,7 @@ mod tests {
     #[test]
     fn test_build_agent_command_bare_uses_config_max_turns() {
         // Bare command gets --max-turns from the config value, not hardcoded 20
-        let cmd = build_agent_command("claude", 42, None);
+        let cmd = build_agent_command("claude", 42, None, None);
         assert!(cmd.contains("--max-turns 42"));
         assert!(!cmd.contains("--max-turns 20"));
     }
@@ -456,20 +464,20 @@ mod tests {
     #[test]
     fn test_build_agent_command_passthrough_no_rewrite() {
         // Command with -p and --max-turns 30 should NOT be rewritten
-        let cmd = build_agent_command("claude -p --max-turns 30", 50, None);
+        let cmd = build_agent_command("claude -p --max-turns 30", 50, None, None);
         assert_eq!(cmd, "claude -p --max-turns 30");
     }
 
     #[test]
     fn test_build_agent_command_passthrough_without_max_turns() {
         // Command with -p but no --max-turns stays as-is
-        let cmd = build_agent_command("claude -p --output-format json", 50, None);
+        let cmd = build_agent_command("claude -p --output-format json", 50, None, None);
         assert_eq!(cmd, "claude -p --output-format json");
     }
 
     #[test]
     fn test_build_agent_command_with_mcp_config_bare() {
-        let cmd = build_agent_command("claude", 20, Some(Path::new("/tmp/mcp.json")));
+        let cmd = build_agent_command("claude", 20, Some(Path::new("/tmp/mcp.json")), None);
         assert!(cmd.contains("--mcp-config /tmp/mcp.json"));
         assert!(cmd.contains("-p"));
     }
@@ -480,6 +488,7 @@ mod tests {
             "claude -p --output-format json",
             20,
             Some(Path::new("/tmp/mcp.json")),
+            None,
         );
         assert!(cmd.contains("--mcp-config /tmp/mcp.json"));
         assert!(cmd.starts_with("claude -p --output-format json"));
@@ -487,8 +496,45 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_with_mcp_config_none() {
-        let cmd = build_agent_command("claude", 20, None);
+        let cmd = build_agent_command("claude", 20, None, None);
         assert!(!cmd.contains("--mcp-config"));
+    }
+
+    #[test]
+    fn test_build_agent_command_with_resume_bare() {
+        let cmd = build_agent_command("claude", 20, None, Some("sess-abc-123"));
+        assert!(cmd.contains("--resume sess-abc-123"));
+        assert!(cmd.contains("-p"));
+        assert!(cmd.contains("--output-format stream-json"));
+    }
+
+    #[test]
+    fn test_build_agent_command_with_resume_passthrough() {
+        let cmd = build_agent_command(
+            "claude -p --output-format stream-json",
+            20,
+            None,
+            Some("sess-xyz"),
+        );
+        assert!(cmd.contains("--resume sess-xyz"));
+    }
+
+    #[test]
+    fn test_build_agent_command_without_resume() {
+        let cmd = build_agent_command("claude", 20, None, None);
+        assert!(!cmd.contains("--resume"));
+    }
+
+    #[test]
+    fn test_build_agent_command_with_resume_and_mcp() {
+        let cmd = build_agent_command(
+            "claude",
+            20,
+            Some(Path::new("/tmp/mcp.json")),
+            Some("sess-both"),
+        );
+        assert!(cmd.contains("--mcp-config /tmp/mcp.json"));
+        assert!(cmd.contains("--resume sess-both"));
     }
 
     #[test]
@@ -745,7 +791,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_with_print_flag() {
-        let cmd = build_agent_command("claude --print", 20, None);
+        let cmd = build_agent_command("claude --print", 20, None, None);
         // --print matches, so it should use the command as-is
         assert_eq!(cmd, "claude --print");
         assert!(!cmd.contains("--output-format"));
@@ -753,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_command_with_app_server() {
-        let cmd = build_agent_command("claude app-server --port 3000", 20, None);
+        let cmd = build_agent_command("claude app-server --port 3000", 20, None, None);
         // app-server matches, so it should use the command as-is
         assert_eq!(cmd, "claude app-server --port 3000");
         assert!(!cmd.contains("--output-format"));
@@ -810,6 +856,7 @@ mod tests {
             &HashMap::new(),
             20,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -836,6 +883,7 @@ mod tests {
             &HashMap::new(),
             20,
             None,
+            None,
         )
         .await;
         assert!(
@@ -859,6 +907,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
             None,
         )
         .await
@@ -887,6 +936,7 @@ mod tests {
             &HashMap::new(),
             20,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -912,6 +962,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
             None,
         )
         .await
@@ -946,6 +997,7 @@ mod tests {
             &HashMap::new(),
             20,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -973,6 +1025,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
             None,
         )
         .await
@@ -1012,6 +1065,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
             None,
         )
         .await
@@ -1074,6 +1128,7 @@ mod tests {
             &HashMap::new(),
             20,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1121,6 +1176,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
             None,
         )
         .await
@@ -1170,6 +1226,7 @@ mod tests {
             &HashMap::new(),
             20,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1212,6 +1269,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
             None,
         )
         .await
@@ -1270,6 +1328,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
             None,
         )
         .await
@@ -1342,6 +1401,7 @@ mod tests {
             &HashMap::new(),
             20,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1370,6 +1430,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
             None,
         )
         .await
@@ -1412,6 +1473,7 @@ mod tests {
             &HashMap::new(),
             20,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1443,6 +1505,7 @@ mod tests {
             &HashMap::new(),
             20,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1469,6 +1532,7 @@ mod tests {
             &issue,
             &HashMap::new(),
             20,
+            None,
             None,
         )
         .await
@@ -1580,7 +1644,7 @@ mod tests {
         );
 
         let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &env_vars, 20, None)
+            AgentSession::launch(&config, tmp.path(), "work", &issue, &env_vars, 20, None, None)
                 .await
                 .unwrap();
 
