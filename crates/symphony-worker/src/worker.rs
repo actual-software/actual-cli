@@ -939,11 +939,8 @@ mod tests {
         assert!(result.is_ok());
 
         // At least 1 heartbeat before claiming + at least 1 during job execution
-        assert!(
-            heartbeat_count.load(Ordering::SeqCst) >= 2,
-            "expected at least 2 heartbeats (1 pre-claim + 1 during job), got {}",
-            heartbeat_count.load(Ordering::SeqCst)
-        );
+        let hb_total = heartbeat_count.load(Ordering::SeqCst);
+        assert!(hb_total >= 2);
         assert!(logs_contain("sent heartbeat"));
     }
 
