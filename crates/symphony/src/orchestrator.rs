@@ -1866,6 +1866,45 @@ impl Orchestrator {
                 .await;
             }
         }
+
+        // ── Orphaned claim cleanup ──────────────────────────────────────
+        // In distributed mode, workers are separate processes. After a restart,
+        // the `claimed` set is restored from the DB but no agents are running.
+        // Any claimed issue without a running entry is orphaned — remove the
+        // claim so it can be re-dispatched.
+        let orphaned_ids: Vec<String> = {
+            let state = self.state.read().await;
+            state
+                .claimed
+                .iter()
+                .filter(|id| !state.running.contains_key(id.as_str()))
+                .cloned()
+                .collect()
+        };
+
+        if !orphaned_ids.is_empty() {
+            info!(count = orphaned_ids.len(), "cleaning up orphaned claims");
+
+            let mut state = self.state.write().await;
+            for id in &orphaned_ids {
+                state.claimed.remove(id);
+            }
+            drop(state);
+
+            // Remove from persistence store (best-effort)
+            if let Some(ref store) = self.store {
+                for id in &orphaned_ids {
+                    if let Err(e) = store.remove_claimed(id) {
+                        debug!(issue_id = %id, error = %e, "failed to remove orphaned claimed marker from store");
+                    }
+                }
+            }
+
+            // Remove symphony-claimed label from Linear for each orphaned issue (best-effort)
+            for id in &orphaned_ids {
+                self.remove_claim_label(id, id).await;
+            }
+        }
     }
 
     async fn shutdown(&self) {
@@ -5108,6 +5147,176 @@ mod tests {
         orch.startup_cleanup().await;
 
         mock.assert_async().await;
+    }
+
+    // ── startup_cleanup: orphaned claim cleanup ────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_startup_cleanup_removes_orphaned_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock the terminal-issues fetch (returns empty — no terminal workspaces)
+        let _terminal_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+
+        let store = Arc::new(MockStore::new());
+        // Pre-populate persistence with claimed IDs
+        store.save_claimed("orphan-1").unwrap();
+        store.save_claimed("orphan-2").unwrap();
+
+        let mut orch = Orchestrator::new(config, "template".to_string());
+        orch.store = Some(store.clone());
+
+        // Pre-populate in-memory claimed set (simulating DB restore on startup)
+        {
+            let mut state = orch.state.write().await;
+            state.claimed.insert("orphan-1".to_string());
+            state.claimed.insert("orphan-2".to_string());
+        }
+        // `running` is empty — simulates a fresh restart
+
+        orch.startup_cleanup().await;
+
+        // Verify: claimed set is now empty
+        let state = orch.state.read().await;
+        assert!(state.claimed.is_empty());
+        drop(state);
+
+        // Verify: persistence store had remove_claimed called
+        let persisted_claimed = store.load_claimed_ids().unwrap();
+        assert!(persisted_claimed.is_empty());
+
+        // Verify: label removal was attempted (best-effort)
+        assert!(logs_contain("cleaning up orphaned claims"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_startup_cleanup_preserves_running_claims() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock the terminal-issues fetch (returns empty)
+        let _terminal_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+
+        let store = Arc::new(MockStore::new());
+        store.save_claimed("running-1").unwrap();
+        store.save_claimed("orphan-1").unwrap();
+
+        let mut orch = Orchestrator::new(config, "template".to_string());
+        orch.store = Some(store.clone());
+
+        // Pre-populate in-memory state: one claimed+running, one claimed-only
+        {
+            let mut state = orch.state.write().await;
+            state.claimed.insert("running-1".to_string());
+            state.claimed.insert("orphan-1".to_string());
+        }
+        // Insert a running entry for "running-1" so it is NOT orphaned
+        let _cancel_rx = insert_running(&orch, "running-1", "PROJ-1", "In Progress").await;
+
+        orch.startup_cleanup().await;
+
+        // "running-1" should still be claimed (it has a running entry)
+        let state = orch.state.read().await;
+        assert!(state.claimed.contains("running-1"));
+        // "orphan-1" should have been cleaned up
+        assert!(!state.claimed.contains("orphan-1"));
+        drop(state);
+
+        // Verify persistence: only "orphan-1" was removed
+        let persisted = store.load_claimed_ids().unwrap();
+        assert!(persisted.contains(&"running-1".to_string()));
+        assert!(!persisted.contains(&"orphan-1".to_string()));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_startup_cleanup_no_orphans_skips_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock the terminal-issues fetch (returns empty)
+        let _terminal_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // No claims at all — should not log any cleanup
+        orch.startup_cleanup().await;
+
+        assert!(!logs_contain("cleaning up orphaned claims"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_startup_cleanup_orphan_persist_error_is_best_effort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock the terminal-issues fetch (returns empty)
+        let _terminal_mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+
+        // Use a store that fails on remove_claimed
+        let store = Arc::new(MockStore::new().with_fail_remove_claimed());
+        store.save_claimed("orphan-1").unwrap();
+
+        let mut orch = Orchestrator::new(config, "template".to_string());
+        orch.store = Some(store.clone());
+
+        // Pre-populate in-memory claimed set
+        {
+            let mut state = orch.state.write().await;
+            state.claimed.insert("orphan-1".to_string());
+        }
+
+        // Should not panic even though persistence removal fails
+        orch.startup_cleanup().await;
+
+        // In-memory state should still be cleaned up
+        let state = orch.state.read().await;
+        assert!(state.claimed.is_empty());
+        drop(state);
+
+        // Verify the debug log for failed removal was emitted
+        assert!(logs_contain(
+            "failed to remove orphaned claimed marker from store"
+        ));
     }
 
     // ── dispatch_issue ───────────────────────────────────────────────
