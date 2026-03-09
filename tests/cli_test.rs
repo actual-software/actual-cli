@@ -2,7 +2,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn cmd() -> Command {
-    Command::from(assert_cmd::cargo::cargo_bin_cmd!("actual"))
+    let mut cmd = Command::from(assert_cmd::cargo::cargo_bin_cmd!("actual"));
+    cmd.timeout(std::time::Duration::from_secs(5));
+    cmd
 }
 
 #[test]
