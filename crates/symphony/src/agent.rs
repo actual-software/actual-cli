@@ -60,8 +60,12 @@ impl AgentSession {
 
         // Build the command. The prompt is passed via stdin to avoid shell
         // injection — issue titles/descriptions from Linear are user-controlled.
-        let full_command =
-            build_agent_command(&config.command, max_turns, mcp_config_path, resume_session_id);
+        let full_command = build_agent_command(
+            &config.command,
+            max_turns,
+            mcp_config_path,
+            resume_session_id,
+        );
 
         log_agent_launch(
             &config.command,
@@ -1643,10 +1647,18 @@ mod tests {
             "injected_value".to_string(),
         );
 
-        let (mut session, mut event_rx) =
-            AgentSession::launch(&config, tmp.path(), "work", &issue, &env_vars, 20, None, None)
-                .await
-                .unwrap();
+        let (mut session, mut event_rx) = AgentSession::launch(
+            &config,
+            tmp.path(),
+            "work",
+            &issue,
+            &env_vars,
+            20,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         session.wait_with_timeout(10_000).await.unwrap();
 
