@@ -1,4 +1,4 @@
-use crate::config::ServiceConfig;
+use crate::config::{DeploymentMode, ServiceConfig};
 use crate::model::{CompletionOutcome, LogEntry, OrchestratorState, RetryEntry, WaitingEntry};
 use crate::protocol::{
     OrchestratorMessage, WorkResult, WorkerEventPayload, WorkerHeartbeat, WorkerRegistration,
@@ -117,6 +117,9 @@ pub struct StateResponse {
     pub completed: Vec<CompletedInfo>,
     pub codex_totals: TotalsInfo,
     pub rate_limits: Option<serde_json::Value>,
+    pub workers: Vec<WorkerInfoResponse>,
+    pub pending_jobs: Vec<PendingJobResponse>,
+    pub is_distributed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +128,29 @@ pub struct StateCounts {
     pub retrying: usize,
     pub waiting: usize,
     pub completed: usize,
+    pub workers: usize,
+    pub pending_jobs: usize,
+}
+
+/// Worker information for dashboard display (distributed mode).
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerInfoResponse {
+    pub worker_id: String,
+    pub status: String,
+    pub last_heartbeat: String,
+    pub active_jobs: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub max_concurrent_jobs: u32,
+    pub job_count: usize,
+}
+
+/// Pending job information for dashboard display (distributed mode).
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingJobResponse {
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub prompt_preview: String,
+    pub attempt: Option<u32>,
 }
 
 /// Summary of a completed agent run for the dashboard.
@@ -154,6 +180,7 @@ pub struct RunningInfo {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+    pub worker_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,7 +277,27 @@ fn build_snapshot(
     Vec<CompletedInfo>,
     TotalsInfo,
 ) {
-    let running: Vec<RunningInfo> = state.running.values().map(map_running_entry).collect();
+    // Build reverse map: issue_identifier -> worker_id (for distributed mode)
+    let worker_for_issue: std::collections::HashMap<&str, &str> = state
+        .tracked_workers
+        .values()
+        .flat_map(|w| {
+            w.active_jobs
+                .iter()
+                .map(move |job| (job.as_str(), w.worker_id.as_str()))
+        })
+        .collect();
+
+    let running: Vec<RunningInfo> = state
+        .running
+        .values()
+        .map(|entry| {
+            let wid = worker_for_issue
+                .get(entry.identifier.as_str())
+                .map(|s| (*s).to_string());
+            map_running_entry(entry, wid)
+        })
+        .collect();
 
     let retrying: Vec<RetryInfo> = state.retry_attempts.values().map(map_retry_entry).collect();
 
@@ -342,7 +389,7 @@ fn format_datetime(dt: chrono::DateTime<Utc>) -> String {
 }
 
 /// Map a `RunningEntry` to a `RunningInfo` for JSON serialization.
-fn map_running_entry(entry: &crate::model::RunningEntry) -> RunningInfo {
+fn map_running_entry(entry: &crate::model::RunningEntry, worker_id: Option<String>) -> RunningInfo {
     RunningInfo {
         issue_id: entry.issue.id.clone(),
         issue_identifier: entry.identifier.clone(),
@@ -356,7 +403,43 @@ fn map_running_entry(entry: &crate::model::RunningEntry) -> RunningInfo {
         input_tokens: entry.session.input_tokens,
         output_tokens: entry.session.output_tokens,
         total_tokens: entry.session.total_tokens,
+        worker_id,
     }
+}
+
+/// Map tracked workers to response format for dashboard display.
+fn map_tracked_workers(state: &OrchestratorState) -> Vec<WorkerInfoResponse> {
+    state
+        .tracked_workers
+        .values()
+        .map(|w| WorkerInfoResponse {
+            worker_id: w.worker_id.clone(),
+            status: if w.alive {
+                "healthy".to_string()
+            } else {
+                "dead".to_string()
+            },
+            last_heartbeat: format_datetime(w.last_heartbeat),
+            active_jobs: w.active_jobs.clone(),
+            capabilities: w.capabilities.clone(),
+            max_concurrent_jobs: w.max_concurrent_jobs,
+            job_count: w.active_jobs.len(),
+        })
+        .collect()
+}
+
+/// Map pending job queue to response format for dashboard display.
+fn map_pending_jobs(state: &OrchestratorState) -> Vec<PendingJobResponse> {
+    state
+        .pending_jobs
+        .iter()
+        .map(|j| PendingJobResponse {
+            issue_id: j.issue_id.clone(),
+            issue_identifier: j.issue_identifier.clone(),
+            prompt_preview: j.prompt.chars().take(100).collect::<String>(),
+            attempt: j.attempt,
+        })
+        .collect()
 }
 
 /// Map a `RetryEntry` to a `RetryInfo` for JSON serialization.
@@ -385,9 +468,23 @@ fn map_waiting_entry(entry: &WaitingEntry) -> WaitingInfo {
 
 /// GET / — HTML dashboard.
 async fn handle_dashboard(State(state): State<AppState>) -> Html<String> {
+    let is_distributed = {
+        let cfg = state.config.read().await;
+        cfg.deployment.mode == DeploymentMode::Distributed
+    };
     let orch_state = state.orchestrator_state.read().await;
     let (running, retrying, waiting, completed, totals) = build_snapshot(&orch_state);
     let rate_limits = orch_state.rate_limits.clone();
+    let workers = if is_distributed {
+        map_tracked_workers(&orch_state)
+    } else {
+        vec![]
+    };
+    let pending_jobs = if is_distributed {
+        map_pending_jobs(&orch_state)
+    } else {
+        vec![]
+    };
     drop(orch_state);
 
     let html = render_dashboard(
@@ -397,32 +494,22 @@ async fn handle_dashboard(State(state): State<AppState>) -> Html<String> {
         &completed,
         &totals,
         &rate_limits,
+        &workers,
+        &pending_jobs,
+        is_distributed,
     );
     Html(html)
 }
 
 /// GET /api/v1/state — JSON state snapshot.
 async fn handle_state(State(state): State<AppState>) -> impl IntoResponse {
-    let orch_state = state.orchestrator_state.read().await;
-    let (running, retrying, waiting, completed, totals) = build_snapshot(&orch_state);
-    let rate_limits = orch_state.rate_limits.clone();
-    drop(orch_state);
-
-    let response = StateResponse {
-        generated_at: Utc::now().to_rfc3339(),
-        counts: StateCounts {
-            running: running.len(),
-            retrying: retrying.len(),
-            waiting: waiting.len(),
-            completed: completed.len(),
-        },
-        running,
-        retrying,
-        waiting,
-        completed,
-        codex_totals: totals,
-        rate_limits,
+    let is_distributed = {
+        let cfg = state.config.read().await;
+        cfg.deployment.mode == DeploymentMode::Distributed
     };
+    let orch_state = state.orchestrator_state.read().await;
+    let response = build_state_response(&orch_state, is_distributed);
+    drop(orch_state);
 
     axum::Json(response)
 }
@@ -505,9 +592,19 @@ pub struct LogsResponse {
 }
 
 /// Build a full `StateResponse` from the current orchestrator state.
-fn build_state_response(state: &OrchestratorState) -> StateResponse {
+fn build_state_response(state: &OrchestratorState, is_distributed: bool) -> StateResponse {
     let (running, retrying, waiting, completed, totals) = build_snapshot(state);
     let rate_limits = state.rate_limits.clone();
+    let workers = if is_distributed {
+        map_tracked_workers(state)
+    } else {
+        vec![]
+    };
+    let pending_jobs = if is_distributed {
+        map_pending_jobs(state)
+    } else {
+        vec![]
+    };
     StateResponse {
         generated_at: Utc::now().to_rfc3339(),
         counts: StateCounts {
@@ -515,6 +612,8 @@ fn build_state_response(state: &OrchestratorState) -> StateResponse {
             retrying: retrying.len(),
             waiting: waiting.len(),
             completed: completed.len(),
+            workers: workers.len(),
+            pending_jobs: pending_jobs.len(),
         },
         running,
         retrying,
@@ -522,6 +621,9 @@ fn build_state_response(state: &OrchestratorState) -> StateResponse {
         completed,
         codex_totals: totals,
         rate_limits,
+        workers,
+        pending_jobs,
+        is_distributed,
     }
 }
 
@@ -555,10 +657,11 @@ fn format_sse_event(entry: &LogEntry) -> Result<Event, Infallible> {
 fn state_broadcast_to_json(
     result: &Result<(), tokio_stream::wrappers::errors::BroadcastStreamRecvError>,
     state: &OrchestratorState,
+    is_distributed: bool,
 ) -> Option<String> {
     match result {
         Ok(()) => {
-            let snapshot = build_state_response(state);
+            let snapshot = build_state_response(state, is_distributed);
             serde_json::to_string(&snapshot).ok()
         }
         Err(_) => None,
@@ -570,6 +673,11 @@ fn state_broadcast_to_json(
 /// Sends an initial snapshot immediately on connection, then streams
 /// new snapshots whenever the orchestrator state changes.
 async fn handle_state_stream(State(state): State<AppState>) -> Response {
+    let is_distributed = {
+        let cfg = state.config.read().await;
+        cfg.deployment.mode == DeploymentMode::Distributed
+    };
+
     let rx = {
         let orch = state.orchestrator_state.read().await;
         orch.state_broadcast.subscribe()
@@ -578,7 +686,7 @@ async fn handle_state_stream(State(state): State<AppState>) -> Response {
     // Build and send initial snapshot
     let initial = {
         let orch = state.orchestrator_state.read().await;
-        build_state_response(&orch)
+        build_state_response(&orch, is_distributed)
     };
 
     let initial_json = serde_json::to_string(&initial).unwrap_or_default();
@@ -592,7 +700,8 @@ async fn handle_state_stream(State(state): State<AppState>) -> Response {
             let sc = state_clone.clone();
             async move {
                 let orch = sc.read().await;
-                state_broadcast_to_json(&result, &orch).map(|j| Ok(Event::default().data(j)))
+                state_broadcast_to_json(&result, &orch, is_distributed)
+                    .map(|j| Ok(Event::default().data(j)))
             }
         })
         .filter_map(|opt| opt);
@@ -1046,6 +1155,9 @@ pub fn render_dashboard(
     completed: &[CompletedInfo],
     totals: &TotalsInfo,
     rate_limits: &Option<serde_json::Value>,
+    workers: &[WorkerInfoResponse],
+    pending_jobs: &[PendingJobResponse],
+    is_distributed: bool,
 ) -> String {
     let mut html = String::with_capacity(16384);
 
@@ -1057,7 +1169,17 @@ pub fn render_dashboard(
         "completed": completed,
         "codex_totals": totals,
         "rate_limits": rate_limits,
-        "counts": { "running": running.len(), "retrying": retrying.len(), "waiting": waiting.len(), "completed": completed.len() },
+        "workers": workers,
+        "pending_jobs": pending_jobs,
+        "is_distributed": is_distributed,
+        "counts": {
+            "running": running.len(),
+            "retrying": retrying.len(),
+            "waiting": waiting.len(),
+            "completed": completed.len(),
+            "workers": workers.len(),
+            "pending_jobs": pending_jobs.len(),
+        },
     });
 
     html.push_str(&format!(
@@ -1096,7 +1218,7 @@ body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-ser
 .btn-danger {{ color:var(--red); border-color:rgba(255,82,82,0.3); }}
 .btn-danger:hover {{ background:rgba(255,82,82,0.15); border-color:var(--red); }}
 .content {{ max-width:1400px; margin:0 auto; padding:24px; }}
-.stats {{ display:grid; grid-template-columns:repeat(5,1fr); gap:16px; margin-bottom:24px; }}
+.stats {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:16px; margin-bottom:24px; }}
 .stat-card {{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:20px; }}
 .stat-card .label {{ font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); margin-bottom:8px; }}
 .stat-card .value {{ font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; }}
@@ -1118,6 +1240,17 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
 .state-badge.success {{ background:rgba(0,230,118,0.15); color:var(--green); }}
 .state-badge.in_review {{ background:rgba(0,212,255,0.15); color:var(--accent); }}
 .state-badge.failed {{ background:rgba(255,82,82,0.15); color:var(--red); }}
+.state-badge.healthy {{ background:rgba(0,230,118,0.15); color:var(--green); }}
+.state-badge.dead {{ background:rgba(255,82,82,0.15); color:var(--red); }}
+.distributed-only {{ display:none; }}
+.distributed-only.visible {{ display:block; }}
+.stat-card.distributed-only {{ display:none; }}
+.stat-card.distributed-only.visible {{ display:block; }}
+.section.distributed-only {{ display:none; }}
+.section.distributed-only.visible {{ display:block; }}
+.worker-section .section-header h2 {{ color:var(--accent2); }}
+.worker-section .badge {{ border-color:var(--accent2); color:var(--accent2); }}
+.cap-badge {{ display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; background:rgba(123,104,238,0.15); color:var(--accent2); margin:1px 2px; }}
 .empty-state {{ padding:40px 20px; text-align:center; color:var(--text-dim); }}
 .empty-state .icon {{ font-size:32px; margin-bottom:12px; }}
 .empty-state p {{ font-size:13px; line-height:1.6; }}
@@ -1193,6 +1326,40 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
       <div class="label">Completed</div>
       <div class="value" id="countCompleted">0</div>
       <div class="sub">finished runs</div>
+    </div>
+    <div class="stat-card distributed-only" id="statWorkers">
+      <div class="label">Workers</div>
+      <div class="value" id="countWorkers" style="color:var(--accent2)">0</div>
+      <div class="sub">connected workers</div>
+    </div>
+    <div class="stat-card distributed-only" id="statPendingJobs">
+      <div class="label">Pending Jobs</div>
+      <div class="value" id="countPendingJobs" style="color:var(--accent2)">0</div>
+      <div class="sub">awaiting assignment</div>
+    </div>
+  </div>
+
+  <div class="section distributed-only worker-section" id="workersSection">
+    <div class="section-header">
+      <h2>Connected Workers <span class="badge" id="workersBadge">0</span></h2>
+    </div>
+    <div id="workersContent">
+      <div class="empty-state">
+        <div class="icon">No connected workers</div>
+        <p>Workers will appear here when they register in distributed mode.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section distributed-only" id="pendingJobsSection">
+    <div class="section-header">
+      <h2>Job Queue <span class="badge" id="pendingJobsBadge">0</span></h2>
+    </div>
+    <div id="pendingJobsContent">
+      <div class="empty-state">
+        <div class="icon">No pending jobs</div>
+        <p>Jobs awaiting worker assignment will appear here.</p>
+      </div>
     </div>
   </div>
 
@@ -1299,11 +1466,15 @@ function renderRunning(items) {{
     el.innerHTML = '<div class="empty-state"><div class="icon">No running sessions</div><p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p></div>';
     return;
   }}
-  let h = '<table><thead><tr><th>Issue</th><th>State</th><th>Session</th><th>Turns</th><th>Last Event</th><th>Tokens</th><th>Started</th></tr></thead><tbody>';
+  const dist = window._isDistributed || false;
+  let h = '<table><thead><tr><th>Issue</th><th>State</th>';
+  if (dist) h += '<th>Worker</th>';
+  h += '<th>Session</th><th>Turns</th><th>Last Event</th><th>Tokens</th><th>Started</th></tr></thead><tbody>';
   for (const r of items) {{
     h += '<tr onclick="openLogPanel(\''+esc(r.issue_identifier)+'\')" title="Click to view live logs">';
     h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
     h += '<td><span class="state-badge active">'+esc(r.state)+'</span></td>';
+    if (dist) h += '<td class="mono">'+(r.worker_id ? esc(r.worker_id).slice(0,12) : '-')+'</td>';
     h += '<td class="mono">'+(r.session_id ? esc(r.session_id).slice(0,12) : '-')+'</td>';
     h += '<td>'+r.turn_count+'</td>';
     h += '<td>'+(r.last_event ? esc(r.last_event) : '-')+'</td>';
@@ -1393,6 +1564,48 @@ function renderCompleted(items) {{
   el.innerHTML = h;
 }}
 
+function renderWorkers(items) {{
+  const el = document.getElementById('workersContent');
+  document.getElementById('workersBadge').textContent = items.length;
+  if (!items.length) {{
+    el.innerHTML = '<div class="empty-state"><div class="icon">No connected workers</div><p>Workers will appear here when they register in distributed mode.</p></div>';
+    return;
+  }}
+  let h = '<table><thead><tr><th>Worker ID</th><th>Status</th><th>Last Heartbeat</th><th>Active Jobs</th><th>Capabilities</th><th>Capacity</th></tr></thead><tbody>';
+  for (const w of items) {{
+    const statusClass = w.status === 'healthy' ? 'healthy' : 'dead';
+    h += '<tr>';
+    h += '<td class="mono">'+esc(w.worker_id).slice(0,16)+'</td>';
+    h += '<td><span class="state-badge '+statusClass+'">'+esc(w.status)+'</span></td>';
+    h += '<td>'+ago(w.last_heartbeat)+'</td>';
+    h += '<td class="mono">'+(w.active_jobs.length ? w.active_jobs.map(j => esc(j)).join(', ') : '-')+'</td>';
+    h += '<td>'+(w.capabilities.length ? w.capabilities.map(c => '<span class="cap-badge">'+esc(c)+'</span>').join(' ') : '-')+'</td>';
+    h += '<td>'+w.job_count+' / '+w.max_concurrent_jobs+'</td>';
+    h += '</tr>';
+  }}
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}}
+
+function renderPendingJobs(items) {{
+  const el = document.getElementById('pendingJobsContent');
+  document.getElementById('pendingJobsBadge').textContent = items.length;
+  if (!items.length) {{
+    el.innerHTML = '<div class="empty-state"><div class="icon">No pending jobs</div><p>Jobs awaiting worker assignment will appear here.</p></div>';
+    return;
+  }}
+  let h = '<table><thead><tr><th>Issue</th><th>Prompt</th><th>Attempt</th></tr></thead><tbody>';
+  for (const j of items) {{
+    h += '<tr>';
+    h += '<td class="mono"><strong>'+esc(j.issue_identifier)+'</strong></td>';
+    h += '<td>'+esc(j.prompt_preview)+'</td>';
+    h += '<td>'+(j.attempt != null ? '#'+j.attempt : '-')+'</td>';
+    h += '</tr>';
+  }}
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}}
+
 function renderRateLimits(rl) {{
   const el = document.getElementById('rateLimitContent');
   if (!rl) {{
@@ -1402,20 +1615,36 @@ function renderRateLimits(rl) {{
   el.innerHTML = '<pre>'+esc(JSON.stringify(rl, null, 2))+'</pre>';
 }}
 
+function setDistributedMode(dist) {{
+  window._isDistributed = dist;
+  const cls = dist ? 'visible' : '';
+  document.querySelectorAll('.distributed-only').forEach(function(el) {{
+    if (dist) el.classList.add('visible'); else el.classList.remove('visible');
+  }});
+}}
+
 function update(data) {{
   const t = data.codex_totals || {{}};
-  document.getElementById('countRunning').textContent = (data.counts||{{}}).running || 0;
-  document.getElementById('countRetrying').textContent = (data.counts||{{}}).retrying || 0;
-  document.getElementById('countWaiting').textContent = (data.counts||{{}}).waiting || 0;
-  document.getElementById('countCompleted').textContent = (data.counts||{{}}).completed || 0;
+  const counts = data.counts || {{}};
+  document.getElementById('countRunning').textContent = counts.running || 0;
+  document.getElementById('countRetrying').textContent = counts.retrying || 0;
+  document.getElementById('countWaiting').textContent = counts.waiting || 0;
+  document.getElementById('countCompleted').textContent = counts.completed || 0;
   document.getElementById('totalTokens').textContent = fmt(t.total_tokens || 0);
   document.getElementById('inputTokens').textContent = fmt(t.input_tokens || 0) + ' in';
   document.getElementById('outputTokens').textContent = fmt(t.output_tokens || 0) + ' out';
   document.getElementById('runtime').textContent = fmtTime(t.seconds_running || 0);
+  setDistributedMode(!!data.is_distributed);
+  if (data.is_distributed) {{
+    document.getElementById('countWorkers').textContent = counts.workers || 0;
+    document.getElementById('countPendingJobs').textContent = counts.pending_jobs || 0;
+  }}
   renderRunning(data.running || []);
   renderRetrying(data.retrying || []);
   renderWaiting(data.waiting || []);
   renderCompleted(data.completed || []);
+  renderWorkers(data.workers || []);
+  renderPendingJobs(data.pending_jobs || []);
   renderRateLimits(data.rate_limits);
   lastFetch = Date.now();
 }}
@@ -1748,6 +1977,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("Symphony"));
@@ -1779,6 +2011,7 @@ mod tests {
             input_tokens: 1000,
             output_tokens: 500,
             total_tokens: 1500,
+            worker_id: None,
         }];
 
         let html = render_dashboard(
@@ -1793,6 +2026,9 @@ mod tests {
                 seconds_running: 60.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         // Data is embedded in the JSON initial state
@@ -1823,6 +2059,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("PROJ-2"));
@@ -1845,6 +2084,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &rate_limits,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("requests_remaining"));
@@ -1866,6 +2108,7 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             total_tokens: 0,
+            worker_id: None,
         }];
 
         let html = render_dashboard(
@@ -1880,6 +2123,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("PROJ-1"));
@@ -1907,6 +2153,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("PROJ-1"));
@@ -1937,6 +2186,9 @@ mod tests {
                 seconds_running: 120.5,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("PROJ-C1"));
@@ -2745,6 +2997,8 @@ mod tests {
                 retrying: 0,
                 waiting: 0,
                 completed: 0,
+                workers: 0,
+                pending_jobs: 0,
             },
             running: vec![RunningInfo {
                 issue_id: "id1".to_string(),
@@ -2759,6 +3013,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
+                worker_id: None,
             }],
             retrying: vec![],
             waiting: vec![],
@@ -2770,6 +3025,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             rate_limits: None,
+            workers: vec![],
+            pending_jobs: vec![],
+            is_distributed: false,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -3229,6 +3487,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("logPanel"));
@@ -3254,6 +3515,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("log-panel"));
@@ -4118,6 +4382,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("removeRetry"));
@@ -4130,7 +4397,7 @@ mod tests {
     #[test]
     fn test_build_state_response_empty() {
         let state = OrchestratorState::new(5000, 3);
-        let response = build_state_response(&state);
+        let response = build_state_response(&state, false);
         assert!(response.generated_at.contains("T"));
         assert_eq!(response.counts.running, 0);
         assert_eq!(response.counts.retrying, 0);
@@ -4172,7 +4439,7 @@ mod tests {
         };
         state.rate_limits = Some(serde_json::json!({"remaining": 10}));
 
-        let response = build_state_response(&state);
+        let response = build_state_response(&state, false);
         assert_eq!(response.counts.running, 1);
         assert_eq!(response.running[0].issue_identifier, "PROJ-1");
         assert_eq!(response.codex_totals.input_tokens, 500);
@@ -4182,7 +4449,7 @@ mod tests {
     #[test]
     fn test_build_state_response_serializes_to_json() {
         let state = OrchestratorState::new(5000, 3);
-        let response = build_state_response(&state);
+        let response = build_state_response(&state, false);
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("generated_at"));
         assert!(json.contains("counts"));
@@ -4195,7 +4462,7 @@ mod tests {
     fn test_state_broadcast_to_json_ok() {
         let state = OrchestratorState::new(5000, 3);
         let result = Ok(());
-        let json = state_broadcast_to_json(&result, &state);
+        let json = state_broadcast_to_json(&result, &state, false);
         assert!(json.is_some());
         let json_str = json.unwrap();
         assert!(json_str.contains("generated_at"));
@@ -4207,7 +4474,7 @@ mod tests {
         use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
         let state = OrchestratorState::new(5000, 3);
         let result = Err(BroadcastStreamRecvError::Lagged(5));
-        let json = state_broadcast_to_json(&result, &state);
+        let json = state_broadcast_to_json(&result, &state, false);
         assert!(json.is_none());
     }
 
@@ -4328,6 +4595,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         // SSE-related functions
@@ -4353,6 +4623,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         // Polling fallback
@@ -4377,6 +4650,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         // Should start with SSE, not setInterval(poll)
@@ -4446,6 +4722,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         // Verify waiting data is embedded in the initial JSON
@@ -4472,6 +4751,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("No PRs waiting"));
@@ -4489,6 +4771,8 @@ mod tests {
                 retrying: 0,
                 waiting: 1,
                 completed: 0,
+                workers: 0,
+                pending_jobs: 0,
             },
             running: vec![],
             retrying: vec![],
@@ -4507,6 +4791,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             rate_limits: None,
+            workers: vec![],
+            pending_jobs: vec![],
+            is_distributed: false,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -4528,6 +4815,8 @@ mod tests {
                 retrying: 0,
                 waiting: 0,
                 completed: 0,
+                workers: 0,
+                pending_jobs: 0,
             },
             running: vec![],
             retrying: vec![],
@@ -4540,6 +4829,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             rate_limits: None,
+            workers: vec![],
+            pending_jobs: vec![],
+            is_distributed: false,
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -4585,7 +4877,7 @@ mod tests {
             },
         );
 
-        let response = build_state_response(&state);
+        let response = build_state_response(&state, false);
         assert_eq!(response.counts.waiting, 1);
         assert_eq!(response.waiting.len(), 1);
         assert_eq!(response.waiting[0].identifier, "PROJ-W1");
@@ -4706,6 +4998,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         // Verify the renderWaiting JS function is present
@@ -4750,6 +5045,9 @@ mod tests {
                 seconds_running: 0.0,
             },
             &None,
+            &[],
+            &[],
+            false,
         );
 
         assert!(html.contains("PROJ-W1"));
