@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::ActualError;
 use crate::generation::markers;
 use crate::generation::OutputFormat;
-use crate::tailoring::types::{FileOutput, TailoringOutput, TailoringSummary};
+use crate::tailoring::types::{FileOutput, SkippedAdr, TailoringOutput, TailoringSummary};
 
 pub(crate) fn zero_adr_context_lines(request: &crate::api::types::MatchRequest) -> Vec<String> {
     let mut langs: Vec<&str> = request
@@ -131,9 +131,11 @@ pub(crate) fn raw_adrs_to_output(
 ) -> TailoringOutput {
     let filename = format.filename();
     let mut project_adrs: HashMap<String, Vec<&crate::api::types::Adr>> = HashMap::new();
+    let mut valid_adr_ids: HashSet<&str> = HashSet::new();
 
     for adr in adrs {
         if adr.matched_projects.is_empty() {
+            valid_adr_ids.insert(&adr.id);
             project_adrs
                 .entry(filename.to_string())
                 .or_default()
@@ -144,6 +146,7 @@ pub(crate) fn raw_adrs_to_output(
                     log_skip_invalid_project(project_path, &adr.id);
                     continue;
                 }
+                valid_adr_ids.insert(&adr.id);
                 let file_path = if project_path == "." {
                     filename.to_string()
                 } else {
@@ -195,16 +198,26 @@ pub(crate) fn raw_adrs_to_output(
     // Sort for deterministic output
     files.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let applicable = adrs.len();
+    let applicable = valid_adr_ids.len();
+    let not_applicable = adrs.len() - applicable;
     let files_generated = files.len();
+
+    let skipped_adrs: Vec<SkippedAdr> = adrs
+        .iter()
+        .filter(|adr| !valid_adr_ids.contains(adr.id.as_str()))
+        .map(|adr| SkippedAdr {
+            id: adr.id.clone(),
+            reason: "All project paths were invalid".to_string(),
+        })
+        .collect();
 
     TailoringOutput {
         files,
-        skipped_adrs: vec![],
+        skipped_adrs,
         summary: TailoringSummary {
-            total_input: applicable,
+            total_input: adrs.len(),
             applicable,
-            not_applicable: 0,
+            not_applicable,
             files_generated,
         },
     }
