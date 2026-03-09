@@ -390,7 +390,14 @@ async fn handle_dashboard(State(state): State<AppState>) -> Html<String> {
     let rate_limits = orch_state.rate_limits.clone();
     drop(orch_state);
 
-    let html = render_dashboard(&running, &retrying, &waiting, &completed, &totals, &rate_limits);
+    let html = render_dashboard(
+        &running,
+        &retrying,
+        &waiting,
+        &completed,
+        &totals,
+        &rate_limits,
+    );
     Html(html)
 }
 
@@ -1700,6 +1707,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1744,6 +1752,7 @@ mod tests {
             &running,
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 1000,
                 output_tokens: 500,
@@ -1773,6 +1782,7 @@ mod tests {
             &[],
             &retrying,
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1791,6 +1801,7 @@ mod tests {
         let rate_limits = Some(serde_json::json!({"requests_remaining": 42}));
 
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &[],
@@ -1828,6 +1839,7 @@ mod tests {
             &running,
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1853,6 +1865,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &retrying,
+            &[],
             &[],
             &TotalsInfo {
                 input_tokens: 0,
@@ -1880,6 +1893,7 @@ mod tests {
         }];
 
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &completed,
@@ -3174,6 +3188,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3195,6 +3210,7 @@ mod tests {
     #[test]
     fn test_dashboard_log_panel_css() {
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &[],
@@ -3997,6 +4013,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -4206,6 +4223,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -4230,6 +4248,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -4250,6 +4269,7 @@ mod tests {
     #[test]
     fn test_dashboard_initial_render_uses_sse() {
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &[],
@@ -4321,6 +4341,7 @@ mod tests {
             &[],
             &[],
             &waiting,
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -4343,6 +4364,7 @@ mod tests {
     #[test]
     fn test_render_dashboard_waiting_empty() {
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &[],
@@ -4369,6 +4391,7 @@ mod tests {
                 running: 0,
                 retrying: 0,
                 waiting: 1,
+                completed: 0,
             },
             running: vec![],
             retrying: vec![],
@@ -4379,6 +4402,7 @@ mod tests {
                 branch: "symphony/proj-w1".to_string(),
                 started_waiting_at: "2025-01-01T00:00:00Z".to_string(),
             }],
+            completed: vec![],
             codex_totals: TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -4406,10 +4430,12 @@ mod tests {
                 running: 0,
                 retrying: 0,
                 waiting: 0,
+                completed: 0,
             },
             running: vec![],
             retrying: vec![],
             waiting: vec![],
+            completed: vec![],
             codex_totals: TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -4440,7 +4466,7 @@ mod tests {
             },
         );
 
-        let (_running, _retrying, waiting, _totals) = build_snapshot(&state);
+        let (_running, _retrying, waiting, _completed, _totals) = build_snapshot(&state);
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].identifier, "PROJ-W1");
         assert_eq!(waiting[0].pr_number, 42);
@@ -4575,6 +4601,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -4618,6 +4645,7 @@ mod tests {
             &[],
             &[],
             &waiting,
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
