@@ -26,16 +26,16 @@ pub fn merge_outputs(outputs: Vec<TailoringOutput>) -> TailoringOutput {
                 .entry(file.path.clone())
                 .and_modify(|existing| {
                     // Merge sections by adr_id: if same adr_id exists,
-                    // concatenate content; otherwise append new section.
+                    // replace with latest content (last occurrence wins);
+                    // otherwise append new section.
                     for section in &file.sections {
                         if let Some(pos) = existing
                             .sections
                             .iter()
                             .position(|s| s.adr_id == section.adr_id)
                         {
-                            // Same adr_id: concatenate content
-                            existing.sections[pos].content.push_str("\n\n");
-                            existing.sections[pos].content.push_str(&section.content);
+                            // Same adr_id: replace with latest content (last occurrence wins)
+                            existing.sections[pos].content = section.content.clone();
                         } else {
                             existing.sections.push(section.clone());
                         }
@@ -286,8 +286,19 @@ mod tests {
         let file = &merged.files[0];
         assert_eq!(file.path, "CLAUDE.md");
 
-        // adr_ids deduplicated, preserving order (adr-002 content updated to batch 2)
+        // adr_ids deduplicated, preserving order (adr-002 content replaced by batch 2)
         assert_eq!(file.adr_ids(), vec!["adr-001", "adr-002", "adr-003"]);
+
+        // Verify last-occurrence-wins: adr-002 content should be from batch 2 only
+        let adr_002 = file
+            .sections
+            .iter()
+            .find(|s| s.adr_id == "adr-002")
+            .unwrap();
+        assert_eq!(
+            adr_002.content, "# Batch 2 rules",
+            "adr-002 should have batch 2 content (last occurrence wins)"
+        );
 
         // Reasoning combined with "; "
         assert_eq!(file.reasoning, "First batch; Second batch");
@@ -440,6 +451,43 @@ mod tests {
         assert_eq!(merged.summary.applicable, 0);
         assert_eq!(merged.summary.not_applicable, 0);
         assert_eq!(merged.summary.files_generated, 0);
+    }
+
+    #[test]
+    fn test_merge_duplicate_adr_id_last_occurrence_wins() {
+        // When the same adr_id appears in multiple outputs,
+        // the content from the last output should replace earlier content.
+        let out1 = make_output(
+            vec![FileOutput {
+                path: "CLAUDE.md".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-dup".to_string(),
+                    content: "First version of content".to_string(),
+                }],
+                reasoning: "First".to_string(),
+            }],
+            vec![],
+        );
+        let out2 = make_output(
+            vec![FileOutput {
+                path: "CLAUDE.md".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "adr-dup".to_string(),
+                    content: "Second version of content".to_string(),
+                }],
+                reasoning: "Second".to_string(),
+            }],
+            vec![],
+        );
+
+        let merged = merge_outputs(vec![out1, out2]);
+
+        assert_eq!(merged.files.len(), 1);
+        let file = &merged.files[0];
+        assert_eq!(file.sections.len(), 1);
+        // Last occurrence wins: content should be from out2
+        assert_eq!(file.sections[0].content, "Second version of content");
+        assert_eq!(file.sections[0].adr_id, "adr-dup");
     }
 
     // ---- merge_content tests ----
