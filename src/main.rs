@@ -46,9 +46,12 @@ fn init_logging(cli: &Cli) {
     }
 
     // Non-TUI mode (or log file creation failed): write to stderr.
+    // Disable ANSI escape codes so tracing output does not interleave raw
+    // escape sequences with the pipeline's own plain-mode `eprintln!` output.
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(false)
         .init();
 }
 
