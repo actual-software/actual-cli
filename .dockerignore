@@ -36,6 +36,7 @@ lcov.info
 
 # npm platform binaries (populated by CI, not needed for worker build)
 npm/
+node_modules/
 
 # Serena memories
 .serena/memories/
@@ -43,6 +44,20 @@ npm/
 # Audit/check scratch dirs
 .audit/
 .check/
+
+# Tooling configuration
+.opencode/
+.mcp-config.json
+.mcp.json
+
+# Agent workspaces
+.agents/
+
+# Scripts (CI helpers, not needed in image)
+scripts/
+
+# Dockerfiles themselves (avoid recursive COPY)
+docker/
 
 # Session recordings
 *.cast
