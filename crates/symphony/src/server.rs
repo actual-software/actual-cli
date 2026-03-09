@@ -1,5 +1,5 @@
 use crate::config::ServiceConfig;
-use crate::model::{LogEntry, OrchestratorState, RetryEntry};
+use crate::model::{LogEntry, OrchestratorState, RetryEntry, WaitingEntry};
 use crate::protocol::{OrchestratorMessage, WorkResult, WorkerEventPayload};
 use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
@@ -109,6 +109,7 @@ pub struct StateResponse {
     pub counts: StateCounts,
     pub running: Vec<RunningInfo>,
     pub retrying: Vec<RetryInfo>,
+    pub waiting: Vec<WaitingInfo>,
     pub codex_totals: TotalsInfo,
     pub rate_limits: Option<serde_json::Value>,
 }
@@ -117,6 +118,7 @@ pub struct StateResponse {
 pub struct StateCounts {
     pub running: usize,
     pub retrying: usize,
+    pub waiting: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,6 +144,15 @@ pub struct RetryInfo {
     pub attempt: u32,
     pub due_at_ms: u64,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WaitingInfo {
+    pub issue_id: String,
+    pub identifier: String,
+    pub pr_number: u64,
+    pub branch: String,
+    pub started_waiting_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -211,10 +222,23 @@ pub struct ErrorDetail {
 ///
 /// Computes live `seconds_running` by adding elapsed time from active sessions
 /// to the cumulative total.
-fn build_snapshot(state: &OrchestratorState) -> (Vec<RunningInfo>, Vec<RetryInfo>, TotalsInfo) {
+fn build_snapshot(
+    state: &OrchestratorState,
+) -> (
+    Vec<RunningInfo>,
+    Vec<RetryInfo>,
+    Vec<WaitingInfo>,
+    TotalsInfo,
+) {
     let running: Vec<RunningInfo> = state.running.values().map(map_running_entry).collect();
 
     let retrying: Vec<RetryInfo> = state.retry_attempts.values().map(map_retry_entry).collect();
+
+    let waiting: Vec<WaitingInfo> = state
+        .waiting_for_review
+        .values()
+        .map(map_waiting_entry)
+        .collect();
 
     let active_seconds: f64 = state
         .running
@@ -229,7 +253,7 @@ fn build_snapshot(state: &OrchestratorState) -> (Vec<RunningInfo>, Vec<RetryInfo
         seconds_running: state.agent_totals.seconds_running + active_seconds,
     };
 
-    (running, retrying, totals)
+    (running, retrying, waiting, totals)
 }
 
 /// Compute elapsed seconds for a running entry.
@@ -299,23 +323,34 @@ fn map_retry_entry(entry: &RetryEntry) -> RetryInfo {
     }
 }
 
+/// Map a `WaitingEntry` to a `WaitingInfo` for JSON serialization.
+fn map_waiting_entry(entry: &WaitingEntry) -> WaitingInfo {
+    WaitingInfo {
+        issue_id: entry.issue_id.clone(),
+        identifier: entry.identifier.clone(),
+        pr_number: entry.pr_number,
+        branch: entry.branch.clone(),
+        started_waiting_at: format_datetime(entry.started_waiting_at),
+    }
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────
 
 /// GET / — HTML dashboard.
 async fn handle_dashboard(State(state): State<AppState>) -> Html<String> {
     let orch_state = state.orchestrator_state.read().await;
-    let (running, retrying, totals) = build_snapshot(&orch_state);
+    let (running, retrying, waiting, totals) = build_snapshot(&orch_state);
     let rate_limits = orch_state.rate_limits.clone();
     drop(orch_state);
 
-    let html = render_dashboard(&running, &retrying, &totals, &rate_limits);
+    let html = render_dashboard(&running, &retrying, &waiting, &totals, &rate_limits);
     Html(html)
 }
 
 /// GET /api/v1/state — JSON state snapshot.
 async fn handle_state(State(state): State<AppState>) -> impl IntoResponse {
     let orch_state = state.orchestrator_state.read().await;
-    let (running, retrying, totals) = build_snapshot(&orch_state);
+    let (running, retrying, waiting, totals) = build_snapshot(&orch_state);
     let rate_limits = orch_state.rate_limits.clone();
     drop(orch_state);
 
@@ -324,9 +359,11 @@ async fn handle_state(State(state): State<AppState>) -> impl IntoResponse {
         counts: StateCounts {
             running: running.len(),
             retrying: retrying.len(),
+            waiting: waiting.len(),
         },
         running,
         retrying,
+        waiting,
         codex_totals: totals,
         rate_limits,
     };
@@ -413,16 +450,18 @@ pub struct LogsResponse {
 
 /// Build a full `StateResponse` from the current orchestrator state.
 fn build_state_response(state: &OrchestratorState) -> StateResponse {
-    let (running, retrying, totals) = build_snapshot(state);
+    let (running, retrying, waiting, totals) = build_snapshot(state);
     let rate_limits = state.rate_limits.clone();
     StateResponse {
         generated_at: Utc::now().to_rfc3339(),
         counts: StateCounts {
             running: running.len(),
             retrying: retrying.len(),
+            waiting: waiting.len(),
         },
         running,
         retrying,
+        waiting,
         codex_totals: totals,
         rate_limits,
     }
@@ -888,6 +927,7 @@ async fn handle_fallback(method: Method) -> Response {
 pub fn render_dashboard(
     running: &[RunningInfo],
     retrying: &[RetryInfo],
+    waiting: &[WaitingInfo],
     totals: &TotalsInfo,
     rate_limits: &Option<serde_json::Value>,
 ) -> String {
@@ -897,9 +937,10 @@ pub fn render_dashboard(
     let initial_state = serde_json::json!({
         "running": running,
         "retrying": retrying,
+        "waiting": waiting,
         "codex_totals": totals,
         "rate_limits": rate_limits,
-        "counts": { "running": running.len(), "retrying": retrying.len() },
+        "counts": { "running": running.len(), "retrying": retrying.len(), "waiting": waiting.len() },
     });
 
     html.push_str(&format!(
@@ -938,7 +979,7 @@ body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-ser
 .btn-danger {{ color:var(--red); border-color:rgba(255,82,82,0.3); }}
 .btn-danger:hover {{ background:rgba(255,82,82,0.15); border-color:var(--red); }}
 .content {{ max-width:1400px; margin:0 auto; padding:24px; }}
-.stats {{ display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }}
+.stats {{ display:grid; grid-template-columns:repeat(5,1fr); gap:16px; margin-bottom:24px; }}
 .stat-card {{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:20px; }}
 .stat-card .label {{ font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); margin-bottom:8px; }}
 .stat-card .value {{ font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; }}
@@ -1023,6 +1064,11 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
       <div class="value" id="countRetrying">0</div>
       <div class="sub">in retry queue</div>
     </div>
+    <div class="stat-card">
+      <div class="label">Waiting</div>
+      <div class="value" id="countWaiting">0</div>
+      <div class="sub">awaiting review</div>
+    </div>
   </div>
 
   <div class="section">
@@ -1053,6 +1099,18 @@ tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
       <div class="empty-state">
         <div class="icon">No retries pending</div>
         <p>Failed or timed-out sessions will appear here with their retry schedule.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Waiting for Review <span class="badge" id="waitingBadge">0</span></h2>
+    </div>
+    <div id="waitingContent">
+      <div class="empty-state">
+        <div class="icon">No PRs waiting</div>
+        <p>Issues waiting for PR review or merge will appear here.</p>
       </div>
     </div>
   </div>
@@ -1142,6 +1200,26 @@ function renderRetrying(items) {{
   el.innerHTML = h;
 }}
 
+function renderWaiting(items) {{
+  const el = document.getElementById('waitingContent');
+  document.getElementById('waitingBadge').textContent = items.length;
+  if (!items.length) {{
+    el.innerHTML = '<div class="empty-state"><div class="icon">No PRs waiting</div><p>Issues waiting for PR review or merge will appear here.</p></div>';
+    return;
+  }}
+  let h = '<table><thead><tr><th>Issue</th><th>PR</th><th>Branch</th><th>Waiting</th></tr></thead><tbody>';
+  for (const w of items) {{
+    h += '<tr>';
+    h += '<td class="mono"><strong>'+esc(w.identifier)+'</strong></td>';
+    h += '<td><span class="state-badge active">#'+w.pr_number+'</span></td>';
+    h += '<td class="mono">'+esc(w.branch)+'</td>';
+    h += '<td>'+ago(w.started_waiting_at)+'</td>';
+    h += '</tr>';
+  }}
+  h += '</tbody></table>';
+  el.innerHTML = h;
+}}
+
 function renderRateLimits(rl) {{
   const el = document.getElementById('rateLimitContent');
   if (!rl) {{
@@ -1155,12 +1233,14 @@ function update(data) {{
   const t = data.codex_totals || {{}};
   document.getElementById('countRunning').textContent = (data.counts||{{}}).running || 0;
   document.getElementById('countRetrying').textContent = (data.counts||{{}}).retrying || 0;
+  document.getElementById('countWaiting').textContent = (data.counts||{{}}).waiting || 0;
   document.getElementById('totalTokens').textContent = fmt(t.total_tokens || 0);
   document.getElementById('inputTokens').textContent = fmt(t.input_tokens || 0) + ' in';
   document.getElementById('outputTokens').textContent = fmt(t.output_tokens || 0) + ' out';
   document.getElementById('runtime').textContent = fmtTime(t.seconds_running || 0);
   renderRunning(data.running || []);
   renderRetrying(data.retrying || []);
+  renderWaiting(data.waiting || []);
   renderRateLimits(data.rate_limits);
   lastFetch = Date.now();
 }}
@@ -1484,6 +1564,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1497,6 +1578,7 @@ mod tests {
         assert!(html.contains("Dashboard"));
         assert!(html.contains("No running sessions"));
         assert!(html.contains("No retries pending"));
+        assert!(html.contains("No PRs waiting"));
         assert!(html.contains("No rate limit data"));
         // Verify initial JSON state is embedded
         assert!(html.contains("const INITIAL"));
@@ -1523,6 +1605,7 @@ mod tests {
 
         let html = render_dashboard(
             &running,
+            &[],
             &[],
             &TotalsInfo {
                 input_tokens: 1000,
@@ -1552,6 +1635,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &retrying,
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1570,6 +1654,7 @@ mod tests {
         let rate_limits = Some(serde_json::json!({"requests_remaining": 42}));
 
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &TotalsInfo {
@@ -1605,6 +1690,7 @@ mod tests {
         let html = render_dashboard(
             &running,
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1630,6 +1716,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &retrying,
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -1759,9 +1846,10 @@ mod tests {
     #[test]
     fn test_build_snapshot_empty() {
         let state = OrchestratorState::new(5000, 3);
-        let (running, retrying, totals) = build_snapshot(&state);
+        let (running, retrying, waiting, totals) = build_snapshot(&state);
         assert!(running.is_empty());
         assert!(retrying.is_empty());
+        assert!(waiting.is_empty());
         assert_eq!(totals.input_tokens, 0);
         assert_eq!(totals.output_tokens, 0);
         assert_eq!(totals.total_tokens, 0);
@@ -1798,11 +1886,12 @@ mod tests {
             seconds_running: 100.0,
         };
 
-        let (running, retrying, totals) = build_snapshot(&state);
+        let (running, retrying, waiting, totals) = build_snapshot(&state);
         assert_eq!(running.len(), 1);
         assert_eq!(running[0].issue_identifier, "PROJ-1");
         assert_eq!(running[0].input_tokens, 100);
         assert!(retrying.is_empty());
+        assert!(waiting.is_empty());
         assert_eq!(totals.input_tokens, 500);
         assert_eq!(totals.output_tokens, 200);
         assert_eq!(totals.total_tokens, 700);
@@ -1824,7 +1913,7 @@ mod tests {
             },
         );
 
-        let (_running, retrying, _totals) = build_snapshot(&state);
+        let (_running, retrying, _waiting, _totals) = build_snapshot(&state);
         assert_eq!(retrying.len(), 1);
         assert_eq!(retrying[0].identifier, "PROJ-1");
         assert_eq!(retrying[0].attempt, 2);
@@ -2346,6 +2435,7 @@ mod tests {
             counts: StateCounts {
                 running: 1,
                 retrying: 0,
+                waiting: 0,
             },
             running: vec![RunningInfo {
                 issue_id: "id1".to_string(),
@@ -2362,6 +2452,7 @@ mod tests {
                 total_tokens: 0,
             }],
             retrying: vec![],
+            waiting: vec![],
             codex_totals: TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2818,6 +2909,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -2839,6 +2931,7 @@ mod tests {
     #[test]
     fn test_dashboard_log_panel_css() {
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &TotalsInfo {
@@ -3639,6 +3732,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3845,6 +3939,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3866,6 +3961,7 @@ mod tests {
     #[test]
     fn test_dashboard_sse_fallback_to_polling() {
         let html = render_dashboard(
+            &[],
             &[],
             &[],
             &TotalsInfo {
@@ -3890,6 +3986,7 @@ mod tests {
         let html = render_dashboard(
             &[],
             &[],
+            &[],
             &TotalsInfo {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -3903,5 +4000,373 @@ mod tests {
         assert!(html.contains("startSSE()"));
         // Old polling-only pattern should be gone
         assert!(!html.contains("setInterval(poll, 3000);\n</script>"));
+    }
+
+    // ── Waiting for Review tests ──────────────────────────────────────
+
+    #[test]
+    fn test_map_waiting_entry() {
+        let entry = WaitingEntry {
+            issue_id: "id1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+            session_id: Some("sess-abc".to_string()),
+        };
+
+        let info = map_waiting_entry(&entry);
+        assert_eq!(info.issue_id, "id1");
+        assert_eq!(info.identifier, "PROJ-1");
+        assert_eq!(info.pr_number, 42);
+        assert_eq!(info.branch, "symphony/proj-1");
+        assert!(info.started_waiting_at.contains("T")); // RFC3339
+    }
+
+    #[test]
+    fn test_map_waiting_entry_no_session() {
+        let entry = WaitingEntry {
+            issue_id: "id2".to_string(),
+            identifier: "PROJ-2".to_string(),
+            pr_number: 99,
+            branch: "feat/xyz".to_string(),
+            started_waiting_at: Utc::now(),
+            session_id: None,
+        };
+
+        let info = map_waiting_entry(&entry);
+        assert_eq!(info.issue_id, "id2");
+        assert_eq!(info.identifier, "PROJ-2");
+        assert_eq!(info.pr_number, 99);
+        assert_eq!(info.branch, "feat/xyz");
+    }
+
+    #[test]
+    fn test_render_dashboard_with_waiting() {
+        let waiting = vec![WaitingInfo {
+            issue_id: "id1".to_string(),
+            identifier: "PROJ-W1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-w1".to_string(),
+            started_waiting_at: "2025-01-01T00:00:00Z".to_string(),
+        }];
+
+        let html = render_dashboard(
+            &[],
+            &[],
+            &waiting,
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        // Verify waiting data is embedded in the initial JSON
+        assert!(html.contains("PROJ-W1"));
+        assert!(html.contains("symphony/proj-w1"));
+        assert!(html.contains("42"));
+        // Verify the waiting section HTML structure
+        assert!(html.contains("Waiting for Review"));
+        assert!(html.contains("waitingBadge"));
+        assert!(html.contains("waitingContent"));
+    }
+
+    #[test]
+    fn test_render_dashboard_waiting_empty() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        assert!(html.contains("No PRs waiting"));
+        assert!(html.contains("Waiting for Review"));
+        assert!(html.contains("renderWaiting"));
+        assert!(html.contains("countWaiting"));
+    }
+
+    #[test]
+    fn test_state_response_includes_waiting() {
+        let response = StateResponse {
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            counts: StateCounts {
+                running: 0,
+                retrying: 0,
+                waiting: 1,
+            },
+            running: vec![],
+            retrying: vec![],
+            waiting: vec![WaitingInfo {
+                issue_id: "id1".to_string(),
+                identifier: "PROJ-W1".to_string(),
+                pr_number: 42,
+                branch: "symphony/proj-w1".to_string(),
+                started_waiting_at: "2025-01-01T00:00:00Z".to_string(),
+            }],
+            codex_totals: TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            rate_limits: None,
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"waiting\""));
+        assert!(json.contains("PROJ-W1"));
+        assert!(json.contains("\"pr_number\":42"));
+        assert!(json.contains("symphony/proj-w1"));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["counts"]["waiting"], 1);
+        assert_eq!(parsed["waiting"][0]["identifier"], "PROJ-W1");
+    }
+
+    #[test]
+    fn test_state_response_waiting_empty() {
+        let response = StateResponse {
+            generated_at: "2025-01-01T00:00:00Z".to_string(),
+            counts: StateCounts {
+                running: 0,
+                retrying: 0,
+                waiting: 0,
+            },
+            running: vec![],
+            retrying: vec![],
+            waiting: vec![],
+            codex_totals: TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            rate_limits: None,
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["counts"]["waiting"], 0);
+        assert!(parsed["waiting"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_build_snapshot_with_waiting() {
+        let mut state = OrchestratorState::new(5000, 3);
+        state.waiting_for_review.insert(
+            "id1".to_string(),
+            WaitingEntry {
+                issue_id: "id1".to_string(),
+                identifier: "PROJ-W1".to_string(),
+                pr_number: 42,
+                branch: "symphony/proj-w1".to_string(),
+                started_waiting_at: Utc::now(),
+                session_id: Some("sess-abc".to_string()),
+            },
+        );
+
+        let (_running, _retrying, waiting, _totals) = build_snapshot(&state);
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].identifier, "PROJ-W1");
+        assert_eq!(waiting[0].pr_number, 42);
+        assert_eq!(waiting[0].branch, "symphony/proj-w1");
+    }
+
+    #[test]
+    fn test_build_state_response_with_waiting() {
+        let mut state = OrchestratorState::new(5000, 3);
+        state.waiting_for_review.insert(
+            "id1".to_string(),
+            WaitingEntry {
+                issue_id: "id1".to_string(),
+                identifier: "PROJ-W1".to_string(),
+                pr_number: 42,
+                branch: "symphony/proj-w1".to_string(),
+                started_waiting_at: Utc::now(),
+                session_id: None,
+            },
+        );
+
+        let response = build_state_response(&state);
+        assert_eq!(response.counts.waiting, 1);
+        assert_eq!(response.waiting.len(), 1);
+        assert_eq!(response.waiting[0].identifier, "PROJ-W1");
+        assert_eq!(response.waiting[0].pr_number, 42);
+    }
+
+    #[tokio::test]
+    async fn test_get_state_includes_waiting() {
+        let app_state = test_app_state();
+
+        // Insert a waiting entry
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-W1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-w1".to_string(),
+                    started_waiting_at: Utc::now(),
+                    session_id: None,
+                },
+            );
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/api/v1/state")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["counts"]["waiting"], 1);
+        assert_eq!(json["waiting"][0]["identifier"], "PROJ-W1");
+        assert_eq!(json["waiting"][0]["pr_number"], 42);
+        assert_eq!(json["waiting"][0]["branch"], "symphony/proj-w1");
+    }
+
+    #[tokio::test]
+    async fn test_get_dashboard_with_waiting() {
+        let app_state = test_app_state();
+
+        // Insert a waiting entry
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            state.waiting_for_review.insert(
+                "id1".to_string(),
+                WaitingEntry {
+                    issue_id: "id1".to_string(),
+                    identifier: "PROJ-W1".to_string(),
+                    pr_number: 42,
+                    branch: "symphony/proj-w1".to_string(),
+                    started_waiting_at: Utc::now(),
+                    session_id: None,
+                },
+            );
+        }
+
+        let app = build_router(app_state);
+
+        let request = axum::http::Request::builder()
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = get_body(response).await;
+        assert!(body.contains("PROJ-W1"));
+        assert!(body.contains("symphony/proj-w1"));
+    }
+
+    #[test]
+    fn test_waiting_info_debug_clone_serialize() {
+        let info = WaitingInfo {
+            issue_id: "id1".to_string(),
+            identifier: "PROJ-W1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-w1".to_string(),
+            started_waiting_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+
+        // Test Debug
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("WaitingInfo"));
+        assert!(debug.contains("PROJ-W1"));
+
+        // Test Clone
+        let cloned = info.clone();
+        assert_eq!(cloned.issue_id, info.issue_id);
+        assert_eq!(cloned.pr_number, info.pr_number);
+
+        // Test Serialize
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("PROJ-W1"));
+        assert!(json.contains("42"));
+    }
+
+    #[test]
+    fn test_render_dashboard_waiting_js_function() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        // Verify the renderWaiting JS function is present
+        assert!(html.contains("function renderWaiting(items)"));
+        assert!(html.contains("waitingContent"));
+        assert!(html.contains("waitingBadge"));
+        // Verify update() calls renderWaiting
+        assert!(html.contains("renderWaiting(data.waiting"));
+        // Verify countWaiting stat card
+        assert!(html.contains("countWaiting"));
+        assert!(html.contains("awaiting review"));
+    }
+
+    #[test]
+    fn test_render_dashboard_multiple_waiting() {
+        let waiting = vec![
+            WaitingInfo {
+                issue_id: "id1".to_string(),
+                identifier: "PROJ-W1".to_string(),
+                pr_number: 42,
+                branch: "symphony/proj-w1".to_string(),
+                started_waiting_at: "2025-01-01T00:00:00Z".to_string(),
+            },
+            WaitingInfo {
+                issue_id: "id2".to_string(),
+                identifier: "PROJ-W2".to_string(),
+                pr_number: 99,
+                branch: "feat/xyz".to_string(),
+                started_waiting_at: "2025-06-15T12:00:00Z".to_string(),
+            },
+        ];
+
+        let html = render_dashboard(
+            &[],
+            &[],
+            &waiting,
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+        );
+
+        assert!(html.contains("PROJ-W1"));
+        assert!(html.contains("PROJ-W2"));
+        assert!(html.contains("42"));
+        assert!(html.contains("99"));
+        // Verify initial counts in JSON
+        let count_str = "\"waiting\":2";
+        assert!(html.contains(count_str));
     }
 }
