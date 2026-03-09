@@ -463,6 +463,7 @@ impl Orchestrator {
             );
             state.claimed.insert(issue_id.clone());
             state.retry_attempts.remove(&issue_id);
+            state.notify_state_change();
         }
 
         // Persist claimed marker (best-effort)
@@ -704,6 +705,7 @@ impl Orchestrator {
         state
             .waiting_for_review
             .insert(issue_id.to_string(), waiting_entry.clone());
+        state.notify_state_change();
         drop(state);
 
         // Persist waiting entry (best-effort)
@@ -774,6 +776,7 @@ impl Orchestrator {
         state.event_broadcasts.remove(issue_id);
 
         if let Some(entry) = state.running.remove(issue_id) {
+            state.notify_state_change();
             // Add runtime seconds to totals
             let elapsed = Utc::now()
                 .signed_duration_since(entry.started_at)
@@ -1008,6 +1011,7 @@ impl Orchestrator {
         };
 
         state.retry_attempts.insert(issue_id.clone(), entry);
+        state.notify_state_change();
 
         debug!(issue_id = %issue_id, issue_identifier = %identifier, attempt = attempt, delay_ms = delay_ms, "scheduled retry");
 
@@ -1237,6 +1241,9 @@ impl Orchestrator {
         if let AgentEvent::RateLimitUpdate { data } = &event {
             state.rate_limits = Some(data.clone());
         }
+
+        // Notify SSE subscribers about the global state change
+        state.notify_state_change();
 
         // Persist updated session snapshot (best-effort)
         if let Some(entry) = state.running.get(issue_id) {
