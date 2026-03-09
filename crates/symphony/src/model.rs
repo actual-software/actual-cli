@@ -99,6 +99,8 @@ pub struct WaitingEntry {
     pub pr_number: u64,
     pub branch: String,
     pub started_waiting_at: DateTime<Utc>,
+    /// Claude Code session ID for resuming the session after PR merge.
+    pub session_id: Option<String>,
 }
 
 /// Maximum number of completed issue IDs to retain for observability.
@@ -711,6 +713,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: Some("sess-abc".to_string()),
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"issue_id\":\"id1\""));
@@ -726,6 +729,7 @@ mod tests {
             pr_number: 42,
             branch: "symphony/proj-1".to_string(),
             started_waiting_at: Utc::now(),
+            session_id: None,
         };
         let cloned = entry.clone();
         assert_eq!(cloned.issue_id, "id1");
@@ -747,6 +751,7 @@ mod tests {
                 pr_number: 42,
                 branch: "symphony/proj-1".to_string(),
                 started_waiting_at: Utc::now(),
+                session_id: None,
             },
         );
         assert_eq!(state.waiting_for_review.len(), 1);
