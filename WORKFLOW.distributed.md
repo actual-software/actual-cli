@@ -8,7 +8,7 @@ tracker:
 polling:
   interval_ms: 30000
 workspace:
-  root: /tmp/actual-cli-ws
+  root: /data
 agent:
   max_concurrent_agents: 5
   max_turns: 30
