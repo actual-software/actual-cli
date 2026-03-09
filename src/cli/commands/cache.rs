@@ -195,6 +195,7 @@ mod tests {
         use crate::testutil::{EnvGuard, ENV_MUTEX};
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
         // Redirect the real config path to a temp file via ACTUAL_CONFIG.
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");

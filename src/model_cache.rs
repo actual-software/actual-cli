@@ -838,7 +838,10 @@ mod tests {
 
     #[test]
     fn test_get_anthropic_models_no_api_key_returns_empty() {
-        let _guard = EnvGuard::remove("ANTHROPIC_API_KEY");
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = TEnvGuard::remove("ANTHROPIC_API_KEY");
         let result = get_anthropic_models(None, None);
         assert!(result.is_empty());
     }
@@ -1101,6 +1104,9 @@ mod tests {
 
     #[test]
     fn test_get_openai_models_no_api_key_returns_empty() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure env var is absent for this test
         let _guard = EnvGuard::remove("OPENAI_API_KEY");
         let result = get_openai_models(None, None);
@@ -1295,74 +1301,23 @@ mod tests {
         assert_eq!(mode, 0o600, "cache file should have mode 0600");
     }
 
-    // -----------------------------------------------------------------------
-    // Local helper: env-var guard (mirrors testutil::EnvGuard for use here)
-    // -----------------------------------------------------------------------
-
-    struct EnvGuard {
-        key: &'static str,
-        old: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn remove(key: &'static str) -> Self {
-            let old = std::env::var(key).ok();
-            #[allow(deprecated)]
-            // SAFETY: caller holds ENV_MUTEX before calling this.
-            unsafe {
-                std::env::remove_var(key);
-            }
-            Self { key, old }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old {
-                Some(v) => {
-                    #[allow(deprecated)]
-                    // SAFETY: caller holds ENV_MUTEX for the lifetime of this guard.
-                    unsafe {
-                        std::env::set_var(self.key, v);
-                    }
-                }
-                None => {
-                    #[allow(deprecated)]
-                    // SAFETY: caller holds ENV_MUTEX for the lifetime of this guard.
-                    unsafe {
-                        std::env::remove_var(self.key);
-                    }
-                }
-            }
-        }
-    }
-
     #[test]
-    fn test_local_env_guard_restores_previous_value() {
-        use crate::testutil::ENV_MUTEX;
+    fn test_env_guard_restores_previous_value() {
+        use crate::testutil::{EnvGuard as TEnvGuard, ENV_MUTEX};
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
         // Exercise the Some(v) branch in EnvGuard::drop(): when a var had a prior
         // value before remove(), drop() must restore it.
         let key = "ACTUAL_CLI_TEST_LOCAL_ENV_GUARD_RESTORE";
-        #[allow(deprecated)]
-        // SAFETY: ENV_MUTEX is held.
-        unsafe {
-            std::env::set_var(key, "original-value");
-        }
+        let _setup = TEnvGuard::set(key, "original-value");
         {
-            let _guard = EnvGuard::remove(key);
+            let _guard = TEnvGuard::remove(key);
             // While the guard is alive, the var should be absent
             assert!(std::env::var(key).is_err());
         }
         // After drop(), the original value must be restored
         assert_eq!(std::env::var(key).unwrap(), "original-value");
-        // Clean up
-        #[allow(deprecated)]
-        // SAFETY: ENV_MUTEX is held.
-        unsafe {
-            std::env::remove_var(key);
-        }
     }
 
     // -----------------------------------------------------------------------

@@ -53,6 +53,7 @@ mod tests {
         use tempfile::tempdir;
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
         let dir = tempdir().unwrap();
         let config_file = dir.path().join("config.yaml");
         config::paths::save_to(&config::Config::default(), &config_file).unwrap();
