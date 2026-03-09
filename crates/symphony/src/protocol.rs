@@ -124,6 +124,34 @@ pub struct WorkResult {
     pub reason: WorkerExitReason,
 }
 
+/// Heartbeat payload sent by workers to the orchestrator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerHeartbeat {
+    pub worker_id: String,
+    pub active_jobs: Vec<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Registration payload sent by workers on startup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerRegistration {
+    pub worker_id: String,
+    pub capabilities: Vec<String>,
+    pub max_concurrent_jobs: u32,
+}
+
+/// Tracked worker state in the orchestrator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackedWorker {
+    pub worker_id: String,
+    pub last_heartbeat: DateTime<Utc>,
+    pub active_jobs: Vec<String>,
+    pub registered_at: DateTime<Utc>,
+    pub capabilities: Vec<String>,
+    pub max_concurrent_jobs: u32,
+    pub alive: bool,
+}
+
 /// Snapshot of orchestrator state for observability.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratorSnapshot {
@@ -991,5 +1019,185 @@ mod tests {
         let debug = format!("{:?}", result);
         assert!(debug.contains("WorkResult"));
         assert!(debug.contains("Normal"));
+    }
+
+    // ── WorkerHeartbeat ────────────────────────────────────────────
+
+    #[test]
+    fn worker_heartbeat_serialize_deserialize_roundtrip() {
+        let hb = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec!["TST-1".to_string(), "TST-2".to_string()],
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&hb).unwrap();
+        let deserialized: WorkerHeartbeat = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.worker_id, "w-1");
+        assert_eq!(deserialized.active_jobs.len(), 2);
+        assert_eq!(deserialized.active_jobs[0], "TST-1");
+        assert_eq!(deserialized.active_jobs[1], "TST-2");
+    }
+
+    #[test]
+    fn worker_heartbeat_empty_active_jobs() {
+        let hb = WorkerHeartbeat {
+            worker_id: "w-2".to_string(),
+            active_jobs: vec![],
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&hb).unwrap();
+        let deserialized: WorkerHeartbeat = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.worker_id, "w-2");
+        assert!(deserialized.active_jobs.is_empty());
+    }
+
+    #[test]
+    fn worker_heartbeat_clone() {
+        let hb = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec!["TST-1".to_string()],
+            timestamp: Utc::now(),
+        };
+        let cloned = hb.clone();
+        assert_eq!(cloned.worker_id, hb.worker_id);
+        assert_eq!(cloned.active_jobs, hb.active_jobs);
+    }
+
+    #[test]
+    fn worker_heartbeat_debug() {
+        let hb = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec![],
+            timestamp: Utc::now(),
+        };
+        let debug = format!("{:?}", hb);
+        assert!(debug.contains("WorkerHeartbeat"));
+        assert!(debug.contains("w-1"));
+    }
+
+    // ── WorkerRegistration ─────────────────────────────────────────
+
+    #[test]
+    fn worker_registration_serialize_deserialize_roundtrip() {
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec!["rust".to_string(), "python".to_string()],
+            max_concurrent_jobs: 4,
+        };
+        let json = serde_json::to_string(&reg).unwrap();
+        let deserialized: WorkerRegistration = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.worker_id, "w-1");
+        assert_eq!(deserialized.capabilities.len(), 2);
+        assert_eq!(deserialized.capabilities[0], "rust");
+        assert_eq!(deserialized.max_concurrent_jobs, 4);
+    }
+
+    #[test]
+    fn worker_registration_empty_capabilities() {
+        let reg = WorkerRegistration {
+            worker_id: "w-2".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+        let json = serde_json::to_string(&reg).unwrap();
+        let deserialized: WorkerRegistration = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.capabilities.is_empty());
+        assert_eq!(deserialized.max_concurrent_jobs, 1);
+    }
+
+    #[test]
+    fn worker_registration_clone() {
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec!["rust".to_string()],
+            max_concurrent_jobs: 2,
+        };
+        let cloned = reg.clone();
+        assert_eq!(cloned.worker_id, reg.worker_id);
+        assert_eq!(cloned.capabilities, reg.capabilities);
+        assert_eq!(cloned.max_concurrent_jobs, reg.max_concurrent_jobs);
+    }
+
+    #[test]
+    fn worker_registration_debug() {
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+        let debug = format!("{:?}", reg);
+        assert!(debug.contains("WorkerRegistration"));
+        assert!(debug.contains("w-1"));
+    }
+
+    // ── TrackedWorker ──────────────────────────────────────────────
+
+    #[test]
+    fn tracked_worker_serialize_deserialize_roundtrip() {
+        let tw = TrackedWorker {
+            worker_id: "w-1".to_string(),
+            last_heartbeat: Utc::now(),
+            active_jobs: vec!["TST-1".to_string()],
+            registered_at: Utc::now(),
+            capabilities: vec!["rust".to_string()],
+            max_concurrent_jobs: 2,
+            alive: true,
+        };
+        let json = serde_json::to_string(&tw).unwrap();
+        let deserialized: TrackedWorker = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.worker_id, "w-1");
+        assert_eq!(deserialized.active_jobs.len(), 1);
+        assert_eq!(deserialized.capabilities.len(), 1);
+        assert_eq!(deserialized.max_concurrent_jobs, 2);
+        assert!(deserialized.alive);
+    }
+
+    #[test]
+    fn tracked_worker_dead() {
+        let tw = TrackedWorker {
+            worker_id: "w-dead".to_string(),
+            last_heartbeat: Utc::now(),
+            active_jobs: vec![],
+            registered_at: Utc::now(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+            alive: false,
+        };
+        let json = serde_json::to_string(&tw).unwrap();
+        let deserialized: TrackedWorker = serde_json::from_str(&json).unwrap();
+        assert!(!deserialized.alive);
+    }
+
+    #[test]
+    fn tracked_worker_clone() {
+        let tw = TrackedWorker {
+            worker_id: "w-1".to_string(),
+            last_heartbeat: Utc::now(),
+            active_jobs: vec!["job-1".to_string()],
+            registered_at: Utc::now(),
+            capabilities: vec!["rust".to_string()],
+            max_concurrent_jobs: 3,
+            alive: true,
+        };
+        let cloned = tw.clone();
+        assert_eq!(cloned.worker_id, tw.worker_id);
+        assert_eq!(cloned.active_jobs, tw.active_jobs);
+        assert_eq!(cloned.alive, tw.alive);
+    }
+
+    #[test]
+    fn tracked_worker_debug() {
+        let tw = TrackedWorker {
+            worker_id: "w-1".to_string(),
+            last_heartbeat: Utc::now(),
+            active_jobs: vec![],
+            registered_at: Utc::now(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+            alive: true,
+        };
+        let debug = format!("{:?}", tw);
+        assert!(debug.contains("TrackedWorker"));
+        assert!(debug.contains("w-1"));
     }
 }

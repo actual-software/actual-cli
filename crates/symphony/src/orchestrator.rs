@@ -23,6 +23,11 @@ fn log_orchestrator_start(poll_interval_ms: u64, max_concurrent: u32) {
     info!(poll_interval_ms, max_concurrent, "starting orchestrator");
 }
 
+/// Log dead worker detection and job reclamation.
+fn log_dead_worker(worker_id: &str, reclaimed_jobs: &[String]) {
+    warn!(worker_id = %worker_id, jobs = ?reclaimed_jobs, "dead worker detected, reclaiming jobs");
+}
+
 /// Log terminal workspace cleanup.
 fn log_terminal_cleanup(identifier: &str, workspace: &std::path::Path) {
     let ws = workspace.display().to_string();
@@ -41,6 +46,9 @@ fn map_worker_result(result: Result<()>) -> WorkerExitReason {
 
 /// Default timeout for draining workers during shutdown (30 seconds).
 const SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 30;
+
+/// Timeout for considering a worker dead if no heartbeat is received (120 seconds).
+const DEAD_WORKER_TIMEOUT_SECS: u64 = 120;
 
 /// The orchestrator owns the poll tick, state, and dispatch logic.
 pub struct Orchestrator {
@@ -1270,6 +1278,9 @@ impl Orchestrator {
 
         // Part D: PR lifecycle management (auto-merge and post-merge cleanup)
         self.reconcile_pr_lifecycle().await;
+
+        // Part E: Dead worker detection and job reclamation
+        self.reconcile_dead_workers().await;
     }
 
     async fn reconcile_pr_conflicts(&self) {
@@ -1578,6 +1589,55 @@ impl Orchestrator {
         // so the agent has full conversation context for cleanup.
         self.dispatch_issue(issue, None, true, entry.session_id.clone())
             .await;
+    }
+
+    async fn reconcile_dead_workers(&self) {
+        let mut state = self.state.write().await;
+        let dead_ids = state.dead_workers(std::time::Duration::from_secs(DEAD_WORKER_TIMEOUT_SECS));
+        if dead_ids.is_empty() {
+            return;
+        }
+
+        for worker_id in &dead_ids {
+            // Collect active jobs for this dead worker
+            let active_jobs: Vec<String> = state
+                .tracked_workers
+                .get(worker_id.as_str())
+                .map(|w| w.active_jobs.clone())
+                .unwrap_or_default();
+
+            // Re-enqueue active jobs that are currently in the running map
+            let mut reclaimed = Vec::new();
+            for job_id in &active_jobs {
+                // The active_jobs list contains issue identifiers. Look up by identifier
+                // in running to find the issue_id key.
+                let issue_id_key = state
+                    .running
+                    .iter()
+                    .find(|(_, entry)| entry.identifier == *job_id)
+                    .map(|(k, _)| k.clone());
+
+                if let Some(issue_id) = issue_id_key {
+                    if let Some(entry) = state.running.remove(&issue_id) {
+                        let assignment = crate::protocol::WorkAssignment {
+                            issue_id: issue_id.clone(),
+                            issue_identifier: entry.identifier.clone(),
+                            prompt: String::new(),
+                            attempt: entry.retry_attempt,
+                            workspace_path: None,
+                        };
+                        state.pending_jobs.push_back(assignment);
+                        state.job_notify.notify_one();
+                        reclaimed.push(job_id.clone());
+                    }
+                }
+            }
+
+            state.mark_worker_dead(worker_id);
+            log_dead_worker(worker_id, &reclaimed);
+        }
+
+        state.notify_state_change();
     }
 
     async fn reconcile_stalls(&self) {
@@ -12871,5 +12931,156 @@ mod tests {
 
         assert!(logs_contain("failed to remove persisted waiting entry"));
         assert!(logs_contain("failed to remove persisted claimed marker"));
+    }
+
+    // ── reconcile_dead_workers ─────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_no_workers() {
+        let orch = test_orchestrator();
+        orch.reconcile_dead_workers().await;
+        // No workers, nothing to do — should not panic
+        let state = orch.state.read().await;
+        assert!(state.tracked_workers.is_empty());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_all_alive() {
+        let orch = test_orchestrator();
+        {
+            let mut state = orch.state.write().await;
+            let hb = crate::protocol::WorkerHeartbeat {
+                worker_id: "w-1".to_string(),
+                active_jobs: vec![],
+                timestamp: Utc::now(),
+            };
+            state.update_worker_heartbeat(&hb);
+        }
+        orch.reconcile_dead_workers().await;
+        let state = orch.state.read().await;
+        assert!(state.tracked_workers.get("w-1").unwrap().alive);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_marks_dead_and_reclaims_jobs() {
+        let orch = test_orchestrator();
+
+        // Insert a running entry with identifier "TST-1"
+        let _cancel_rx = insert_running(&orch, "id-1", "TST-1", "In Progress").await;
+
+        {
+            let mut state = orch.state.write().await;
+            // Register a worker with old heartbeat
+            let old_time = Utc::now() - chrono::Duration::seconds(300);
+            let hb = crate::protocol::WorkerHeartbeat {
+                worker_id: "w-dead".to_string(),
+                active_jobs: vec!["TST-1".to_string()],
+                timestamp: old_time,
+            };
+            state.update_worker_heartbeat(&hb);
+        }
+
+        orch.reconcile_dead_workers().await;
+
+        let state = orch.state.read().await;
+        // Worker should be marked dead
+        assert!(!state.tracked_workers.get("w-dead").unwrap().alive);
+        // Running entry should be removed
+        assert!(!state.running.contains_key("id-1"));
+        // Job should be re-enqueued
+        assert_eq!(state.pending_jobs.len(), 1);
+        assert_eq!(state.pending_jobs[0].issue_id, "id-1");
+        assert_eq!(state.pending_jobs[0].issue_identifier, "TST-1");
+        assert!(logs_contain("dead worker detected"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_no_matching_running_entry() {
+        let orch = test_orchestrator();
+
+        {
+            let mut state = orch.state.write().await;
+            let old_time = Utc::now() - chrono::Duration::seconds(300);
+            let hb = crate::protocol::WorkerHeartbeat {
+                worker_id: "w-dead".to_string(),
+                active_jobs: vec!["NONEXISTENT-1".to_string()],
+                timestamp: old_time,
+            };
+            state.update_worker_heartbeat(&hb);
+        }
+
+        orch.reconcile_dead_workers().await;
+
+        let state = orch.state.read().await;
+        // Worker should still be marked dead
+        assert!(!state.tracked_workers.get("w-dead").unwrap().alive);
+        // Nothing to re-enqueue
+        assert!(state.pending_jobs.is_empty());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_already_dead_skipped() {
+        let orch = test_orchestrator();
+
+        {
+            let mut state = orch.state.write().await;
+            let old_time = Utc::now() - chrono::Duration::seconds(300);
+            let hb = crate::protocol::WorkerHeartbeat {
+                worker_id: "w-dead".to_string(),
+                active_jobs: vec![],
+                timestamp: old_time,
+            };
+            state.update_worker_heartbeat(&hb);
+            state.mark_worker_dead("w-dead");
+        }
+
+        orch.reconcile_dead_workers().await;
+        // Should not log "dead worker detected" since it was already dead
+        // The dead_workers method filters out already-dead workers
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_reconcile_dead_workers_multiple_dead_workers() {
+        let orch = test_orchestrator();
+
+        let _cancel_rx1 = insert_running(&orch, "id-1", "TST-1", "In Progress").await;
+        let _cancel_rx2 = insert_running(&orch, "id-2", "TST-2", "In Progress").await;
+
+        {
+            let mut state = orch.state.write().await;
+            let old_time = Utc::now() - chrono::Duration::seconds(300);
+            let hb1 = crate::protocol::WorkerHeartbeat {
+                worker_id: "w-dead-1".to_string(),
+                active_jobs: vec!["TST-1".to_string()],
+                timestamp: old_time,
+            };
+            state.update_worker_heartbeat(&hb1);
+
+            let hb2 = crate::protocol::WorkerHeartbeat {
+                worker_id: "w-dead-2".to_string(),
+                active_jobs: vec!["TST-2".to_string()],
+                timestamp: old_time,
+            };
+            state.update_worker_heartbeat(&hb2);
+        }
+
+        orch.reconcile_dead_workers().await;
+
+        let state = orch.state.read().await;
+        assert!(!state.tracked_workers.get("w-dead-1").unwrap().alive);
+        assert!(!state.tracked_workers.get("w-dead-2").unwrap().alive);
+        assert!(state.running.is_empty());
+        assert_eq!(state.pending_jobs.len(), 2);
+    }
+
+    #[test]
+    fn test_dead_worker_timeout_constant() {
+        assert_eq!(DEAD_WORKER_TIMEOUT_SECS, 120);
     }
 }

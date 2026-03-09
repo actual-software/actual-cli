@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 // Re-export protocol types for backward compatibility.
 pub use crate::protocol::{
-    AgentEvent, LiveSession, RunningEntry, WorkAssignment, WorkerExitReason,
+    AgentEvent, LiveSession, RunningEntry, TrackedWorker, WorkAssignment, WorkerExitReason,
+    WorkerHeartbeat, WorkerRegistration,
 };
 
 /// Maximum number of log entries to retain per running issue.
@@ -128,6 +129,8 @@ pub struct OrchestratorState {
     pub rate_limits: Option<serde_json::Value>,
     /// Per-issue broadcast channels for SSE event streaming.
     pub event_broadcasts: HashMap<String, tokio::sync::broadcast::Sender<LogEntry>>,
+    /// Tracked remote workers (heartbeats, registration).
+    pub tracked_workers: HashMap<String, TrackedWorker>,
     /// Queue of work assignments awaiting pickup by distributed workers.
     pub pending_jobs: VecDeque<WorkAssignment>,
     /// Notifier to wake long-polling workers when new jobs are enqueued.
@@ -151,6 +154,10 @@ impl std::fmt::Debug for OrchestratorState {
             .field(
                 "event_broadcasts",
                 &format!("<{} channels>", self.event_broadcasts.len()),
+            )
+            .field(
+                "tracked_workers",
+                &format!("<{} workers>", self.tracked_workers.len()),
             )
             .field(
                 "pending_jobs",
@@ -179,6 +186,7 @@ impl OrchestratorState {
             agent_totals: AgentTotals::default(),
             rate_limits: None,
             event_broadcasts: HashMap::new(),
+            tracked_workers: HashMap::new(),
             pending_jobs: VecDeque::new(),
             job_notify: Arc::new(tokio::sync::Notify::new()),
             state_broadcast,
@@ -225,6 +233,62 @@ impl OrchestratorState {
     /// subscribers.
     pub fn notify_state_change(&self) {
         let _ = self.state_broadcast.send(());
+    }
+
+    /// Update or insert a tracked worker from a heartbeat.
+    pub fn update_worker_heartbeat(&mut self, heartbeat: &WorkerHeartbeat) {
+        let entry = self
+            .tracked_workers
+            .entry(heartbeat.worker_id.clone())
+            .or_insert_with(|| TrackedWorker {
+                worker_id: heartbeat.worker_id.clone(),
+                last_heartbeat: heartbeat.timestamp,
+                active_jobs: heartbeat.active_jobs.clone(),
+                registered_at: heartbeat.timestamp,
+                capabilities: vec![],
+                max_concurrent_jobs: 1,
+                alive: true,
+            });
+        entry.last_heartbeat = heartbeat.timestamp;
+        entry.active_jobs = heartbeat.active_jobs.clone();
+        entry.alive = true;
+    }
+
+    /// Register a worker (create or update its tracked entry).
+    pub fn register_worker(&mut self, reg: &WorkerRegistration) {
+        let now = Utc::now();
+        let entry = self
+            .tracked_workers
+            .entry(reg.worker_id.clone())
+            .or_insert_with(|| TrackedWorker {
+                worker_id: reg.worker_id.clone(),
+                last_heartbeat: now,
+                active_jobs: vec![],
+                registered_at: now,
+                capabilities: reg.capabilities.clone(),
+                max_concurrent_jobs: reg.max_concurrent_jobs,
+                alive: true,
+            });
+        entry.capabilities = reg.capabilities.clone();
+        entry.max_concurrent_jobs = reg.max_concurrent_jobs;
+        entry.alive = true;
+    }
+
+    /// Mark a worker as dead.
+    pub fn mark_worker_dead(&mut self, worker_id: &str) {
+        if let Some(entry) = self.tracked_workers.get_mut(worker_id) {
+            entry.alive = false;
+        }
+    }
+
+    /// Return worker IDs whose last heartbeat is older than `threshold`.
+    pub fn dead_workers(&self, threshold: std::time::Duration) -> Vec<String> {
+        let cutoff = Utc::now() - chrono::Duration::from_std(threshold).unwrap_or_default();
+        self.tracked_workers
+            .values()
+            .filter(|w| w.alive && w.last_heartbeat < cutoff)
+            .map(|w| w.worker_id.clone())
+            .collect()
     }
 
     /// Count running issues in a given state (case-insensitive).
@@ -817,6 +881,191 @@ mod tests {
 
         state.waiting_for_review.remove("id1");
         assert!(state.waiting_for_review.is_empty());
+    }
+
+    // ── tracked_workers ─────────────────────────────────────────────
+
+    #[test]
+    fn orchestrator_state_tracked_workers_empty_on_init() {
+        let state = OrchestratorState::new(5000, 4);
+        assert!(state.tracked_workers.is_empty());
+    }
+
+    #[test]
+    fn update_worker_heartbeat_inserts_new_worker() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let hb = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec!["TST-1".to_string()],
+            timestamp: Utc::now(),
+        };
+        state.update_worker_heartbeat(&hb);
+        assert_eq!(state.tracked_workers.len(), 1);
+        let w = state.tracked_workers.get("w-1").unwrap();
+        assert_eq!(w.worker_id, "w-1");
+        assert_eq!(w.active_jobs, vec!["TST-1".to_string()]);
+        assert!(w.alive);
+    }
+
+    #[test]
+    fn update_worker_heartbeat_updates_existing_worker() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let hb1 = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec!["TST-1".to_string()],
+            timestamp: Utc::now(),
+        };
+        state.update_worker_heartbeat(&hb1);
+
+        let hb2 = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec!["TST-2".to_string(), "TST-3".to_string()],
+            timestamp: Utc::now(),
+        };
+        state.update_worker_heartbeat(&hb2);
+        assert_eq!(state.tracked_workers.len(), 1);
+        let w = state.tracked_workers.get("w-1").unwrap();
+        assert_eq!(w.active_jobs.len(), 2);
+    }
+
+    #[test]
+    fn update_worker_heartbeat_revives_dead_worker() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let hb = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec![],
+            timestamp: Utc::now(),
+        };
+        state.update_worker_heartbeat(&hb);
+        state.mark_worker_dead("w-1");
+        assert!(!state.tracked_workers.get("w-1").unwrap().alive);
+
+        // Heartbeat revives
+        let hb2 = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec![],
+            timestamp: Utc::now(),
+        };
+        state.update_worker_heartbeat(&hb2);
+        assert!(state.tracked_workers.get("w-1").unwrap().alive);
+    }
+
+    #[test]
+    fn register_worker_inserts_new_worker() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec!["rust".to_string()],
+            max_concurrent_jobs: 2,
+        };
+        state.register_worker(&reg);
+        assert_eq!(state.tracked_workers.len(), 1);
+        let w = state.tracked_workers.get("w-1").unwrap();
+        assert_eq!(w.capabilities, vec!["rust".to_string()]);
+        assert_eq!(w.max_concurrent_jobs, 2);
+        assert!(w.alive);
+    }
+
+    #[test]
+    fn register_worker_updates_existing_worker() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let reg1 = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec!["rust".to_string()],
+            max_concurrent_jobs: 2,
+        };
+        state.register_worker(&reg1);
+
+        let reg2 = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec!["rust".to_string(), "python".to_string()],
+            max_concurrent_jobs: 4,
+        };
+        state.register_worker(&reg2);
+        assert_eq!(state.tracked_workers.len(), 1);
+        let w = state.tracked_workers.get("w-1").unwrap();
+        assert_eq!(w.capabilities.len(), 2);
+        assert_eq!(w.max_concurrent_jobs, 4);
+    }
+
+    #[test]
+    fn mark_worker_dead_sets_alive_false() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let hb = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec![],
+            timestamp: Utc::now(),
+        };
+        state.update_worker_heartbeat(&hb);
+        state.mark_worker_dead("w-1");
+        assert!(!state.tracked_workers.get("w-1").unwrap().alive);
+    }
+
+    #[test]
+    fn mark_worker_dead_nonexistent_is_noop() {
+        let mut state = OrchestratorState::new(5000, 4);
+        state.mark_worker_dead("no-such-worker");
+        assert!(state.tracked_workers.is_empty());
+    }
+
+    #[test]
+    fn dead_workers_returns_stale_workers() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let old_time = Utc::now() - chrono::Duration::seconds(300);
+        let hb = WorkerHeartbeat {
+            worker_id: "w-old".to_string(),
+            active_jobs: vec![],
+            timestamp: old_time,
+        };
+        state.update_worker_heartbeat(&hb);
+
+        let recent_hb = WorkerHeartbeat {
+            worker_id: "w-new".to_string(),
+            active_jobs: vec![],
+            timestamp: Utc::now(),
+        };
+        state.update_worker_heartbeat(&recent_hb);
+
+        let dead = state.dead_workers(std::time::Duration::from_secs(120));
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0], "w-old");
+    }
+
+    #[test]
+    fn dead_workers_excludes_already_dead() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let old_time = Utc::now() - chrono::Duration::seconds(300);
+        let hb = WorkerHeartbeat {
+            worker_id: "w-old".to_string(),
+            active_jobs: vec![],
+            timestamp: old_time,
+        };
+        state.update_worker_heartbeat(&hb);
+        state.mark_worker_dead("w-old");
+
+        let dead = state.dead_workers(std::time::Duration::from_secs(120));
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn dead_workers_no_workers_returns_empty() {
+        let state = OrchestratorState::new(5000, 4);
+        let dead = state.dead_workers(std::time::Duration::from_secs(120));
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn orchestrator_state_debug_includes_tracked_workers() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let hb = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec![],
+            timestamp: Utc::now(),
+        };
+        state.update_worker_heartbeat(&hb);
+        let debug = format!("{:?}", state);
+        assert!(debug.contains("tracked_workers"));
+        assert!(debug.contains("<1 workers>"));
     }
 
     // ── helpers ──────────────────────────────────────────────────────

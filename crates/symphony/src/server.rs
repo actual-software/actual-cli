@@ -1,6 +1,8 @@
 use crate::config::ServiceConfig;
 use crate::model::{LogEntry, OrchestratorState, RetryEntry, WaitingEntry};
-use crate::protocol::{OrchestratorMessage, WorkResult, WorkerEventPayload};
+use crate::protocol::{
+    OrchestratorMessage, WorkResult, WorkerEventPayload, WorkerHeartbeat, WorkerRegistration,
+};
 use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -75,6 +77,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/state/stream", get(handle_state_stream))
         .route("/api/v1/refresh", post(handle_refresh))
         .route("/api/v1/work", get(handle_claim_work))
+        .route("/api/v1/heartbeat", post(handle_heartbeat))
+        .route("/api/v1/workers/register", post(handle_register))
         .route(
             "/api/v1/{issue_identifier}/stream",
             get(handle_issue_stream),
@@ -737,6 +741,30 @@ async fn handle_claim_work(
         Some(assignment) => (StatusCode::OK, axum::Json(assignment)).into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
     }
+}
+
+/// POST /api/v1/heartbeat — Worker heartbeat.
+async fn handle_heartbeat(
+    _worker: AuthenticatedWorker,
+    State(state): State<AppState>,
+    axum::Json(heartbeat): axum::Json<WorkerHeartbeat>,
+) -> Response {
+    let mut orch = state.orchestrator_state.write().await;
+    orch.update_worker_heartbeat(&heartbeat);
+    orch.notify_state_change();
+    StatusCode::OK.into_response()
+}
+
+/// POST /api/v1/workers/register — Worker registration.
+async fn handle_register(
+    _worker: AuthenticatedWorker,
+    State(state): State<AppState>,
+    axum::Json(reg): axum::Json<WorkerRegistration>,
+) -> Response {
+    let mut orch = state.orchestrator_state.write().await;
+    orch.register_worker(&reg);
+    orch.notify_state_change();
+    StatusCode::OK.into_response()
 }
 
 /// POST /api/v1/{issue_identifier}/events — Worker reports an agent event.
@@ -4368,5 +4396,171 @@ mod tests {
         // Verify initial counts in JSON
         let count_str = "\"waiting\":2";
         assert!(html.contains(count_str));
+    }
+
+    // ── POST /api/v1/heartbeat tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_heartbeat_valid() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state.clone());
+
+        let heartbeat = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec!["TST-1".to_string()],
+            timestamp: Utc::now(),
+        };
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/heartbeat")
+            .header("Authorization", "Bearer secret-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&heartbeat).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the worker was tracked
+        let orch = app_state.orchestrator_state.read().await;
+        let tracked = orch.tracked_workers.get("w-1");
+        assert!(tracked.is_some());
+        let w = tracked.unwrap();
+        assert_eq!(w.active_jobs, vec!["TST-1".to_string()]);
+        assert!(w.alive);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_requires_auth() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state);
+
+        let heartbeat = WorkerHeartbeat {
+            worker_id: "w-1".to_string(),
+            active_jobs: vec![],
+            timestamp: Utc::now(),
+        };
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/heartbeat")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&heartbeat).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_empty_active_jobs() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state.clone());
+
+        let heartbeat = WorkerHeartbeat {
+            worker_id: "w-2".to_string(),
+            active_jobs: vec![],
+            timestamp: Utc::now(),
+        };
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/heartbeat")
+            .header("Authorization", "Bearer secret-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&heartbeat).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let orch = app_state.orchestrator_state.read().await;
+        let w = orch.tracked_workers.get("w-2").unwrap();
+        assert!(w.active_jobs.is_empty());
+    }
+
+    // ── POST /api/v1/workers/register tests ─────────────────────────
+
+    #[tokio::test]
+    async fn test_register_valid() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state.clone());
+
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec!["rust".to_string()],
+            max_concurrent_jobs: 2,
+        };
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/workers/register")
+            .header("Authorization", "Bearer secret-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&reg).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify the worker was tracked
+        let orch = app_state.orchestrator_state.read().await;
+        let tracked = orch.tracked_workers.get("w-1");
+        assert!(tracked.is_some());
+        let w = tracked.unwrap();
+        assert_eq!(w.capabilities, vec!["rust".to_string()]);
+        assert_eq!(w.max_concurrent_jobs, 2);
+        assert!(w.alive);
+    }
+
+    #[tokio::test]
+    async fn test_register_requires_auth() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state);
+
+        let reg = WorkerRegistration {
+            worker_id: "w-1".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/workers/register")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&reg).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_register_empty_capabilities() {
+        let (app_state, _rx) = test_app_state_with_auth(Some("secret-token"));
+        let app = build_router(app_state.clone());
+
+        let reg = WorkerRegistration {
+            worker_id: "w-3".to_string(),
+            capabilities: vec![],
+            max_concurrent_jobs: 1,
+        };
+
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/v1/workers/register")
+            .header("Authorization", "Bearer secret-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&reg).unwrap()))
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let orch = app_state.orchestrator_state.read().await;
+        let w = orch.tracked_workers.get("w-3").unwrap();
+        assert!(w.capabilities.is_empty());
+        assert_eq!(w.max_concurrent_jobs, 1);
     }
 }
