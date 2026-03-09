@@ -2,7 +2,7 @@ use crate::agent::AgentSession;
 use crate::config::{state_matches, DeploymentMode, ServiceConfig};
 use crate::error::{Result, SymphonyError};
 use crate::github::GitHubClient;
-use crate::model::{Issue, OrchestratorState, RetryEntry};
+use crate::model::{CompletionOutcome, CompletionRecord, Issue, OrchestratorState, RetryEntry};
 use crate::persistence::{PersistedSession, StateStore};
 use crate::prompt::{build_continuation_prompt, render_prompt};
 use crate::protocol::{
@@ -144,6 +144,22 @@ impl Orchestrator {
             }
             Err(e) => {
                 warn!(error = %e, "failed to load persisted waiting entries");
+            }
+        }
+
+        // Load persisted completion history
+        match store.load_completion_history() {
+            Ok(records) => {
+                let count = records.len();
+                let mut state = self.state.write().await;
+                // Records are loaded in DESC order; reverse to push in chronological order
+                for record in records.into_iter().rev() {
+                    state.add_completion(record);
+                }
+                info!(count, "restored persisted completion history");
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to load persisted completion history");
             }
         }
 
@@ -757,6 +773,16 @@ impl Orchestrator {
         }
     }
 
+    /// Add a completion record to in-memory state and persist to store (best-effort).
+    fn persist_completion_record(&self, state: &mut OrchestratorState, record: CompletionRecord) {
+        state.add_completion(record.clone());
+        if let Some(ref store) = self.store {
+            if let Err(e) = store.save_completion_record(&record) {
+                debug!(error = %e, issue_id = %record.issue_id, "failed to persist completion record");
+            }
+        }
+    }
+
     async fn handle_message(&self, msg: OrchestratorMessage) {
         match msg {
             OrchestratorMessage::WorkerExited { issue_id, reason } => {
@@ -822,6 +848,19 @@ impl Orchestrator {
             let identifier = entry.identifier.clone();
             let next_attempt = entry.retry_attempt.unwrap_or(0) + 1;
 
+            // Build a completion record template; the outcome will be set per-branch.
+            let completion_template = CompletionRecord {
+                issue_id: issue_id.to_string(),
+                identifier: entry.identifier.clone(),
+                outcome: CompletionOutcome::Failed, // default; overwritten per-branch
+                duration_seconds: elapsed,
+                input_tokens: entry.session.input_tokens,
+                output_tokens: entry.session.output_tokens,
+                total_tokens: entry.session.total_tokens,
+                turn_count: entry.session.turn_count,
+                completed_at: Utc::now(),
+            };
+
             // Extract data needed for normal-exit processing before the match,
             // since the Normal arm needs to drop the state lock for async HTTP calls.
             let normal_exit_data = if matches!(reason, WorkerExitReason::Normal) {
@@ -879,6 +918,10 @@ impl Orchestrator {
                     if is_done_state(&issue_state) {
                         // Cleanup completed — issue already transitioned, nothing more to do
                         info!(issue_id = %issue_id, issue_identifier = %identifier, "cleanup worker completed, issue already in terminal state");
+                        // Record completion with Success outcome
+                        let mut record = completion_template;
+                        record.outcome = CompletionOutcome::Success;
+                        self.persist_completion_record(&mut *self.state.write().await, record);
                     } else if is_in_review_state(&issue_state) {
                         self.add_to_waiting_for_review(
                             issue_id,
@@ -903,11 +946,19 @@ impl Orchestrator {
                         } else {
                             drop(state);
                         }
+                        // Record completion with InReview outcome
+                        let mut record = completion_template;
+                        record.outcome = CompletionOutcome::InReview;
+                        self.persist_completion_record(&mut *self.state.write().await, record);
                         // Remove claim label when entering review (best-effort)
                         self.remove_claim_label(issue_id, &issue_identifier).await;
                     } else {
-                        // §8.1: Schedule a short continuation retry (1000ms)
+                        // Record completion with Retry outcome
+                        let mut record = completion_template;
+                        record.outcome = CompletionOutcome::Retry;
                         let mut state = self.state.write().await;
+                        self.persist_completion_record(&mut state, record);
+                        // §8.1: Schedule a short continuation retry (1000ms)
                         self.schedule_retry_inner(
                             &mut state,
                             issue_id.to_string(),
@@ -920,6 +971,10 @@ impl Orchestrator {
                 }
                 WorkerExitReason::Failed(err) => {
                     warn!(issue_id = %issue_id, issue_identifier = %identifier, error = %err, "worker failed");
+                    // Record completion with Failed outcome
+                    let mut record = completion_template;
+                    record.outcome = CompletionOutcome::Failed;
+                    self.persist_completion_record(&mut state, record);
                     let config = self.config.read().await;
                     self.schedule_retry(
                         &mut state,
@@ -932,6 +987,10 @@ impl Orchestrator {
                 }
                 WorkerExitReason::TimedOut => {
                     warn!(issue_id = %issue_id, issue_identifier = %identifier, "worker timed out");
+                    // Record completion with Failed outcome
+                    let mut record = completion_template;
+                    record.outcome = CompletionOutcome::Failed;
+                    self.persist_completion_record(&mut state, record);
                     let config = self.config.read().await;
                     self.schedule_retry(
                         &mut state,
@@ -944,6 +1003,10 @@ impl Orchestrator {
                 }
                 WorkerExitReason::Stalled => {
                     warn!(issue_id = %issue_id, issue_identifier = %identifier, "worker stalled");
+                    // Record completion with Failed outcome
+                    let mut record = completion_template;
+                    record.outcome = CompletionOutcome::Failed;
+                    self.persist_completion_record(&mut state, record);
                     let config = self.config.read().await;
                     self.schedule_retry(
                         &mut state,
@@ -956,6 +1019,10 @@ impl Orchestrator {
                 }
                 WorkerExitReason::Cancelled => {
                     info!(issue_id = %issue_id, issue_identifier = %identifier, "worker cancelled by reconciliation");
+                    // Record completion with Failed outcome
+                    let mut record = completion_template;
+                    record.outcome = CompletionOutcome::Failed;
+                    self.persist_completion_record(&mut state, record);
                     state.claimed.remove(issue_id);
                     // Remove claim label (best-effort, after releasing lock)
                     let id = issue_id.to_string();
@@ -10931,6 +10998,19 @@ mod tests {
                 return Err(persistence::PersistenceError::LockPoisoned);
             }
             Ok(self.waiting.lock().unwrap().clone())
+        }
+
+        fn save_completion_record(
+            &self,
+            _record: &crate::model::CompletionRecord,
+        ) -> persistence::Result<()> {
+            Ok(())
+        }
+
+        fn load_completion_history(
+            &self,
+        ) -> persistence::Result<Vec<crate::model::CompletionRecord>> {
+            Ok(Vec::new())
         }
     }
 
