@@ -1,0 +1,43 @@
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: docker/orchestrator.Dockerfile
+    ports:
+      - "7070:7070"
+    volumes:
+      - ./WORKFLOW.distributed.md:/app/WORKFLOW.md:ro
+      - ~/.ssh:/root/.ssh:ro
+      - symphony-data:/data
+    env_file: .env.local
+    environment:
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7070/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    volumes:
+      - ~/.ssh:/root/.ssh:ro
+      - ~/.claude:/root/.claude:ro
+    env_file: .env.local
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:7070
+      - AUTH_TOKEN
+      - ANTHROPIC_API_KEY
+      - GITHUB_TOKEN
+      - LINEAR_API_KEY
+      - RUST_LOG=info
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  symphony-data:
