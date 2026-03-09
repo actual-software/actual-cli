@@ -152,7 +152,8 @@ impl SqliteStore {
                 identifier TEXT NOT NULL,
                 pr_number INTEGER NOT NULL,
                 branch TEXT NOT NULL,
-                started_waiting_at TEXT NOT NULL
+                started_waiting_at TEXT NOT NULL,
+                session_id TEXT
             );";
         conn.execute_batch(schema)?;
 
@@ -416,14 +417,15 @@ impl StateStore for SqliteStore {
         let conn = self.lock()?;
         conn.execute(
             "INSERT OR REPLACE INTO waiting_issues
-             (issue_id, identifier, pr_number, branch, started_waiting_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (issue_id, identifier, pr_number, branch, started_waiting_at, session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 entry.issue_id,
                 entry.identifier,
                 entry.pr_number as i64,
                 entry.branch,
                 entry.started_waiting_at.to_rfc3339(),
+                entry.session_id,
             ],
         )?;
         Ok(())
@@ -441,7 +443,7 @@ impl StateStore for SqliteStore {
     fn load_waiting(&self) -> Result<Vec<crate::model::WaitingEntry>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT issue_id, identifier, pr_number, branch, started_waiting_at
+            "SELECT issue_id, identifier, pr_number, branch, started_waiting_at, session_id
              FROM waiting_issues ORDER BY started_waiting_at",
         )?;
 
@@ -457,7 +459,7 @@ impl StateStore for SqliteStore {
                 pr_number: row.get::<_, i64>(2)? as u64,
                 branch: row.get(3)?,
                 started_waiting_at,
-                session_id: None,
+                session_id: row.get(5)?,
             })
         })?;
 
@@ -997,6 +999,42 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].issue_id, "issue-1"); // earlier
         assert_eq!(loaded[1].issue_id, "issue-2"); // later
+    }
+
+    #[test]
+    fn save_and_load_waiting_with_session_id() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry = crate::model::WaitingEntry {
+            issue_id: "issue-1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+            session_id: Some("sess-abc-123".to_string()),
+        };
+        store.save_waiting(&entry).unwrap();
+
+        let loaded = store.load_waiting().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].session_id, Some("sess-abc-123".to_string()));
+    }
+
+    #[test]
+    fn save_and_load_waiting_with_none_session_id() {
+        let store = SqliteStore::in_memory().unwrap();
+        let entry = crate::model::WaitingEntry {
+            issue_id: "issue-1".to_string(),
+            identifier: "PROJ-1".to_string(),
+            pr_number: 42,
+            branch: "symphony/proj-1".to_string(),
+            started_waiting_at: Utc::now(),
+            session_id: None,
+        };
+        store.save_waiting(&entry).unwrap();
+
+        let loaded = store.load_waiting().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].session_id, None);
     }
 
     #[test]
