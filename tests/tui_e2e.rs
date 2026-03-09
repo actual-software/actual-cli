@@ -26,7 +26,7 @@ mod tests {
         }
         TuiSession::new(&cmd)
             .size(120, 40)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(5))
             .env("CLAUDE_BINARY", env.binary_path.to_str().unwrap())
             .env("ACTUAL_CONFIG", env.config_path.to_str().unwrap())
             .env("NO_COLOR", "1")
@@ -300,7 +300,7 @@ mod tests {
         );
         let mut session = TuiSession::new(&cmd)
             .size(120, 40)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(5))
             .env("CLAUDE_BINARY", env.binary_path.to_str().unwrap())
             .env("ACTUAL_CONFIG", env.config_path.to_str().unwrap())
             .env("NO_COLOR", "1")
@@ -419,7 +419,7 @@ mod tests {
         );
         let mut session = TuiSession::new(&cmd)
             .size(120, 40)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(5))
             .env("CLAUDE_BINARY", env.binary_path.to_str().unwrap())
             .env("ACTUAL_CONFIG", env.config_path.to_str().unwrap())
             .env("NO_COLOR", "1")
