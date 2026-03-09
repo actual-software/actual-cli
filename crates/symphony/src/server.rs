@@ -1511,8 +1511,10 @@ function renderRunning(items, mode) {{
   }}
   let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>State</th>';
   if (mode === 'distributed') h += '<th>Worker</th>';
-  h += '<th class="col-session">Session</th><th>Turns</th><th>Last Event</th><th class="col-tokens">Tokens</th><th>Started</th></tr></thead><tbody>';
+  h += '<th class="col-session">Session</th><th>Turns</th><th>Last Event</th><th>Last Message</th><th class="col-tokens">Tokens</th><th>Started</th></tr></thead><tbody>';
   for (const r of items) {{
+    const msg = r.last_message || '';
+    const msgPreview = msg.length > 80 ? esc(msg.slice(0, 80)) + '&hellip;' : (msg ? esc(msg) : '-');
     h += '<tr onclick="openLogPanel(\''+esc(r.issue_identifier)+'\')" title="Click to view live logs">';
     h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
     h += '<td><span class="state-badge active">'+esc(r.state)+'</span></td>';
@@ -1520,6 +1522,7 @@ function renderRunning(items, mode) {{
     h += '<td class="mono col-session">'+(r.session_id ? esc(r.session_id).slice(0,12) : '-')+'</td>';
     h += '<td>'+r.turn_count+'</td>';
     h += '<td>'+(r.last_event ? esc(r.last_event) : '-')+'</td>';
+    h += '<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+(msg ? esc(msg) : '')+'">'+msgPreview+'</td>';
     h += '<td class="mono col-tokens">'+fmt(r.total_tokens)+'</td>';
     h += '<td>'+ago(r.started_at)+'</td>';
     h += '</tr>';
@@ -2064,6 +2067,108 @@ mod tests {
         assert!(html.contains("PROJ-1"));
         assert!(html.contains("sess-abc"));
         assert!(html.contains("1500"));
+    }
+
+    #[test]
+    fn test_render_dashboard_running_last_message_column_header() {
+        let running = vec![RunningInfo {
+            issue_id: "id1".to_string(),
+            issue_identifier: "PROJ-1".to_string(),
+            state: "Todo".to_string(),
+            session_id: Some("sess-abc".to_string()),
+            turn_count: 1,
+            last_event: Some("turn_completed".to_string()),
+            last_message: Some("Fixing the bug now".to_string()),
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            last_event_at: Some("2025-01-01T00:01:00Z".to_string()),
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+            worker_id: None,
+        }];
+
+        let html = render_dashboard(
+            &running,
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+                seconds_running: 60.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+
+        assert!(html.contains("Last Message"));
+        assert!(html.contains("Fixing the bug now"));
+    }
+
+    #[test]
+    fn test_render_dashboard_running_last_message_null_when_none() {
+        let running = vec![RunningInfo {
+            issue_id: "id1".to_string(),
+            issue_identifier: "PROJ-1".to_string(),
+            state: "Todo".to_string(),
+            session_id: None,
+            turn_count: 0,
+            last_event: None,
+            last_message: None,
+            started_at: "2025-01-01T00:00:00Z".to_string(),
+            last_event_at: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            worker_id: None,
+        }];
+
+        let html = render_dashboard(
+            &running,
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+
+        assert!(html.contains("Last Message"));
+        assert!(html.contains("\"last_message\":null"));
+    }
+
+    #[test]
+    fn test_render_dashboard_running_last_message_js_truncation_logic() {
+        let html = render_dashboard(
+            &[],
+            &[],
+            &[],
+            &[],
+            &TotalsInfo {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: 0.0,
+            },
+            &None,
+            &[],
+            &[],
+            "local",
+        );
+
+        assert!(html.contains("msg.length > 80"));
+        assert!(html.contains("msg.slice(0, 80)"));
+        assert!(html.contains("&hellip;"));
     }
 
     #[test]
