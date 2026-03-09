@@ -46,6 +46,7 @@ pub async fn run_review<R: TailoringRunner>(
         &lenses,
         args.model.as_deref(),
         args.max_budget_usd,
+        Some(args.max_tokens),
     )
     .await?;
 
@@ -60,6 +61,7 @@ pub async fn run_review<R: TailoringRunner>(
         &diff,
         args.model.as_deref(),
         args.max_budget_usd,
+        Some(args.max_tokens),
     )
     .await
     {
@@ -234,6 +236,7 @@ async fn run_parallel_reviews<R: TailoringRunner>(
     lenses: &[ReviewerLens],
     model: Option<&str>,
     max_budget_usd: Option<f64>,
+    max_tokens: Option<u32>,
 ) -> Result<Vec<LensReview>, ActualError> {
     let mut results: Vec<LensReview> = Vec::with_capacity(lenses.len());
     let mut failures = 0;
@@ -243,7 +246,13 @@ async fn run_parallel_reviews<R: TailoringRunner>(
     for lens in lenses {
         let prompt = build_lens_prompt(lens, diff, adrs);
         match runner
-            .run_raw_json::<LensReview>(&prompt, LENS_REVIEW_SCHEMA, model, max_budget_usd)
+            .run_raw_json::<LensReview>(
+                &prompt,
+                LENS_REVIEW_SCHEMA,
+                model,
+                max_budget_usd,
+                max_tokens,
+            )
             .await
         {
             Ok(review) => results.push(review),
@@ -401,6 +410,7 @@ async fn synthesize_cross_lens<R: TailoringRunner>(
     diff: &DiffContext,
     model: Option<&str>,
     max_budget_usd: Option<f64>,
+    max_tokens: Option<u32>,
 ) -> Result<CrossLensSynthesis, ActualError> {
     let prompt = build_synthesis_prompt(reviews, aggregated, diff);
     runner
@@ -409,6 +419,7 @@ async fn synthesize_cross_lens<R: TailoringRunner>(
             CROSS_LENS_SYNTHESIS_SCHEMA,
             model,
             max_budget_usd,
+            max_tokens,
         )
         .await
 }
