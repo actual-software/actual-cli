@@ -1,4 +1,6 @@
+pub mod lenses;
 pub mod schemas;
+pub mod synthesis;
 pub mod types;
 
 use crate::cli::args::CrArgs;
