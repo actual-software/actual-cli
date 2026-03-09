@@ -295,9 +295,14 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     };
 
     // 4. Filter by --project if specified
-    let analysis = filter_projects(analysis, &args.projects).inspect_err(|_| {
-        pipeline.finish_remaining();
-    })?;
+    let analysis = match filter_projects(analysis, &args.projects) {
+        Ok(filtered) => filtered,
+        Err(e) => {
+            pipeline.error(SyncPhase::Analysis, &format!("Project filter failed: {e}"));
+            pipeline.finish_remaining();
+            return Err(e);
+        }
+    };
 
     // 5. Auto-select language/framework for each project
     let mut analysis = analysis;
