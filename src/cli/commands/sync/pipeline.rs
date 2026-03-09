@@ -3116,46 +3116,32 @@ mod tests {
         let adrs = vec![make_test_adr("adr-001", "Test ADR", vec!["../evil"])];
         let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
         // The invalid project path should be skipped; no file generated
-        assert!(
-            output.files.is_empty(),
-            "expected no files for traversal path"
-        );
+        assert!(output.files.is_empty());
         assert_eq!(output.summary.total_input, 1);
         assert_eq!(output.summary.applicable, 0);
         assert_eq!(output.summary.not_applicable, 1);
         assert_eq!(output.skipped_adrs.len(), 1);
         assert_eq!(output.skipped_adrs[0].id, "adr-001");
-        assert!(
-            output.skipped_adrs[0]
-                .reason
-                .to_lowercase()
-                .contains("invalid"),
-            "expected 'invalid' in reason: {}",
-            output.skipped_adrs[0].reason
-        );
+        assert!(output.skipped_adrs[0]
+            .reason
+            .to_lowercase()
+            .contains("invalid"));
     }
 
     #[test]
     fn test_raw_adrs_to_output_skips_absolute_project_path() {
         let adrs = vec![make_test_adr("adr-001", "Test ADR", vec!["/etc/passwd"])];
         let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
-        assert!(
-            output.files.is_empty(),
-            "expected no files for absolute path"
-        );
+        assert!(output.files.is_empty());
         assert_eq!(output.summary.total_input, 1);
         assert_eq!(output.summary.applicable, 0);
         assert_eq!(output.summary.not_applicable, 1);
         assert_eq!(output.skipped_adrs.len(), 1);
         assert_eq!(output.skipped_adrs[0].id, "adr-001");
-        assert!(
-            output.skipped_adrs[0]
-                .reason
-                .to_lowercase()
-                .contains("invalid"),
-            "expected 'invalid' in reason: {}",
-            output.skipped_adrs[0].reason
-        );
+        assert!(output.skipped_adrs[0]
+            .reason
+            .to_lowercase()
+            .contains("invalid"));
     }
 
     #[test]
@@ -3167,20 +3153,16 @@ mod tests {
             vec!["../evil", "/etc/passwd"],
         )];
         let output = raw_adrs_to_output(&adrs, &OutputFormat::ClaudeMd);
-        assert!(output.files.is_empty(), "expected no files");
+        assert!(output.files.is_empty());
         assert_eq!(output.summary.total_input, 1);
         assert_eq!(output.summary.applicable, 0);
         assert_eq!(output.summary.not_applicable, 1);
         assert_eq!(output.skipped_adrs.len(), 1);
         assert_eq!(output.skipped_adrs[0].id, "adr-001");
-        assert!(
-            output.skipped_adrs[0]
-                .reason
-                .to_lowercase()
-                .contains("invalid"),
-            "expected 'invalid' in reason: {}",
-            output.skipped_adrs[0].reason
-        );
+        assert!(output.skipped_adrs[0]
+            .reason
+            .to_lowercase()
+            .contains("invalid"));
     }
 
     #[test]
