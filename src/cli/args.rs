@@ -333,6 +333,8 @@ pub enum Command {
     Models(ModelsArgs),
     /// Clear local cache (analysis and tailoring results)
     Cache(CacheArgs),
+    /// Review current branch's changes against ADR policies
+    Cr(CrArgs),
 }
 
 /// Arguments for the `adr-bot` command
@@ -419,6 +421,43 @@ pub struct SyncArgs {
     /// other Claude Code diagnostics appear on stderr.
     #[arg(long)]
     pub show_errors: bool,
+}
+
+/// Arguments for the `cr` (code review) command
+#[derive(Parser, Debug, Clone)]
+pub struct CrArgs {
+    /// Base branch to diff against (default: main)
+    #[arg(long, default_value = "main")]
+    pub base: String,
+
+    /// Override the AI model for review
+    #[arg(long, value_parser = parse_model)]
+    pub model: Option<String>,
+
+    /// Override the AI backend runner
+    #[arg(long, value_enum, value_name = "RUNNER")]
+    pub runner: Option<RunnerChoice>,
+
+    /// Output results as JSON instead of terminal panels
+    #[arg(long)]
+    pub json: bool,
+
+    /// Only run specific lenses (comma-separated)
+    /// e.g., --lenses security,sre,test
+    #[arg(long, value_delimiter = ',')]
+    pub lenses: Option<Vec<String>>,
+
+    /// Show detailed findings including full evidence
+    #[arg(long)]
+    pub verbose: bool,
+
+    /// Maximum budget per lens invocation (USD)
+    #[arg(long, value_parser = parse_budget, allow_hyphen_values = true)]
+    pub max_budget_usd: Option<f64>,
+
+    /// Disable the ratatui TUI and use plain line output
+    #[arg(long)]
+    pub no_tui: bool,
 }
 
 /// Arguments for the `status` command
