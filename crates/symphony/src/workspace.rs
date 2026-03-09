@@ -140,6 +140,27 @@ pub async fn create_workspace(
     })
 }
 
+/// Destroy and recreate a workspace from scratch.
+///
+/// This is used to recover from stale/corrupted workspace state (e.g. a broken
+/// `.git` directory from a previous run). It removes the existing workspace
+/// directory and creates a fresh one, running the `after_create` hook again.
+pub async fn recreate_workspace(
+    workspace_root: &Path,
+    identifier: &str,
+    hooks: &HooksConfig,
+    issue_id: &str,
+) -> Result<WorkspaceResult> {
+    let workspace_key = sanitize_workspace_key(identifier);
+    let workspace_path = workspace_root.join(&workspace_key);
+
+    if workspace_path.exists() {
+        cleanup_workspace(&workspace_path, hooks, issue_id, identifier).await;
+    }
+
+    create_workspace(workspace_root, identifier, hooks, issue_id).await
+}
+
 /// Run the before_run hook.
 pub async fn run_before_run_hook(
     workspace_path: &Path,
@@ -762,5 +783,60 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("exit code"));
+    }
+
+    // ── recreate_workspace ──────────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_recreate_workspace_removes_and_recreates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspaces");
+        let hooks = HooksConfig {
+            after_create: Some("touch .initialized".to_string()),
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        // Create workspace initially
+        let r1 = create_workspace(&root, "PROJ-RC", &hooks, "test-id")
+            .await
+            .unwrap();
+        assert!(r1.created_now);
+        assert!(r1.path.join(".initialized").exists());
+
+        // Place a stale marker file to prove the directory gets wiped
+        std::fs::write(r1.path.join("stale-marker"), "old data").unwrap();
+
+        // Recreate should wipe and recreate from scratch
+        let r2 = recreate_workspace(&root, "PROJ-RC", &hooks, "test-id")
+            .await
+            .unwrap();
+        assert!(r2.created_now);
+        assert!(r2.path.join(".initialized").exists());
+        assert!(!r2.path.join("stale-marker").exists());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_recreate_workspace_when_no_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspaces");
+        let hooks = HooksConfig {
+            after_create: Some("touch .fresh".to_string()),
+            before_run: None,
+            after_run: None,
+            before_remove: None,
+            timeout_ms: 60_000,
+        };
+
+        // Recreate on a non-existent workspace should just create it
+        let result = recreate_workspace(&root, "PROJ-NEW", &hooks, "test-id")
+            .await
+            .unwrap();
+        assert!(result.created_now);
+        assert!(result.path.join(".fresh").exists());
     }
 }

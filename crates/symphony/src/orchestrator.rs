@@ -2062,14 +2062,38 @@ async fn run_worker(
     )
     .await?;
 
-    // Phase 2: Run before_run hook
-    workspace::run_before_run_hook(
+    // Phase 2: Run before_run hook.
+    // If the hook fails on a reused workspace (e.g. stale/broken git state),
+    // nuke the workspace, recreate it from scratch, and retry the hook once.
+    let workspace_result = match workspace::run_before_run_hook(
         &workspace_result.path,
         &config.hooks,
         &issue.id,
         &issue.identifier,
     )
-    .await?;
+    .await
+    {
+        Ok(()) => workspace_result,
+        Err(hook_err) if !workspace_result.created_now => {
+            warn!(issue_id = %issue.id, error = %hook_err, "before_run hook failed on reused workspace, recreating from scratch");
+            let fresh = workspace::recreate_workspace(
+                &config.workspace.root,
+                &issue.identifier,
+                &config.hooks,
+                &issue.id,
+            )
+            .await?;
+            workspace::run_before_run_hook(
+                &fresh.path,
+                &config.hooks,
+                &issue.id,
+                &issue.identifier,
+            )
+            .await?;
+            fresh
+        }
+        Err(hook_err) => return Err(hook_err),
+    };
 
     // Phase 3: Build env vars for agent subprocess
     let env_vars = build_agent_env_vars(config, config.agent.max_turns);
@@ -6696,6 +6720,131 @@ mod tests {
             result.unwrap_err(),
             SymphonyError::AgentTurnTimeout
         ));
+    }
+
+    // ── run_worker: stale workspace recovery ─────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_worker_before_run_hook_fails_recreates_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // After agent succeeds, the worker checks if the issue is still active.
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "Done")]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+
+        // after_create places a marker that before_run checks for.
+        // This simulates the real pattern: after_create clones a repo,
+        // before_run runs git commands that need a valid repo.
+        config.hooks.after_create = Some("touch .git-repo-marker".to_string());
+        config.hooks.before_run = Some("test -f .git-repo-marker || exit 1".to_string());
+
+        // Pre-create the workspace directory WITHOUT the marker file,
+        // simulating a stale workspace from a previous run.
+        let ws_key = workspace::sanitize_workspace_key("PROJ-1");
+        let ws_dir = tmp.path().join(&ws_key);
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        // No .git-repo-marker → before_run will fail on first try
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        let (msg_tx, _msg_rx) = mpsc::channel(256);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+
+        // Should succeed: before_run fails → workspace recreated → hook retried
+        let result = run_worker(
+            &config,
+            "Work on {{ issue.identifier }}",
+            &issue,
+            None,
+            reqwest::Client::new(),
+            msg_tx,
+            cancel_rx,
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected ok, got: {result:?}");
+        // Verify the marker exists (workspace was recreated with after_create)
+        assert!(ws_dir.join(".git-repo-marker").exists());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_worker_before_run_hook_fails_on_fresh_workspace_no_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut config = test_config();
+        config.workspace.root = tmp.path().to_path_buf();
+        config.coding_agent.command = "echo test #-p".to_string();
+
+        // before_run always fails; workspace is freshly created (no pre-existing dir)
+        config.hooks.before_run = Some("exit 1".to_string());
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        let (msg_tx, _msg_rx) = mpsc::channel(256);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+
+        // Should fail immediately — no retry for freshly created workspaces
+        let result = run_worker(
+            &config,
+            "Work on {{ issue.identifier }}",
+            &issue,
+            None,
+            reqwest::Client::new(),
+            msg_tx,
+            cancel_rx,
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_run_worker_before_run_hook_fails_after_recreate_still_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut config = test_config();
+        config.workspace.root = tmp.path().to_path_buf();
+        config.coding_agent.command = "echo test #-p".to_string();
+
+        // before_run always fails even after recreate
+        config.hooks.before_run = Some("exit 1".to_string());
+
+        // Pre-create workspace to trigger the retry path
+        let ws_key = workspace::sanitize_workspace_key("PROJ-1");
+        std::fs::create_dir_all(tmp.path().join(&ws_key)).unwrap();
+
+        let issue = make_issue("id1", "PROJ-1", "Todo");
+        let (msg_tx, _msg_rx) = mpsc::channel(256);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+
+        // Should fail: before_run fails → recreate → before_run still fails
+        let result = run_worker(
+            &config,
+            "Work on {{ issue.identifier }}",
+            &issue,
+            None,
+            reqwest::Client::new(),
+            msg_tx,
+            cancel_rx,
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
     }
 
     // ══════════════════════════════════════════════════════════════════
