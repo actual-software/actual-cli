@@ -140,6 +140,50 @@ export const EXIT_CODES: { code: string; meaning: string }[] = [
     { code: "5", meaning: "I/O error (permissions, disk space)" },
 ];
 
+export const SKILL_INSTALL_METHODS: {
+    name: string;
+    color: string;
+    tool: string;
+    command: string;
+    note: string;
+}[] = [
+    {
+        name: "npx skills add",
+        color: "#39eba1",
+        tool: "Claude Code",
+        command: "npx skills add actual-software/actual-skill",
+        note: "One-command install using the skills CLI. Downloads the skill into your project and configures it for Claude Code automatically.",
+    },
+    {
+        name: "Claude Code (Plugin)",
+        color: "#39eba1",
+        tool: "Claude Code",
+        command: "claude mcp add-plugin https://github.com/actual-software/actual-skill",
+        note: "Installs as a Claude Code plugin. The skill auto-activates when the model detects you're working with the actual CLI — no slash command needed.",
+    },
+    {
+        name: "Claude Code (Manual)",
+        color: "#39eba1",
+        tool: "Claude Code",
+        command: "# Add to your project's .claude/skills/ directory\ncurl -fsSL https://raw.githubusercontent.com/actual-software/actual-skill/main/skills/actual/SKILL.md \\\n  -o .claude/skills/actual/SKILL.md\n\n# Or clone the full skill with references\ngit clone https://github.com/actual-software/actual-skill.git .claude/plugins/actual-skill",
+        note: "Download the skill file directly into your project. Useful when you want version-controlled skill files or can't install plugins.",
+    },
+    {
+        name: "Codex CLI",
+        color: "#4d93c8",
+        tool: "Codex CLI",
+        command: "# Add the agents/openai.yaml to your project\ncurl -fsSL https://raw.githubusercontent.com/actual-software/actual-skill/main/agents/openai.yaml \\\n  -o agents/openai.yaml",
+        note: "Uses the OpenAI agents.yaml format. Place in your project root for Codex to pick up automatically.",
+    },
+    {
+        name: "ClawdHub",
+        color: "#43bdb7",
+        tool: "ClawdHub / OpenClaw",
+        command: "clawhub install actual",
+        note: "Install from ClawdHub (clawhub.ai). Includes an ADR Pre-Check section that nudges agents to check for ADR context before creating new components.",
+    },
+];
+
 export const LANGUAGES: { language: string; color: string; frameworks: string[] }[] = [
     { language: "TypeScript", color: "#3178c6", frameworks: ["Next.js", "HeroUI"] },
     { language: "Rust", color: "#ce422b", frameworks: ["Ratatui"] },

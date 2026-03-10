@@ -45,6 +45,17 @@ Supported AI backends (runners): claude-cli (default), anthropic-api, openai-api
 - \`agents-md\` → AGENTS.md (Codex CLI, OpenCode)
 - \`cursor-rules\` → .cursor/rules/actual-policies.mdc (Cursor IDE)
 
+## AI Skill
+
+The actual AI skill teaches coding agents how to run, configure, and troubleshoot the CLI autonomously.
+
+Install methods:
+- \`npx skills add actual-software/actual-skill\` — one-command install for Claude Code
+- \`claude mcp add-plugin https://github.com/actual-software/actual-skill\` — Claude Code plugin
+- \`clawhub install actual\` — ClawdHub / OpenClaw
+
+Source: [actual-software/actual-skill](https://github.com/actual-software/actual-skill) (Apache-2.0) | [actual-software/actual-skill-openclaw](https://github.com/actual-software/actual-skill-openclaw) (MIT-0)
+
 ## Docs
 
 - [Getting Started & Full Command Reference](https://cli.actual.ai/docs.md): Installation, quick start, all commands with flags, runners, output formats, configuration, and troubleshooting
