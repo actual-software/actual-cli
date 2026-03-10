@@ -29,10 +29,6 @@ struct ClaudeEnvelope<T> {
 ///
 /// Accepts high-level parameters instead of raw CLI args, keeping the
 /// subprocess wire format as an implementation detail of [`CliClaudeRunner`].
-///
-/// Uses native async fn in trait (stable since Rust 1.75). The lint is suppressed
-/// because this trait is internal and all implementors are `Send + Sync`.
-#[allow(async_fn_in_trait)]
 pub trait TailoringRunner: Send + Sync {
     async fn run_tailoring(
         &self,
@@ -143,10 +139,6 @@ pub(crate) fn format_stream_event(line: &str) -> Option<String> {
 /// Generic over the output type T at the method level — any `DeserializeOwned` type
 /// can be returned. This allows callers to use the same runner for different schemas
 /// (e.g., `RepoAnalysis`, `TailoringOutput`).
-///
-/// Uses native async fn in trait (stable since Rust 1.75). The lint is suppressed
-/// because this trait is internal and all implementors are `Send + Sync`.
-#[allow(async_fn_in_trait)]
 pub trait ClaudeRunner: Send + Sync {
     async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError>;
 }
