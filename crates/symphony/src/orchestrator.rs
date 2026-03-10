@@ -2039,10 +2039,10 @@ impl Orchestrator {
                             .await;
                     }
                     let recovered = to_recover.len();
+                    let skipped = issues.len() - recovered;
                     info!(
                         recovered,
-                        skipped = issues.len() - recovered,
-                        "waiting_for_review recovery from Linear complete"
+                        skipped, "waiting_for_review recovery from Linear complete"
                     );
                 }
                 Err(e) => {
