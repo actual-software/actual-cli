@@ -10,6 +10,7 @@ import {
     COMMON_ERRORS,
     EXIT_CODES,
     LANGUAGES,
+    SKILL_INSTALL_METHODS,
 } from "../../lib/docs-data";
 
 export const metadata: Metadata = {
@@ -32,6 +33,7 @@ const NAV_SECTIONS = [
     { id: "cache-cmd", label: "  actual cache" },
     { id: "runners", label: "Runners" },
     { id: "output-formats", label: "Output Formats" },
+    { id: "skills", label: "AI Skill" },
     { id: "configuration", label: "Configuration" },
     { id: "troubleshooting", label: "Troubleshooting" },
 ];
@@ -497,6 +499,62 @@ actual models --no-fetch   # skip live API fetch; show hardcoded list only`}</Pr
                             <Code>{`<!-- managed:actual-end -->`}</Code> markers. Any content you write outside
                             these markers is never touched by <Code>actual adr-bot</Code>.
                         </P>
+                    </Section>
+
+                    {/* AI Skill */}
+                    <Section id="skills">
+                        <H2>AI Skill</H2>
+                        <P>
+                            The <Code>actual</Code> AI skill teaches coding agents how to run, configure, and troubleshoot the CLI.
+                            Install it alongside the CLI so your AI assistant can operate <Code>actual</Code> autonomously —
+                            running syncs, switching runners, diagnosing errors, and keeping your context files up to date without manual intervention.
+                        </P>
+
+                        <H3>What it covers</H3>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-[12px]">
+                            {[
+                                { title: "Sync workflow", desc: "Step-by-step guide for running actual adr-bot and handling all prompts" },
+                                { title: "Runner selection", desc: "How to pick and configure the right AI backend for your setup" },
+                                { title: "Error diagnosis", desc: "Catalog of common errors with exact fix commands" },
+                                { title: "Configuration", desc: "All config keys, env vars, and cache management" },
+                            ].map((item) => (
+                                <div key={item.title} className="border border-[#393939] rounded-[6px] p-[14px] flex flex-col gap-[6px] bg-[#030301]">
+                                    <span className="text-[13px] font-semibold text-white/90">{item.title}</span>
+                                    <span className="text-[12px] text-white/50 leading-[1.6]">{item.desc}</span>
+                                </div>
+                            ))}
+                        </div>
+
+                        <H3>Install</H3>
+                        <div className="flex flex-col gap-[16px]">
+                            {SKILL_INSTALL_METHODS.map((m) => (
+                                <div key={m.name} className="border border-[#393939] rounded-[6px] p-[20px] flex flex-col gap-[12px] bg-[#030301]">
+                                    <div className="flex items-center justify-between gap-[12px] flex-wrap">
+                                        <code className="font-mono text-[15px] font-semibold" style={{ color: m.color }}>
+                                            {m.name}
+                                        </code>
+                                        <span className="text-[12px] text-white/40">{m.tool}</span>
+                                    </div>
+                                    <p className="text-white/60 text-[13px] leading-[1.65]">{m.note}</p>
+                                    <Pre>{m.command}</Pre>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="bg-[#141414] border border-white/10 rounded-[6px] p-[16px] flex flex-col gap-[8px]">
+                            <p className="text-[12px] font-semibold uppercase tracking-[0.07em] text-white/40">Source</p>
+                            <p className="text-white/60 text-[13px] leading-[1.65]">
+                                The skill is open source. Standard variant:{" "}
+                                <a href="https://github.com/actual-software/actual-skill" className="text-[#39eba1] hover:text-[#43bdb7] transition-colors underline underline-offset-2" target="_blank" rel="noopener noreferrer">
+                                    actual-software/actual-skill
+                                </a>
+                                {" "}(Apache-2.0). ClawdHub variant:{" "}
+                                <a href="https://github.com/actual-software/actual-skill-openclaw" className="text-[#39eba1] hover:text-[#43bdb7] transition-colors underline underline-offset-2" target="_blank" rel="noopener noreferrer">
+                                    actual-software/actual-skill-openclaw
+                                </a>
+                                {" "}(MIT-0).
+                            </p>
+                        </div>
                     </Section>
 
                     {/* Configuration */}

@@ -9,6 +9,7 @@ import {
     ENV_VARS,
     COMMON_ERRORS,
     EXIT_CODES,
+    SKILL_INSTALL_METHODS,
 } from "../../lib/docs-data";
 
 function buildFlagsTable(flags: { flag: string; type: string; desc: string }[]): string {
@@ -203,6 +204,20 @@ All formats use managed-section markers. Content outside the markers is always p
 ...tailored ADR content...
 <!-- managed:actual-end -->
 \`\`\`
+
+---
+
+## AI Skill
+
+The actual AI skill teaches coding agents how to run, configure, and troubleshoot the CLI. Install it alongside the CLI so your AI assistant can operate actual autonomously.
+
+The skill covers: sync workflow, runner selection, error diagnosis, and configuration management.
+
+### Install methods
+
+${SKILL_INSTALL_METHODS.map((m) => `**${m.name}** (${m.tool})\n\n\`\`\`bash\n${m.command}\n\`\`\`\n\n${m.note}`).join("\n\n---\n\n")}
+
+Source: [actual-software/actual-skill](https://github.com/actual-software/actual-skill) (Apache-2.0) | [actual-software/actual-skill-openclaw](https://github.com/actual-software/actual-skill-openclaw) (MIT-0, ClawdHub)
 
 ---
 
