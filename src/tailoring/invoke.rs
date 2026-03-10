@@ -789,6 +789,36 @@ mod tests {
         assert_eq!(runner.call_count.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn test_retry_on_structured_output_retries_exhausted() {
+        let adrs = vec![make_adr("adr-001")];
+        let valid_json = valid_output_json(&["adr-001"]);
+        let runner = MockTailoringRunner::new(vec![
+            MockResponse::Error(ActualError::RunnerFailed {
+                message: "Claude Code returned an error: error_max_structured_output_retries (no further details available)".to_string(),
+                stderr: String::new(),
+            }),
+            MockResponse::Json(valid_json),
+        ]);
+
+        let result = invoke_tailoring(
+            &runner,
+            &adrs,
+            "{}",
+            "",
+            None,
+            None,
+            &OutputFormat::ClaudeMd,
+            None,
+        )
+        .await;
+
+        let output = result.unwrap();
+        assert_eq!(output.files.len(), 1);
+        assert_eq!(output.files[0].path, "CLAUDE.md");
+        assert_eq!(runner.call_count.load(Ordering::SeqCst), 2);
+    }
+
     // ── format-aware validate_and_filter_output tests ──
 
     #[tokio::test]
