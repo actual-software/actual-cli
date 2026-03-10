@@ -348,14 +348,31 @@ pub fn parse_fallback_message(json: &serde_json::Value, msg_type: &str) -> Vec<A
             }
             // Structured form — collect text from content array items.
             // Items can be text blocks ({"type":"text","text":"..."}) or
-            // tool_result blocks ({"type":"tool_result","content":"..."}).
+            // tool_result blocks whose "content" is either a plain string
+            // or a nested array of text items.
             v.get("content").and_then(|c| c.as_array()).and_then(|arr| {
-                let texts: Vec<&str> = arr
+                let texts: Vec<String> = arr
                     .iter()
                     .filter_map(|item| {
-                        item.get("text")
-                            .and_then(|t| t.as_str())
-                            .or_else(|| item.get("content").and_then(|c| c.as_str()))
+                        // 1) Direct "text" field (text blocks)
+                        if let Some(s) = item.get("text").and_then(|t| t.as_str()) {
+                            return Some(s.to_string());
+                        }
+                        // 2) "content" as a plain string (tool_result shorthand)
+                        if let Some(s) = item.get("content").and_then(|c| c.as_str()) {
+                            return Some(s.to_string());
+                        }
+                        // 3) "content" as an array of text items (tool_result with structured content)
+                        if let Some(inner) = item.get("content").and_then(|c| c.as_array()) {
+                            let inner_texts: Vec<&str> = inner
+                                .iter()
+                                .filter_map(|el| el.get("text").and_then(|t| t.as_str()))
+                                .collect();
+                            if !inner_texts.is_empty() {
+                                return Some(inner_texts.join("\n"));
+                            }
+                        }
+                        None
                     })
                     .collect();
                 if texts.is_empty() {
@@ -765,6 +782,82 @@ mod tests {
         assert!(
             matches!(&events[0], AgentEvent::AgentMessage { event_type, message }
             if event_type == "user" && message.as_deref() == Some("file contents here"))
+        );
+    }
+
+    #[test]
+    fn test_parse_fallback_structured_tool_result_content_array() {
+        // tool_result blocks where "content" is an array of text items
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "abc",
+                        "content": [
+                            { "type": "text", "text": "command output here" }
+                        ]
+                    }
+                ]
+            }
+        });
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AgentEvent::AgentMessage { event_type, message }
+            if event_type == "user" && message.as_deref() == Some("command output here"))
+        );
+    }
+
+    #[test]
+    fn test_parse_fallback_structured_tool_result_content_array_multi() {
+        // tool_result with multiple text items in content array
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "abc",
+                        "content": [
+                            { "type": "text", "text": "line 1" },
+                            { "type": "text", "text": "line 2" }
+                        ]
+                    }
+                ]
+            }
+        });
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AgentEvent::AgentMessage { event_type, message }
+            if event_type == "user" && message.as_deref() == Some("line 1\nline 2"))
+        );
+    }
+
+    #[test]
+    fn test_parse_fallback_structured_tool_result_content_array_no_text() {
+        // tool_result with content array containing only non-text items
+        let json = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "abc",
+                        "content": [
+                            { "type": "image", "source": {} }
+                        ]
+                    }
+                ]
+            }
+        });
+        let events = parse_agent_message(&json);
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], AgentEvent::AgentMessage { event_type, message }
+            if event_type == "user" && message.is_none())
         );
     }
 
