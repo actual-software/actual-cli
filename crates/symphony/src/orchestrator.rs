@@ -2030,18 +2030,20 @@ impl Orchestrator {
                         let state = self.state.read().await;
                         state.waiting_for_review.keys().cloned().collect()
                     };
-                    let mut recovered = 0u32;
-                    for issue in &issues {
-                        if already_waiting.contains(&issue.id) {
-                            continue;
-                        }
+                    let to_recover: Vec<_> = issues
+                        .iter()
+                        .filter(|issue| !already_waiting.contains(&issue.id))
+                        .collect();
+                    for issue in &to_recover {
                         self.add_to_waiting_for_review(&issue.id, &issue.identifier, None)
                             .await;
-                        recovered += 1;
                     }
-                    if recovered > 0 {
-                        info!(recovered, "restored waiting_for_review entries from Linear");
-                    }
+                    let recovered = to_recover.len();
+                    info!(
+                        recovered,
+                        skipped = issues.len() - recovered,
+                        "waiting_for_review recovery from Linear complete"
+                    );
                 }
                 Err(e) => {
                     warn!(
@@ -5841,7 +5843,132 @@ mod tests {
         drop(state);
 
         assert!(logs_contain(
-            "restored waiting_for_review entries from Linear"
+            "waiting_for_review recovery from Linear complete"
+        ));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_startup_cleanup_skips_already_waiting_issues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Linear: terminal issues fetch returns empty
+        let _terminal_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        // In Review fetch returns two issues: one already tracked, one new
+        let _in_review_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[
+                ("id-existing", "ACTCLI-50", "In Review"),
+                ("id-new", "ACTCLI-51", "In Review"),
+            ]))
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        // GitHub: PRs for both issues
+        let _gh_pr_mock = gh_server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!([{
+                    "number": 100,
+                    "state": "open"
+                }])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.github = Some(test_github_config(&gh_server.url()));
+
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Pre-populate waiting_for_review with id-existing
+        {
+            let mut state = orch.state.write().await;
+            state.waiting_for_review.insert(
+                "id-existing".to_string(),
+                crate::model::WaitingEntry {
+                    issue_id: "id-existing".to_string(),
+                    identifier: "ACTCLI-50".to_string(),
+                    pr_number: 99,
+                    branch: "symphony/actcli-50".to_string(),
+                    started_waiting_at: chrono::Utc::now(),
+                    session_id: None,
+                },
+            );
+        }
+
+        orch.startup_cleanup().await;
+
+        let state = orch.state.read().await;
+        // Should have 2 entries: the pre-existing one (unchanged) and the new one
+        assert_eq!(state.waiting_for_review.len(), 2);
+        // Pre-existing entry kept its original PR number
+        assert_eq!(state.waiting_for_review["id-existing"].pr_number, 99);
+        // New entry was recovered
+        assert!(state.waiting_for_review.contains_key("id-new"));
+        assert_eq!(state.waiting_for_review["id-new"].identifier, "ACTCLI-51");
+        drop(state);
+
+        assert!(logs_contain("skipped=1"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_startup_cleanup_handles_in_review_fetch_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut linear_server = mockito::Server::new_async().await;
+
+        // Linear: terminal issues fetch returns empty
+        let _terminal_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        // In Review fetch returns server error
+        let _in_review_err_mock = linear_server
+            .mock("POST", "/")
+            .with_status(500)
+            .with_body("internal server error")
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.github = Some(test_github_config("http://unused:9999"));
+
+        let orch = Orchestrator::new(config, "template".to_string());
+        orch.startup_cleanup().await;
+
+        // Should not crash, waiting_for_review remains empty
+        let state = orch.state.read().await;
+        assert!(state.waiting_for_review.is_empty());
+        drop(state);
+
+        assert!(logs_contain(
+            "failed to fetch In Review issues for waiting_for_review recovery"
         ));
     }
 
