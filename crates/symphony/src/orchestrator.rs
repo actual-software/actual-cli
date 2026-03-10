@@ -350,10 +350,9 @@ impl Orchestrator {
             for issue in &candidates {
                 if state.clear_completed(&issue.id) {
                     info!(issue_id = %issue.id, issue_identifier = %issue.identifier, "cleared stale completed marker for active issue");
-                    if let Some(ref store) = self.store {
-                        if let Err(e) = store.remove_completed(&issue.id) {
-                            debug!(issue_id = %issue.id, error = %e, "failed to remove persisted completed marker");
-                        }
+                    if let Some(Err(e)) = self.store.as_ref().map(|s| s.remove_completed(&issue.id))
+                    {
+                        debug!(issue_id = %issue.id, error = %e, "failed to remove persisted completed marker");
                     }
                 }
             }
@@ -1535,12 +1534,7 @@ impl Orchestrator {
                     state.conflict_dispatches(&issue.id)
                 };
                 if count >= crate::model::MAX_CONFLICT_DISPATCHES {
-                    warn!(
-                        issue_id = %issue.id,
-                        issue_identifier = %issue.identifier,
-                        conflict_dispatches = count,
-                        "merge conflict dispatch cap reached, leaving in In Review for human intervention"
-                    );
+                    warn!(issue_id = %issue.id, issue_identifier = %issue.identifier, conflict_dispatches = count, "merge conflict dispatch cap reached, leaving in In Review for human intervention");
                     continue;
                 }
 
@@ -3504,11 +3498,7 @@ mod tests {
             "issue should be in waiting_for_review after clean PR skip"
         );
         // Verify conflict dispatch counter was cleared (PR is now clean)
-        assert_eq!(
-            state.conflict_dispatches("id1"),
-            0,
-            "conflict dispatch counter should be cleared when PR is clean"
-        );
+        assert!(state.conflict_dispatches("id1") == 0);
     }
 
     #[tokio::test]
@@ -14495,17 +14485,13 @@ mod tests {
         // Monitor: wait for Phase 3b to clear the completed marker (the issue
         // appears in running). Then shut down — we don't need the full cycle.
         let monitor = tokio::spawn(async move {
-            loop {
+            while {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
                 let state = state_ref.read().await;
-                // Phase 3b clears the completed marker, then dispatch adds
-                // the issue to running.
-                if !state.is_completed("id1") || state.running.contains_key("id1") {
-                    break;
-                }
-                drop(state);
-            }
-            // Give a moment for the dispatch to settle
+                let still_completed =
+                    state.is_completed("id1") && !state.running.contains_key("id1");
+                still_completed
+            } {}
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let _ = shutdown_tx.send(true);
         });
@@ -14578,14 +14564,13 @@ mod tests {
 
         // Wait for Phase 3b to clear the in-memory completed marker
         let monitor = tokio::spawn(async move {
-            loop {
+            while {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
                 let state = state_ref.read().await;
-                if !state.is_completed("id1") || state.running.contains_key("id1") {
-                    break;
-                }
-                drop(state);
-            }
+                let still_completed =
+                    state.is_completed("id1") && !state.running.contains_key("id1");
+                still_completed
+            } {}
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let _ = shutdown_tx.send(true);
         });
