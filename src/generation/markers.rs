@@ -81,18 +81,6 @@ pub fn extract_adr_sections(content: &str) -> Vec<AdrSection> {
     sections
 }
 
-/// Strip per-ADR section markers from content, keeping the content between them.
-pub fn strip_adr_section_markers(content: &str) -> String {
-    content
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !is_adr_section_marker(trimmed)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Check if a trimmed line is a valid ADR section start or end marker.
 ///
 /// Delegates to the strict parsers to ensure the ID between the prefix and
@@ -1032,29 +1020,6 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_adr_section_markers_basic() {
-        let content = "<!-- adr:abc start -->\nContent here\n<!-- adr:abc end -->";
-        let result = strip_adr_section_markers(content);
-        assert_eq!(result, "Content here");
-        assert!(!result.contains("<!-- adr:"));
-    }
-
-    #[test]
-    fn test_strip_adr_section_markers_multiple() {
-        let content = format!(
-            "{}\n{}\n{}",
-            wrap_adr_section("a", "Content A"),
-            wrap_adr_section("b", "Content B"),
-            wrap_adr_section("c", "Content C"),
-        );
-        let result = strip_adr_section_markers(&content);
-        assert!(result.contains("Content A"));
-        assert!(result.contains("Content B"));
-        assert!(result.contains("Content C"));
-        assert!(!result.contains("<!-- adr:"));
-    }
-
-    #[test]
     fn test_strip_managed_metadata_strips_adr_section_markers() {
         let inner = format!(
             "<!-- adr-ids: x,y -->\n{}\n{}",
@@ -1170,35 +1135,6 @@ mod tests {
         );
     }
 
-    // --- strip_adr_section_markers preserves empty-ID markers ---
-
-    #[test]
-    fn test_strip_adr_section_markers_preserves_empty_id_markers() {
-        let content =
-            "<!-- adr: start -->\nUser content here\n<!-- adr: end -->\n<!-- adr:real-id start -->\nManaged content\n<!-- adr:real-id end -->";
-        let result = strip_adr_section_markers(content);
-        assert!(
-            result.contains("<!-- adr: start -->"),
-            "empty-ID start marker should be preserved: {result}"
-        );
-        assert!(
-            result.contains("<!-- adr: end -->"),
-            "empty-ID end marker should be preserved: {result}"
-        );
-        assert!(
-            result.contains("User content here"),
-            "user content should be preserved: {result}"
-        );
-        assert!(
-            !result.contains("<!-- adr:real-id start -->"),
-            "valid start marker should be stripped: {result}"
-        );
-        assert!(
-            !result.contains("<!-- adr:real-id end -->"),
-            "valid end marker should be stripped: {result}"
-        );
-    }
-
     // --- strip_managed_metadata preserves empty-ID markers ---
 
     #[test]
@@ -1270,24 +1206,6 @@ mod tests {
         assert!(
             result.contains("User note"),
             "user content should be preserved: {result}"
-        );
-    }
-
-    #[test]
-    fn test_strip_adr_section_markers_preserves_whitespace_id_markers() {
-        let content = "<!-- adr:has space start -->\nUser content\n<!-- adr:has space end -->\n<!-- adr:valid-id start -->\nManaged\n<!-- adr:valid-id end -->";
-        let result = strip_adr_section_markers(content);
-        assert!(
-            result.contains("<!-- adr:has space start -->"),
-            "whitespace-ID start marker should be preserved: {result}"
-        );
-        assert!(
-            result.contains("<!-- adr:has space end -->"),
-            "whitespace-ID end marker should be preserved: {result}"
-        );
-        assert!(
-            !result.contains("<!-- adr:valid-id start -->"),
-            "valid start marker should be stripped: {result}"
         );
     }
 
