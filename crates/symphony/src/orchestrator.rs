@@ -14479,13 +14479,15 @@ mod tests {
         // Monitor: wait for Phase 3b to clear the completed marker (the issue
         // appears in running). Then shut down — we don't need the full cycle.
         let monitor = tokio::spawn(async move {
-            while {
+            loop {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
                 let state = state_ref.read().await;
                 let still_completed =
                     state.is_completed("id1") && !state.running.contains_key("id1");
-                still_completed
-            } {}
+                if !still_completed {
+                    break;
+                }
+            }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let _ = shutdown_tx.send(true);
         });
@@ -14555,13 +14557,15 @@ mod tests {
 
         // Wait for Phase 3b to clear the in-memory completed marker
         let monitor = tokio::spawn(async move {
-            while {
+            loop {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
                 let state = state_ref.read().await;
                 let still_completed =
                     state.is_completed("id1") && !state.running.contains_key("id1");
-                still_completed
-            } {}
+                if !still_completed {
+                    break;
+                }
+            }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let _ = shutdown_tx.send(true);
         });
