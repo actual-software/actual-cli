@@ -932,23 +932,22 @@ impl TuiRenderer {
                 // render_to uses:
                 //   Wide (>=80): no footer row, box borders = -2, OUTPUT_PADDING = -2 → log = rows-4
                 //   Narrow (<80): footer row = -1, condensed row = -1 → log = rows-2
-                let (log_height, log_width): (usize, usize) = crossterm::terminal::size()
-                    .map(|(cols, rows)| {
-                        let rows = rows as usize;
-                        let height = if cols >= 80 {
-                            rows.saturating_sub(4)
-                        } else {
-                            rows.saturating_sub(2)
-                        };
-                        let width = if cols >= 80 {
-                            (cols as usize)
-                                .saturating_sub(LEFT_COL_WIDTH as usize + 2 + 2 * HORIZ_PAD)
-                        } else {
-                            (cols as usize).saturating_sub(2)
-                        };
-                        (height, width)
-                    })
-                    .unwrap_or((20, 80));
+                let (rows, cols) = crate::cli::ui::term_size::terminal_size();
+                let (log_height, log_width): (usize, usize) = {
+                    let rows = rows as usize;
+                    let cols = cols as usize;
+                    let height = if cols >= 80 {
+                        rows.saturating_sub(4)
+                    } else {
+                        rows.saturating_sub(2)
+                    };
+                    let width = if cols >= 80 {
+                        cols.saturating_sub(LEFT_COL_WIDTH as usize + 2 + 2 * HORIZ_PAD)
+                    } else {
+                        cols.saturating_sub(2)
+                    };
+                    (height, width)
+                };
                 let n_steps = self.steps.steps.len();
                 if n_steps == 0 {
                     break;
