@@ -140,6 +140,11 @@ pub struct CompletionRecord {
 /// Older entries are evicted in FIFO order to prevent unbounded growth.
 pub const MAX_COMPLETED_ENTRIES: usize = 1000;
 
+/// Maximum number of times an issue will be re-dispatched to resolve merge
+/// conflicts before the orchestrator gives up and leaves it in "In Review"
+/// for human intervention.
+pub const MAX_CONFLICT_DISPATCHES: u32 = 3;
+
 /// Orchestrator runtime state.
 pub struct OrchestratorState {
     pub poll_interval_ms: u64,
@@ -167,6 +172,10 @@ pub struct OrchestratorState {
     /// Broadcast channel for global state-change notifications (SSE).
     /// Sends `()` signals — clients read the full snapshot on each signal.
     pub state_broadcast: tokio::sync::broadcast::Sender<()>,
+    /// Per-issue count of dispatches to fix merge conflicts.  When this
+    /// reaches [`MAX_CONFLICT_DISPATCHES`], the orchestrator stops bouncing
+    /// the issue out of "In Review" and leaves it for human intervention.
+    conflict_dispatch_count: HashMap<String, u32>,
 }
 
 impl std::fmt::Debug for OrchestratorState {
@@ -200,6 +209,10 @@ impl std::fmt::Debug for OrchestratorState {
                 "state_broadcast",
                 &format!("<{} receivers>", self.state_broadcast.receiver_count()),
             )
+            .field(
+                "conflict_dispatch_count",
+                &format!("<{} tracked>", self.conflict_dispatch_count.len()),
+            )
             .finish()
     }
 }
@@ -224,6 +237,7 @@ impl OrchestratorState {
             pending_jobs: VecDeque::new(),
             job_notify: Arc::new(tokio::sync::Notify::new()),
             state_broadcast,
+            conflict_dispatch_count: HashMap::new(),
         }
     }
 
@@ -245,9 +259,44 @@ impl OrchestratorState {
         self.completed_set.contains(issue_id)
     }
 
+    /// Remove an issue from the completed set (e.g. when it returns to an
+    /// active Linear state and should be eligible for re-dispatch).
+    pub fn clear_completed(&mut self, issue_id: &str) -> bool {
+        let removed = self.completed_set.remove(issue_id);
+        if removed {
+            self.completed_order.retain(|id| id != issue_id);
+        }
+        removed
+    }
+
     /// Number of completed entries.
     pub fn completed_count(&self) -> usize {
         self.completed_set.len()
+    }
+
+    /// Increment the merge-conflict dispatch counter for an issue and return
+    /// the new count. Used by `should_dispatch` when dispatching for a dirty PR.
+    pub fn increment_conflict_dispatch(&mut self, issue_id: &str) -> u32 {
+        let count = self
+            .conflict_dispatch_count
+            .entry(issue_id.to_string())
+            .or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Return the current merge-conflict dispatch count for an issue.
+    pub fn conflict_dispatches(&self, issue_id: &str) -> u32 {
+        self.conflict_dispatch_count
+            .get(issue_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Clear the merge-conflict dispatch counter for an issue (e.g. when it
+    /// completes or its PR becomes clean).
+    pub fn clear_conflict_dispatch(&mut self, issue_id: &str) {
+        self.conflict_dispatch_count.remove(issue_id);
     }
 
     /// Add a completion record to the history. Evicts the oldest record
@@ -1407,5 +1456,92 @@ mod tests {
         let debug = format!("{:?}", state);
         assert!(debug.contains("completion_history"));
         assert!(debug.contains("<1 records>"));
+    }
+
+    // ── clear_completed ─────────────────────────────────────────────
+
+    #[test]
+    fn test_clear_completed_removes_from_set_and_order() {
+        let mut state = OrchestratorState::new(5000, 4);
+        state.mark_completed("id1".to_string());
+        state.mark_completed("id2".to_string());
+        assert!(state.is_completed("id1"));
+        assert!(state.is_completed("id2"));
+
+        let removed = state.clear_completed("id1");
+        assert!(removed);
+        assert!(!state.is_completed("id1"));
+        assert!(state.is_completed("id2"));
+        assert_eq!(state.completed_count(), 1);
+    }
+
+    #[test]
+    fn test_clear_completed_returns_false_if_not_present() {
+        let mut state = OrchestratorState::new(5000, 4);
+        let removed = state.clear_completed("nonexistent");
+        assert!(!removed);
+    }
+
+    #[test]
+    fn test_clear_completed_allows_re_mark() {
+        let mut state = OrchestratorState::new(5000, 4);
+        state.mark_completed("id1".to_string());
+        state.clear_completed("id1");
+        assert!(!state.is_completed("id1"));
+
+        // Can be marked completed again
+        state.mark_completed("id1".to_string());
+        assert!(state.is_completed("id1"));
+    }
+
+    // ── conflict_dispatch_count ─────────────────────────────────────
+
+    #[test]
+    fn test_increment_conflict_dispatch() {
+        let mut state = OrchestratorState::new(5000, 4);
+        assert_eq!(state.conflict_dispatches("id1"), 0);
+
+        assert_eq!(state.increment_conflict_dispatch("id1"), 1);
+        assert_eq!(state.increment_conflict_dispatch("id1"), 2);
+        assert_eq!(state.increment_conflict_dispatch("id1"), 3);
+        assert_eq!(state.conflict_dispatches("id1"), 3);
+    }
+
+    #[test]
+    fn test_conflict_dispatches_independent_per_issue() {
+        let mut state = OrchestratorState::new(5000, 4);
+        state.increment_conflict_dispatch("id1");
+        state.increment_conflict_dispatch("id1");
+        state.increment_conflict_dispatch("id2");
+
+        assert_eq!(state.conflict_dispatches("id1"), 2);
+        assert_eq!(state.conflict_dispatches("id2"), 1);
+        assert_eq!(state.conflict_dispatches("id3"), 0);
+    }
+
+    #[test]
+    fn test_clear_conflict_dispatch() {
+        let mut state = OrchestratorState::new(5000, 4);
+        state.increment_conflict_dispatch("id1");
+        state.increment_conflict_dispatch("id1");
+        assert_eq!(state.conflict_dispatches("id1"), 2);
+
+        state.clear_conflict_dispatch("id1");
+        assert_eq!(state.conflict_dispatches("id1"), 0);
+    }
+
+    #[test]
+    fn test_clear_conflict_dispatch_nonexistent_is_noop() {
+        let mut state = OrchestratorState::new(5000, 4);
+        // Should not panic
+        state.clear_conflict_dispatch("nonexistent");
+        assert_eq!(state.conflict_dispatches("nonexistent"), 0);
+    }
+
+    #[test]
+    fn test_debug_includes_conflict_dispatch_count() {
+        let state = OrchestratorState::new(5000, 4);
+        let debug = format!("{:?}", state);
+        assert!(debug.contains("conflict_dispatch_count"));
     }
 }
