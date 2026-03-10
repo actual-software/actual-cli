@@ -2013,6 +2013,44 @@ impl Orchestrator {
                 self.remove_claim_label(id, id).await;
             }
         }
+
+        // ── Restore waiting_for_review from Linear ──────────────────────
+        // After a restart, waiting_for_review may be empty even though
+        // issues exist in "In Review" state with open PRs.  Discover them
+        // from Linear and add them to the map so the dashboard and
+        // reconcile_pr_lifecycle can track them.
+        if self.config.read().await.github.is_some() {
+            let client = LinearClient::new(&config.tracker, self.http.clone());
+            match client
+                .fetch_issues_by_states(&["In Review".to_string()])
+                .await
+            {
+                Ok(issues) => {
+                    let already_waiting: std::collections::HashSet<String> = {
+                        let state = self.state.read().await;
+                        state.waiting_for_review.keys().cloned().collect()
+                    };
+                    let mut recovered = 0u32;
+                    for issue in &issues {
+                        if already_waiting.contains(&issue.id) {
+                            continue;
+                        }
+                        self.add_to_waiting_for_review(&issue.id, &issue.identifier, None)
+                            .await;
+                        recovered += 1;
+                    }
+                    if recovered > 0 {
+                        info!(recovered, "restored waiting_for_review entries from Linear");
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "failed to fetch In Review issues for waiting_for_review recovery"
+                    );
+                }
+            }
+        }
     }
 
     async fn shutdown(&self) {
@@ -5729,6 +5767,107 @@ mod tests {
         // In-memory state should still be cleaned up even without a store
         let state = orch.state.read().await;
         assert!(state.claimed.is_empty());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_startup_cleanup_recovers_waiting_for_review_from_linear() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Linear: terminal issues fetch returns empty (no workspaces to clean)
+        // then In Review fetch returns one issue
+        let _terminal_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        let _in_review_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[(
+                "id1",
+                "ACTCLI-92",
+                "In Review",
+            )]))
+            .expect_at_most(1)
+            .create_async()
+            .await;
+
+        // GitHub: find_open_pr returns a PR for the branch
+        let _gh_pr_mock = gh_server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!([{
+                    "number": 684,
+                    "state": "open"
+                }])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.github = Some(test_github_config(&gh_server.url()));
+
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Verify: waiting_for_review is initially empty
+        {
+            let state = orch.state.read().await;
+            assert!(state.waiting_for_review.is_empty());
+        }
+
+        orch.startup_cleanup().await;
+
+        // Verify: waiting_for_review now has the In Review issue
+        let state = orch.state.read().await;
+        assert_eq!(state.waiting_for_review.len(), 1);
+        assert!(state.waiting_for_review.contains_key("id1"));
+        let entry = &state.waiting_for_review["id1"];
+        assert_eq!(entry.identifier, "ACTCLI-92");
+        assert_eq!(entry.pr_number, 684);
+        assert_eq!(entry.branch, "symphony/actcli-92");
+        drop(state);
+
+        assert!(logs_contain(
+            "restored waiting_for_review entries from Linear"
+        ));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_startup_cleanup_skips_waiting_recovery_without_github() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[]))
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        // github is None by default
+
+        let orch = Orchestrator::new(config, "template".to_string());
+        orch.startup_cleanup().await;
+
+        let state = orch.state.read().await;
+        assert!(state.waiting_for_review.is_empty());
     }
 
     // ── dispatch_issue ───────────────────────────────────────────────
