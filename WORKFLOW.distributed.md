@@ -11,14 +11,14 @@ workspace:
   root: /data
 agent:
   max_concurrent_agents: 5
-  max_turns: 30
+  max_turns: 50
   max_retry_backoff_ms: 300000
   max_concurrent_agents_by_state:
     todo: 2
     in progress: 3
     in review: 1
 coding_agent:
-  command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 30"
+  command: "claude -p --output-format stream-json --verbose --dangerously-skip-permissions --max-turns 50"
   stall_timeout_ms: 600000
   turn_timeout_ms: 1800000
 github:
