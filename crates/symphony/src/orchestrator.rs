@@ -3493,10 +3493,7 @@ mod tests {
 
         // Verify the issue was added to waiting_for_review
         let state = orch.state.read().await;
-        assert!(
-            state.waiting_for_review.contains_key("id1"),
-            "issue should be in waiting_for_review after clean PR skip"
-        );
+        assert!(state.waiting_for_review.contains_key("id1"));
         // Verify conflict dispatch counter was cleared (PR is now clean)
         assert!(state.conflict_dispatches("id1") == 0);
     }
@@ -14471,10 +14468,7 @@ mod tests {
         // Verify id1 is in the completed set after with_store()
         {
             let state = orch.state.read().await;
-            assert!(
-                state.is_completed("id1"),
-                "id1 should be completed after with_store()"
-            );
+            assert!(state.is_completed("id1"));
         }
 
         let state_ref = Arc::clone(&orch.state);
@@ -14514,10 +14508,7 @@ mod tests {
         // (it was removed by remove_completed, and not yet re-added since the
         //  agent might still be running or in retry).
         let completed = store.completed_ids();
-        assert!(
-            !completed.contains(&"id1".to_string()),
-            "id1 should have been removed from the store by Phase 3b"
-        );
+        assert!(!completed.contains(&"id1".to_string()));
     }
 
     #[traced_test]
@@ -14593,9 +14584,6 @@ mod tests {
 
         // The store still has id1 because remove_completed failed
         let completed = store.completed_ids();
-        assert!(
-            completed.contains(&"id1".to_string()),
-            "id1 should still be in the store since remove_completed failed"
-        );
+        assert!(completed.contains(&"id1".to_string()));
     }
 }
