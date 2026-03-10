@@ -33,6 +33,9 @@ tui-test-captures/
 .env
 .env.local
 
+# Skill variant build output
+/dist/
+
 # Remotion promo project build artifacts
 promo/node_modules/
 promo/out/
