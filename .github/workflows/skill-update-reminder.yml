@@ -63,22 +63,26 @@ jobs:
         run: |
           cat <<'COMMENT' | gh pr comment ${{ github.event.pull_request.number }} --body-file -
           <!-- skill-update-reminder -->
-          ### /actual skill may need updating
+          ### actual skill repos may need updating
 
-          This PR modifies files that are referenced by the `/actual` skill. If the changes affect user-facing behavior (new errors, config keys, flags, output format changes, runner changes), the corresponding skill reference files should be updated too.
+          This PR modifies files that are referenced by the `actual` companion skill. The skill is now maintained in standalone repos. If the changes affect user-facing behavior (new errors, config keys, flags, output format changes, runner changes), the corresponding skill reference files should be updated in the standalone repos.
 
           **Changed files:**
           ${{ steps.changes.outputs.files }}
 
-          **Skill files to check:**
-          | Changed Area | Skill Reference |
-          |-------------|----------------|
-          | `src/error.rs` | `.claude/skills/actual/references/error-catalog.md` |
-          | `src/config/` | `.claude/skills/actual/references/config-reference.md` |
-          | `src/generation/format.rs` | `.claude/skills/actual/references/output-formats.md` |
-          | `src/generation/markers.rs`, `merge.rs` | `.claude/skills/actual/references/output-formats.md` |
-          | `src/cli/args.rs`, `src/runner/` | `.claude/skills/actual/references/runner-guide.md` |
-          | `src/cli/commands/sync*.rs` | `.claude/skills/actual/references/sync-workflow.md` |
+          **Skill repos to update:**
+          - Standard variant: [actual-software/actual-skill](https://github.com/actual-software/actual-skill)
+          - OpenClaw variant: [actual-software/actual-skill-openclaw](https://github.com/actual-software/actual-skill-openclaw)
+
+          **Mapping:**
+          | Changed Area | Skill Reference File |
+          |-------------|---------------------|
+          | `src/error.rs` | `references/error-catalog.md` |
+          | `src/config/` | `references/config-reference.md` |
+          | `src/generation/format.rs` | `references/output-formats.md` |
+          | `src/generation/markers.rs`, `merge.rs` | `references/output-formats.md` |
+          | `src/cli/args.rs`, `src/runner/` | `references/runner-guide.md` |
+          | `src/cli/commands/sync*.rs` | `references/sync-workflow.md` |
 
           If the changes are purely internal (refactoring, tests, perf) with no user-facing impact, this reminder can be ignored.
           COMMENT
