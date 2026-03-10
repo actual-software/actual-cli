@@ -93,7 +93,7 @@ pub enum Language {
 
 impl Language {
     /// Lowercase string representation used for both serialization and display.
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         match self {
             Language::TypeScript => "typescript",
             Language::JavaScript => "javascript",
