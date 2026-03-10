@@ -119,7 +119,11 @@ pub struct Config {
     pub rejected_adrs: Option<HashMap<String, Vec<String>>>,
 
     /// Cached repo analysis (keyed to HEAD commit hash).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_cached_analysis"
+    )]
     pub cached_analysis: Option<CachedAnalysis>,
 
     /// Cached tailoring result (keyed to composite input hash).
@@ -248,6 +252,22 @@ impl CachedAnalysis {
         let age = chrono::Utc::now() - self.analyzed_at;
         age.num_days() >= CACHE_TTL_DAYS
     }
+}
+
+/// Deserializes `Option<CachedAnalysis>`, returning `None` if the YAML
+/// structure is present but cannot be deserialized as a valid `CachedAnalysis`.
+///
+/// This provides graceful degradation for corrupt or schema-mismatched cache
+/// entries: instead of failing to parse the entire `Config`, a bad
+/// `cached_analysis` block is silently dropped (treated as a cache miss).
+fn deserialize_optional_cached_analysis<'de, D>(
+    deserializer: D,
+) -> Result<Option<CachedAnalysis>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<serde_yml::Value> = Option::deserialize(deserializer)?;
+    Ok(opt.and_then(|v| serde_yml::from_value(v).ok()))
 }
 
 /// Deserializes `Option<CachedTailoring>`, returning `None` if the YAML
@@ -557,6 +577,16 @@ mod tests {
             analyzed_at: chrono::Utc::now() - chrono::Duration::days(8),
         };
         assert!(cached.is_expired());
+    }
+
+    #[test]
+    fn test_corrupted_cached_analysis_yaml_deserializes_as_none() {
+        let yaml = "cached_analysis:\n  not_a_valid_field: oops\n";
+        let cfg: Config = serde_yml::from_str(yaml).expect("config should still parse");
+        assert!(
+            cfg.cached_analysis.is_none(),
+            "corrupt cached_analysis must degrade to None, not fail config parsing"
+        );
     }
 
     #[test]
