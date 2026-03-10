@@ -1218,8 +1218,6 @@ pub fn render_dashboard(
     pending_jobs: &[PendingJobInfo],
     deployment_mode: &str,
 ) -> String {
-    let mut html = String::with_capacity(16384);
-
     // Serialize initial state as JSON for the JS hydration
     let initial_state = serde_json::json!({
         "running": running,
@@ -1234,587 +1232,37 @@ pub fn render_dashboard(
         "counts": { "running": running.len(), "retrying": retrying.len(), "waiting": waiting.len(), "completed": completed.len() },
     });
 
-    html.push_str(&format!(
-        r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Symphony Dashboard</title>
-<style>
-*,*::before,*::after {{ box-sizing:border-box; margin:0; padding:0; }}
-:root {{
-  --bg: #0f0f1a;
-  --surface: #1a1a2e;
-  --surface2: #16213e;
-  --border: #2a2a4a;
-  --text: #e0e0e0;
-  --text-dim: #888;
-  --accent: #00d4ff;
-  --accent2: #7b68ee;
-  --green: #00e676;
-  --amber: #ffab00;
-  --red: #ff5252;
-  --radius: 8px;
-}}
-body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }}
-.header {{ background:var(--surface); border-bottom:1px solid var(--border); padding:16px 24px; display:flex; align-items:center; justify-content:space-between; }}
-.header h1 {{ font-size:18px; font-weight:600; display:flex; align-items:center; gap:10px; }}
-.header h1 span {{ color:var(--accent); }}
-.header-right {{ display:flex; align-items:center; gap:16px; font-size:13px; color:var(--text-dim); }}
-.status-dot {{ width:8px; height:8px; border-radius:50%; background:var(--green); display:inline-block; animation:pulse 2s infinite; }}
-@keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.4; }} }}
-.btn {{ background:var(--surface2); border:1px solid var(--border); color:var(--text); padding:6px 14px; border-radius:var(--radius); cursor:pointer; font-size:13px; transition:all 0.15s; }}
-.btn:hover {{ background:var(--border); border-color:var(--accent); }}
-.btn:active {{ transform:scale(0.97); }}
-.btn-danger {{ color:var(--red); border-color:rgba(255,82,82,0.3); }}
-.btn-danger:hover {{ background:rgba(255,82,82,0.15); border-color:var(--red); }}
-.content {{ max-width:1400px; margin:0 auto; padding:24px; }}
-.stats {{ display:grid; grid-template-columns:repeat(5,1fr); gap:16px; margin-bottom:24px; }}
-.stat-card {{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:20px; }}
-.stat-card .label {{ font-size:12px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); margin-bottom:8px; }}
-.stat-card .value {{ font-size:28px; font-weight:700; font-variant-numeric:tabular-nums; }}
-.stat-card .value.accent {{ color:var(--accent); }}
-.stat-card .sub {{ font-size:12px; color:var(--text-dim); margin-top:4px; }}
-.section {{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:16px; overflow:hidden; }}
-.section-header {{ padding:14px 20px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }}
-.section-header h2 {{ font-size:14px; font-weight:600; display:flex; align-items:center; gap:8px; }}
-.section-header .badge {{ background:var(--surface2); border:1px solid var(--border); padding:2px 8px; border-radius:12px; font-size:12px; color:var(--text-dim); font-weight:500; }}
-table {{ width:100%; border-collapse:collapse; font-size:13px; }}
-thead th {{ padding:10px 16px; text-align:left; font-weight:500; color:var(--text-dim); font-size:11px; text-transform:uppercase; letter-spacing:0.5px; background:var(--surface2); border-bottom:1px solid var(--border); }}
-tbody td {{ padding:10px 16px; border-bottom:1px solid var(--border); }}
-tbody tr:last-child td {{ border-bottom:none; }}
-tbody tr:hover {{ background:rgba(0,212,255,0.04); cursor:pointer; }}
-.mono {{ font-family:'SF Mono',SFMono-Regular,Consolas,monospace; font-size:12px; }}
-.state-badge {{ display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:500; }}
-.state-badge.active {{ background:rgba(0,230,118,0.15); color:var(--green); }}
-.state-badge.retry {{ background:rgba(255,171,0,0.15); color:var(--amber); }}
-.state-badge.success {{ background:rgba(0,230,118,0.15); color:var(--green); }}
-.state-badge.in_review {{ background:rgba(0,212,255,0.15); color:var(--accent); }}
-.state-badge.failed {{ background:rgba(255,82,82,0.15); color:var(--red); }}
-.state-badge.healthy {{ background:rgba(0,230,118,0.15); color:var(--green); }}
-.state-badge.stale {{ background:rgba(255,171,0,0.15); color:var(--amber); }}
-.state-badge.dead {{ background:rgba(255,82,82,0.15); color:var(--red); }}
-.empty-state {{ padding:40px 20px; text-align:center; color:var(--text-dim); }}
-.empty-state .icon {{ font-size:32px; margin-bottom:12px; }}
-.empty-state p {{ font-size:13px; line-height:1.6; }}
-.token-bar {{ display:flex; gap:4px; align-items:center; }}
-.token-bar .in {{ color:var(--accent); }}
-.token-bar .out {{ color:var(--accent2); }}
-.rate-limits pre {{ padding:16px 20px; margin:0; font-family:'SF Mono',SFMono-Regular,Consolas,monospace; font-size:12px; line-height:1.5; overflow-x:auto; color:var(--text); }}
-.updated {{ font-size:11px; color:var(--text-dim); }}
-.log-panel {{ background:#0a0a14; border:1px solid var(--border); border-radius:var(--radius); margin-bottom:16px; overflow:hidden; display:none; }}
-.log-panel.open {{ display:block; }}
-.log-panel-header {{ padding:10px 16px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; background:var(--surface); }}
-.log-panel-header h3 {{ font-size:13px; font-weight:600; }}
-.log-panel-close {{ background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:16px; padding:4px 8px; }}
-.log-panel-close:hover {{ color:var(--text); }}
-.log-panel-body {{ max-height:400px; overflow-y:auto; padding:8px 0; font-family:'SF Mono',SFMono-Regular,Consolas,monospace; font-size:12px; line-height:1.6; }}
-.log-entry {{ padding:2px 16px; display:flex; gap:10px; align-items:baseline; }}
-.log-entry:hover {{ background:rgba(255,255,255,0.03); }}
-.log-ts {{ color:var(--text-dim); white-space:nowrap; min-width:60px; }}
-.log-badge {{ display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px; font-weight:600; text-transform:uppercase; white-space:nowrap; }}
-.log-badge.session_started {{ background:rgba(0,230,118,0.2); color:var(--green); }}
-.log-badge.turn_completed {{ background:rgba(0,212,255,0.2); color:var(--accent); }}
-.log-badge.notification {{ background:rgba(224,224,224,0.1); color:var(--text); }}
-.log-badge.token_usage {{ background:rgba(136,136,136,0.15); color:var(--text-dim); }}
-.log-badge.turn_failed {{ background:rgba(255,82,82,0.2); color:var(--red); }}
-.log-badge.rate_limit_event {{ background:rgba(255,171,0,0.2); color:var(--amber); }}
-.log-badge.tool_use {{ background:rgba(171,71,188,0.2); color:#ce93d8; }}
-.log-badge.tool_result {{ background:rgba(171,71,188,0.15); color:#b39ddb; }}
-.log-badge.user {{ background:rgba(100,181,246,0.15); color:#90caf9; }}
-.log-msg {{ color:var(--text); word-break:break-word; flex:1; }}
-.log-tokens {{ color:var(--text-dim); white-space:nowrap; }}
-.table-responsive {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
-@media (max-width:768px) {{
-  .stats {{ grid-template-columns:repeat(2,1fr); grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); }}
-  .header {{ flex-direction:column; gap:12px; }}
-  .table-responsive {{ margin:0 -16px; padding:0 16px; }}
-  .col-session, .col-tokens {{ display:none; }}
-  .log-panel-body {{ max-height:250px; }}
-  .log-entry {{ gap:6px; }}
-  .log-ts {{ min-width:50px; font-size:11px; }}
-}}
-</style>
-</head>
-<body>
+    let initial_json = script_safe_json(&serde_json::to_string(&initial_state).unwrap_or_default());
 
-<div class="header">
-  <h1><span>Symphony</span> Dashboard</h1>
-  <div class="header-right">
-    <span><span class="status-dot" id="statusDot"></span> <span id="statusText">Connected</span></span>
-    <span class="updated" id="lastUpdate">Updated just now</span>
-    <button class="btn" id="refreshBtn" onclick="triggerRefresh()">Refresh Now</button>
-  </div>
-</div>
+    let template = load_dashboard_template();
+    template.replace("__INITIAL_STATE__", &initial_json)
+}
 
-<div class="content">
-  <div class="stats">
-    <div class="stat-card">
-      <div class="label">Running</div>
-      <div class="value accent" id="countRunning">0</div>
-      <div class="sub">active sessions</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Total Tokens</div>
-      <div class="value" id="totalTokens">0</div>
-      <div class="sub"><span class="token-bar"><span class="in" id="inputTokens">0 in</span> / <span class="out" id="outputTokens">0 out</span></span></div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Runtime</div>
-      <div class="value" id="runtime">0s</div>
-      <div class="sub">total agent time</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Retrying</div>
-      <div class="value" id="countRetrying">0</div>
-      <div class="sub">in retry queue</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Waiting</div>
-      <div class="value" id="countWaiting">0</div>
-      <div class="sub">awaiting review</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Completed</div>
-      <div class="value" id="countCompleted">0</div>
-      <div class="sub">finished runs</div>
-    </div>
-  </div>
+const DASHBOARD_HTML: &str = include_str!("../static/dashboard.html");
+const DASHBOARD_CSS: &str = include_str!("../static/dashboard.css");
+const DASHBOARD_JS: &str = include_str!("../static/dashboard.js");
 
-  <div class="section">
-    <div class="section-header">
-      <h2>Running Sessions <span class="badge" id="runningBadge">0</span></h2>
-    </div>
-    <div id="runningContent">
-      <div class="empty-state">
-        <div class="icon">No running sessions</div>
-        <p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p>
-      </div>
-    </div>
-  </div>
+/// In debug builds, read dashboard assets from disk for hot-reload during
+/// development. Falls back to the compile-time embedded copy on read failure.
+#[cfg(debug_assertions)]
+fn load_dashboard_template() -> String {
+    let static_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("static");
+    let html = std::fs::read_to_string(static_dir.join("dashboard.html"))
+        .unwrap_or_else(|_| DASHBOARD_HTML.to_string());
+    let css = std::fs::read_to_string(static_dir.join("dashboard.css"))
+        .unwrap_or_else(|_| DASHBOARD_CSS.to_string());
+    let js = std::fs::read_to_string(static_dir.join("dashboard.js"))
+        .unwrap_or_else(|_| DASHBOARD_JS.to_string());
+    html.replace("/* __DASHBOARD_CSS__ */", &css)
+        .replace("/* __DASHBOARD_JS__ */", &js)
+}
 
-  <div class="log-panel" id="logPanel">
-    <div class="log-panel-header">
-      <h3 id="logPanelTitle">Event Log</h3>
-      <button class="log-panel-close" onclick="closeLogPanel()">X</button>
-    </div>
-    <div class="log-panel-body" id="logPanelBody"></div>
-  </div>
-
-  <div class="section">
-    <div class="section-header">
-      <h2>Retry Queue <span class="badge" id="retryBadge">0</span></h2>
-    </div>
-    <div id="retryContent">
-      <div class="empty-state">
-        <div class="icon">No retries pending</div>
-        <p>Failed or timed-out sessions will appear here with their retry schedule.</p>
-      </div>
-    </div>
-  </div>
-
-  <div class="section">
-    <div class="section-header">
-      <h2>Waiting for Review <span class="badge" id="waitingBadge">0</span></h2>
-    </div>
-    <div id="waitingContent">
-      <div class="empty-state">
-        <div class="icon">No PRs waiting</div>
-        <p>Issues waiting for PR review or merge will appear here.</p>
-      </div>
-    </div>
-  </div>
-
-  <div class="section" id="workersSection" style="display:none;">
-    <div class="section-header">
-      <h2>Connected Workers <span class="badge" id="workersBadge">0</span></h2>
-    </div>
-    <div id="workersContent">
-      <div class="empty-state">
-        <div class="icon">No workers connected</div>
-        <p>Workers will appear here when they register with the orchestrator.</p>
-      </div>
-    </div>
-  </div>
-
-  <div class="section" id="pendingJobsSection" style="display:none;">
-    <div class="section-header">
-      <h2>Job Queue <span class="badge" id="pendingJobsBadge">0</span></h2>
-    </div>
-    <div id="pendingJobsContent">
-      <div class="empty-state">
-        <div class="icon">No pending jobs</div>
-        <p>Jobs waiting to be claimed by workers will appear here.</p>
-      </div>
-    </div>
-  </div>
-
-  <div class="section" id="completedSection">
-    <div class="section-header" style="cursor:pointer;" onclick="toggleCompleted()">
-      <h2>Completed / History <span class="badge" id="completedBadge">0</span></h2>
-      <span id="completedToggle" style="font-size:12px;color:var(--text-dim);">Show</span>
-    </div>
-    <div id="completedContent" style="display:none;">
-      <div class="empty-state">
-        <div class="icon">No completed runs</div>
-        <p>Finished agent sessions will appear here.</p>
-      </div>
-    </div>
-  </div>
-
-  <div class="section" id="rateLimitSection">
-    <div class="section-header">
-      <h2>Rate Limits</h2>
-    </div>
-    <div id="rateLimitContent" class="rate-limits">
-      <div class="empty-state">
-        <p>No rate limit data</p>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script>
-const INITIAL = {initial_json};
-let lastFetch = Date.now();
-
-function fmt(n) {{
-  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
-  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
-  return String(n);
-}}
-
-function fmtTime(s) {{
-  if (s >= 3600) return (s/3600).toFixed(1)+'h';
-  if (s >= 60) return (s/60).toFixed(1)+'m';
-  return s.toFixed(0)+'s';
-}}
-
-function ago(iso) {{
-  if (!iso) return '-';
-  const d = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (d < 5) return 'just now';
-  if (d < 60) return Math.floor(d)+'s ago';
-  if (d < 3600) return Math.floor(d/60)+'m ago';
-  return Math.floor(d/3600)+'h ago';
-}}
-
-function esc(s) {{ const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }}
-
-function renderRunning(items, mode) {{
-  const el = document.getElementById('runningContent');
-  document.getElementById('runningBadge').textContent = items.length;
-  if (!items.length) {{
-    el.innerHTML = '<div class="empty-state"><div class="icon">No running sessions</div><p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p></div>';
-    return;
-  }}
-  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>State</th>';
-  if (mode === 'distributed') h += '<th>Worker</th>';
-  h += '<th class="col-session">Session</th><th>Turns</th><th>Last Event</th><th>Last Message</th><th class="col-tokens">Tokens</th><th>Started</th></tr></thead><tbody>';
-  for (const r of items) {{
-    const msg = r.last_message || '';
-    const msgPreview = msg.length > 80 ? esc(msg.slice(0, 80)) + '&hellip;' : (msg ? esc(msg) : '-');
-    h += '<tr onclick="openLogPanel(\''+esc(r.issue_identifier)+'\')" title="Click to view live logs">';
-    h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
-    h += '<td><span class="state-badge active">'+esc(r.state)+'</span></td>';
-    if (mode === 'distributed') h += '<td class="mono">'+(r.worker_id ? esc(r.worker_id) : '-')+'</td>';
-    h += '<td class="mono col-session">'+(r.session_id ? esc(r.session_id).slice(0,12) : '-')+'</td>';
-    h += '<td>'+r.turn_count+'</td>';
-    h += '<td>'+(r.last_event ? esc(r.last_event) : '-')+'</td>';
-    h += '<td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="'+(msg ? esc(msg) : '')+'">'+msgPreview+'</td>';
-    h += '<td class="mono col-tokens">'+fmt(r.total_tokens)+'</td>';
-    h += '<td>'+ago(r.started_at)+'</td>';
-    h += '</tr>';
-  }}
-  h += '</tbody></table></div>';
-  el.innerHTML = h;
-}}
-
-function renderWorkers(items) {{
-  const el = document.getElementById('workersContent');
-  document.getElementById('workersBadge').textContent = items.length;
-  if (!items.length) {{
-    el.innerHTML = '<div class="empty-state"><div class="icon">No workers connected</div><p>Workers will appear here when they register with the orchestrator.</p></div>';
-    return;
-  }}
-  let h = '<div class="table-responsive"><table><thead><tr><th class="col-session">Worker ID</th><th>Status</th><th>Active Jobs</th><th>Max Jobs</th><th>Last Heartbeat</th><th>Registered</th></tr></thead><tbody>';
-  for (const w of items) {{
-    h += '<tr>';
-    h += '<td class="mono col-session"><strong>'+esc(w.worker_id)+'</strong></td>';
-    h += '<td><span class="state-badge '+esc(w.status)+'">'+esc(w.status)+'</span></td>';
-    h += '<td class="mono">'+w.active_jobs.map(j => esc(j)).join(', ')+'</td>';
-    h += '<td>'+w.max_concurrent_jobs+'</td>';
-    h += '<td>'+ago(w.last_heartbeat)+'</td>';
-    h += '<td>'+ago(w.registered_at)+'</td>';
-    h += '</tr>';
-  }}
-  h += '</tbody></table></div>';
-  el.innerHTML = h;
-}}
-
-function renderPendingJobs(items) {{
-  const el = document.getElementById('pendingJobsContent');
-  document.getElementById('pendingJobsBadge').textContent = items.length;
-  if (!items.length) {{
-    el.innerHTML = '<div class="empty-state"><div class="icon">No pending jobs</div><p>Jobs waiting to be claimed by workers will appear here.</p></div>';
-    return;
-  }}
-  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>Attempt</th><th>Prompt Preview</th></tr></thead><tbody>';
-  for (const j of items) {{
-    h += '<tr>';
-    h += '<td class="mono"><strong>'+esc(j.issue_identifier)+'</strong></td>';
-    h += '<td>'+(j.attempt != null ? '#'+j.attempt : '-')+'</td>';
-    h += '<td>'+esc(j.prompt_preview)+'</td>';
-    h += '</tr>';
-  }}
-  h += '</tbody></table></div>';
-  el.innerHTML = h;
-}}
-
-function renderRetrying(items) {{
-  const el = document.getElementById('retryContent');
-  document.getElementById('retryBadge').textContent = items.length;
-  if (!items.length) {{
-    el.innerHTML = '<div class="empty-state"><div class="icon">No retries pending</div><p>Failed or timed-out sessions will appear here with their retry schedule.</p></div>';
-    return;
-  }}
-  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>Attempt</th><th>Retry In</th><th>Error</th><th></th></tr></thead><tbody>';
-  for (const r of items) {{
-    const dueIn = Math.max(0, r.due_at_ms - Date.now());
-    const dueStr = dueIn > 0 ? fmtTime(dueIn/1000) : 'now';
-    h += '<tr>';
-    h += '<td class="mono"><strong>'+esc(r.identifier)+'</strong></td>';
-    h += '<td><span class="state-badge retry">#'+r.attempt+'</span></td>';
-    h += '<td>'+dueStr+'</td>';
-    h += '<td>'+(r.error ? esc(r.error) : '-')+'</td>';
-    h += '<td><button class="btn btn-danger" onclick="removeRetry(\''+esc(r.identifier)+'\')">Remove</button></td>';
-    h += '</tr>';
-  }}
-  h += '</tbody></table></div>';
-  el.innerHTML = h;
-}}
-
-function renderWaiting(items) {{
-  const el = document.getElementById('waitingContent');
-  document.getElementById('waitingBadge').textContent = items.length;
-  if (!items.length) {{
-    el.innerHTML = '<div class="empty-state"><div class="icon">No PRs waiting</div><p>Issues waiting for PR review or merge will appear here.</p></div>';
-    return;
-  }}
-  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>PR</th><th>Branch</th><th>Waiting</th></tr></thead><tbody>';
-  for (const w of items) {{
-    h += '<tr>';
-    h += '<td class="mono"><strong>'+esc(w.identifier)+'</strong></td>';
-    h += '<td><span class="state-badge active">#'+w.pr_number+'</span></td>';
-    h += '<td class="mono">'+esc(w.branch)+'</td>';
-    h += '<td>'+ago(w.started_waiting_at)+'</td>';
-    h += '</tr>';
-  }}
-  h += '</tbody></table></div>';
-  el.innerHTML = h;
-}}
-
-let completedVisible = false;
-function toggleCompleted() {{
-  completedVisible = !completedVisible;
-  document.getElementById('completedContent').style.display = completedVisible ? '' : 'none';
-  document.getElementById('completedToggle').textContent = completedVisible ? 'Hide' : 'Show';
-}}
-
-function fmtDuration(s) {{
-  if (s >= 3600) return (s/3600).toFixed(1)+'h';
-  if (s >= 60) return (s/60).toFixed(1)+'m';
-  return s.toFixed(0)+'s';
-}}
-
-function renderCompleted(items) {{
-  const el = document.getElementById('completedContent');
-  document.getElementById('completedBadge').textContent = items.length;
-  if (!items.length) {{
-    el.innerHTML = '<div class="empty-state"><div class="icon">No completed runs</div><p>Finished agent sessions will appear here.</p></div>';
-    return;
-  }}
-  let h = '<div class="table-responsive"><table><thead><tr><th>Issue</th><th>Outcome</th><th>Duration</th><th class="col-tokens">Tokens</th><th>Turns</th><th>Completed</th></tr></thead><tbody>';
-  for (const r of items) {{
-    h += '<tr>';
-    h += '<td class="mono"><strong>'+esc(r.issue_identifier)+'</strong></td>';
-    h += '<td><span class="state-badge '+esc(r.outcome)+'">'+esc(r.outcome)+'</span></td>';
-    h += '<td>'+fmtDuration(r.duration_seconds)+'</td>';
-    h += '<td class="mono col-tokens">'+fmt(r.total_tokens)+'</td>';
-    h += '<td>'+r.turn_count+'</td>';
-    h += '<td>'+ago(r.completed_at)+'</td>';
-    h += '</tr>';
-  }}
-  h += '</tbody></table></div>';
-  el.innerHTML = h;
-}}
-
-function renderRateLimits(rl) {{
-  const el = document.getElementById('rateLimitContent');
-  if (!rl) {{
-    el.innerHTML = '<div class="empty-state"><p>No rate limit data</p></div>';
-    return;
-  }}
-  el.innerHTML = '<pre>'+esc(JSON.stringify(rl, null, 2))+'</pre>';
-}}
-
-function update(data) {{
-  const t = data.agent_totals || {{}};
-  const mode = data.deployment_mode || 'local';
-  document.getElementById('countRunning').textContent = (data.counts||{{}}).running || 0;
-  document.getElementById('countRetrying').textContent = (data.counts||{{}}).retrying || 0;
-  document.getElementById('countWaiting').textContent = (data.counts||{{}}).waiting || 0;
-  document.getElementById('countCompleted').textContent = (data.counts||{{}}).completed || 0;
-  document.getElementById('totalTokens').textContent = fmt(t.total_tokens || 0);
-  document.getElementById('inputTokens').textContent = fmt(t.input_tokens || 0) + ' in';
-  document.getElementById('outputTokens').textContent = fmt(t.output_tokens || 0) + ' out';
-  document.getElementById('runtime').textContent = fmtTime(t.seconds_running || 0);
-  renderRunning(data.running || [], mode);
-  renderRetrying(data.retrying || []);
-  renderWaiting(data.waiting || []);
-  renderCompleted(data.completed || []);
-  renderRateLimits(data.rate_limits);
-  if (mode === 'distributed') {{
-    document.getElementById('workersSection').style.display = '';
-    document.getElementById('pendingJobsSection').style.display = '';
-    renderWorkers(data.workers || []);
-    renderPendingJobs(data.pending_jobs || []);
-  }} else {{
-    document.getElementById('workersSection').style.display = 'none';
-    document.getElementById('pendingJobsSection').style.display = 'none';
-  }}
-  lastFetch = Date.now();
-}}
-
-let stateEvtSource = null;
-let pollTimer = null;
-
-function startSSE() {{
-  stateEvtSource = new EventSource('/api/v1/state/stream');
-  stateEvtSource.onmessage = function(e) {{
-    try {{
-      const data = JSON.parse(e.data);
-      update(data);
-      document.getElementById('statusDot').style.background = 'var(--green)';
-      document.getElementById('statusText').textContent = 'Live (SSE)';
-    }} catch(err) {{ /* ignore parse errors */ }}
-  }};
-  stateEvtSource.onerror = function() {{
-    stateEvtSource.close();
-    stateEvtSource = null;
-    startPolling();
-  }};
-  if (pollTimer) {{ clearInterval(pollTimer); pollTimer = null; }}
-}}
-
-async function poll() {{
-  try {{
-    const r = await fetch('/api/v1/state');
-    if (r.ok) {{
-      update(await r.json());
-      document.getElementById('statusDot').style.background = 'var(--green)';
-      document.getElementById('statusText').textContent = 'Polling (fallback)';
-    }}
-  }} catch(e) {{
-    document.getElementById('statusDot').style.background = 'var(--red)';
-    document.getElementById('statusText').textContent = 'Disconnected';
-  }}
-}}
-
-function startPolling() {{
-  document.getElementById('statusText').textContent = 'Polling (fallback)';
-  poll();
-  pollTimer = setInterval(poll, 3000);
-  setTimeout(function() {{ if (!stateEvtSource) startSSE(); }}, 10000);
-}}
-
-async function triggerRefresh() {{
-  const btn = document.getElementById('refreshBtn');
-  btn.textContent = 'Refreshing...';
-  btn.disabled = true;
-  try {{
-    await fetch('/api/v1/refresh', {{ method: 'POST' }});
-    await new Promise(r => setTimeout(r, 500));
-    await poll();
-  }} catch(e) {{}}
-  btn.textContent = 'Refresh Now';
-  btn.disabled = false;
-}}
-
-async function removeRetry(identifier) {{
-  if (!confirm('Remove ' + identifier + ' from retry queue? It will stop retrying.')) return;
-  try {{
-    const r = await fetch('/api/v1/' + encodeURIComponent(identifier) + '/remove-retry', {{ method: 'POST' }});
-    if (r.ok) {{
-      await poll();
-    }} else {{
-      const data = await r.json().catch(() => ({{}}));
-      alert('Failed to remove: ' + (data.error?.message || r.statusText));
-    }}
-  }} catch(e) {{
-    alert('Failed to remove: ' + e.message);
-  }}
-}}
-
-// Update relative timestamps every second
-setInterval(() => {{
-  const s = Math.floor((Date.now() - lastFetch) / 1000);
-  document.getElementById('lastUpdate').textContent = s < 3 ? 'Updated just now' : 'Updated '+s+'s ago';
-}}, 1000);
-
-// ── Live Log Panel ──────────────────────────────────────────────
-let currentLogIssue = null;
-let currentEventSource = null;
-
-function openLogPanel(identifier) {{
-  if (currentLogIssue === identifier) {{ closeLogPanel(); return; }}
-  closeLogPanel();
-  currentLogIssue = identifier;
-  const panel = document.getElementById('logPanel');
-  const title = document.getElementById('logPanelTitle');
-  const body = document.getElementById('logPanelBody');
-  title.textContent = 'Event Log — ' + identifier;
-  body.innerHTML = '';
-  panel.classList.add('open');
-  currentEventSource = new EventSource('/api/v1/' + encodeURIComponent(identifier) + '/stream');
-  currentEventSource.onmessage = function(e) {{ appendLogEntry(JSON.parse(e.data)); }};
-  currentEventSource.onerror = function() {{ appendLogEntry({{event_type:'notification',message:'Stream disconnected',seq:0,timestamp:new Date().toISOString()}}); }};
-}}
-
-function closeLogPanel() {{
-  if (currentEventSource) {{ currentEventSource.close(); currentEventSource = null; }}
-  currentLogIssue = null;
-  document.getElementById('logPanel').classList.remove('open');
-}}
-
-function appendLogEntry(entry) {{
-  const body = document.getElementById('logPanelBody');
-  const div = document.createElement('div');
-  div.className = 'log-entry';
-  const ts = entry.timestamp ? ago(entry.timestamp) : '';
-  const badgeClass = entry.event_type || 'notification';
-  let parts = '<span class="log-ts">'+esc(ts)+'</span>';
-  parts += '<span class="log-badge '+esc(badgeClass)+'">'+esc(entry.event_type||'')+'</span>';
-  if (entry.message) parts += '<span class="log-msg">'+esc(entry.message)+'</span>';
-  else if (!entry.tokens) return;
-  if (entry.tokens) parts += '<span class="log-tokens">'+fmt(entry.tokens.total_tokens||0)+' tok</span>';
-  div.innerHTML = parts;
-  body.appendChild(div);
-  body.scrollTop = body.scrollHeight;
-}}
-
-// Initial render from server-embedded data
-update(INITIAL);
-// Start SSE (falls back to polling on error)
-startSSE();
-</script>
-</body>
-</html>"##,
-        initial_json = script_safe_json(&serde_json::to_string(&initial_state).unwrap_or_default())
-    ));
-
-    html
+/// In release builds, use the compile-time embedded copies directly.
+#[cfg(not(debug_assertions))]
+fn load_dashboard_template() -> String {
+    DASHBOARD_HTML
+        .replace("/* __DASHBOARD_CSS__ */", DASHBOARD_CSS)
+        .replace("/* __DASHBOARD_JS__ */", DASHBOARD_JS)
 }
 
 /// Minimal HTML escaping for display safety.
@@ -2533,6 +1981,38 @@ mod tests {
             script_safe_json("{\"key\":\"value\"}"),
             "{\"key\":\"value\"}"
         );
+    }
+
+    // ── load_dashboard_template tests ──────────────────────────────
+
+    #[test]
+    fn test_load_dashboard_template_returns_valid_html() {
+        let html = load_dashboard_template();
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("Symphony"));
+        assert!(html.contains("__INITIAL_STATE__"));
+        // CSS is injected into the template
+        assert!(html.contains("--bg: #0f0f1a"));
+        // JS is injected into the template
+        assert!(html.contains("function renderRunning"));
+        assert!(html.contains("function startSSE"));
+    }
+
+    #[test]
+    fn test_load_dashboard_template_placeholders_replaced() {
+        let html = load_dashboard_template();
+        // The CSS/JS placeholders should be replaced with actual content
+        assert!(!html.contains("/* __DASHBOARD_CSS__ */"));
+        assert!(!html.contains("/* __DASHBOARD_JS__ */"));
+    }
+
+    #[test]
+    fn test_dashboard_constants_are_valid() {
+        // Verify the include_str! constants contain expected content
+        assert!(DASHBOARD_HTML.contains("<!DOCTYPE html>"));
+        assert!(DASHBOARD_HTML.contains("__INITIAL_STATE__"));
+        assert!(DASHBOARD_CSS.contains("--bg: #0f0f1a"));
+        assert!(DASHBOARD_JS.contains("function renderRunning"));
     }
 
     // ── build_snapshot tests ─────────────────────────────────────────

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Symphony Dashboard</title>
+<style>
+/* __DASHBOARD_CSS__ */
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1><span>Symphony</span> Dashboard</h1>
+  <div class="header-right">
+    <span><span class="status-dot" id="statusDot"></span> <span id="statusText">Connected</span></span>
+    <span class="updated" id="lastUpdate">Updated just now</span>
+    <button class="btn" id="refreshBtn" onclick="triggerRefresh()">Refresh Now</button>
+  </div>
+</div>
+
+<div class="content">
+  <div class="stats">
+    <div class="stat-card">
+      <div class="label">Running</div>
+      <div class="value accent" id="countRunning">0</div>
+      <div class="sub">active sessions</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Total Tokens</div>
+      <div class="value" id="totalTokens">0</div>
+      <div class="sub"><span class="token-bar"><span class="in" id="inputTokens">0 in</span> / <span class="out" id="outputTokens">0 out</span></span></div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Runtime</div>
+      <div class="value" id="runtime">0s</div>
+      <div class="sub">total agent time</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Retrying</div>
+      <div class="value" id="countRetrying">0</div>
+      <div class="sub">in retry queue</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Waiting</div>
+      <div class="value" id="countWaiting">0</div>
+      <div class="sub">awaiting review</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Completed</div>
+      <div class="value" id="countCompleted">0</div>
+      <div class="sub">finished runs</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Running Sessions <span class="badge" id="runningBadge">0</span></h2>
+    </div>
+    <div id="runningContent">
+      <div class="empty-state">
+        <div class="icon">No running sessions</div>
+        <p>Waiting for Linear issues in active states.<br>Move an issue to Todo or In Progress to start.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="log-panel" id="logPanel">
+    <div class="log-panel-header">
+      <h3 id="logPanelTitle">Event Log</h3>
+      <button class="log-panel-close" onclick="closeLogPanel()">X</button>
+    </div>
+    <div class="log-panel-body" id="logPanelBody"></div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Retry Queue <span class="badge" id="retryBadge">0</span></h2>
+    </div>
+    <div id="retryContent">
+      <div class="empty-state">
+        <div class="icon">No retries pending</div>
+        <p>Failed or timed-out sessions will appear here with their retry schedule.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <h2>Waiting for Review <span class="badge" id="waitingBadge">0</span></h2>
+    </div>
+    <div id="waitingContent">
+      <div class="empty-state">
+        <div class="icon">No PRs waiting</div>
+        <p>Issues waiting for PR review or merge will appear here.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="workersSection" style="display:none;">
+    <div class="section-header">
+      <h2>Connected Workers <span class="badge" id="workersBadge">0</span></h2>
+    </div>
+    <div id="workersContent">
+      <div class="empty-state">
+        <div class="icon">No workers connected</div>
+        <p>Workers will appear here when they register with the orchestrator.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="pendingJobsSection" style="display:none;">
+    <div class="section-header">
+      <h2>Job Queue <span class="badge" id="pendingJobsBadge">0</span></h2>
+    </div>
+    <div id="pendingJobsContent">
+      <div class="empty-state">
+        <div class="icon">No pending jobs</div>
+        <p>Jobs waiting to be claimed by workers will appear here.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="completedSection">
+    <div class="section-header" style="cursor:pointer;" onclick="toggleCompleted()">
+      <h2>Completed / History <span class="badge" id="completedBadge">0</span></h2>
+      <span id="completedToggle" style="font-size:12px;color:var(--text-dim);">Show</span>
+    </div>
+    <div id="completedContent" style="display:none;">
+      <div class="empty-state">
+        <div class="icon">No completed runs</div>
+        <p>Finished agent sessions will appear here.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="rateLimitSection">
+    <div class="section-header">
+      <h2>Rate Limits</h2>
+    </div>
+    <div id="rateLimitContent" class="rate-limits">
+      <div class="empty-state">
+        <p>No rate limit data</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const INITIAL = __INITIAL_STATE__;
+/* __DASHBOARD_JS__ */
+</script>
+</body>
+</html>
