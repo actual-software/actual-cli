@@ -187,7 +187,7 @@ fn test_run_sync_without_claude() {
     // Explicitly set --runner to prevent the user's config from auto-selecting
     // a different runner (e.g. codex-cli) which would bypass find_claude_binary().
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+    let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude", &_lock);
     let cli = Cli::parse_from(["actual", "adr-bot", "--dry-run", "--runner", "claude-cli"]);
     assert_eq!(handle_result(run(cli)), 2);
 }
@@ -197,7 +197,7 @@ fn test_run_status() {
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
-    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap(), &_lock);
     let cli = Cli::parse_from(["actual", "status"]);
     assert_eq!(handle_result(run(cli)), 0);
 }
@@ -205,7 +205,7 @@ fn test_run_status() {
 #[test]
 fn test_run_auth() {
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+    let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude", &_lock);
     let cli = Cli::parse_from(["actual", "auth"]);
     assert_eq!(handle_result(run(cli)), 2);
 }
@@ -215,7 +215,7 @@ fn test_run_config_show() {
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
-    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap(), &_lock);
     let cli = Cli::parse_from(["actual", "config", "show"]);
     assert_eq!(handle_result(run(cli)), 0);
 }
@@ -225,7 +225,7 @@ fn test_run_config_set() {
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
-    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap(), &_lock);
     let cli = Cli::parse_from(["actual", "config", "set", "batch_size", "10"]);
     assert_eq!(handle_result(run(cli)), 0);
 }
@@ -235,7 +235,7 @@ fn test_run_config_path() {
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let config_file = dir.path().join("config.yaml");
-    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap(), &_lock);
     let cli = Cli::parse_from(["actual", "config", "path"]);
     assert_eq!(handle_result(run(cli)), 0);
 }
@@ -395,8 +395,8 @@ fn test_run_sync_force_with_fake_claude() {
         common::ANALYSIS_SINGLE_PROJECT,
     );
 
-    let _guard_binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
-    let _guard_config = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
+    let _guard_binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap(), &_lock);
+    let _guard_config = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap(), &_lock);
 
     let cli = Cli::parse_from([
         "actual",
@@ -420,7 +420,7 @@ fn test_run_sync_not_authenticated_with_fake_claude() {
 
     let script = common::create_fake_claude_binary(dir.path(), common::AUTH_FAIL, "{}");
 
-    let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+    let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap(), &_lock);
 
     // Explicitly set --runner to prevent the user's config from auto-selecting
     // a different runner (e.g. codex-cli) which would bypass find_claude_binary().
