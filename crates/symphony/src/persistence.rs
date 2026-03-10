@@ -61,6 +61,7 @@ pub trait StateStore: Send + Sync {
     fn save_agent_totals(&self, totals: &AgentTotals) -> Result<()>;
     fn load_agent_totals(&self) -> Result<AgentTotals>;
     fn mark_completed(&self, issue_id: &str) -> Result<()>;
+    fn remove_completed(&self, issue_id: &str) -> Result<()>;
     fn load_completed_ids(&self) -> Result<Vec<String>>;
     fn save_claimed(&self, issue_id: &str) -> Result<()>;
     fn remove_claimed(&self, issue_id: &str) -> Result<()>;
@@ -383,6 +384,15 @@ impl StateStore for SqliteStore {
             "INSERT OR IGNORE INTO completed_issues (issue_id, completed_at)
              VALUES (?1, ?2)",
             params![issue_id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    fn remove_completed(&self, issue_id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "DELETE FROM completed_issues WHERE issue_id = ?1",
+            params![issue_id],
         )?;
         Ok(())
     }
@@ -931,6 +941,25 @@ mod tests {
         let store = SqliteStore::in_memory().unwrap();
         let ids = store.load_completed_ids().unwrap();
         assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn remove_completed_deletes_entry() {
+        let store = SqliteStore::in_memory().unwrap();
+        store.mark_completed("issue-1").unwrap();
+        store.mark_completed("issue-2").unwrap();
+
+        store.remove_completed("issue-1").unwrap();
+        let ids = store.load_completed_ids().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains(&"issue-2".to_string()));
+    }
+
+    #[test]
+    fn remove_completed_nonexistent_is_ok() {
+        let store = SqliteStore::in_memory().unwrap();
+        // Should not error even if nothing to remove
+        store.remove_completed("nonexistent").unwrap();
     }
 
     // ── Claimed issues ────────────────────────────────────────────────

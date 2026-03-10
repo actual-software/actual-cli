@@ -342,6 +342,23 @@ impl Orchestrator {
 
         debug!(count = candidates.len(), "fetched candidate issues");
 
+        // Phase 3b: Clear stale completed entries. If Linear says an issue is
+        // back in an active state, it should be eligible for re-dispatch even
+        // if it completed in a previous cycle.
+        {
+            let mut state = self.state.write().await;
+            for issue in &candidates {
+                if state.clear_completed(&issue.id) {
+                    info!(issue_id = %issue.id, issue_identifier = %issue.identifier, "cleared stale completed marker for active issue");
+                    if let Some(ref store) = self.store {
+                        if let Err(e) = store.remove_completed(&issue.id) {
+                            debug!(issue_id = %issue.id, error = %e, "failed to remove persisted completed marker");
+                        }
+                    }
+                }
+            }
+        }
+
         // Phase 4: Sort and dispatch
         let sorted = sort_for_dispatch(candidates);
         for issue in sorted {
@@ -447,7 +464,22 @@ impl Orchestrator {
                         let is_clean =
                             details.mergeable == Some(true) && is_pr_state_clean(&details);
                         if is_clean {
-                            info!(issue_id = %issue.id, branch = %branch, pr_number = pr.number, "skipping dispatch: open PR is clean");
+                            info!(issue_id = %issue.id, branch = %branch, pr_number = pr.number, "skipping dispatch: open PR is clean, transitioning to In Review");
+                            // PR is clean — clear any conflict dispatch counter
+                            {
+                                let mut state = self.state.write().await;
+                                state.clear_conflict_dispatch(&issue.id);
+                            }
+                            let tracker_config = config.tracker.clone();
+                            transition_to_in_review(
+                                &issue.id,
+                                &issue.identifier,
+                                &tracker_config,
+                                &self.http,
+                            )
+                            .await;
+                            self.add_to_waiting_for_review(&issue.id, &issue.identifier, None)
+                                .await;
                             return false;
                         }
                         info!(issue_id = %issue.id, branch = %branch, pr_number = pr.number, mergeable = ?details.mergeable, mergeable_state = ?details.mergeable_state, "dispatching: open PR needs attention");
@@ -893,6 +925,7 @@ impl Orchestrator {
                 WorkerExitReason::Normal => {
                     info!(issue_id = %issue_id, issue_identifier = %identifier, "worker completed normally");
                     state.mark_completed(issue_id.to_string());
+                    state.clear_conflict_dispatch(issue_id);
                     // Persist completed marker (best-effort)
                     if let Some(ref store) = self.store {
                         if let Err(e) = store.mark_completed(issue_id) {
@@ -1496,7 +1529,26 @@ impl Orchestrator {
                 issue.identifier.to_lowercase()
             );
             if let Ok(Some(false)) = github.is_pr_mergeable(&branch).await {
-                warn!(issue_id = %issue.id, issue_identifier = %issue.identifier, "In Review issue has merge conflicts, transitioning to In Progress");
+                // Check if we've exceeded the conflict dispatch cap
+                let count = {
+                    let state = self.state.read().await;
+                    state.conflict_dispatches(&issue.id)
+                };
+                if count >= crate::model::MAX_CONFLICT_DISPATCHES {
+                    warn!(
+                        issue_id = %issue.id,
+                        issue_identifier = %issue.identifier,
+                        conflict_dispatches = count,
+                        "merge conflict dispatch cap reached, leaving in In Review for human intervention"
+                    );
+                    continue;
+                }
+
+                warn!(issue_id = %issue.id, issue_identifier = %issue.identifier, conflict_dispatches = count + 1, "In Review issue has merge conflicts, transitioning to In Progress");
+                {
+                    let mut state = self.state.write().await;
+                    state.increment_conflict_dispatch(&issue.id);
+                }
                 if let Err(e) = client
                     .transition_issue_state(&issue.id, "In Progress")
                     .await
@@ -1817,6 +1869,7 @@ impl Orchestrator {
                 {
                     let mut state = self.state.write().await;
                     state.mark_completed(issue.id.clone());
+                    state.clear_conflict_dispatch(&issue.id);
                 }
                 self.terminate_running_issue(&issue.id, true).await;
             } else if is_in_review_state(&issue.state) {
@@ -3378,10 +3431,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_dispatch_open_pr_exists() {
-        let mut server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+        let mut linear_server = mockito::Server::new_async().await;
 
         // Mock: find_open_pr returns an open PR
-        let _list_mock = server
+        let _list_mock = gh_server
             .mock("GET", "/repos/test-owner/test-repo/pulls")
             .match_query(mockito::Matcher::AllOf(vec![mockito::Matcher::UrlEncoded(
                 "state".to_string(),
@@ -3396,11 +3450,12 @@ mod tests {
                 }])
                 .to_string(),
             )
+            .expect_at_least(1)
             .create_async()
             .await;
 
         // Mock: get_pr_details returns clean PR
-        let _detail_mock = server
+        let _detail_mock = gh_server
             .mock("GET", "/repos/test-owner/test-repo/pulls/42")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -3417,12 +3472,43 @@ mod tests {
             .create_async()
             .await;
 
-        let mut config = test_config();
-        config.github = Some(test_github_config(&server.url()));
+        // Mock: Linear transition_issue_state (called when clean PR triggers In Review)
+        let _linear_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"issueUpdate":{"success":true},"workflowStates":{"nodes":[{"id":"state-in-review","name":"In Review"}]}}}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(test_github_config(&gh_server.url()));
         let orch = Orchestrator::new(config.clone(), "template".to_string());
 
+        // Pre-set a conflict dispatch count to verify it gets cleared
+        {
+            let mut state = orch.state.write().await;
+            state.increment_conflict_dispatch("id1");
+            state.increment_conflict_dispatch("id1");
+        }
+
         let issue = make_issue("id1", "PROJ-1", "Todo");
-        assert!(!orch.should_dispatch(&issue, &config).await);
+        let result = orch.should_dispatch(&issue, &config).await;
+        assert!(!result);
+
+        // Verify the issue was added to waiting_for_review
+        let state = orch.state.read().await;
+        assert!(
+            state.waiting_for_review.contains_key("id1"),
+            "issue should be in waiting_for_review after clean PR skip"
+        );
+        // Verify conflict dispatch counter was cleared (PR is now clean)
+        assert_eq!(
+            state.conflict_dispatches("id1"),
+            0,
+            "conflict dispatch counter should be cleared when PR is clean"
+        );
     }
 
     #[tokio::test]
@@ -3883,6 +3969,27 @@ mod tests {
         let retry = state.retry_attempts.get("id1").unwrap();
         assert_eq!(retry.attempt, 0); // continuation, not failure
         assert!(retry.error.is_none());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_clears_conflict_dispatch() {
+        let orch = test_orchestrator();
+        {
+            let mut state = orch.state.write().await;
+            state.increment_conflict_dispatch("id1");
+            state.increment_conflict_dispatch("id1");
+        }
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "Todo").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert_eq!(
+            state.conflict_dispatches("id1"),
+            0,
+            "conflict dispatch counter should be cleared on Normal exit"
+        );
     }
 
     #[traced_test]
@@ -8532,6 +8639,130 @@ mod tests {
         gh_details_mock.assert_async().await;
         linear_resolve_mock.assert_async().await;
         linear_update_mock.assert_async().await;
+
+        // Verify the conflict dispatch counter was incremented
+        let state = orch.state.read().await;
+        assert_eq!(state.conflict_dispatches("issue-99"), 1);
+    }
+
+    /// When the conflict dispatch counter has reached the cap, the orchestrator
+    /// should leave the issue in "In Review" and NOT transition it back to
+    /// "In Progress".
+    #[tokio::test]
+    #[traced_test]
+    async fn test_reconcile_pr_conflicts_cap_reached_leaves_in_review() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Linear: fetch "In Review" issues — returns one issue not currently running
+        let linear_fetch_mock = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("In Review".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "data": {
+                        "issues": {
+                            "nodes": [{
+                                "id": "issue-99",
+                                "identifier": "TST-99",
+                                "title": "Capped issue",
+                                "state": { "name": "In Review" },
+                                "priority": null,
+                                "branchName": null,
+                                "url": null,
+                                "labels": { "nodes": [] },
+                                "relations": { "nodes": [] },
+                                "createdAt": "2024-01-01T00:00:00Z",
+                                "updatedAt": "2024-01-01T00:00:00Z"
+                            }],
+                            "pageInfo": { "hasNextPage": false }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // GitHub: find open PR for TST-99
+        let gh_find_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "head".to_string(),
+                    "test-org:symphony/tst-99".to_string(),
+                ),
+                mockito::Matcher::UrlEncoded("state".to_string(), "open".to_string()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&vec![serde_json::json!({
+                    "number": 77,
+                    "state": "open"
+                })])
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        // GitHub: PR details — conflicting
+        let gh_details_mock = server
+            .mock("GET", "/repos/test-org/test-repo/pulls/77")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::to_string(&serde_json::json!({
+                    "number": 77,
+                    "state": "open",
+                    "mergeable": false,
+                    "mergeable_state": "dirty"
+                }))
+                .unwrap(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "Test prompt".to_string());
+
+        // Pre-set the conflict dispatch count to the cap
+        {
+            let mut state = orch.state.write().await;
+            for _ in 0..crate::model::MAX_CONFLICT_DISPATCHES {
+                state.increment_conflict_dispatch("issue-99");
+            }
+        }
+
+        orch.reconcile_pr_conflicts().await;
+
+        // Should NOT have transitioned — cap reached
+        assert!(logs_contain(
+            "merge conflict dispatch cap reached, leaving in In Review for human intervention"
+        ));
+        assert!(!logs_contain(
+            "In Review issue has merge conflicts, transitioning to In Progress"
+        ));
+
+        linear_fetch_mock.assert_async().await;
+        gh_find_mock.assert_async().await;
+        gh_details_mock.assert_async().await;
+
+        // Counter should remain at the cap (not incremented further)
+        let state = orch.state.read().await;
+        assert_eq!(
+            state.conflict_dispatches("issue-99"),
+            crate::model::MAX_CONFLICT_DISPATCHES
+        );
     }
 
     #[tokio::test]
@@ -11355,6 +11586,8 @@ mod tests {
         fail_mark_completed: bool,
         /// When true, save_log_entry returns an error.
         fail_save_log_entry: bool,
+        /// When true, remove_completed returns an error.
+        fail_remove_completed: bool,
         /// When true, load_claimed_ids returns an error.
         fail_load_claimed: bool,
         /// When true, load_waiting returns an error.
@@ -11390,6 +11623,7 @@ mod tests {
                 fail_save_totals: false,
                 fail_mark_completed: false,
                 fail_save_log_entry: false,
+                fail_remove_completed: false,
                 fail_load_claimed: false,
                 fail_load_waiting: false,
                 fail_save_claimed: false,
@@ -11469,6 +11703,11 @@ mod tests {
 
         fn with_fail_remove_waiting(mut self) -> Self {
             self.fail_remove_waiting = true;
+            self
+        }
+
+        fn with_fail_remove_completed(mut self) -> Self {
+            self.fail_remove_completed = true;
             self
         }
 
@@ -11587,6 +11826,14 @@ mod tests {
                 return Err(persistence::PersistenceError::LockPoisoned);
             }
             self.completed.lock().unwrap().push(issue_id.to_string());
+            Ok(())
+        }
+
+        fn remove_completed(&self, issue_id: &str) -> persistence::Result<()> {
+            if self.fail_remove_completed {
+                return Err(persistence::PersistenceError::LockPoisoned);
+            }
+            self.completed.lock().unwrap().retain(|id| id != issue_id);
             Ok(())
         }
 
@@ -14177,5 +14424,184 @@ mod tests {
             merged: None,
         };
         assert!(is_pr_state_clean(&pr));
+    }
+
+    /// Integration: a previously-completed issue returns as a Linear candidate
+    /// and gets its completed marker cleared (Phase 3b), then is re-dispatched.
+    /// Exercises `on_tick` Phase 3b + `MockStore::remove_completed`.
+    #[traced_test]
+    #[tokio::test]
+    async fn test_integration_clear_stale_completed_on_redispatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        // All Linear GraphQL calls hit POST /. We return id1 as a candidate
+        // for EVERY request. The key calls are:
+        //   1. startup_cleanup (terminal fetch) → returns id1 but that's OK
+        //      (id1 has a Todo workspace dir that doesn't exist → no cleanup)
+        //   2. on_tick candidate fetch → returns id1 → Phase 3b clears completed
+        //   3. dispatch_issue transition/label → format mismatch → warn + continue
+        //   4. on_worker_exit state refresh → same response → parsed but no "Done"
+        //      state match → cached state "Todo" → retry (not terminal)
+        //
+        // The test only needs to observe that Phase 3b fires (clear + store
+        // removal), NOT that the full dispatch-complete cycle finishes.
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 100;
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+
+        // Pre-populate MockStore with id1 as completed
+        let store = Arc::new(MockStore::new());
+        store.mark_completed("id1").unwrap();
+
+        let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string())
+            .with_store(store.clone())
+            .await;
+
+        // Verify id1 is in the completed set after with_store()
+        {
+            let state = orch.state.read().await;
+            assert!(
+                state.is_completed("id1"),
+                "id1 should be completed after with_store()"
+            );
+        }
+
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        // Monitor: wait for Phase 3b to clear the completed marker (the issue
+        // appears in running). Then shut down — we don't need the full cycle.
+        let monitor = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                let state = state_ref.read().await;
+                // Phase 3b clears the completed marker, then dispatch adds
+                // the issue to running.
+                if !state.is_completed("id1") || state.running.contains_key("id1") {
+                    break;
+                }
+                drop(state);
+            }
+            // Give a moment for the dispatch to settle
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            orch.run(shutdown_rx, reload_rx),
+        )
+        .await
+        .expect("test timed out waiting for Phase 3b to clear completed marker");
+        monitor.abort();
+
+        // Verify Phase 3b ran
+        assert!(logs_contain(
+            "cleared stale completed marker for active issue"
+        ));
+
+        // Verify store.remove_completed was called (MockStore removes from its vec)
+        // After Phase 3b, id1 should NOT be in the store's completed list
+        // (it was removed by remove_completed, and not yet re-added since the
+        //  agent might still be running or in retry).
+        let completed = store.completed_ids();
+        assert!(
+            !completed.contains(&"id1".to_string()),
+            "id1 should have been removed from the store by Phase 3b"
+        );
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_phase3b_remove_completed_store_error_is_non_fatal() {
+        // When store.remove_completed() fails, Phase 3b should log a debug
+        // message but still clear the in-memory completed marker and continue.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut server = mockito::Server::new_async().await;
+
+        server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_candidates_response(&[("id1", "PROJ-1", "Todo")]))
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&server.url());
+        config.workspace.root = tmp.path().to_path_buf();
+        config.polling.interval_ms = 100;
+        config.coding_agent.command =
+            r#"printf '{"type":"result","result":"done"}\n' #-p"#.to_string();
+
+        // Pre-populate MockStore with id1 as completed AND failing remove_completed
+        let store = Arc::new(MockStore::new().with_fail_remove_completed());
+        store.mark_completed("id1").unwrap();
+
+        let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string())
+            .with_store(store.clone())
+            .await;
+
+        // Verify id1 is in the completed set
+        {
+            let state = orch.state.read().await;
+            assert!(state.is_completed("id1"));
+        }
+
+        let state_ref = Arc::clone(&orch.state);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
+
+        // Wait for Phase 3b to clear the in-memory completed marker
+        let monitor = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                let state = state_ref.read().await;
+                if !state.is_completed("id1") || state.running.contains_key("id1") {
+                    break;
+                }
+                drop(state);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            orch.run(shutdown_rx, reload_rx),
+        )
+        .await
+        .expect("test timed out waiting for Phase 3b");
+        monitor.abort();
+
+        // The in-memory marker was still cleared despite the store error
+        assert!(logs_contain(
+            "cleared stale completed marker for active issue"
+        ));
+
+        // The debug error path was hit
+        assert!(logs_contain("failed to remove persisted completed marker"));
+
+        // The store still has id1 because remove_completed failed
+        let completed = store.completed_ids();
+        assert!(
+            completed.contains(&"id1".to_string()),
+            "id1 should still be in the store since remove_completed failed"
+        );
     }
 }
