@@ -94,34 +94,44 @@ The CLI auto-selects a runner from the model name:
 
 > For deep runner details (install steps, compatibility, special behaviors), see `references/runner-guide.md`.
 
+## Non-Interactive Environments
+
+This skill runs inside coding agents (Claude Code, Codex, Cursor) where the Bash tool does **not** provide a TTY. The CLI's TUI prompts and confirmation dialogs will fail with `TerminalIOError` unless disabled.
+
+**Always pass `--force --no-tui`** on every `actual adr-bot` invocation:
+- `--no-tui` disables TUI rendering that requires a terminal
+- `--force` skips interactive confirmation prompts that cannot receive input
+
+Use the agent's built-in question/confirmation tools (e.g., `AskUserQuestion`) for user confirmation instead of relying on CLI prompts.
+
 ## Sync Quick Reference
 
 The most common sync patterns:
 
 ```bash
 # Preview what sync would do (safe, no file changes)
-actual adr-bot --dry-run
+actual adr-bot --dry-run --force --no-tui
 
 # Preview with full content
-actual adr-bot --dry-run --full
+actual adr-bot --dry-run --full --force --no-tui
 
-# Run sync, skip confirmation prompts
-actual adr-bot --force
+# Run sync
+actual adr-bot --force --no-tui
 
 # Sync specific subdirectories only (monorepo)
-actual adr-bot --project services/api --project services/web
+actual adr-bot --force --no-tui --project services/api --project services/web
 
 # Use a specific runner/model
-actual adr-bot --runner anthropic-api --model claude-sonnet-4-6
+actual adr-bot --force --no-tui --runner anthropic-api --model claude-sonnet-4-6
 
 # Skip AI tailoring (use raw ADRs)
-actual adr-bot --no-tailor
+actual adr-bot --force --no-tui --no-tailor
 
 # Re-offer previously rejected ADRs
-actual adr-bot --reset-rejections
+actual adr-bot --force --no-tui --reset-rejections
 
 # Set spending cap
-actual adr-bot --max-budget-usd 5.00
+actual adr-bot --force --no-tui --max-budget-usd 5.00
 ```
 
 > For the complete 13-step sync internals, see `references/sync-workflow.md`.
@@ -151,19 +161,19 @@ If any check shows a problem, diagnose and fix before proceeding.
 ### 2. Dry-run (LOW freedom -- exact command)
 
 ```bash
-actual adr-bot --dry-run [--full] [user's flags]
+actual adr-bot --dry-run --force --no-tui [--full] [user's flags]
 ```
 
 Show the user what would change. Let them review.
 
 ### 3. Confirm (HIGH freedom)
 
-Ask user if they want to proceed. If no, stop.
+Ask user if they want to proceed using the agent's built-in tools (e.g., `AskUserQuestion`). Do NOT rely on CLI prompts — they will fail in non-interactive shells. If no, stop.
 
 ### 4. Execute (LOW freedom -- exact command)
 
 ```bash
-actual adr-bot [user's flags]
+actual adr-bot --force --no-tui [user's flags]
 ```
 
 ### 5. On failure: Diagnose
@@ -206,6 +216,7 @@ Use inline commands instead when checking a single thing (e.g., just `actual aut
 | ConfigError | 1 | Invalid config file | Check YAML syntax, run `actual config show` |
 | AnalysisEmpty | 1 | No analysis results | Check project path, repo content |
 | TailoringValidationError | 1 | Tailored output invalid | Retry, or use `--no-tailor` |
+| TerminalIOError | 1 | CLI needs a TTY (non-interactive shell) | Add `--force --no-tui` flags |
 | IoError | 5 | File I/O failure | Check permissions, disk space |
 | UserCancelled | 4 | User cancelled operation | (intentional) |
 
