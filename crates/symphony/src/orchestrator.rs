@@ -998,37 +998,12 @@ impl Orchestrator {
                         // Issue is not terminal and not "In Review". Check if the
                         // worker left behind an open PR — if so, the agent likely
                         // ran out of turns before transitioning the Linear issue.
-                        // The orchestrator transitions it instead of looping forever.
-                        let pr_found = {
-                            let config = self.config.read().await;
-                            if let Some(github_config) = &config.github {
-                                let branch = format!(
-                                    "{}{}",
-                                    github_config.branch_prefix,
-                                    issue_identifier.to_lowercase()
-                                );
-                                let github = GitHubClient::new(github_config, self.http.clone());
-                                match github.find_open_pr(&branch).await {
-                                    Ok(Some(pr)) if pr.state == "open" => {
-                                        info!(issue_id = %issue_id, issue_identifier = %issue_identifier, pr_number = pr.number, "worker completed with open PR but issue not In Review — orchestrator transitioning");
-                                        transition_to_in_review(
-                                            issue_id,
-                                            &issue_identifier,
-                                            &config.tracker,
-                                            &self.http,
-                                        )
-                                        .await;
-                                        true
-                                    }
-                                    _ => false,
-                                }
-                            } else {
-                                false
-                            }
-                        };
+                        // Only transition to "In Review" if the PR is clean (mergeable,
+                        // no conflicts). Dirty PRs need another agent run to rebase.
+                        let pr_clean = self.check_exit_pr_clean(issue_id, &issue_identifier).await;
 
-                        if pr_found {
-                            // Treat as "In Review" — add to waiting_for_review
+                        if pr_clean {
+                            // PR is clean — treat as "In Review"
                             self.add_to_waiting_for_review(
                                 issue_id,
                                 &issue_identifier,
@@ -1040,7 +1015,7 @@ impl Orchestrator {
                             self.persist_completion_record(&mut *self.state.write().await, record);
                             self.remove_claim_label(issue_id, &issue_identifier).await;
                         } else {
-                            // No PR — schedule a continuation retry
+                            // No clean PR — schedule a continuation retry
                             let mut record = completion_template;
                             record.outcome = CompletionOutcome::Retry;
                             let mut state = self.state.write().await;
@@ -1939,6 +1914,45 @@ impl Orchestrator {
                     .await;
             }
         }
+    }
+
+    /// Check if the worker's branch has a clean open PR (mergeable, no conflicts).
+    /// If so, transition the issue to "In Review" and return `true`. If the PR
+    /// exists but is dirty (merge conflicts, failing CI), return `false` so the
+    /// caller schedules a retry instead of marking the issue as reviewed.
+    async fn check_exit_pr_clean(&self, issue_id: &str, issue_identifier: &str) -> bool {
+        let config = self.config.read().await;
+        let github_config = match &config.github {
+            Some(cfg) => cfg,
+            None => return false,
+        };
+        let branch = format!(
+            "{}{}",
+            github_config.branch_prefix,
+            issue_identifier.to_lowercase()
+        );
+        let github = GitHubClient::new(github_config, self.http.clone());
+        let pr = match github.find_open_pr(&branch).await {
+            Ok(Some(pr)) if pr.state == "open" => pr,
+            _ => return false,
+        };
+        // The list endpoint doesn't return mergeable/mergeable_state — fetch
+        // the full PR detail to get accurate merge status.
+        let details = match github.get_pr_details(pr.number).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(issue_id = %issue_id, issue_identifier = %issue_identifier, pr_number = pr.number, error = %e, "failed to get PR details on worker exit, scheduling retry");
+                return false;
+            }
+        };
+        let is_clean = details.mergeable == Some(true) && is_pr_state_clean(&details);
+        if is_clean {
+            info!(issue_id = %issue_id, issue_identifier = %issue_identifier, pr_number = pr.number, "worker exited with clean PR — transitioning to In Review");
+            transition_to_in_review(issue_id, issue_identifier, &config.tracker, &self.http).await;
+        } else {
+            info!(issue_id = %issue_id, issue_identifier = %issue_identifier, pr_number = pr.number, mergeable = ?details.mergeable, mergeable_state = ?details.mergeable_state, "worker exited with dirty PR — scheduling retry");
+        }
+        is_clean
     }
 
     async fn startup_cleanup(&self) {
@@ -5995,6 +6009,168 @@ mod tests {
 
         let state = orch.state.read().await;
         assert!(state.waiting_for_review.is_empty());
+    }
+
+    // ── check_exit_pr_clean ────────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_exit_pr_clean_returns_true_for_clean_pr() {
+        let mut gh_server = mockito::Server::new_async().await;
+        let mut linear_server = mockito::Server::new_async().await;
+
+        // GitHub: find_open_pr returns an open PR
+        let _pr_list = gh_server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{"number": 100, "state": "open"}]).to_string())
+            .create_async()
+            .await;
+
+        // GitHub: get_pr_details returns clean PR
+        let _pr_detail = gh_server
+            .mock("GET", "/repos/test-owner/test-repo/pulls/100")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "number": 100,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Linear: transition to In Review
+        let _linear_mock = linear_server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data":{"issueUpdate":{"success":true}}}"#)
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(test_github_config(&gh_server.url()));
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let result = orch.check_exit_pr_clean("id1", "ACTCLI-42").await;
+        assert!(result);
+        assert!(logs_contain("worker exited with clean PR"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_exit_pr_clean_returns_false_for_dirty_pr() {
+        let mut gh_server = mockito::Server::new_async().await;
+        let linear_server = mockito::Server::new_async().await;
+
+        // GitHub: find_open_pr returns an open PR
+        let _pr_list = gh_server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{"number": 100, "state": "open"}]).to_string())
+            .create_async()
+            .await;
+
+        // GitHub: get_pr_details returns dirty PR
+        let _pr_detail = gh_server
+            .mock("GET", "/repos/test-owner/test-repo/pulls/100")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "number": 100,
+                    "state": "open",
+                    "mergeable": false,
+                    "mergeable_state": "dirty"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(test_github_config(&gh_server.url()));
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let result = orch.check_exit_pr_clean("id1", "ACTCLI-42").await;
+        assert!(!result);
+        assert!(logs_contain("worker exited with dirty PR"));
+    }
+
+    #[tokio::test]
+    async fn test_check_exit_pr_clean_returns_false_without_github() {
+        let linear_server = mockito::Server::new_async().await;
+        let config = test_config_with_endpoint(&linear_server.url());
+        // github is None by default
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let result = orch.check_exit_pr_clean("id1", "ACTCLI-42").await;
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_check_exit_pr_clean_returns_false_when_no_pr() {
+        let mut gh_server = mockito::Server::new_async().await;
+        let linear_server = mockito::Server::new_async().await;
+
+        // GitHub: no open PR found
+        let _pr_list = gh_server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(test_github_config(&gh_server.url()));
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let result = orch.check_exit_pr_clean("id1", "ACTCLI-42").await;
+        assert!(!result);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn test_check_exit_pr_clean_returns_false_on_details_error() {
+        let mut gh_server = mockito::Server::new_async().await;
+        let linear_server = mockito::Server::new_async().await;
+
+        // GitHub: find_open_pr returns an open PR
+        let _pr_list = gh_server
+            .mock("GET", "/repos/test-owner/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{"number": 100, "state": "open"}]).to_string())
+            .create_async()
+            .await;
+
+        // GitHub: get_pr_details returns 500
+        let _pr_detail = gh_server
+            .mock("GET", "/repos/test-owner/test-repo/pulls/100")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(test_github_config(&gh_server.url()));
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        let result = orch.check_exit_pr_clean("id1", "ACTCLI-42").await;
+        assert!(!result);
+        assert!(logs_contain("failed to get PR details on worker exit"));
     }
 
     // ── dispatch_issue ───────────────────────────────────────────────
@@ -14455,6 +14631,23 @@ mod tests {
             .create_async()
             .await;
 
+        // GitHub: get_pr_details returns a clean PR
+        let _pr_details_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls/99")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "number": 99,
+                    "state": "open",
+                    "mergeable": true,
+                    "mergeable_state": "clean"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
         let mut config = test_config_with_endpoint(&linear_server.url());
         config.github = Some(crate::config::GitHubConfig {
             token: "test-gh-token".to_string(),
@@ -14481,9 +14674,77 @@ mod tests {
         assert_eq!(entry.pr_number, 99);
         assert_eq!(entry.identifier, "PROJ-1");
         assert_eq!(entry.branch, "symphony/proj-1");
-        assert!(logs_contain(
-            "worker completed with open PR but issue not In Review"
-        ));
+        assert!(logs_contain("worker exited with clean PR"));
+    }
+
+    /// When the issue is NOT terminal and NOT "In Review", and an open PR
+    /// exists but has merge conflicts, the orchestrator should schedule a
+    /// retry instead of transitioning to "In Review".
+    #[traced_test]
+    #[tokio::test]
+    async fn test_on_worker_exit_normal_else_dirty_pr_retries() {
+        let mut linear_server = mockito::Server::new_async().await;
+        let mut gh_server = mockito::Server::new_async().await;
+
+        // Linear: refresh returns "In Progress"
+        let _linear_refresh = linear_server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("IssuesByIds".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(mock_states_response(&[("id1", "PROJ-1", "In Progress")]))
+            .create_async()
+            .await;
+
+        // GitHub: find_open_pr returns an open PR
+        let _pr_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::json!([{"number": 99, "state": "open"}]).to_string())
+            .create_async()
+            .await;
+
+        // GitHub: get_pr_details returns dirty PR
+        let _pr_details_mock = gh_server
+            .mock("GET", "/repos/test-org/test-repo/pulls/99")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "number": 99,
+                    "state": "open",
+                    "mergeable": false,
+                    "mergeable_state": "dirty"
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut config = test_config_with_endpoint(&linear_server.url());
+        config.github = Some(crate::config::GitHubConfig {
+            token: "test-gh-token".to_string(),
+            repo_owner: "test-org".to_string(),
+            repo_name: "test-repo".to_string(),
+            api_base: gh_server.url(),
+            branch_prefix: "symphony/".to_string(),
+            auto_merge: false,
+        });
+        let orch = Orchestrator::new(config, "template".to_string());
+
+        // Insert running entry with "In Progress" state
+        let _cancel_rx = insert_running(&orch, "id1", "PROJ-1", "In Progress").await;
+
+        orch.on_worker_exit("id1", WorkerExitReason::Normal).await;
+
+        let state = orch.state.read().await;
+        assert!(!state.running.contains_key("id1"));
+        // Should be in retry queue — NOT in waiting_for_review
+        assert!(!state.waiting_for_review.contains_key("id1"));
+        assert!(state.retry_attempts.contains_key("id1"));
+        assert!(logs_contain("worker exited with dirty PR"));
     }
 
     /// When the issue is NOT terminal and NOT "In Review", and no PR exists
