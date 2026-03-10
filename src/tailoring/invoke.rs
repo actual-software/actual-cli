@@ -80,13 +80,21 @@ pub async fn invoke_tailoring<R: TailoringRunner>(
     let schema = tailoring_output_schema()?;
     let valid_ids: HashSet<&str> = adrs.iter().map(|a| a.id.as_str()).collect();
 
-    // First attempt; retry once on JSON parse failure.
+    // First attempt; retry once on JSON parse failure or structured output exhaustion.
     let output = match runner
         .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
         .await
     {
         Ok(output) => output,
         Err(ActualError::RunnerOutputParse(_)) => {
+            runner
+                .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
+                .await?
+        }
+        Err(ActualError::RunnerFailed { ref message, .. })
+            if message.contains("error_max_structured_output_retries") =>
+        {
+            tracing::warn!("structured output retries exhausted, retrying invocation");
             runner
                 .run_tailoring(&prompt, &schema, model_override, max_budget_usd)
                 .await?

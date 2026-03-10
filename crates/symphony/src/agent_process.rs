@@ -83,6 +83,7 @@ pub fn spawn_agent_process(
         .arg("-lc")
         .arg(full_command)
         .current_dir(workspace_path)
+        .env_remove("CLAUDECODE")
         .envs(env_vars)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
