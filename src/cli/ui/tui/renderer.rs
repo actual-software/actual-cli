@@ -777,7 +777,7 @@ impl TuiRenderer {
         }
         self.draw();
         if let Mode::Plain = &self.mode {
-            eprintln!("  ○ {message}");
+            println!("  ○ {message}");
         }
     }
 
@@ -790,7 +790,7 @@ impl TuiRenderer {
         self.push_log(idx, message);
         self.draw();
         if let Mode::Plain = &self.mode {
-            eprintln!("  ✔ {message}");
+            println!("  ✔ {message}");
         }
     }
 
@@ -802,7 +802,7 @@ impl TuiRenderer {
         self.push_log(idx, message);
         self.draw();
         if let Mode::Plain = &self.mode {
-            eprintln!("  ─ {message}");
+            println!("  ─ {message}");
         }
     }
 
@@ -815,7 +815,7 @@ impl TuiRenderer {
         self.push_log(idx, message);
         self.draw();
         if let Mode::Plain = &self.mode {
-            eprintln!("  ✖ {message}");
+            println!("  ✖ {message}");
         }
     }
 
@@ -828,7 +828,7 @@ impl TuiRenderer {
         self.push_log(idx, message);
         self.draw();
         if let Mode::Plain = &self.mode {
-            eprintln!("  ⚠ {message}");
+            println!("  ⚠ {message}");
         }
     }
 
@@ -876,7 +876,7 @@ impl TuiRenderer {
         self.push_log(self.active_step, line);
         self.draw();
         if let Mode::Plain = &self.mode {
-            eprintln!("{line}");
+            println!("{line}");
         }
     }
 

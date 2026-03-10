@@ -310,6 +310,8 @@ async fn run_subprocess<T: DeserializeOwned>(
     // the `Child` it owns. With `kill_on_drop(true)`, tokio sends SIGKILL to the child
     // on drop, preventing orphaned processes.
     cmd.kill_on_drop(true);
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
     let child = cmd
         .stdin(std::process::Stdio::null())
@@ -437,6 +439,8 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
     cmd.arg("--print");
     cmd.args(args);
     cmd.kill_on_drop(true);
+    cmd.env_remove("CLAUDECODE");
+    cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
     let mut child = cmd
         .stdin(std::process::Stdio::null())
