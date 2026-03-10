@@ -3,12 +3,13 @@
 #
 # Starts a lightweight Ubuntu container that:
 #   1. Builds (or reuses) a Linux binary from the host repo
-#   2. Maps the binary and the .claude/skills/actual/ skill from the host
+#   2. Maps the binary into the container
 #   3. Starts a local auth-proxy (scripts/auth-proxy.py) that captures a fresh
 #      OAuth token from the host's `claude` binary and forwards container API
 #      calls to api.anthropic.com with that token
-#   4. Invokes actual adr-bot via the 'actual' skill through Claude Code
-#   5. Streams all Claude Code output back to the host
+#   4. Fetches the actual skill from the standalone repo (actual-software/actual-skill)
+#   5. Invokes actual adr-bot via the 'actual' skill through Claude Code
+#   6. Streams all Claude Code output back to the host
 #
 # Usage:
 #   scripts/container-e2e.sh [OPTIONS]
@@ -334,9 +335,14 @@ log "  claude installed: $(claude --version 2>/dev/null | head -1)"
 useradd -m -s /bin/bash testuser 2>/dev/null || true
 # Give testuser write access to the output dir (/usr/local/bin/actual is ro-mounted, already executable)
 chmod 777 /output
-# Copy the skill files from the mounted repo directly into testuser's claude config
+# Fetch the actual skill from the standalone repo into testuser's claude config
 mkdir -p /home/testuser/.claude/skills/actual
-cp -r /repo/.claude/skills/actual/. /home/testuser/.claude/skills/actual/
+SKILL_REPO_URL="https://raw.githubusercontent.com/actual-software/actual-skill/main/skills/actual"
+for f in SKILL.md references/config-reference.md references/error-catalog.md references/output-formats.md references/runner-guide.md references/sync-workflow.md scripts/diagnose.sh; do
+  mkdir -p "/home/testuser/.claude/skills/actual/$(dirname "$f")"
+  curl -sfL "$SKILL_REPO_URL/$f" -o "/home/testuser/.claude/skills/actual/$f" || log "  WARN: failed to fetch $f"
+done
+chmod +x /home/testuser/.claude/skills/actual/scripts/diagnose.sh 2>/dev/null || true
 chown -R testuser:testuser /home/testuser/.claude
 hr
 
@@ -459,7 +465,7 @@ hr
 # ── 5. Set up skill for Claude Code ──────────────────────────────────────────
 
 log "Setting up actual skill for Claude Code..."
-# Skill already copied to /home/testuser/.claude/skills/actual/ in step 2.
+# Skill was fetched from GitHub and installed to /home/testuser/.claude/skills/actual/ in step 2.
 # Write a CLAUDE.md for the test project so claude knows the actual binary is available
 cat > /test-project/CLAUDE.md <<'EOF'
 # actual CLI Test Project
@@ -481,7 +487,7 @@ Pre-flight before sync:
 Then execute: `actual adr-bot --force [--no-tailor] --api-url <URL>`
 EOF
 
-log "  Skill installed at /home/testuser/.claude/skills/actual/"
+log "  Skill fetched and installed at /home/testuser/.claude/skills/actual/"
 
 # Also give testuser ownership of the test project
 chown -R testuser:testuser /test-project
@@ -553,7 +559,7 @@ if [[ "$NO_TAILOR_FLAG" == "1" ]]; then
 fi
 
 # Read the skill content to include as context in the prompt
-SKILL_CONTENT="$(cat /repo/.claude/skills/actual/SKILL.md)"
+SKILL_CONTENT="$(cat /home/testuser/.claude/skills/actual/SKILL.md)"
 
 PROMPT="$(cat <<PROMPT
 You are operating as an AI assistant with the 'actual' CLI skill loaded.
@@ -705,7 +711,7 @@ docker run \
   `# Mount the compiled Linux actual binary (read-only)` \
   -v "${LINUX_BINARY}:/usr/local/bin/actual:ro" \
   \
-  `# Mount the full repo read-only — provides .claude/skills/actual/ skill` \
+  `# Mount the full repo read-only — provides source code and scripts` \
   -v "${REPO_ROOT}:/repo:ro" \
   \
   `# Mount host output directory — all logs are written here` \
