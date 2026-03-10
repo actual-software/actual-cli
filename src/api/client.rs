@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::analysis::types::{FrameworkCategory, Language, RepoAnalysis};
@@ -19,7 +21,24 @@ pub struct ActualApiClient {
 }
 
 impl ActualApiClient {
+    /// Default overall request timeout (30 seconds).
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+    /// Default connection establishment timeout (10 seconds).
+    const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
     pub fn new(base_url: &str) -> Result<Self, ActualError> {
+        Self::new_with_timeout(
+            base_url,
+            Self::DEFAULT_TIMEOUT,
+            Self::DEFAULT_CONNECT_TIMEOUT,
+        )
+    }
+
+    pub fn new_with_timeout(
+        base_url: &str,
+        timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Result<Self, ActualError> {
         // Enforce HTTPS for all non-loopback URLs to protect credentials in transit.
         let is_localhost = base_url.starts_with("http://localhost")
             || base_url.starts_with("http://127.0.0.1")
@@ -38,6 +57,8 @@ impl ActualApiClient {
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
             .https_only(!is_localhost)
+            .timeout(timeout)
+            .connect_timeout(connect_timeout)
             .build()
             .map_err(|e| ActualError::ApiError(format!("Failed to build HTTP client: {e}")))?;
 
@@ -1209,6 +1230,76 @@ mod tests {
             .languages
             .contains(&"python".to_string()));
         assert_eq!(request.projects[0].frameworks.len(), 2);
+    }
+
+    // --- Timeout tests ---
+
+    #[test]
+    fn test_new_with_timeout_creates_client() {
+        let client = ActualApiClient::new_with_timeout(
+            "https://example.com",
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_new_with_timeout_rejects_http_non_localhost() {
+        let result = ActualApiClient::new_with_timeout(
+            "http://example.com",
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        assert!(matches!(result, Err(ActualError::ConfigError(ref msg)) if msg.contains("HTTPS")),);
+    }
+
+    #[test]
+    fn test_new_with_timeout_allows_localhost_http() {
+        let result = ActualApiClient::new_with_timeout(
+            "http://127.0.0.1:8080",
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_request_timeout() {
+        // Create a TCP listener that accepts connections but never responds,
+        // which will trigger the request timeout.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Keep listener alive but don't handle connections
+        let _listener = listener;
+
+        let client = ActualApiClient::new_with_timeout(
+            &format!("http://127.0.0.1:{}", addr.port()),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let start = std::time::Instant::now();
+        let result = client.get_health().await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        // Should timeout well before 5 seconds (configured for 1 second)
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "expected timeout within 5s, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_default_timeout_constants() {
+        assert_eq!(ActualApiClient::DEFAULT_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(
+            ActualApiClient::DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10)
+        );
     }
 
     #[test]
