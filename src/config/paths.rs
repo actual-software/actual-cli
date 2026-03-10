@@ -17,9 +17,25 @@ pub fn config_dir() -> Result<PathBuf, ActualError> {
     config_dir_with_home(dirs::home_dir())
 }
 
+fn validate_actual_config(path: &Path) -> Result<(), ActualError> {
+    if !path.is_absolute() {
+        return Err(config_error("ACTUAL_CONFIG must be an absolute path"));
+    }
+    if path
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(config_error(
+            "ACTUAL_CONFIG must not contain '..' components",
+        ));
+    }
+    Ok(())
+}
+
 fn config_dir_with_home(home: Option<PathBuf>) -> Result<PathBuf, ActualError> {
     if let Ok(config_file) = std::env::var("ACTUAL_CONFIG") {
         let p = PathBuf::from(config_file);
+        validate_actual_config(&p)?;
         return p
             .parent()
             .map(|d| d.to_path_buf())
@@ -52,7 +68,9 @@ fn config_dir_with_home(home: Option<PathBuf>) -> Result<PathBuf, ActualError> {
 /// Otherwise returns `config_dir()?.join("config.yaml")`.
 pub fn config_path() -> Result<PathBuf, ActualError> {
     if let Ok(path) = std::env::var("ACTUAL_CONFIG") {
-        return Ok(PathBuf::from(path));
+        let p = PathBuf::from(path);
+        validate_actual_config(&p)?;
+        return Ok(p);
     }
     Ok(config_dir()?.join("config.yaml"))
 }
@@ -428,28 +446,32 @@ mod tests {
 
     #[test]
     fn test_config_dir_actual_config_bare_filename() {
-        // When ACTUAL_CONFIG is set to a bare filename, parent is Some("").
+        // A bare filename (relative path) is rejected by validation.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
         let _guard = EnvGuard::set("ACTUAL_CONFIG", "config.yaml");
 
-        let dir = config_dir().unwrap();
-        assert_eq!(dir, PathBuf::from(""));
+        let err = config_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("must be an absolute path"),
+            "Expected absolute-path error, got: {err}"
+        );
     }
 
     #[test]
     fn test_config_dir_actual_config_empty_string() {
-        // When ACTUAL_CONFIG is set to an empty string, parent() returns None.
+        // An empty string is not absolute and is rejected.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
         let _guard = EnvGuard::set("ACTUAL_CONFIG", "");
 
         let err = config_dir().unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("ACTUAL_CONFIG has no parent directory"));
+        assert!(
+            err.to_string().contains("must be an absolute path"),
+            "Expected absolute-path error, got: {err}"
+        );
     }
 
     #[test]
@@ -646,6 +668,77 @@ mod tests {
             err.to_string().contains("must not contain '..'"),
             "Expected traversal error, got: {err}"
         );
+    }
+
+    // Tests for ACTCLI-38: ACTUAL_CONFIG validation
+    #[test]
+    fn test_config_dir_rejects_relative_actual_config() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", "relative/path/config.yaml");
+
+        let err = config_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("must be an absolute path"),
+            "Expected absolute-path error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_dir_rejects_actual_config_with_dotdot() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", "/some/path/../etc/config.yaml");
+
+        let err = config_dir().unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain '..'"),
+            "Expected traversal error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_path_rejects_relative_actual_config() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", "relative/config.yaml");
+
+        let err = config_path().unwrap_err();
+        assert!(
+            err.to_string().contains("must be an absolute path"),
+            "Expected absolute-path error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_path_rejects_actual_config_with_dotdot() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", "/some/../etc/config.yaml");
+
+        let err = config_path().unwrap_err();
+        assert!(
+            err.to_string().contains("must not contain '..'"),
+            "Expected traversal error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_config_path_accepts_valid_absolute_actual_config() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g2 = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+
+        let tmp = tempdir().unwrap();
+        let config_file = tmp.path().join("config.yaml");
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap());
+
+        let path = config_path().unwrap();
+        assert_eq!(path, config_file);
     }
 
     #[test]
