@@ -14479,15 +14479,14 @@ mod tests {
         // Monitor: wait for Phase 3b to clear the completed marker (the issue
         // appears in running). Then shut down — we don't need the full cycle.
         let monitor = tokio::spawn(async move {
-            loop {
+            async fn still_pending(
+                sr: &std::sync::Arc<tokio::sync::RwLock<OrchestratorState>>,
+            ) -> bool {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                let state = state_ref.read().await;
-                let still_completed =
-                    state.is_completed("id1") && !state.running.contains_key("id1");
-                if !still_completed {
-                    break;
-                }
+                let s = sr.read().await;
+                s.is_completed("id1") && !s.running.contains_key("id1")
             }
+            while still_pending(&state_ref).await {}
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let _ = shutdown_tx.send(true);
         });
@@ -14557,15 +14556,14 @@ mod tests {
 
         // Wait for Phase 3b to clear the in-memory completed marker
         let monitor = tokio::spawn(async move {
-            loop {
+            async fn still_pending(
+                sr: &std::sync::Arc<tokio::sync::RwLock<OrchestratorState>>,
+            ) -> bool {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                let state = state_ref.read().await;
-                let still_completed =
-                    state.is_completed("id1") && !state.running.contains_key("id1");
-                if !still_completed {
-                    break;
-                }
+                let s = sr.read().await;
+                s.is_completed("id1") && !s.running.contains_key("id1")
             }
+            while still_pending(&state_ref).await {}
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let _ = shutdown_tx.send(true);
         });
