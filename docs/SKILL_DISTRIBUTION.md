@@ -149,13 +149,122 @@ When CLI changes affect user-facing behavior (new errors, config keys, flags, ou
 
 The CI workflow `.github/workflows/skill-update-reminder.yml` posts a PR comment when skill-relevant source files are changed, listing which skill reference files may need updating in the standalone repos.
 
-### Update workflow
+### Update workflow (step-by-step)
 
-1. Make the change in `actual-software/actual-skill` (standard variant)
-2. Copy the same change to `actual-software/actual-skill-openclaw` (OpenClaw variant)
-3. If the change affects the OpenClaw-specific ADR Pre-Check section, update only the OpenClaw repo
-4. Publish the OpenClaw variant to ClawdHub (see "Publishing" above)
-5. Bump version in `plugin.json` if updating the standard variant
+#### 1. Clone both repos (if you haven't already)
+
+```bash
+# Standard variant
+git clone https://github.com/actual-software/actual-skill.git ~/repos/actual-skill
+
+# OpenClaw variant
+git clone https://github.com/actual-software/actual-skill-openclaw.git ~/repos/actual-skill-openclaw
+```
+
+#### 2. Make the change in the standard variant
+
+Edit the relevant files in `actual-skill`. The skill files live under `skills/actual/`:
+
+```bash
+cd ~/repos/actual-skill
+
+# Example: update the error catalog after adding a new error variant
+vim skills/actual/references/error-catalog.md
+
+# Example: update SKILL.md after adding a new CLI flag
+vim skills/actual/SKILL.md
+```
+
+#### 3. Copy the change to the OpenClaw variant
+
+The OpenClaw variant has the same files but at the repo root (no `skills/actual/` prefix):
+
+```bash
+cd ~/repos/actual-skill-openclaw
+
+# Copy changed files from standard variant
+cp ~/repos/actual-skill/skills/actual/references/error-catalog.md references/error-catalog.md
+cp ~/repos/actual-skill/skills/actual/SKILL.md SKILL.md
+```
+
+**Important**: If you copied `SKILL.md`, the OpenClaw variant has extra content that the standard variant doesn't:
+- The `metadata.openclaw` block in the frontmatter
+- The "ADR Pre-Check (OpenClaw)" section in the body
+
+After copying, re-add these sections. They appear:
+- **Frontmatter**: `metadata.openclaw` block after `argument-hint`
+- **Body**: "ADR Pre-Check (OpenClaw)" section after "CLI Not Installed"
+
+If the change only affects reference files or `scripts/diagnose.sh`, a straight copy works with no edits needed.
+
+#### 4. Bump the version in the standard variant
+
+```bash
+cd ~/repos/actual-skill
+
+# Bump version in plugin.json (e.g., 1.0.0 -> 1.1.0 for new content, 1.0.1 for fixes)
+vim .claude-plugin/plugin.json
+```
+
+#### 5. Commit and push both repos
+
+```bash
+# Standard variant
+cd ~/repos/actual-skill
+git add -A && git commit -m "update: <what changed>" && git push
+
+# OpenClaw variant
+cd ~/repos/actual-skill-openclaw
+git add -A && git commit -m "update: <what changed>" && git push
+```
+
+#### 6. Republish the OpenClaw variant to ClawdHub
+
+Choose a new semver version (must be higher than the current one). Check the current version:
+
+```bash
+clawhub inspect actual
+```
+
+Then publish (use the next version):
+
+```bash
+cd ~/repos/actual-skill-openclaw
+
+# Using the CLI (when the acceptLicenseTerms bug is fixed)
+clawhub publish . --slug actual --name "actual" --version <NEW_VERSION> --tags latest --changelog "<what changed>"
+
+# Or using curl (workaround for CLI v0.7.0 bug)
+TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/Library/Application Support/clawhub/config.json'))['token'])")
+
+curl -s -X POST "https://clawhub.ai/api/v1/skills" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Accept: application/json" \
+  -F "payload={\"slug\":\"actual\",\"displayName\":\"actual\",\"version\":\"<NEW_VERSION>\",\"changelog\":\"<what changed>\",\"acceptLicenseTerms\":true,\"tags\":[\"latest\"]}" \
+  -F "files=@SKILL.md;filename=SKILL.md" \
+  -F "files=@references/config-reference.md;filename=references/config-reference.md" \
+  -F "files=@references/error-catalog.md;filename=references/error-catalog.md" \
+  -F "files=@references/output-formats.md;filename=references/output-formats.md" \
+  -F "files=@references/runner-guide.md;filename=references/runner-guide.md" \
+  -F "files=@references/sync-workflow.md;filename=references/sync-workflow.md" \
+  -F "files=@scripts/diagnose.sh;filename=scripts/diagnose.sh"
+```
+
+#### 7. Verify
+
+```bash
+# Check ClawdHub listing shows new version
+clawhub inspect actual
+
+# Test install in a scratch directory
+clawhub install actual --workdir /tmp/clawhub-test --dir skills
+cat /tmp/clawhub-test/skills/actual/SKILL.md | head -5
+rm -rf /tmp/clawhub-test
+```
+
+#### Special case: OpenClaw-only changes
+
+If the change only affects the "ADR Pre-Check (OpenClaw)" section or the `metadata.openclaw` frontmatter, skip steps 2 and 4 — only update and publish the OpenClaw repo.
 
 ---
 
