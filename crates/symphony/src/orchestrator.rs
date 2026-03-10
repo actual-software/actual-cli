@@ -7274,21 +7274,30 @@ mod tests {
                 .to_string();
 
         let orch = Orchestrator::new(config, "Work on {{ issue.identifier }}".to_string());
-        let state_ref = Arc::clone(&orch.state);
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let (_reload_tx, reload_rx) = mpsc::channel::<(ServiceConfig, String)>(1);
 
         let tmp_path = tmp.path().to_path_buf();
-        let monitor = tokio::spawn(async move {
-            let mut done = false;
-            while !done {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let state = state_ref.read().await;
-                done = state.is_completed("id1") && state.is_completed("id2");
-                drop(state);
+        let monitor = tokio::spawn({
+            let tmp_path = tmp_path.clone();
+            async move {
+                // Wait for the workspace identity files to be written rather
+                // than relying on the is_completed state, which Phase 3b may
+                // clear on the next tick when the mock keeps returning the same
+                // candidates as active.
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    let f1 = tmp_path.join("PROJ-1").join("workspace_id.txt");
+                    let f2 = tmp_path.join("PROJ-2").join("workspace_id.txt");
+                    if f1.exists() && f2.exists() {
+                        break;
+                    }
+                }
+                // Give a moment for the agent to finish writing
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = shutdown_tx.send(true);
             }
-            let _ = shutdown_tx.send(true);
         });
 
         tokio::time::timeout(
