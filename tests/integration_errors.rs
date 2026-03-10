@@ -361,7 +361,7 @@ mod tests {
             ])
             .assert()
             .code(1)
-            .stderr(predicate::str::contains(
+            .stdout(predicate::str::contains(
                 "Claude Code exited without producing a result",
             ));
     }
