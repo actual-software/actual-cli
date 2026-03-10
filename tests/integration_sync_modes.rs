@@ -192,11 +192,11 @@ mod tests {
             ])
             .assert()
             .success()
-            .stderr(predicate::str::contains("## Use Error Types"))
-            .stderr(predicate::str::contains(
+            .stdout(predicate::str::contains("## Use Error Types"))
+            .stdout(predicate::str::contains(
                 "- Always use thiserror for errors",
             ))
-            .stderr(predicate::str::contains(
+            .stdout(predicate::str::contains(
                 "- Never use unwrap in production code",
             ));
 
@@ -232,7 +232,7 @@ mod tests {
             ])
             .assert()
             .success()
-            .stderr(predicate::str::contains("new file"));
+            .stdout(predicate::str::contains("new file"));
     }
 
     // ── Re-sync (updating existing CLAUDE.md) ───────────────────────────
@@ -691,7 +691,7 @@ User footer";
             ])
             .assert()
             .success()
-            .stderr(predicate::str::contains("No files to write"));
+            .stdout(predicate::str::contains("No files to write"));
 
         assert!(
             !env.file_exists("CLAUDE.md"),
@@ -808,16 +808,16 @@ User footer";
             String::from_utf8_lossy(&output.stderr)
         );
 
-        // Assert no ESC byte in raw stderr
+        // Assert no ESC byte in raw stdout (plain mode output)
         assert!(
-            !output.stderr.contains(&0x1Bu8),
-            "dry-run --full stderr must not contain ESC byte (0x1B)"
+            !output.stdout.contains(&0x1Bu8),
+            "dry-run --full stdout must not contain ESC byte (0x1B)"
         );
 
-        let stderr_str = String::from_utf8_lossy(&output.stderr);
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stderr_str.contains("safe content"),
-            "expected plain-text content in stderr: {stderr_str}"
+            stdout_str.contains("safe content"),
+            "expected plain-text content in stdout: {stdout_str}"
         );
 
         assert!(
