@@ -213,19 +213,11 @@ where
     let cfg_path = config_path()?;
 
     // Load config first to get runner/key fallbacks.
-    // If the config file exists but is malformed, surface the error so the user
-    // can fix it rather than silently falling back to defaults (which would cause
-    // confusing downstream failures like ClaudeNotAuthenticated).
-    let cfg = match load_from(&cfg_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "Warning: failed to load config from {}: {e}. Using defaults.",
-                cfg_path.display()
-            );
-            Default::default()
-        }
-    };
+    // Propagate errors (malformed YAML, unreadable file, too large) so the user
+    // gets a clear ConfigError instead of confusing downstream failures like
+    // ClaudeNotAuthenticated.  Note: load_from() already handles file-not-found
+    // gracefully by creating a default config, so all errors here are real problems.
+    let cfg = load_from(&cfg_path)?;
 
     // Resolve the runner: CLI flag > config (parsed from string) > default.
     //
@@ -1033,21 +1025,18 @@ mod tests {
     }
 
     #[test]
-    fn test_preamble_malformed_config_uses_defaults() {
-        // A malformed config file should fall back to defaults (eprintln warning).
-        // auto_detect_runner is called with (none, none, none) and default config.
-        // It tries ClaudeCli (not found), then AnthropicApi (no key) → NoRunnerAvailable.
+    fn test_preamble_malformed_config_returns_config_error() {
+        // A malformed config file should propagate a ConfigError, not silently
+        // fall back to defaults (which would cause confusing downstream failures
+        // like ClaudeNotAuthenticated when the API key is silently dropped).
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/claude");
-        let _g2 = EnvGuard::remove("ANTHROPIC_API_KEY");
         let dir = tempfile::tempdir().unwrap();
-        let _g3 = with_temp_config(&dir, ": this is not valid yaml [\n");
-        let args = make_sync_args(None); // no runner → falls through to auto_detect_runner
+        let _g1 = with_temp_config(&dir, ": this is not valid yaml [\n");
+        let args = make_sync_args(None);
         let result = sync_run_inner(&args, auth_not_authenticated);
-        // Falls back to defaults → auto_detect_runner → both candidates fail
         assert!(
-            matches!(result, Err(ActualError::NoRunnerAvailable { .. })),
-            "expected NoRunnerAvailable with defaults after malformed config, got: {result:?}"
+            matches!(result, Err(ActualError::ConfigError(ref msg)) if msg.contains("Failed to parse config YAML")),
+            "expected ConfigError with YAML parse message, got: {result:?}"
         );
     }
 
