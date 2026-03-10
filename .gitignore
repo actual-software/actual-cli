@@ -39,6 +39,9 @@ promo/out/
 promo/dist/
 promo/.cache/
 
+# Skill distribution variants (built by scripts/build-skill-variants.sh)
+/dist/
+
 # npm platform binary payloads (populated by CI)
 npm/actual-darwin-arm64/bin/actual
 npm/actual-darwin-x64/bin/actual

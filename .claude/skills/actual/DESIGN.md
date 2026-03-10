@@ -255,3 +255,5 @@ Additional anti-patterns from Source 8 (existing skills analysis):
 | 8 | Description includes exhaustive trigger keywords | Source 2: "Include specific keywords that help agents identify relevant tasks" | Source 2 |
 | 9 | No allowed-tools field | Experimental feature; skill runs in existing permission context | Source 4 |
 | 10 | Feature-complete: every command, flag, error, config key covered | Epic requirement; skill is the canonical CLI companion | Epic actual-hje |
+| 11 | Two distribution variants (standard + openclaw) via build script, not runtime detection | Runtime install-source detection is unreliable (no platform provides it). Cross-skill file patching violates separation of concerns and erodes trust. Build-time differentiation is deterministic and auditable. | Sources 2, 7 |
+| 12 | Variant injection via marker comments in canonical SKILL.md | Single source of truth; markers are invisible HTML comments in standard variant; build script is simple sed/cat; CI can verify with `--check` | Source 1 (progressive disclosure) |

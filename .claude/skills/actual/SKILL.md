@@ -16,6 +16,33 @@ argument-hint: "[question or command] e.g. 'run sync', 'set up anthropic-api', '
 
 Inline knowledge and operational workflows for the actual CLI. Read this file first; load reference files only when you need deeper detail for a specific topic.
 
+## CLI Not Installed
+
+If the `actual` binary is not in PATH, **stop and help the user install it** before doing anything else. All commands, pre-flight checks, and diagnostics require the CLI.
+
+Detect with:
+```bash
+command -v actual
+```
+
+Install options (try in this order):
+
+| Method | Command |
+|--------|---------|
+| npm/npx (quickest) | `npm install -g @actualai/actual` |
+| Homebrew (macOS/Linux) | `brew install actual-software/actual/actual` |
+| GitHub Release (manual) | Download from `actual-software/actual-releases` on GitHub |
+
+For one-off use without installing globally:
+```bash
+npx @actualai/actual adr-bot [flags]
+```
+
+After install, verify: `actual --version`
+
+<!-- variant:openclaw-start -->
+<!-- variant:openclaw-end -->
+
 ## Commands
 
 | Command | Purpose | Key Flags |
@@ -102,6 +129,14 @@ actual adr-bot --max-budget-usd 5.00
 ## Operational Workflow: Running Sync
 
 Follow this pattern whenever running sync. Do NOT skip pre-flight.
+
+### 0. Verify CLI installed (LOW freedom -- exact check)
+
+```bash
+command -v actual       # Must succeed before anything else
+```
+
+If missing, follow the install steps in [CLI Not Installed](#cli-not-installed) above. Do NOT proceed until `actual --version` succeeds.
 
 ### 1. Pre-flight (LOW freedom -- exact commands)
 

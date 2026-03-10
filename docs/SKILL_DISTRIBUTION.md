@@ -444,13 +444,40 @@ The skill version should be **independent of the CLI version**. Rationale:
 
 Recommended: Start at `1.0.0`, bump `MINOR` for new content, `PATCH` for fixes.
 
+### Distribution Variants
+
+The skill ships in two variants, built from a single canonical source:
+
+| Variant | Audience | Extra Content | Distributed Via |
+|---------|----------|---------------|-----------------|
+| **Standard** | In-repo users, manual installs | (none) | `.claude/skills/actual/SKILL.md` (as-is) |
+| **OpenClaw** | OpenClaw marketplace installs | "ADR Pre-Check" section | `dist/skills/openclaw/actual/SKILL.md` (generated) |
+
+The canonical SKILL.md contains marker comments (`<!-- variant:openclaw-start -->` /
+`<!-- variant:openclaw-end -->`) that are empty in the standard variant. The build
+script injects the OpenClaw-specific section between these markers.
+
+**Build**:
+```bash
+bash scripts/build-skill-variants.sh          # Generate dist/
+bash scripts/build-skill-variants.sh --check  # CI: verify dist/ is current
+```
+
+**Output**: `dist/skills/openclaw/actual/` (SKILL.md + references/ + scripts/).
+The `dist/` directory is gitignored and built on demand.
+
+The standalone repo (`actual-software/actual-skill`) should use the OpenClaw variant
+when publishing to the OpenClaw marketplace, and the standard variant for all other
+distribution channels.
+
 ### Sync: In-Repo to Standalone
 
 When the CLI changes in ways that affect the skill:
 1. Update `.claude/skills/actual/` in the CLI repo (canonical)
-2. Copy changes to the standalone repo
-3. Bump version in `plugin.json`
-4. Commit and push the standalone repo
+2. Run `bash scripts/build-skill-variants.sh` to regenerate variants
+3. Copy the appropriate variant to the standalone repo
+4. Bump version in `plugin.json`
+5. Commit and push the standalone repo
 
 **Future automation**: A GitHub Action on the CLI repo could auto-create a PR
 on the standalone repo when skill files change. The CI workflow
@@ -505,3 +532,6 @@ skill-relevant source changes — it could be extended to trigger a cross-repo P
 | 8 | No agents/openai.yaml in-repo | Codex-specific metadata only makes sense in the standalone repo |
 | 9 | Keep DESIGN.md in-repo (not in standalone) | DESIGN.md is an implementation guide for contributors, not for end users |
 | 10 | Marketplace catalog is self-referencing (source: ".") | The plugin IS the marketplace repo; simplest possible structure |
+| 11 | Two distribution variants (standard + openclaw) built from one source | OpenClaw users get ADR pre-check guidance; regular users aren't burdened with it. Build-time differentiation avoids runtime heuristics and cross-skill file patching. |
+| 12 | Variant markers in canonical SKILL.md, build script generates dist/ | Single source of truth; no drift between variants; CI can verify with `--check` |
+| 13 | dist/ is gitignored, built on demand | Avoids noise in PRs; standalone repo sync process runs the build script |
