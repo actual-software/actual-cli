@@ -169,28 +169,20 @@ impl ActualApiClient {
     }
 }
 
-/// Serialize a [`Language`] enum variant to its serde string representation.
+/// Serialize a [`Language`] enum variant to its lowercase string representation.
 ///
-/// Uses `serde_json::to_value` which produces lowercase strings like
+/// Uses the direct `as_str()` method which produces lowercase strings like
 /// `"typescript"`, `"rust"`, etc.
 fn serialize_language(lang: &Language) -> String {
-    serde_json::to_value(lang)
-        .expect("Language serialization cannot fail")
-        .as_str()
-        .expect("Language serializes as string")
-        .to_string()
+    lang.as_str().to_string()
 }
 
-/// Serialize a [`FrameworkCategory`] enum variant to its serde string representation.
+/// Serialize a [`FrameworkCategory`] enum variant to its kebab-case string representation.
 ///
-/// Uses `serde_json::to_value` which produces kebab-case strings for known variants
+/// Uses the direct `as_str()` method which produces kebab-case strings for known variants
 /// (e.g. `"web-frontend"`, `"web-backend"`) and the raw string for `Other`.
 fn serialize_framework_category(category: &FrameworkCategory) -> String {
-    serde_json::to_value(category)
-        .expect("FrameworkCategory serialization cannot fail")
-        .as_str()
-        .expect("FrameworkCategory serializes as string")
-        .to_string()
+    category.as_str().to_string()
 }
 
 /// Convert a [`RepoAnalysis`] and [`Config`] into a [`MatchRequest`] suitable for the API.
@@ -1209,6 +1201,60 @@ mod tests {
             .languages
             .contains(&"python".to_string()));
         assert_eq!(request.projects[0].frameworks.len(), 2);
+    }
+
+    #[test]
+    fn test_serialize_language_all_variants() {
+        let all_languages = vec![
+            Language::TypeScript,
+            Language::JavaScript,
+            Language::Python,
+            Language::Rust,
+            Language::Go,
+            Language::Java,
+            Language::Kotlin,
+            Language::Swift,
+            Language::Ruby,
+            Language::Php,
+            Language::C,
+            Language::Cpp,
+            Language::CSharp,
+            Language::Scala,
+            Language::Elixir,
+            Language::Other("haskell".to_string()),
+        ];
+        for lang in &all_languages {
+            let result = serialize_language(lang);
+            assert!(
+                !result.is_empty(),
+                "serialize_language should return non-empty string for {lang:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_serialize_framework_category_all_variants() {
+        let all_categories = vec![
+            FrameworkCategory::WebFrontend,
+            FrameworkCategory::WebBackend,
+            FrameworkCategory::Mobile,
+            FrameworkCategory::Desktop,
+            FrameworkCategory::Cli,
+            FrameworkCategory::Library,
+            FrameworkCategory::Data,
+            FrameworkCategory::Ml,
+            FrameworkCategory::Devops,
+            FrameworkCategory::Testing,
+            FrameworkCategory::BuildSystem,
+            FrameworkCategory::Other("embedded".to_string()),
+        ];
+        for cat in &all_categories {
+            let result = serialize_framework_category(cat);
+            assert!(
+                !result.is_empty(),
+                "serialize_framework_category should return non-empty string for {cat:?}"
+            );
+        }
     }
 
     #[test]
