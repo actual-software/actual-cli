@@ -24,10 +24,10 @@ pub struct EnvGuard {
 impl EnvGuard {
     /// Set `key` to `val`, saving the previous value for restoration on drop.
     ///
-    /// The caller must hold `ENV_MUTEX` (or equivalent) before calling this
-    /// function to serialise access, as required by the deprecated
-    /// `set_var`/`remove_var` APIs.
-    pub fn set(key: &str, val: &str) -> Self {
+    /// The `_lock` parameter must be a guard obtained from `ENV_MUTEX` (or
+    /// equivalent). Requiring it here makes it a **compile error** to call
+    /// this function without holding the mutex, preventing silent data races.
+    pub fn set(key: &str, val: &str, _lock: &std::sync::MutexGuard<'_, ()>) -> Self {
         let old = std::env::var(key).ok();
         #[allow(deprecated)]
         unsafe {
@@ -41,10 +41,10 @@ impl EnvGuard {
 
     /// Remove `key`, saving the previous value for restoration on drop.
     ///
-    /// The caller must hold `ENV_MUTEX` (or equivalent) before calling this
-    /// function to serialise access, as required by the deprecated
-    /// `set_var`/`remove_var` APIs.
-    pub fn remove(key: &str) -> Self {
+    /// The `_lock` parameter must be a guard obtained from `ENV_MUTEX` (or
+    /// equivalent). Requiring it here makes it a **compile error** to call
+    /// this function without holding the mutex, preventing silent data races.
+    pub fn remove(key: &str, _lock: &std::sync::MutexGuard<'_, ()>) -> Self {
         let old = std::env::var(key).ok();
         #[allow(deprecated)]
         unsafe {
