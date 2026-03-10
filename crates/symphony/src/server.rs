@@ -1797,6 +1797,7 @@ function appendLogEntry(entry) {{
   let parts = '<span class="log-ts">'+esc(ts)+'</span>';
   parts += '<span class="log-badge '+esc(badgeClass)+'">'+esc(entry.event_type||'')+'</span>';
   if (entry.message) parts += '<span class="log-msg">'+esc(entry.message)+'</span>';
+  else if (!entry.tokens) return;
   if (entry.tokens) parts += '<span class="log-tokens">'+fmt(entry.tokens.total_tokens||0)+' tok</span>';
   div.innerHTML = parts;
   body.appendChild(div);
