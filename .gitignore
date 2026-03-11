@@ -15,8 +15,8 @@ Thumbs.db
 # Git worktrees (used for parallel agent work)
 .worktrees/
 
-# Serena (memories are generated per-user by onboarding)
-.serena/memories/
+# Serena
+.serena/
 
 # Skill scratch directories (created during /audit and /check runs)
 .audit/
@@ -32,6 +32,9 @@ tui-test-captures/
 # Environment
 .env
 .env.local
+
+# Tooling configuration
+.mcp.json
 
 # Skill variant build output
 /dist/
