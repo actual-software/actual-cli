@@ -13,10 +13,6 @@ default-run = "actual"
 name = "actual"
 path = "src/main.rs"
 
-[[bin]]
-name = "analysis_baseline"
-path = "benches/analysis_baseline.rs"
-
 [dependencies]
 # CLI framework
 clap = { version = "4", features = ["derive", "env"] }
