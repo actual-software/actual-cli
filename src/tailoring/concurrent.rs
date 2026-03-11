@@ -23,7 +23,7 @@ pub struct ConcurrentTailoringConfig<'a> {
     /// Pre-existing output file paths to include as context.
     ///
     /// Named generically to reflect that it applies to all output formats
-    /// (CLAUDE.md, AGENTS.md, etc.), not just CLAUDE.md. See actual-cli-bek.15.
+    /// (CLAUDE.md, AGENTS.md, etc.), not just CLAUDE.md.
     pub existing_output_file_paths: &'a str,
     /// Optional model override for the Claude invocation.
     pub model_override: Option<&'a str>,
@@ -190,7 +190,6 @@ async fn tailor_single_project<R: TailoringRunner>(
                 // The semaphore is held in an Arc and never explicitly closed, so
                 // AcquireError is unreachable in practice. We convert it to
                 // InternalError rather than panicking, documenting the invariant.
-                // See actual-cli-bek.21.
                 let _permit = semaphore.acquire().await.map_err(|_| {
                     ActualError::InternalError(
                         "semaphore closed unexpectedly — this is a bug".to_string(),

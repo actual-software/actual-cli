@@ -766,7 +766,7 @@ mod tests {
         );
     }
 
-    // ── actual-cli-jot.8: config-change cache invalidation ──
+    // ── config-change cache invalidation ──
 
     /// Changing a config field that affects analysis (e.g. include_categories)
     /// must produce a different config hash, causing a cache miss.

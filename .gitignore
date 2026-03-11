@@ -35,6 +35,11 @@ tui-test-captures/
 
 # Tooling configuration
 .mcp.json
+opencode.json
+.opencode/
+
+# Claude Code local settings
+.claude/settings.local.json
 
 # Skill variant build output
 /dist/

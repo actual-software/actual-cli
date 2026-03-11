@@ -670,7 +670,7 @@ mod tests {
         );
     }
 
-    // Tests for ACTCLI-38: ACTUAL_CONFIG validation
+    // Tests for ACTUAL_CONFIG validation
     #[test]
     fn test_config_dir_rejects_relative_actual_config() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
