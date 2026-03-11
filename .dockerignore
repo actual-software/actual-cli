@@ -26,7 +26,6 @@ Thumbs.db
 .github/
 docs/
 promo/
-site/
 benches/
 
 # Test captures and coverage
