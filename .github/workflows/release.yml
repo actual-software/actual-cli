@@ -335,17 +335,11 @@ jobs:
     needs: package-and-release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main repo (for formula template + update script)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          path: src
-
       - name: Checkout tap repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: actual-software/homebrew-actual
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          path: tap
 
       - name: Set up Python
         uses: actions/setup-python@v6  # v5
@@ -354,9 +348,9 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          python3 src/scripts/update-formula.py \
-            src/Formula/actual.rb \
-            tap/Formula/actual.rb \
+          python3 scripts/update-formula.py \
+            template/actual.rb \
+            Formula/actual.rb \
             --version "${VERSION#v}" \
             --sha-darwin-arm64 "${{ needs.package-and-release.outputs.sha256_darwin_arm64 }}" \
             --sha-darwin-x64   "${{ needs.package-and-release.outputs.sha256_darwin_x64 }}" \
@@ -367,7 +361,6 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/actual.rb
