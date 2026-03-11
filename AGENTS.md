@@ -5,9 +5,11 @@ This project uses **Linear** for issue tracking and **Symphony** for autonomous 
 ## Quick Reference
 
 ```bash
-# Symphony (autonomous orchestration)
-cargo run --release -p symphony              # Start from the workspace
-cargo run --release -p symphony -- WORKFLOW.md  # Start with explicit workflow file
+# Symphony (autonomous orchestration) — lives in actual-software/factory
+symphony WORKFLOW.md                           # Run locally (binary from factory repo)
+# Or via Docker:
+docker run -v $(pwd)/WORKFLOW.md:/app/WORKFLOW.md:ro \
+  --env-file .env.local ghcr.io/actual-software/symphony-orchestrator
 
 # Environment
 export LINEAR_API_KEY="lin_api_..."   # Required for Symphony and Linear API access
@@ -50,7 +52,7 @@ Symphony is a long-running service that:
 4. **Retries** on failure with exponential backoff
 5. **Cleans up** workspaces when issues reach terminal state (`Merged`)
 
-Configuration lives in `WORKFLOW.md` at the repo root. See `crates/symphony/USAGE.md` for full documentation.
+Configuration lives in `WORKFLOW.md` at the repo root. See the [factory repo](https://github.com/actual-software/factory) for full documentation.
 
 ### Symphony Architecture
 
