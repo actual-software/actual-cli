@@ -36,12 +36,6 @@ tui-test-captures/
 # Skill variant build output
 /dist/
 
-# Remotion promo project build artifacts
-promo/node_modules/
-promo/out/
-promo/dist/
-promo/.cache/
-
 # npm platform binary payloads (populated by CI)
 npm/actual-darwin-arm64/bin/actual
 npm/actual-darwin-x64/bin/actual
