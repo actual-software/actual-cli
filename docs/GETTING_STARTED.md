@@ -13,7 +13,7 @@ brew install actual-software/actual/actual
 ### npm
 
 ```bash
-npm install -g @anthropic/actual
+npm install -g @actualai/actual
 ```
 
 ### Manual download
