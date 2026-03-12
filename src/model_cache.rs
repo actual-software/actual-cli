@@ -43,7 +43,8 @@ impl ProviderCache {
 
 /// The top-level model cache file structure.
 ///
-/// The `anthropic` section is reserved for actual-3kh.2.
+/// The `anthropic` section is reserved for future use (Anthropic does not
+/// yet expose a public model-listing API).
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub(crate) struct ModelCacheFile {
     #[serde(default)]
