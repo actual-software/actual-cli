@@ -153,7 +153,7 @@ def refresh_state():
             merged.update(extra_headers)
             _state["extra_headers"] = merged
             _state["fetched_at"] = time.time()
-            log(f"Token captured: {token[:35]}... (expires in {_state['ttl']}s)")
+            log(f"Token captured: {token[:8]}... (expires in {_state['ttl']}s)")
         else:
             log("WARNING: Token capture failed — proxy requests will likely 401")
 
@@ -309,7 +309,7 @@ def main():
             log("ERROR: Could not capture token. Is `claude` installed and logged in?")
             sys.exit(1)
 
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), ProxyHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), ProxyHandler)
 
     def shutdown(sig, frame):
         log("Shutting down...")
