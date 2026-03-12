@@ -17,7 +17,7 @@ set -euo pipefail
 # ── Config ───────────────────────────────────────────────────────────────────
 
 ACTUAL_BIN="$(cd "$(dirname "${1:?Usage: $0 <path-to-actual-binary>}")" && pwd)/$(basename "$1")"
-API_URL="${ACTUAL_E2E_API_URL:-https://api-service.api.staging.actual.ai}"
+API_URL="${ACTUAL_E2E_API_URL:?Set ACTUAL_E2E_API_URL to the API endpoint for E2E tests}"
 RESULTS_FILE="$(mktemp)"
 trap 'rm -f "$RESULTS_FILE"' EXIT
 

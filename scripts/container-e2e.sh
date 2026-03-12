@@ -52,7 +52,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 CONTAINER_PLATFORM="${CONTAINER_PLATFORM:-linux/amd64}"
-DEFAULT_API_URL="https://api-service.api.staging.actual.ai"
+DEFAULT_API_URL="${ACTUAL_E2E_API_URL:?Set ACTUAL_E2E_API_URL to the API endpoint for E2E tests}"
 # musl target produces a fully-static binary: no GLIBC version dependency across distros
 BINARY_TARGET="x86_64-unknown-linux-musl"   # matches linux/amd64, static binary
 
