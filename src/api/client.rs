@@ -68,60 +68,51 @@ impl ActualApiClient {
         })
     }
 
-    pub async fn post_match(&self, request: &MatchRequest) -> Result<MatchResponse, ActualError> {
-        let url = format!("{}/adrs/match", self.base_url);
+    async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ActualError> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        Self::handle_response(response).await
+    }
+
+    async fn post<B: serde::Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, ActualError> {
+        let url = format!("{}{}", self.base_url, path);
         let response = self
             .client
             .post(&url)
-            .json(request)
+            .json(body)
             .send()
             .await
             .map_err(|e| ActualError::ApiError(e.to_string()))?;
         Self::handle_response(response).await
+    }
+
+    pub async fn post_match(&self, request: &MatchRequest) -> Result<MatchResponse, ActualError> {
+        self.post("/adrs/match", request).await
     }
 
     pub async fn get_languages(&self) -> Result<LanguagesResponse, ActualError> {
-        let url = format!("{}/taxonomy/languages", self.base_url);
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ActualError::ApiError(e.to_string()))?;
-        Self::handle_response(response).await
+        self.get("/taxonomy/languages").await
     }
 
     pub async fn get_frameworks(&self) -> Result<FrameworksResponse, ActualError> {
-        let url = format!("{}/taxonomy/frameworks", self.base_url);
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ActualError::ApiError(e.to_string()))?;
-        Self::handle_response(response).await
+        self.get("/taxonomy/frameworks").await
     }
 
     pub async fn get_categories(&self) -> Result<CategoriesResponse, ActualError> {
-        let url = format!("{}/taxonomy/categories", self.base_url);
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ActualError::ApiError(e.to_string()))?;
-        Self::handle_response(response).await
+        self.get("/taxonomy/categories").await
     }
 
     pub async fn get_health(&self) -> Result<HealthResponse, ActualError> {
-        let url = format!("{}/health", self.base_url);
-        let response = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ActualError::ApiError(e.to_string()))?;
-        Self::handle_response(response).await
+        self.get("/health").await
     }
 
     pub async fn post_telemetry(
