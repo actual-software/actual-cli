@@ -6,6 +6,9 @@ name = "actual-cli"
 version = "0.1.2"
 edition = "2021"
 description = "ADR-powered AI context file generator"
+license = "MIT"
+repository = "https://github.com/actual-software/actual-cli"
+homepage = "https://cli.actual.ai"
 autobenches = false
 default-run = "actual"
 
