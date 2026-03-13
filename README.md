@@ -8,11 +8,15 @@ Guide AI coding agents with tailored software development best practices.
 ## What it does
 
 Actual CLI establishes guardrails for AI coding agents by delivering
-Architecture Decision Records (ADRs) that encode software development best
-practices. These ADRs are tailored to your specific codebase using an LLM,
-catching edge cases and guiding agents toward correct decisions. The output
-is written to context files (`CLAUDE.md`, `AGENTS.md`, or Cursor rules) that
-agents read automatically.
+Architecture Decision Records (ADRs) — short documents that capture
+software development best practices and design guidance — tailored to your
+specific codebase using an LLM. This catches edge cases and guides agents
+toward correct decisions. The output is written to context files
+(`CLAUDE.md`, `AGENTS.md`, or Cursor rules) that agents read automatically.
+
+The Actual API is **free and requires no account or API key**. You only need
+a configured AI runner (Claude Code, Anthropic API, OpenAI API, etc.) for
+the tailoring step.
 
 ## Quick start
 
@@ -59,9 +63,9 @@ npm install -g @actualai/actual
 
 ### Manual download
 
-Download the binary for your platform from
-[GitHub Releases](https://github.com/actual-software/actual-releases/releases),
-then:
+Download the binary for your platform from the
+[releases repository](https://github.com/actual-software/actual-releases/releases)
+(binaries are published separately from source), then:
 
 ```bash
 chmod +x ./actual
@@ -76,9 +80,29 @@ xattr -dr com.apple.quarantine /usr/local/bin/actual
 
 ### Build from source
 
+Requires a C compiler (for tree-sitter native dependencies):
+
 ```bash
+# macOS: Xcode command-line tools (usually already installed)
+xcode-select --install
+
+# Debian/Ubuntu:
+sudo apt-get install build-essential
+
+# Then:
 cargo install --git https://github.com/actual-software/actual-cli.git
 ```
+
+## Supported platforms
+
+| Platform | Architecture | Install method |
+|----------|-------------|----------------|
+| macOS | Apple Silicon (arm64) | Homebrew, npm, manual download |
+| macOS | Intel (x64) | Homebrew, npm, manual download |
+| Linux | x64 | npm, manual download |
+| Linux | arm64 | npm, manual download |
+
+Windows is not currently supported.
 
 ## Output formats
 
