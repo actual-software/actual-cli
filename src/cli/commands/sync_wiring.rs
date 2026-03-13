@@ -195,12 +195,277 @@ pub(crate) fn sync_run(args: &SyncArgs) -> Result<(), ActualError> {
     sync_run_inner(args, check_auth_with_timeout)
 }
 
+/// Set up and run the Claude CLI runner.
+fn run_claude_cli<AuthFn>(
+    args: &SyncArgs,
+    cfg: &crate::config::types::Config,
+    subprocess_timeout: Duration,
+    root_dir: &std::path::Path,
+    cfg_path: &std::path::Path,
+    term: &RealTerminal,
+    auth_fn: AuthFn,
+) -> Result<(), ActualError>
+where
+    AuthFn: Fn(
+        &std::path::Path,
+        std::time::Duration,
+    ) -> Result<crate::runner::auth::ClaudeAuthStatus, ActualError>,
+{
+    let binary_path = find_claude_binary()?;
+    let auth_status = auth_fn(&binary_path, Duration::from_secs(10))?;
+    if !auth_status.is_usable() {
+        return Err(ActualError::ClaudeNotAuthenticated);
+    }
+    let auth_display = AuthDisplay {
+        authenticated: auth_status.logged_in,
+        email: auth_status.email.clone(),
+    };
+    let effective_model = args
+        .model
+        .as_deref()
+        .or(cfg.model.as_deref())
+        .unwrap_or("sonnet")
+        .to_string();
+    let runner_display = RunnerDisplay {
+        runner_name: RunnerChoice::ClaudeCli.display_name().to_string(),
+        model: effective_model.clone(),
+        warning: RunnerChoice::ClaudeCli.model_compatibility_warning(&effective_model),
+    };
+    let cli_runner = CliClaudeRunner::new(binary_path, subprocess_timeout);
+    let cli_runner = if let Some(t) = cfg.max_turns {
+        cli_runner.with_max_turns(t)
+    } else {
+        cli_runner
+    };
+    run_sync(
+        args,
+        root_dir,
+        cfg_path,
+        term,
+        &cli_runner,
+        Some(&auth_display),
+        Some(&runner_display),
+    )
+}
+
+/// Set up and run the Anthropic API runner.
+fn run_anthropic_api(
+    args: &SyncArgs,
+    cfg: &crate::config::types::Config,
+    subprocess_timeout: Duration,
+    root_dir: &std::path::Path,
+    cfg_path: &std::path::Path,
+    term: &RealTerminal,
+) -> Result<(), ActualError> {
+    let api_key = resolve_api_key("ANTHROPIC_API_KEY", cfg.anthropic_api_key.as_deref())?;
+    let auth_display = AuthDisplay {
+        authenticated: true,
+        email: Some("Anthropic API".to_string()),
+    };
+    // Full API model name — unlike the Claude CLI alias in options.rs DEFAULT_MODEL,
+    // the Anthropic HTTP API requires the complete model identifier.
+    let model = args
+        .model
+        .as_deref()
+        .or(cfg.model.as_deref())
+        .unwrap_or(DEFAULT_ANTHROPIC_MODEL)
+        .to_string();
+    let runner_display = RunnerDisplay {
+        runner_name: RunnerChoice::AnthropicApi.display_name().to_string(),
+        model: model.clone(),
+        warning: RunnerChoice::AnthropicApi.model_compatibility_warning(&model),
+    };
+    let max_tokens = cfg.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    let runner_result = if let Ok(base_url) = std::env::var("ANTHROPIC_API_BASE_URL") {
+        AnthropicApiRunner::with_base_url(api_key, model, subprocess_timeout, base_url, max_tokens)
+    } else {
+        AnthropicApiRunner::with_max_tokens(api_key, model, subprocess_timeout, max_tokens)
+    };
+    let api_runner = runner_result?;
+    run_sync(
+        args,
+        root_dir,
+        cfg_path,
+        term,
+        &api_runner,
+        Some(&auth_display),
+        Some(&runner_display),
+    )
+}
+
+/// Set up and run the OpenAI API runner.
+fn run_openai_api(
+    args: &SyncArgs,
+    cfg: &crate::config::types::Config,
+    subprocess_timeout: Duration,
+    root_dir: &std::path::Path,
+    cfg_path: &std::path::Path,
+    term: &RealTerminal,
+) -> Result<(), ActualError> {
+    let api_key = resolve_api_key("OPENAI_API_KEY", cfg.openai_api_key.as_deref())?;
+    let auth_display = AuthDisplay {
+        authenticated: true,
+        email: Some("OpenAI API".to_string()),
+    };
+    // Model resolution: --model flag > model config > OpenAI default.
+    // keep in sync with RUNNER_FAMILIES default for openai-api (models.rs)
+    let model = args
+        .model
+        .as_deref()
+        .or(cfg.model.as_deref())
+        .unwrap_or(DEFAULT_OPENAI_MODEL)
+        .to_string();
+    let runner_display = RunnerDisplay {
+        runner_name: RunnerChoice::OpenAiApi.display_name().to_string(),
+        model: model.clone(),
+        warning: RunnerChoice::OpenAiApi.model_compatibility_warning(&model),
+    };
+    let api_runner = if let Ok(base_url) = std::env::var("OPENAI_API_BASE_URL") {
+        OpenAiApiRunner::new(api_key, model, subprocess_timeout)?.with_base_url(base_url)
+    } else {
+        OpenAiApiRunner::new(api_key, model, subprocess_timeout)?
+    };
+    run_sync(
+        args,
+        root_dir,
+        cfg_path,
+        term,
+        &api_runner,
+        Some(&auth_display),
+        Some(&runner_display),
+    )
+}
+
+/// Set up and run the Codex CLI runner, with automatic fallback to the OpenAI
+/// API runner on model errors.
+fn run_codex_cli(
+    args: &SyncArgs,
+    cfg: &crate::config::types::Config,
+    subprocess_timeout: Duration,
+    root_dir: &std::path::Path,
+    cfg_path: &std::path::Path,
+    term: &RealTerminal,
+) -> Result<(), ActualError> {
+    let binary_path = find_codex_binary()?;
+    // Codex CLI supports two auth methods:
+    // 1. OPENAI_API_KEY env var (API key from platform.openai.com)
+    // 2. `codex login` (OAuth / ChatGPT account)
+    //
+    // We check the env var and config fallback first. If an API key is
+    // found, it is injected into the subprocess environment.
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .or_else(|| cfg.openai_api_key.clone());
+    // Model resolution: --model flag > model config > None
+    // (let Codex CLI use its own default, currently gpt-5 for ChatGPT OAuth).
+    let model = args
+        .model
+        .as_deref()
+        .or(cfg.model.as_deref())
+        .map(|s| s.to_string());
+    let auth_display = AuthDisplay {
+        authenticated: true,
+        email: api_key.as_ref().map(|_| "OpenAI API".to_string()),
+    };
+    let display_model = model
+        .clone()
+        .unwrap_or_else(|| "(codex default)".to_string());
+    let runner_display = RunnerDisplay {
+        runner_name: RunnerChoice::CodexCli.display_name().to_string(),
+        model: display_model.clone(),
+        warning: RunnerChoice::CodexCli.model_compatibility_warning(&display_model),
+    };
+    let mut codex_runner = CodexCliRunner::new(binary_path, model.clone(), subprocess_timeout);
+    if let Some(ref key) = api_key {
+        codex_runner = codex_runner.with_api_key(key.clone());
+    }
+    // Move the pre-flight checks (API-key-for-model + codex auth) into a
+    // runner_probe closure so that failures surface in the Environment phase
+    // of the TUI rather than before the pipeline starts.
+    let probe_api_key = api_key.clone();
+    let probe_model = model.clone();
+    let runner_probe: Box<dyn Fn() -> Result<(), ActualError>> = Box::new(move || {
+        require_api_key_for_model(probe_api_key.as_deref(), probe_model.as_deref())?;
+        check_codex_auth(probe_api_key.as_deref())
+    });
+    let result = run_sync_with_probe(
+        args,
+        root_dir,
+        cfg_path,
+        term,
+        &codex_runner,
+        Some(&auth_display),
+        Some(&runner_display),
+        Some(runner_probe),
+    );
+
+    // Fall back to the OpenAI Responses API when Codex CLI reports a
+    // model-level error (e.g. "model is not supported").  This lets
+    // users who have a valid OPENAI_API_KEY transparently retry via
+    // the direct API without manual --runner overrides.
+    codex_cli_fallback_if_model_error(
+        result,
+        args,
+        model,
+        cfg.openai_api_key.as_deref(),
+        subprocess_timeout,
+        root_dir,
+        cfg_path,
+        term,
+    )
+}
+
+/// Set up and run the Cursor CLI runner.
+fn run_cursor_cli(
+    args: &SyncArgs,
+    cfg: &crate::config::types::Config,
+    subprocess_timeout: Duration,
+    root_dir: &std::path::Path,
+    cfg_path: &std::path::Path,
+    term: &RealTerminal,
+) -> Result<(), ActualError> {
+    let binary_path = find_cursor_binary()?;
+    let api_key = std::env::var("CURSOR_API_KEY")
+        .ok()
+        .or_else(|| cfg.cursor_api_key.clone());
+    let auth_display = AuthDisplay {
+        authenticated: true,
+        email: api_key.as_ref().map(|_| "Cursor API".to_string()),
+    };
+    let model = args
+        .model
+        .as_deref()
+        .or(cfg.model.as_deref())
+        .map(|s| s.to_string());
+    let display_model = model
+        .clone()
+        .unwrap_or_else(|| "(cursor default)".to_string());
+    let runner_display = RunnerDisplay {
+        runner_name: RunnerChoice::CursorCli.display_name().to_string(),
+        model: display_model.clone(),
+        warning: RunnerChoice::CursorCli.model_compatibility_warning(&display_model),
+    };
+    let mut cursor_runner = CursorCliRunner::new(binary_path, model, subprocess_timeout);
+    if let Some(key) = api_key {
+        cursor_runner = cursor_runner.with_api_key(key);
+    }
+    run_sync(
+        args,
+        root_dir,
+        cfg_path,
+        term,
+        &cursor_runner,
+        Some(&auth_display),
+        Some(&runner_display),
+    )
+}
+
 /// Inner implementation of `actual adr-bot`, parameterised over the auth
 /// function so that tests can inject a fake.
 ///
 /// Resolves system dependencies (cwd, terminal, runner) and delegates
-/// to [`run_sync`].  Kept minimal so nearly all logic lives in the
-/// fully-testable [`run_sync`].
+/// to the per-runner setup functions.  Kept minimal so nearly all logic
+/// lives in the fully-testable runner functions and [`run_sync`].
 fn sync_run_inner<AuthFn>(args: &SyncArgs, auth_fn: AuthFn) -> Result<(), ActualError>
 where
     AuthFn: Fn(
@@ -249,224 +514,26 @@ where
         Duration::from_secs(cfg.invocation_timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
 
     match runner {
-        RunnerChoice::ClaudeCli => {
-            let binary_path = find_claude_binary()?;
-            let auth_status = auth_fn(&binary_path, Duration::from_secs(10))?;
-            if !auth_status.is_usable() {
-                return Err(ActualError::ClaudeNotAuthenticated);
-            }
-            let auth_display = AuthDisplay {
-                authenticated: auth_status.logged_in,
-                email: auth_status.email.clone(),
-            };
-            let effective_model = args
-                .model
-                .as_deref()
-                .or(cfg.model.as_deref())
-                .unwrap_or("sonnet")
-                .to_string();
-            let runner_display = RunnerDisplay {
-                runner_name: RunnerChoice::ClaudeCli.display_name().to_string(),
-                model: effective_model.clone(),
-                warning: RunnerChoice::ClaudeCli.model_compatibility_warning(&effective_model),
-            };
-            let cli_runner = CliClaudeRunner::new(binary_path, subprocess_timeout);
-            let cli_runner = if let Some(t) = cfg.max_turns {
-                cli_runner.with_max_turns(t)
-            } else {
-                cli_runner
-            };
-            run_sync(
-                args,
-                &root_dir,
-                &cfg_path,
-                &term,
-                &cli_runner,
-                Some(&auth_display),
-                Some(&runner_display),
-            )
-        }
+        RunnerChoice::ClaudeCli => run_claude_cli(
+            args,
+            &cfg,
+            subprocess_timeout,
+            &root_dir,
+            &cfg_path,
+            &term,
+            auth_fn,
+        ),
         RunnerChoice::AnthropicApi => {
-            let api_key = resolve_api_key("ANTHROPIC_API_KEY", cfg.anthropic_api_key.as_deref())?;
-            let auth_display = AuthDisplay {
-                authenticated: true,
-                email: Some("Anthropic API".to_string()),
-            };
-            // Full API model name — unlike the Claude CLI alias in options.rs DEFAULT_MODEL,
-            // the Anthropic HTTP API requires the complete model identifier.
-            let model = args
-                .model
-                .as_deref()
-                .or(cfg.model.as_deref())
-                .unwrap_or(DEFAULT_ANTHROPIC_MODEL)
-                .to_string();
-            let runner_display = RunnerDisplay {
-                runner_name: RunnerChoice::AnthropicApi.display_name().to_string(),
-                model: model.clone(),
-                warning: RunnerChoice::AnthropicApi.model_compatibility_warning(&model),
-            };
-            let max_tokens = cfg.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
-            let runner_result = if let Ok(base_url) = std::env::var("ANTHROPIC_API_BASE_URL") {
-                AnthropicApiRunner::with_base_url(
-                    api_key,
-                    model,
-                    subprocess_timeout,
-                    base_url,
-                    max_tokens,
-                )
-            } else {
-                AnthropicApiRunner::with_max_tokens(api_key, model, subprocess_timeout, max_tokens)
-            };
-            let api_runner = runner_result?;
-            run_sync(
-                args,
-                &root_dir,
-                &cfg_path,
-                &term,
-                &api_runner,
-                Some(&auth_display),
-                Some(&runner_display),
-            )
+            run_anthropic_api(args, &cfg, subprocess_timeout, &root_dir, &cfg_path, &term)
         }
         RunnerChoice::OpenAiApi => {
-            let api_key = resolve_api_key("OPENAI_API_KEY", cfg.openai_api_key.as_deref())?;
-            let auth_display = AuthDisplay {
-                authenticated: true,
-                email: Some("OpenAI API".to_string()),
-            };
-            // Model resolution: --model flag > model config > OpenAI default.
-            // keep in sync with RUNNER_FAMILIES default for openai-api (models.rs)
-            let model = args
-                .model
-                .as_deref()
-                .or(cfg.model.as_deref())
-                .unwrap_or(DEFAULT_OPENAI_MODEL)
-                .to_string();
-            let runner_display = RunnerDisplay {
-                runner_name: RunnerChoice::OpenAiApi.display_name().to_string(),
-                model: model.clone(),
-                warning: RunnerChoice::OpenAiApi.model_compatibility_warning(&model),
-            };
-            let api_runner = if let Ok(base_url) = std::env::var("OPENAI_API_BASE_URL") {
-                OpenAiApiRunner::new(api_key, model, subprocess_timeout)?.with_base_url(base_url)
-            } else {
-                OpenAiApiRunner::new(api_key, model, subprocess_timeout)?
-            };
-            run_sync(
-                args,
-                &root_dir,
-                &cfg_path,
-                &term,
-                &api_runner,
-                Some(&auth_display),
-                Some(&runner_display),
-            )
+            run_openai_api(args, &cfg, subprocess_timeout, &root_dir, &cfg_path, &term)
         }
         RunnerChoice::CodexCli => {
-            let binary_path = find_codex_binary()?;
-            // Codex CLI supports two auth methods:
-            // 1. OPENAI_API_KEY env var (API key from platform.openai.com)
-            // 2. `codex login` (OAuth / ChatGPT account)
-            //
-            // We check the env var and config fallback first. If an API key is
-            // found, it is injected into the subprocess environment.
-            let api_key = std::env::var("OPENAI_API_KEY")
-                .ok()
-                .or_else(|| cfg.openai_api_key.clone());
-            // Model resolution: --model flag > model config > None
-            // (let Codex CLI use its own default, currently gpt-5 for ChatGPT OAuth).
-            let model = args
-                .model
-                .as_deref()
-                .or(cfg.model.as_deref())
-                .map(|s| s.to_string());
-            let auth_display = AuthDisplay {
-                authenticated: true,
-                email: api_key.as_ref().map(|_| "OpenAI API".to_string()),
-            };
-            let display_model = model
-                .clone()
-                .unwrap_or_else(|| "(codex default)".to_string());
-            let runner_display = RunnerDisplay {
-                runner_name: RunnerChoice::CodexCli.display_name().to_string(),
-                model: display_model.clone(),
-                warning: RunnerChoice::CodexCli.model_compatibility_warning(&display_model),
-            };
-            let mut codex_runner =
-                CodexCliRunner::new(binary_path, model.clone(), subprocess_timeout);
-            if let Some(ref key) = api_key {
-                codex_runner = codex_runner.with_api_key(key.clone());
-            }
-            // Move the pre-flight checks (API-key-for-model + codex auth) into a
-            // runner_probe closure so that failures surface in the Environment phase
-            // of the TUI rather than before the pipeline starts.
-            let probe_api_key = api_key.clone();
-            let probe_model = model.clone();
-            let runner_probe: Box<dyn Fn() -> Result<(), ActualError>> = Box::new(move || {
-                require_api_key_for_model(probe_api_key.as_deref(), probe_model.as_deref())?;
-                check_codex_auth(probe_api_key.as_deref())
-            });
-            let result = run_sync_with_probe(
-                args,
-                &root_dir,
-                &cfg_path,
-                &term,
-                &codex_runner,
-                Some(&auth_display),
-                Some(&runner_display),
-                Some(runner_probe),
-            );
-
-            // Fall back to the OpenAI Responses API when Codex CLI reports a
-            // model-level error (e.g. "model is not supported").  This lets
-            // users who have a valid OPENAI_API_KEY transparently retry via
-            // the direct API without manual --runner overrides.
-            codex_cli_fallback_if_model_error(
-                result,
-                args,
-                model,
-                cfg.openai_api_key.as_deref(),
-                subprocess_timeout,
-                &root_dir,
-                &cfg_path,
-                &term,
-            )
+            run_codex_cli(args, &cfg, subprocess_timeout, &root_dir, &cfg_path, &term)
         }
         RunnerChoice::CursorCli => {
-            let binary_path = find_cursor_binary()?;
-            let api_key = std::env::var("CURSOR_API_KEY")
-                .ok()
-                .or_else(|| cfg.cursor_api_key.clone());
-            let auth_display = AuthDisplay {
-                authenticated: true,
-                email: api_key.as_ref().map(|_| "Cursor API".to_string()),
-            };
-            let model = args
-                .model
-                .as_deref()
-                .or(cfg.model.as_deref())
-                .map(|s| s.to_string());
-            let display_model = model
-                .clone()
-                .unwrap_or_else(|| "(cursor default)".to_string());
-            let runner_display = RunnerDisplay {
-                runner_name: RunnerChoice::CursorCli.display_name().to_string(),
-                model: display_model.clone(),
-                warning: RunnerChoice::CursorCli.model_compatibility_warning(&display_model),
-            };
-            let mut cursor_runner = CursorCliRunner::new(binary_path, model, subprocess_timeout);
-            if let Some(key) = api_key {
-                cursor_runner = cursor_runner.with_api_key(key);
-            }
-            run_sync(
-                args,
-                &root_dir,
-                &cfg_path,
-                &term,
-                &cursor_runner,
-                Some(&auth_display),
-                Some(&runner_display),
-            )
+            run_cursor_cli(args, &cfg, subprocess_timeout, &root_dir, &cfg_path, &term)
         }
     }
 }
