@@ -5,7 +5,7 @@
 If you discover a security vulnerability in Actual CLI, please report it
 responsibly. **Do not open a public GitHub issue.**
 
-**Email:** [security@actual.ai](mailto:security@actual.ai)
+**Email:** [john@actual.ai](mailto:john@actual.ai)
 
 Include:
 
