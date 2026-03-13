@@ -91,6 +91,7 @@ impl clap::ValueEnum for OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generation::markers::{END_MARKER, START_MARKER};
 
     #[test]
     fn test_claude_md_filename() {
@@ -113,6 +114,16 @@ mod tests {
     #[test]
     fn test_cursor_rules_filename_matches_constant() {
         assert_eq!(OutputFormat::CursorRules.filename(), CURSOR_RULES_PATH);
+    }
+
+    #[test]
+    fn test_start_marker_constant() {
+        assert!(START_MARKER.starts_with("<!--"));
+    }
+
+    #[test]
+    fn test_end_marker_constant() {
+        assert!(END_MARKER.starts_with("<!--"));
     }
 
     #[test]
