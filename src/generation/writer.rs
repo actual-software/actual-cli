@@ -169,7 +169,7 @@ pub fn write_files(
             }
 
             // Write file
-            if let Err(e) = std::fs::write(&full_path, &result.content) {
+            if let Err(e) = std::fs::write(&full_path, &result) {
                 return WriteResult {
                     path: file.path.clone(),
                     action: WriteAction::Failed,
