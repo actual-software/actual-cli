@@ -8,7 +8,7 @@ is collected, where it goes, and how to opt out.
 
 ### Telemetry counters (anonymous)
 
-On each successful sync, the CLI sends four counter metrics:
+On each successful run of `actual adr-bot`, the CLI sends four counter metrics:
 
 | Metric | Description |
 |--------|-------------|

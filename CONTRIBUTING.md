@@ -51,11 +51,13 @@ configuration files.
 
 CI enforces **100% per-file line coverage** for most source files (a small
 set of files is excluded — see `.github/workflows/coverage.yml`). To check
-coverage locally:
+coverage locally with the same exclusions as CI:
 
 ```bash
 cargo install cargo-llvm-cov
-cargo llvm-cov --workspace --lcov --output-path lcov.info
+cargo llvm-cov --workspace \
+  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' \
+  --lcov --output-path lcov.info
 ```
 
 ## Project Structure
@@ -73,9 +75,11 @@ src/
 ├── telemetry/     # Anonymous usage metrics
 ├── main.rs        # Entry point
 ├── lib.rs         # Library root
-└── error.rs       # Error types
+├── error.rs       # Error types
+├── model_cache.rs # OpenAI/Anthropic model list caching
+└── testutil.rs    # Shared test utilities
 crates/
-└── tui-test/      # TUI E2E testing library
+└── tui-test/      # TUI E2E testing library (PTY-based screenshot comparison)
 tests/             # Integration tests
 scripts/           # E2E and helper scripts
 ```

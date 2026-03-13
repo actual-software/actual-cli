@@ -62,7 +62,7 @@ actual config set runner codex-cli
 
 **Cursor CLI**
 ```bash
-# Requires the `agent` binary on your PATH
+# Requires `cursor-agent` on your PATH (falls back to `agent` if not found)
 actual config set runner cursor-cli
 ```
 
@@ -116,7 +116,7 @@ By default, `actual adr-bot` writes to `CLAUDE.md`. Content is wrapped in manage
 ```bash
 actual adr-bot        # analyze repo & write AI context files
 actual status         # check output file state (managed markers, staleness)
-actual auth           # verify authentication
+actual auth           # verify the configured AI runner is authenticated
 actual config show    # view current configuration
 actual config set     # set a config value (e.g. actual config set runner anthropic-api)
 actual config path    # print config file location
@@ -127,11 +127,50 @@ actual cache clear    # clear local analysis and tailoring caches
 
 ## Configuration
 
-Config lives at `~/.actualai/actual/config.yaml` and is created automatically on first run.
+Config lives at `~/.actualai/actual/config.yaml` and is created automatically
+on first run. All fields are optional — missing fields use sensible defaults.
 
-Override the config location with environment variables:
+### Config file keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `api_url` | string | `https://api-service.api.prod.actual.ai` | Actual API endpoint |
+| `runner` | string | `claude-cli` | AI backend: `claude-cli`, `anthropic-api`, `openai-api`, `codex-cli`, `cursor-cli` |
+| `model` | string | `claude-sonnet-4-6` (Claude) / `gpt-5.2` (OpenAI) | Model for tailoring |
+| `output_format` | string | `claude-md` | Output format: `claude-md`, `agents-md`, `cursor-rules` |
+| `anthropic_api_key` | string | — | Fallback Anthropic key (if `ANTHROPIC_API_KEY` env var not set) |
+| `openai_api_key` | string | — | Fallback OpenAI key (if `OPENAI_API_KEY` env var not set) |
+| `cursor_api_key` | string | — | Fallback Cursor key (if `CURSOR_API_KEY` env var not set) |
+| `max_budget_usd` | float | — | Maximum budget per tailoring invocation (USD) |
+| `max_turns` | integer | 10 | Max agentic turns per invocation (claude-cli only) |
+| `max_tokens` | integer | 16384 | Max output tokens (anthropic-api only) |
+| `batch_size` | integer | 15 | Number of ADRs per tailoring batch |
+| `concurrency` | integer | 10 | Max concurrent projects during tailoring |
+| `invocation_timeout_secs` | integer | 600 | Per-project tailoring timeout |
+| `include_categories` | list | — | ADR categories to always include |
+| `exclude_categories` | list | — | ADR categories to always exclude |
+| `include_general` | boolean | — | Whether to include language-agnostic ADRs |
+| `max_per_framework` | integer | — | Max ADRs per framework |
+| `telemetry.enabled` | boolean | `true` | Enable/disable anonymous telemetry |
+
+### Example config
+
+```yaml
+runner: anthropic-api
+model: claude-sonnet-4-6
+output_format: claude-md
+max_budget_usd: 0.50
+telemetry:
+  enabled: false
+```
+
+### Environment variable overrides
 
 | Variable | Effect |
 |----------|--------|
 | `ACTUAL_CONFIG` | Exact path to the config file |
 | `ACTUAL_CONFIG_DIR` | Directory containing `config.yaml` |
+| `ANTHROPIC_API_KEY` | Anthropic API key (overrides config file) |
+| `OPENAI_API_KEY` | OpenAI API key (overrides config file) |
+| `CURSOR_API_KEY` | Cursor API key (overrides config file) |
+| `ACTUAL_NO_TELEMETRY` | Set to any value to disable telemetry |
