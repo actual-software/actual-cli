@@ -30,8 +30,11 @@ struct ClaudeEnvelope<T> {
 /// Accepts high-level parameters instead of raw CLI args, keeping the
 /// subprocess wire format as an implementation detail of [`CliClaudeRunner`].
 ///
-/// Uses native async fn in trait (stable since Rust 1.75). The lint is suppressed
-/// because this trait is internal and all implementors are `Send + Sync`.
+/// `async fn` in public traits still triggers a clippy lint because auto trait
+/// bounds (e.g. `Send`) cannot be specified on the returned future.  The lint
+/// is suppressed here intentionally: this trait is only called from within
+/// this crate, all callers are already `Send`, and the cost of desugaring to
+/// `fn … -> impl Future + Send` outweighs the benefit for an internal API.
 #[allow(async_fn_in_trait)]
 pub trait TailoringRunner: Send + Sync {
     async fn run_tailoring(
@@ -144,8 +147,11 @@ pub(crate) fn format_stream_event(line: &str) -> Option<String> {
 /// can be returned. This allows callers to use the same runner for different schemas
 /// (e.g., `RepoAnalysis`, `TailoringOutput`).
 ///
-/// Uses native async fn in trait (stable since Rust 1.75). The lint is suppressed
-/// because this trait is internal and all implementors are `Send + Sync`.
+/// `async fn` in public traits still triggers a clippy lint because auto trait
+/// bounds (e.g. `Send`) cannot be specified on the returned future.  The lint
+/// is suppressed here intentionally: this trait is only called from within
+/// this crate, all callers are already `Send`, and the cost of desugaring to
+/// `fn … -> impl Future + Send` outweighs the benefit for an internal API.
 #[allow(async_fn_in_trait)]
 pub trait ClaudeRunner: Send + Sync {
     async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError>;
