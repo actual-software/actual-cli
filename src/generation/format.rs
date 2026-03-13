@@ -57,16 +57,6 @@ impl OutputFormat {
         }
     }
 
-    /// The managed-section start marker (identical for all formats).
-    pub fn start_marker(&self) -> &str {
-        crate::generation::markers::START_MARKER
-    }
-
-    /// The managed-section end marker (identical for all formats).
-    pub fn end_marker(&self) -> &str {
-        crate::generation::markers::END_MARKER
-    }
-
     /// The header prepended to new root-level files, or `None` if no header
     /// should be added.
     ///
@@ -101,7 +91,6 @@ impl clap::ValueEnum for OutputFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generation::markers::{END_MARKER, START_MARKER};
 
     #[test]
     fn test_claude_md_filename() {
@@ -124,20 +113,6 @@ mod tests {
     #[test]
     fn test_cursor_rules_filename_matches_constant() {
         assert_eq!(OutputFormat::CursorRules.filename(), CURSOR_RULES_PATH);
-    }
-
-    #[test]
-    fn test_start_marker_same_for_all() {
-        assert_eq!(OutputFormat::ClaudeMd.start_marker(), START_MARKER);
-        assert_eq!(OutputFormat::AgentsMd.start_marker(), START_MARKER);
-        assert_eq!(OutputFormat::CursorRules.start_marker(), START_MARKER);
-    }
-
-    #[test]
-    fn test_end_marker_same_for_all() {
-        assert_eq!(OutputFormat::ClaudeMd.end_marker(), END_MARKER);
-        assert_eq!(OutputFormat::AgentsMd.end_marker(), END_MARKER);
-        assert_eq!(OutputFormat::CursorRules.end_marker(), END_MARKER);
     }
 
     #[test]
