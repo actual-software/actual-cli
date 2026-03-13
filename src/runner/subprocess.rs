@@ -29,21 +29,14 @@ struct ClaudeEnvelope<T> {
 ///
 /// Accepts high-level parameters instead of raw CLI args, keeping the
 /// subprocess wire format as an implementation detail of [`CliClaudeRunner`].
-///
-/// `async fn` in public traits still triggers a clippy lint because auto trait
-/// bounds (e.g. `Send`) cannot be specified on the returned future.  The lint
-/// is suppressed here intentionally: this trait is only called from within
-/// this crate, all callers are already `Send`, and the cost of desugaring to
-/// `fn … -> impl Future + Send` outweighs the benefit for an internal API.
-#[allow(async_fn_in_trait)]
 pub trait TailoringRunner: Send + Sync {
-    async fn run_tailoring(
+    fn run_tailoring(
         &self,
         prompt: &str,
         schema: &str,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
-    ) -> Result<TailoringOutput, ActualError>;
+    ) -> impl std::future::Future<Output = Result<TailoringOutput, ActualError>> + Send;
 
     /// Register a channel for streaming subprocess events (tool calls, stderr lines).
     ///
@@ -146,15 +139,11 @@ pub(crate) fn format_stream_event(line: &str) -> Option<String> {
 /// Generic over the output type T at the method level — any `DeserializeOwned` type
 /// can be returned. This allows callers to use the same runner for different schemas
 /// (e.g., `RepoAnalysis`, `TailoringOutput`).
-///
-/// `async fn` in public traits still triggers a clippy lint because auto trait
-/// bounds (e.g. `Send`) cannot be specified on the returned future.  The lint
-/// is suppressed here intentionally: this trait is only called from within
-/// this crate, all callers are already `Send`, and the cost of desugaring to
-/// `fn … -> impl Future + Send` outweighs the benefit for an internal API.
-#[allow(async_fn_in_trait)]
 pub trait ClaudeRunner: Send + Sync {
-    async fn run<T: DeserializeOwned + Send>(&self, args: &[String]) -> Result<T, ActualError>;
+    fn run<T: DeserializeOwned + Send>(
+        &self,
+        args: &[String],
+    ) -> impl std::future::Future<Output = Result<T, ActualError>> + Send;
 }
 
 /// Production implementation that spawns `claude --print` as a subprocess.
