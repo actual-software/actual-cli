@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use crate::cli::ui::diff::{format_diff_summary, FileDiff};
 use crate::cli::ui::progress::SyncPhase;
-use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::cli::ui::theme;
 use crate::cli::ui::tui::renderer::TuiRenderer;
@@ -158,14 +157,8 @@ pub fn confirm_and_write(
     }
 
     // Step 6: Report results and return SyncResult
-    let width = term_size::terminal_width();
-    let (files_created, files_updated, files_failed) = report_write_results(
-        &results,
-        files_rejected,
-        pipeline.steps_elapsed(),
-        pipeline,
-        width,
-    );
+    let (files_created, files_updated, files_failed) =
+        report_write_results(&results, files_rejected, pipeline.steps_elapsed(), pipeline);
 
     Ok(SyncResult {
         files_created,
@@ -183,7 +176,6 @@ pub(crate) fn report_write_results(
     rejected_count: usize,
     elapsed: Duration,
     pipeline: &mut TuiRenderer,
-    _width: usize,
 ) -> (usize, usize, usize) {
     let mut files_created = 0;
     let mut files_updated = 0;

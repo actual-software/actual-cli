@@ -1,6 +1,5 @@
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::{Language, LanguageStat, Project, RepoAnalysis};
-use crate::cli::ui::term_size;
 use crate::cli::ui::terminal::TerminalIO;
 use crate::error::ActualError;
 
@@ -253,7 +252,7 @@ fn format_metadata_lines_plain(project: &Project) -> Vec<String> {
 /// This is separate from the prompt so it can be tested independently.
 /// The `width` parameter is retained for API compatibility but is no longer
 /// used to render a panel — the output is plain text.
-pub fn format_project_summary(analysis: &RepoAnalysis, _width: usize) -> String {
+pub fn format_project_summary(analysis: &RepoAnalysis) -> String {
     let diamond = theme::hint(&theme::DIAMOND);
 
     let header = if analysis.is_monorepo {
@@ -301,8 +300,7 @@ pub fn prompt_project_confirmation(
     analysis: &RepoAnalysis,
     term: &dyn TerminalIO,
 ) -> Result<ConfirmAction, ActualError> {
-    let width = term_size::terminal_width();
-    let summary = format_project_summary(analysis, width);
+    let summary = format_project_summary(analysis);
     term.write_line(&summary);
 
     let options = vec![
@@ -426,7 +424,7 @@ mod tests {
     #[test]
     fn format_summary_monorepo() {
         let analysis = make_monorepo_analysis();
-        let output = format_project_summary(&analysis, 80);
+        let output = format_project_summary(&analysis);
         let plain = strip(&output);
 
         assert!(
@@ -506,7 +504,7 @@ mod tests {
     #[test]
     fn format_summary_single_project() {
         let analysis = make_single_project_analysis();
-        let output = format_project_summary(&analysis, 80);
+        let output = format_project_summary(&analysis);
         let plain = strip(&output);
 
         assert!(
@@ -546,7 +544,7 @@ mod tests {
     #[test]
     fn format_summary_empty_projects() {
         let analysis = make_empty_analysis();
-        let output = format_project_summary(&analysis, 80);
+        let output = format_project_summary(&analysis);
         let plain = strip(&output);
 
         assert!(
@@ -573,7 +571,7 @@ mod tests {
                 selection: None,
             }],
         };
-        let themed = strip(&format_project_summary(&analysis, 80));
+        let themed = strip(&format_project_summary(&analysis));
         assert!(
             themed.contains("Monorepo detected"),
             "expected 'Monorepo detected' in themed output: {themed}"
@@ -610,7 +608,7 @@ mod tests {
                 selection: None,
             }],
         };
-        let output = format_project_summary(&analysis, 80);
+        let output = format_project_summary(&analysis);
         let plain = strip(&output);
 
         assert!(plain.contains("bare"), "expected project name in: {plain}");
@@ -844,7 +842,7 @@ mod tests {
     fn format_summary_width_ignored_no_panel() {
         let analysis = make_single_project_analysis();
         // Width parameter is accepted but no longer affects output — no panel is rendered
-        let output = format_project_summary(&analysis, 60);
+        let output = format_project_summary(&analysis);
         let plain = strip(&output);
 
         // Content is still present
@@ -957,7 +955,7 @@ mod tests {
                 selection: None,
             }],
         };
-        let output = format_project_summary(&analysis, 80);
+        let output = format_project_summary(&analysis);
         assert!(
             !output.contains('\x1b'),
             "output must not contain raw ANSI escape codes from injected project name: {output:?}"
@@ -988,7 +986,7 @@ mod tests {
                 selection: None,
             }],
         };
-        let output = format_project_summary(&analysis, 80);
+        let output = format_project_summary(&analysis);
         assert!(
             !output.contains('\x1b'),
             "output must not contain raw ANSI escape codes from injected project path: {output:?}"
