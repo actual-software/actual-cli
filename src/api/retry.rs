@@ -46,7 +46,8 @@ impl RetryConfig {
     /// # Errors
     ///
     /// Returns [`ActualError::ConfigError`] if `max_attempts` is zero.
-    pub fn new_with_max_delay(
+    #[cfg(test)]
+    pub(crate) fn new_with_max_delay(
         max_attempts: u32,
         initial_delay: Duration,
         backoff_factor: u32,
@@ -66,23 +67,27 @@ impl RetryConfig {
     }
 
     /// Maximum number of attempts (including the initial attempt).
-    pub fn max_attempts(&self) -> u32 {
+    #[cfg(test)]
+    pub(crate) fn max_attempts(&self) -> u32 {
         self.max_attempts
     }
 
     /// Delay before the first retry.
-    pub fn initial_delay(&self) -> Duration {
+    #[cfg(test)]
+    pub(crate) fn initial_delay(&self) -> Duration {
         self.initial_delay
     }
 
     /// Multiplier applied to the delay after each failed attempt.
-    pub fn backoff_factor(&self) -> u32 {
+    #[cfg(test)]
+    pub(crate) fn backoff_factor(&self) -> u32 {
         self.backoff_factor
     }
 
     /// Maximum delay between retries. The computed backoff is always capped at
     /// this value. Defaults to 30 seconds.
-    pub fn max_delay(&self) -> Duration {
+    #[cfg(test)]
+    pub(crate) fn max_delay(&self) -> Duration {
         self.max_delay
     }
 }
