@@ -2513,6 +2513,33 @@ require github.com/another/indirect v4.0.0 // indirect
     }
 
     #[test]
+    fn test_parse_csproj_nonexistent_directory() {
+        // Exercises the Err(_) => return branch in parse_csproj when read_dir fails.
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(
+            Path::new("/nonexistent/path/that/does/not/exist"),
+            &mut deps,
+            &mut sources,
+        );
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_csproj_invalid_utf8() {
+        // Exercises the None => return branch in parse_single_csproj when the file
+        // cannot be decoded as UTF-8.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("App.csproj"), b"\xff\xfe not valid utf-8").unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(dir.path(), &mut deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
     fn test_parse_dependencies_includes_csproj() {
         let dir = tempdir().unwrap();
         fs::write(
