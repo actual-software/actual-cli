@@ -356,40 +356,140 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
     // CMake find_package() names (title-case) and vcpkg/Conan names (lowercase)
 
     // Testing
-    FrameworkSignature { dependency: "GTest",       framework_name: "googletest",  category: "testing"     },
-    FrameworkSignature { dependency: "gtest",        framework_name: "googletest",  category: "testing"     },
-    FrameworkSignature { dependency: "googletest",   framework_name: "googletest",  category: "testing"     },
-    FrameworkSignature { dependency: "Catch2",       framework_name: "catch2",      category: "testing"     },
-    FrameworkSignature { dependency: "catch2",       framework_name: "catch2",      category: "testing"     },
-    FrameworkSignature { dependency: "doctest",      framework_name: "doctest",     category: "testing"     },
-
+    FrameworkSignature {
+        dependency: "GTest",
+        framework_name: "googletest",
+        category: "testing",
+    },
+    FrameworkSignature {
+        dependency: "gtest",
+        framework_name: "googletest",
+        category: "testing",
+    },
+    FrameworkSignature {
+        dependency: "googletest",
+        framework_name: "googletest",
+        category: "testing",
+    },
+    FrameworkSignature {
+        dependency: "Catch2",
+        framework_name: "catch2",
+        category: "testing",
+    },
+    FrameworkSignature {
+        dependency: "catch2",
+        framework_name: "catch2",
+        category: "testing",
+    },
+    FrameworkSignature {
+        dependency: "doctest",
+        framework_name: "doctest",
+        category: "testing",
+    },
     // GUI / Desktop
-    FrameworkSignature { dependency: "Qt5",          framework_name: "qt",          category: "desktop"     },
-    FrameworkSignature { dependency: "Qt6",          framework_name: "qt",          category: "desktop"     },
-    FrameworkSignature { dependency: "qt5",          framework_name: "qt",          category: "desktop"     },
-    FrameworkSignature { dependency: "qt6",          framework_name: "qt",          category: "desktop"     },
-    FrameworkSignature { dependency: "SDL2",         framework_name: "sdl2",        category: "desktop"     },
-    FrameworkSignature { dependency: "sdl2",         framework_name: "sdl2",        category: "desktop"     },
-    FrameworkSignature { dependency: "SFML",         framework_name: "sfml",        category: "desktop"     },
-    FrameworkSignature { dependency: "sfml",         framework_name: "sfml",        category: "desktop"     },
-
+    FrameworkSignature {
+        dependency: "Qt5",
+        framework_name: "qt",
+        category: "desktop",
+    },
+    FrameworkSignature {
+        dependency: "Qt6",
+        framework_name: "qt",
+        category: "desktop",
+    },
+    FrameworkSignature {
+        dependency: "qt5",
+        framework_name: "qt",
+        category: "desktop",
+    },
+    FrameworkSignature {
+        dependency: "qt6",
+        framework_name: "qt",
+        category: "desktop",
+    },
+    FrameworkSignature {
+        dependency: "SDL2",
+        framework_name: "sdl2",
+        category: "desktop",
+    },
+    FrameworkSignature {
+        dependency: "sdl2",
+        framework_name: "sdl2",
+        category: "desktop",
+    },
+    FrameworkSignature {
+        dependency: "SFML",
+        framework_name: "sfml",
+        category: "desktop",
+    },
+    FrameworkSignature {
+        dependency: "sfml",
+        framework_name: "sfml",
+        category: "desktop",
+    },
     // Web / networking
-    FrameworkSignature { dependency: "cpp-httplib",  framework_name: "cpp-httplib", category: "web-backend" },
-    FrameworkSignature { dependency: "Pistache",     framework_name: "pistache",    category: "web-backend" },
-    FrameworkSignature { dependency: "pistache",     framework_name: "pistache",    category: "web-backend" },
-    FrameworkSignature { dependency: "crow",         framework_name: "crow",        category: "web-backend" },
-
+    FrameworkSignature {
+        dependency: "cpp-httplib",
+        framework_name: "cpp-httplib",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "Pistache",
+        framework_name: "pistache",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "pistache",
+        framework_name: "pistache",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "crow",
+        framework_name: "crow",
+        category: "web-backend",
+    },
     // Libraries
-    FrameworkSignature { dependency: "Boost",        framework_name: "boost",       category: "library"     },
-    FrameworkSignature { dependency: "boost",        framework_name: "boost",       category: "library"     },
-    FrameworkSignature { dependency: "OpenSSL",      framework_name: "openssl",     category: "library"     },
-    FrameworkSignature { dependency: "openssl",      framework_name: "openssl",     category: "library"     },
-
+    FrameworkSignature {
+        dependency: "Boost",
+        framework_name: "boost",
+        category: "library",
+    },
+    FrameworkSignature {
+        dependency: "boost",
+        framework_name: "boost",
+        category: "library",
+    },
+    FrameworkSignature {
+        dependency: "OpenSSL",
+        framework_name: "openssl",
+        category: "library",
+    },
+    FrameworkSignature {
+        dependency: "openssl",
+        framework_name: "openssl",
+        category: "library",
+    },
     // Data
-    FrameworkSignature { dependency: "SQLite3",      framework_name: "sqlite",      category: "data"        },
-    FrameworkSignature { dependency: "sqlite3",      framework_name: "sqlite",      category: "data"        },
-    FrameworkSignature { dependency: "PostgreSQL",   framework_name: "postgresql",  category: "data"        },
-    FrameworkSignature { dependency: "libpq",        framework_name: "postgresql",  category: "data"        },
+    FrameworkSignature {
+        dependency: "SQLite3",
+        framework_name: "sqlite",
+        category: "data",
+    },
+    FrameworkSignature {
+        dependency: "sqlite3",
+        framework_name: "sqlite",
+        category: "data",
+    },
+    FrameworkSignature {
+        dependency: "PostgreSQL",
+        framework_name: "postgresql",
+        category: "data",
+    },
+    FrameworkSignature {
+        dependency: "libpq",
+        framework_name: "postgresql",
+        category: "data",
+    },
 ];
 
 /// Look up a dependency name in the registry.
