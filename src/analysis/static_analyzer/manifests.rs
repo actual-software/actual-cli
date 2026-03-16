@@ -788,7 +788,10 @@ fn parse_csproj(
     };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("csproj")) {
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("csproj"))
+        {
             parse_single_csproj(&path, deps, sources);
         }
     }
@@ -2524,8 +2527,12 @@ require github.com/another/indirect v4.0.0 // indirect
 
         let info = parse_dependencies(dir.path());
 
-        assert!(info.dependencies.contains(&"Microsoft.NET.Sdk.Web".to_string()));
-        assert!(info.dependencies.contains(&"Microsoft.AspNetCore.Mvc".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"Microsoft.NET.Sdk.Web".to_string()));
+        assert!(info
+            .dependencies
+            .contains(&"Microsoft.AspNetCore.Mvc".to_string()));
         assert_eq!(
             info.sources.get("Microsoft.NET.Sdk.Web"),
             Some(&ManifestSource::CsprojFile)

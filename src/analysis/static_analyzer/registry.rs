@@ -436,26 +436,30 @@ mod tests {
 
     #[test]
     fn test_lookup_aspnetcore_sdk_web() {
-        let sig = lookup("Microsoft.NET.Sdk.Web").expect("Microsoft.NET.Sdk.Web should be in registry");
+        let sig =
+            lookup("Microsoft.NET.Sdk.Web").expect("Microsoft.NET.Sdk.Web should be in registry");
         assert_eq!(sig.framework_name, "aspnetcore");
         assert_eq!(sig.category, "web-backend");
     }
 
     #[test]
     fn test_lookup_aspnetcore_app() {
-        let sig = lookup("Microsoft.AspNetCore.App").expect("Microsoft.AspNetCore.App should be in registry");
+        let sig = lookup("Microsoft.AspNetCore.App")
+            .expect("Microsoft.AspNetCore.App should be in registry");
         assert_eq!(sig.framework_name, "aspnetcore");
     }
 
     #[test]
     fn test_lookup_swashbuckle() {
-        let sig = lookup("Swashbuckle.AspNetCore").expect("Swashbuckle.AspNetCore should be in registry");
+        let sig =
+            lookup("Swashbuckle.AspNetCore").expect("Swashbuckle.AspNetCore should be in registry");
         assert_eq!(sig.framework_name, "aspnetcore");
     }
 
     #[test]
     fn test_lookup_entityframeworkcore() {
-        let sig = lookup("Microsoft.EntityFrameworkCore").expect("Microsoft.EntityFrameworkCore should be in registry");
+        let sig = lookup("Microsoft.EntityFrameworkCore")
+            .expect("Microsoft.EntityFrameworkCore should be in registry");
         assert_eq!(sig.framework_name, "entityframeworkcore");
         assert_eq!(sig.category, "data");
     }
