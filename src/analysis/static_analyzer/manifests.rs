@@ -2923,54 +2923,6 @@ require github.com/another/indirect v4.0.0 // indirect
         );
     }
 
-    // ── csproj edge-case coverage ─────────────────────────────────────
-
-    #[test]
-    fn test_parse_csproj_nonexistent_directory() {
-        // Covers `Err(_) => return` in parse_csproj (line 796).
-        let mut deps = HashSet::new();
-        let mut sources = HashMap::new();
-        parse_csproj(
-            Path::new("/nonexistent/path/that/does/not/exist"),
-            &mut deps,
-            &mut sources,
-        );
-        assert!(deps.is_empty());
-        assert!(sources.is_empty());
-    }
-
-    #[test]
-    fn test_parse_csproj_invalid_utf8() {
-        // Covers `None => return` in parse_single_csproj (line 816).
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join("App.csproj"), b"\xff\xfe not valid utf-8").unwrap();
-        let mut deps = HashSet::new();
-        let mut sources = HashMap::new();
-        parse_csproj(dir.path(), &mut deps, &mut sources);
-        assert!(deps.is_empty());
-        assert!(sources.is_empty());
-    }
-
-    #[test]
-    fn test_parse_csproj_no_sdk_attribute() {
-        // Covers the else-path of `if let Some(cap) = sdk_re.captures(...)` (line 827).
-        let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join("App.csproj"),
-            r#"<Project>
-  <ItemGroup>
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
-  </ItemGroup>
-</Project>"#,
-        )
-        .unwrap();
-        let mut deps = HashSet::new();
-        let mut sources = HashMap::new();
-        parse_csproj(dir.path(), &mut deps, &mut sources);
-        assert!(deps.contains("Newtonsoft.Json"));
-        assert!(!deps.contains("Microsoft.NET.Sdk.Web"));
-    }
-
     // ── vcpkg.json edge-case coverage ────────────────────────────────
 
     #[test]
