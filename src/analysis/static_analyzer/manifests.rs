@@ -2928,4 +2928,119 @@ require github.com/another/indirect v4.0.0 // indirect
             Some(&ManifestSource::CMakeListsTxt)
         );
     }
+
+    // ── csproj edge-case coverage ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_csproj_nonexistent_directory() {
+        // Covers `Err(_) => return` in parse_csproj (line 796).
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(
+            Path::new("/nonexistent/path/that/does/not/exist"),
+            &mut deps,
+            &mut sources,
+        );
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_csproj_invalid_utf8() {
+        // Covers `None => return` in parse_single_csproj (line 816).
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("App.csproj"), b"\xff\xfe not valid utf-8").unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(dir.path(), &mut deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_csproj_no_sdk_attribute() {
+        // Covers the else-path of `if let Some(cap) = sdk_re.captures(...)` (line 827).
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("App.csproj"),
+            r#"<Project>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+  </ItemGroup>
+</Project>"#,
+        )
+        .unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(dir.path(), &mut deps, &mut sources);
+        assert!(deps.contains("Newtonsoft.Json"));
+        assert!(!deps.contains("Microsoft.NET.Sdk.Web"));
+    }
+
+    // ── vcpkg.json edge-case coverage ────────────────────────────────
+
+    #[test]
+    fn test_parse_vcpkg_json_invalid_json() {
+        // Covers the `Err(e) => { warn; return }` branch (lines 914-916).
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("vcpkg.json"), "not valid json {{").unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_vcpkg_json(dir.path(), &mut deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_vcpkg_json_dep_item_skipped_if_no_name() {
+        // Covers the `else { continue }` branch (line 926) for items that are
+        // neither a string nor an object with a "name" key.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("vcpkg.json"),
+            r#"{"dependencies":[42, {"version":"1.0"}]}"#,
+        )
+        .unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_vcpkg_json(dir.path(), &mut deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_vcpkg_json_no_dependencies_key() {
+        // Covers the else-path of `if let Some(arr) = parsed.get("dependencies")...`
+        // (line 931).
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("vcpkg.json"),
+            r#"{"name":"my-app","version":"1.0"}"#,
+        )
+        .unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_vcpkg_json(dir.path(), &mut deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    // ── conanfile.txt edge-case coverage ─────────────────────────────
+
+    #[test]
+    fn test_parse_conan_file_txt_skips_empty_and_comment_lines() {
+        // Covers `continue` at line 954: empty lines, comments, and lines
+        // outside a [requires]/[build_requires] section.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("conanfile.txt"),
+            "[generators]\ncmake\n\n# a comment\n[requires]\nzlib/1.2.11\n",
+        )
+        .unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_conan_file_txt(dir.path(), &mut deps, &mut sources);
+        assert!(deps.contains("zlib"), "expected zlib");
+        assert!(!deps.contains("cmake"), "cmake should not be a dep");
+    }
 }
