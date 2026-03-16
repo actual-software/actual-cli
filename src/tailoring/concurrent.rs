@@ -450,6 +450,12 @@ mod tests {
             let idx = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
             self.tracker.record(self.delay).await;
             let mut responses = self.responses.lock().unwrap();
+            assert!(
+                idx < responses.len(),
+                "ConcurrentMockRunner: unexpected call #{}, only {} responses configured",
+                idx + 1,
+                responses.len()
+            );
             let entry = std::mem::replace(&mut responses[idx], MockResponse::Json(String::new()));
             match entry {
                 MockResponse::Json(json) => serde_json::from_str(&json).map_err(Into::into),
@@ -1843,5 +1849,34 @@ mod tests {
             file_paths: vec![],
         };
         batch_completed_fields(&wrong);
+    }
+
+    #[tokio::test]
+    #[should_panic(
+        expected = "ConcurrentMockRunner: unexpected call #2, only 1 responses configured"
+    )]
+    async fn test_concurrent_mock_runner_panics_with_descriptive_message_when_called_too_many_times(
+    ) {
+        let output = TailoringOutput {
+            files: vec![],
+            skipped_adrs: vec![],
+            summary: TailoringSummary {
+                total_input: 0,
+                applicable: 0,
+                not_applicable: 0,
+                files_generated: 0,
+            },
+        };
+        let json = serde_json::to_string(&output).unwrap();
+        let runner = ConcurrentMockRunner::new(vec![json], Duration::ZERO);
+
+        // First call succeeds
+        runner
+            .run_tailoring("", "", None, None)
+            .await
+            .expect("first call should succeed");
+
+        // Second call panics with descriptive message
+        runner.run_tailoring("", "", None, None).await.unwrap();
     }
 }
