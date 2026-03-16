@@ -379,6 +379,57 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         framework_name: "maui",
         category: "mobile",
     },
+    // ── Swift ────────────────────────────────────────────────────────
+    FrameworkSignature {
+        dependency: "vapor",
+        framework_name: "vapor",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "hummingbird",
+        framework_name: "hummingbird",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "Kitura",
+        framework_name: "kitura",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "swift-argument-parser",
+        framework_name: "swift-argument-parser",
+        category: "cli",
+    },
+    FrameworkSignature {
+        dependency: "Alamofire",
+        framework_name: "alamofire",
+        category: "library",
+    },
+    FrameworkSignature {
+        dependency: "RxSwift",
+        framework_name: "rxswift",
+        category: "library",
+    },
+    FrameworkSignature {
+        dependency: "swift-nio",
+        framework_name: "swift-nio",
+        category: "library",
+    },
+    FrameworkSignature {
+        dependency: "SnapKit",
+        framework_name: "snapkit",
+        category: "mobile",
+    },
+    FrameworkSignature {
+        dependency: "Kingfisher",
+        framework_name: "kingfisher",
+        category: "mobile",
+    },
+    FrameworkSignature {
+        dependency: "SwiftyJSON",
+        framework_name: "swiftyjson",
+        category: "library",
+    },
     // ── C / C++ ──────────────────────────────────────────────────────────
     // CMake find_package() names (title-case) and vcpkg/Conan names (lowercase)
 
@@ -670,6 +721,28 @@ mod tests {
     }
 
     #[test]
+    fn test_lookup_vapor() {
+        let sig = lookup("vapor").expect("vapor should be in registry");
+        assert_eq!(sig.framework_name, "vapor");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_swift_argument_parser() {
+        let sig =
+            lookup("swift-argument-parser").expect("swift-argument-parser should be in registry");
+        assert_eq!(sig.framework_name, "swift-argument-parser");
+        assert_eq!(sig.category, "cli");
+    }
+
+    #[test]
+    fn test_lookup_alamofire() {
+        let sig = lookup("Alamofire").expect("Alamofire should be in registry");
+        assert_eq!(sig.framework_name, "alamofire");
+        assert_eq!(sig.category, "library");
+    }
+
+    #[test]
     fn registry_has_entries_for_all_ecosystems() {
         // Spot-check at least one entry per ecosystem
         let checks = [
@@ -682,6 +755,7 @@ mod tests {
             "Microsoft.NET.Sdk.Web",
             "GTest",
             "Qt6",
+            "vapor",
         ];
         for dep in checks {
             assert!(lookup(dep).is_some());
