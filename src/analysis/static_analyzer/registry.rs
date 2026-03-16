@@ -307,6 +307,51 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         framework_name: "micronaut",
         category: "web-backend",
     },
+    // ── .NET / C# ────────────────────────────────────────────────────────
+    // SDK attribute extracted from <Project Sdk="..."> — most reliable aspnetcore signal
+    FrameworkSignature {
+        dependency: "Microsoft.NET.Sdk.Web",
+        framework_name: "aspnetcore",
+        category: "web-backend",
+    },
+    // Explicit framework reference / metapackage
+    FrameworkSignature {
+        dependency: "Microsoft.AspNetCore.App",
+        framework_name: "aspnetcore",
+        category: "web-backend",
+    },
+    // Common individual packages that imply aspnetcore
+    FrameworkSignature {
+        dependency: "Microsoft.AspNetCore.Mvc",
+        framework_name: "aspnetcore",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "Microsoft.AspNetCore.Authentication.JwtBearer",
+        framework_name: "aspnetcore",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "Swashbuckle.AspNetCore",
+        framework_name: "aspnetcore",
+        category: "web-backend",
+    },
+    // Entity Framework Core (separate framework)
+    FrameworkSignature {
+        dependency: "Microsoft.EntityFrameworkCore",
+        framework_name: "entityframeworkcore",
+        category: "data",
+    },
+    FrameworkSignature {
+        dependency: "Microsoft.EntityFrameworkCore.SqlServer",
+        framework_name: "entityframeworkcore",
+        category: "data",
+    },
+    FrameworkSignature {
+        dependency: "Microsoft.EntityFrameworkCore.InMemory",
+        framework_name: "entityframeworkcore",
+        category: "data",
+    },
 ];
 
 /// Look up a dependency name in the registry.
@@ -390,6 +435,32 @@ mod tests {
     }
 
     #[test]
+    fn test_lookup_aspnetcore_sdk_web() {
+        let sig = lookup("Microsoft.NET.Sdk.Web").expect("Microsoft.NET.Sdk.Web should be in registry");
+        assert_eq!(sig.framework_name, "aspnetcore");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_aspnetcore_app() {
+        let sig = lookup("Microsoft.AspNetCore.App").expect("Microsoft.AspNetCore.App should be in registry");
+        assert_eq!(sig.framework_name, "aspnetcore");
+    }
+
+    #[test]
+    fn test_lookup_swashbuckle() {
+        let sig = lookup("Swashbuckle.AspNetCore").expect("Swashbuckle.AspNetCore should be in registry");
+        assert_eq!(sig.framework_name, "aspnetcore");
+    }
+
+    #[test]
+    fn test_lookup_entityframeworkcore() {
+        let sig = lookup("Microsoft.EntityFrameworkCore").expect("Microsoft.EntityFrameworkCore should be in registry");
+        assert_eq!(sig.framework_name, "entityframeworkcore");
+        assert_eq!(sig.category, "data");
+    }
+
+    #[test]
     fn registry_has_entries_for_all_ecosystems() {
         // Spot-check at least one entry per ecosystem
         let checks = [
@@ -399,6 +470,7 @@ mod tests {
             "github.com/gin-gonic/gin",
             "rails",
             "org.springframework.boot",
+            "Microsoft.NET.Sdk.Web",
         ];
         for dep in checks {
             assert!(lookup(dep).is_some());

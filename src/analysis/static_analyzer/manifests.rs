@@ -37,6 +37,7 @@ pub enum ManifestSource {
     BuildGradle,
     GradleVersionCatalog,
     PackageSwift,
+    CsprojFile,
     ConfigFile,
 }
 
@@ -61,6 +62,7 @@ impl ManifestSource {
                 vec![Language::Java, Language::Kotlin]
             }
             ManifestSource::PackageSwift => vec![Language::Swift],
+            ManifestSource::CsprojFile => vec![Language::CSharp],
             ManifestSource::ConfigFile => vec![],
         }
     }
@@ -99,6 +101,7 @@ pub fn parse_dependencies(project_dir: &Path) -> DependencyInfo {
     parse_build_gradle(project_dir, &mut deps, &mut sources);
     parse_gradle_version_catalog(project_dir, &mut deps, &mut sources);
     parse_package_swift(project_dir, &mut deps, &mut sources);
+    parse_csproj(project_dir, &mut deps, &mut sources);
 
     let mut dependencies: Vec<String> = deps.into_iter().collect();
     dependencies.sort();
@@ -772,6 +775,72 @@ fn regex_swift_package_url() -> &'static regex::Regex {
     &RE
 }
 
+// ── *.csproj ─────────────────────────────────────────────────────────
+
+fn parse_csproj(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
+    let entries = match std::fs::read_dir(project_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("csproj")) {
+            parse_single_csproj(&path, deps, sources);
+        }
+    }
+}
+
+fn parse_single_csproj(
+    path: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
+    let content = match read_manifest_file(path) {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Project Sdk attribute → treat as a synthetic dep (e.g. "Microsoft.NET.Sdk.Web")
+    let sdk_re = regex_csproj_sdk();
+    if let Some(cap) = sdk_re.captures(&content) {
+        if let Some(m) = cap.get(1) {
+            let name = m.as_str().to_string();
+            deps.insert(name.clone());
+            sources.entry(name).or_insert(ManifestSource::CsprojFile);
+        }
+    }
+
+    // PackageReference Include values
+    let pkg_re = regex_csproj_package_reference();
+    for cap in pkg_re.captures_iter(&content) {
+        if let Some(m) = cap.get(1) {
+            let name = m.as_str().to_string();
+            deps.insert(name.clone());
+            sources.entry(name).or_insert(ManifestSource::CsprojFile);
+        }
+    }
+}
+
+fn regex_csproj_sdk() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?i)<Project\s[^>]*Sdk\s*=\s*"([^"]+)""#)
+            .expect("valid regex — this is a programmer error")
+    });
+    &RE
+}
+
+fn regex_csproj_package_reference() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?i)<PackageReference\s+Include\s*=\s*"([^"]+)""#)
+            .expect("valid regex — this is a programmer error")
+    });
+    &RE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -863,6 +932,7 @@ mod tests {
             ManifestSource::BuildGradle,
             ManifestSource::GradleVersionCatalog,
             ManifestSource::PackageSwift,
+            ManifestSource::CsprojFile,
             ManifestSource::ConfigFile,
         ];
         for src in &all_sources {
@@ -2351,5 +2421,114 @@ require github.com/another/indirect v4.0.0 // indirect
 
         let result = super::read_manifest_file(&path);
         assert!(result.is_none());
+    }
+
+    // ── .csproj tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_manifest_source_compatible_languages_csproj_file() {
+        let langs = ManifestSource::CsprojFile.compatible_languages();
+        assert_eq!(langs, vec![Language::CSharp]);
+    }
+
+    #[test]
+    fn test_parse_csproj_sdk_web() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("App.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup></PropertyGroup></Project>"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(dir.path(), &mut deps, &mut sources);
+
+        assert!(
+            deps.contains("Microsoft.NET.Sdk.Web"),
+            "expected SDK name in deps"
+        );
+    }
+
+    #[test]
+    fn test_parse_csproj_package_references() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("App.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.4.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="7.0.0" />
+  </ItemGroup>
+</Project>"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(dir.path(), &mut deps, &mut sources);
+
+        assert!(deps.contains("Swashbuckle.AspNetCore"));
+        assert!(deps.contains("Microsoft.EntityFrameworkCore"));
+    }
+
+    #[test]
+    fn test_parse_csproj_no_file() {
+        let dir = tempdir().unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(dir.path(), &mut deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_csproj_source_is_csproj_file() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("App.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.4.0" />
+  </ItemGroup>
+</Project>"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(dir.path(), &mut deps, &mut sources);
+
+        assert_eq!(
+            sources.get("Microsoft.NET.Sdk.Web"),
+            Some(&ManifestSource::CsprojFile)
+        );
+        assert_eq!(
+            sources.get("Swashbuckle.AspNetCore"),
+            Some(&ManifestSource::CsprojFile)
+        );
+    }
+
+    #[test]
+    fn test_parse_dependencies_includes_csproj() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("App.csproj"),
+            r#"<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc" Version="2.2.0" />
+  </ItemGroup>
+</Project>"#,
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+
+        assert!(info.dependencies.contains(&"Microsoft.NET.Sdk.Web".to_string()));
+        assert!(info.dependencies.contains(&"Microsoft.AspNetCore.Mvc".to_string()));
+        assert_eq!(
+            info.sources.get("Microsoft.NET.Sdk.Web"),
+            Some(&ManifestSource::CsprojFile)
+        );
     }
 }
