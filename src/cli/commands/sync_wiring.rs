@@ -911,6 +911,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_openai_api_base_url_env_creates_runner_with_custom_base() {
+        // Verify the OPENAI_API_BASE_URL env var path is exercised.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("OPENAI_API_KEY", "sk-openai-test");
+        let _g2 = EnvGuard::set("OPENAI_API_BASE_URL", "http://localhost:9999");
+        let dir = tempfile::tempdir().unwrap();
+        let _g3 = with_temp_config(&dir, "{}");
+        let mut args = make_sync_args(Some(RunnerChoice::OpenAiApi));
+        args.no_tailor = true;
+        let result = sync_run_inner(&args, auth_not_authenticated);
+        // Must NOT be ApiKeyMissing — the preamble resolved the key
+        // and used with_base_url to construct the runner.
+        assert!(
+            !matches!(result, Err(ActualError::ApiKeyMissing { .. })),
+            "should have resolved key and created runner with base URL, got: {result:?}"
+        );
+    }
+
     // ── CodexCli arm ─────────────────────────────────────────────────────────
 
     #[test]
