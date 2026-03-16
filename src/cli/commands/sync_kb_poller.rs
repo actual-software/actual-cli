@@ -26,15 +26,14 @@ pub struct KbPoller {
 
 struct KbPollerInner {
     stop: Arc<AtomicBool>,
-    _handle: std::thread::JoinHandle<()>,
+    handle: std::thread::JoinHandle<()>,
 }
 
 impl Drop for KbPoller {
     fn drop(&mut self) {
-        if let Some(inner) = &self.inner {
+        if let Some(inner) = self.inner.take() {
             inner.stop.store(true, Ordering::Relaxed);
-            // The thread wakes every 100 ms and will exit after seeing the flag.
-            // We don't join here because `JoinHandle::join` requires ownership.
+            let _ = inner.handle.join();
         }
     }
 }
@@ -129,12 +128,35 @@ fn spawn_thread() -> (
         }
     });
 
-    (
-        KbPollerInner {
-            stop,
-            _handle: handle,
-        },
-        rx,
-        nav_rx,
-    )
+    (KbPollerInner { stop, handle }, rx, nav_rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn drop_sets_flag_and_joins_thread() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop.clone();
+        let handle = std::thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                std::thread::yield_now();
+            }
+        });
+
+        let poller = KbPoller {
+            inner: Some(KbPollerInner { stop, handle }),
+        };
+
+        // Drop must set the flag and join the thread; reaching this line confirms it.
+        drop(poller);
+    }
+
+    #[test]
+    fn drop_is_noop_when_inner_is_none() {
+        let poller = KbPoller { inner: None };
+        drop(poller);
+    }
 }
