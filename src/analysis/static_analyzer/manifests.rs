@@ -868,16 +868,12 @@ fn parse_cmake_lists(
     for cap in regex_cmake_find_package().captures_iter(&content) {
         let name = cap[1].to_string();
         deps.insert(name.clone());
-        sources
-            .entry(name)
-            .or_insert(ManifestSource::CMakeListsTxt);
+        sources.entry(name).or_insert(ManifestSource::CMakeListsTxt);
     }
     for cap in regex_cmake_fetch_content().captures_iter(&content) {
         let name = cap[1].to_string();
         deps.insert(name.clone());
-        sources
-            .entry(name)
-            .or_insert(ManifestSource::CMakeListsTxt);
+        sources.entry(name).or_insert(ManifestSource::CMakeListsTxt);
     }
 }
 
@@ -956,9 +952,7 @@ fn parse_conan_file_txt(
         let name = line.split('/').next().unwrap_or(line).trim().to_string();
         if !name.is_empty() {
             deps.insert(name.clone());
-            sources
-                .entry(name)
-                .or_insert(ManifestSource::ConanFileTxt);
+            sources.entry(name).or_insert(ManifestSource::ConanFileTxt);
         }
     }
 }
