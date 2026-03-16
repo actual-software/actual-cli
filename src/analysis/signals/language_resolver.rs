@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use crate::analysis::static_analyzer::languages::normalize_language;
+
 /// Extensions (without dots) that cannot be parsed with tree-sitter.
 const KNOWN_UNPARSEABLE_EXTENSIONS: &[&str] = &[
     "baml", "toml", "ini", "env", "lock", "tf", "tfvars", "hcl", "tfstate",
@@ -173,23 +175,35 @@ fn resolve_from_extension(ext: &str) -> Option<TreeSitterLanguage> {
 }
 
 /// Map a language hint / alias (case-insensitive) to a language.
+///
+/// Delegates alias resolution to [`normalize_language`] (the single canonical
+/// alias table) and then maps the canonical name to a [`TreeSitterLanguage`].
+///
+/// TSX is handled before delegation because `normalize_language` collapses
+/// `"tsx"` into `"typescript"`, but tree-sitter requires a distinct grammar
+/// for TSX files.
 fn resolve_from_hint(hint: &str) -> Option<TreeSitterLanguage> {
-    match hint.to_lowercase().as_str() {
-        "javascript" | "js" | "jsx" => Some(TreeSitterLanguage::JavaScript),
-        "typescript" | "ts" => Some(TreeSitterLanguage::TypeScript),
-        "tsx" => Some(TreeSitterLanguage::Tsx),
-        "python" | "py" => Some(TreeSitterLanguage::Python),
-        "go" | "golang" => Some(TreeSitterLanguage::Go),
+    // TSX needs its own tree-sitter grammar; handle before normalisation.
+    if hint.eq_ignore_ascii_case("tsx") {
+        return Some(TreeSitterLanguage::Tsx);
+    }
+
+    // Use the canonical alias table for all other hints.
+    match normalize_language(hint)? {
+        "javascript" => Some(TreeSitterLanguage::JavaScript),
+        "typescript" => Some(TreeSitterLanguage::TypeScript),
+        "python" => Some(TreeSitterLanguage::Python),
+        "go" => Some(TreeSitterLanguage::Go),
         "java" => Some(TreeSitterLanguage::Java),
-        "kotlin" | "kt" => Some(TreeSitterLanguage::Kotlin),
-        "rust" | "rs" => Some(TreeSitterLanguage::Rust),
+        "kotlin" => Some(TreeSitterLanguage::Kotlin),
+        "rust" => Some(TreeSitterLanguage::Rust),
         "c" => Some(TreeSitterLanguage::C),
-        "cpp" | "c++" | "cxx" => Some(TreeSitterLanguage::Cpp),
-        "csharp" | "c#" | "cs" => Some(TreeSitterLanguage::CSharp),
-        "ruby" | "rb" => Some(TreeSitterLanguage::Ruby),
+        "cpp" => Some(TreeSitterLanguage::Cpp),
+        "csharp" => Some(TreeSitterLanguage::CSharp),
+        "ruby" => Some(TreeSitterLanguage::Ruby),
         "php" => Some(TreeSitterLanguage::Php),
         "swift" => Some(TreeSitterLanguage::Swift),
-        _ => None,
+        _ => None, // scala, elixir, etc. have no tree-sitter support here
     }
 }
 
@@ -660,6 +674,38 @@ mod tests {
     }
 
     // ----- additional hint coverage -----
+
+    #[test]
+    fn hint_c_sharp_and_c_minus_sharp_resolve() {
+        // Previously-missing aliases that normalize_language knows but
+        // the old resolve_from_hint match did not include.
+        let p = PathBuf::from("file.txt");
+        assert_eq!(
+            resolve_language(&p, Some("c_sharp")),
+            Some(TreeSitterLanguage::CSharp)
+        );
+        assert_eq!(
+            resolve_language(&p, Some("c-sharp")),
+            Some(TreeSitterLanguage::CSharp)
+        );
+        assert_eq!(
+            resolve_language(&p, Some("C_SHARP")),
+            Some(TreeSitterLanguage::CSharp)
+        );
+        assert_eq!(
+            resolve_language(&p, Some("C-Sharp")),
+            Some(TreeSitterLanguage::CSharp)
+        );
+    }
+
+    #[test]
+    fn hint_known_but_unsupported_by_tree_sitter_returns_none() {
+        // Languages that normalize_language recognises but have no tree-sitter
+        // grammar in this project fall through to `_ => None`.
+        let p = PathBuf::from("file.txt");
+        assert_eq!(resolve_language(&p, Some("scala")), None);
+        assert_eq!(resolve_language(&p, Some("elixir")), None);
+    }
 
     #[test]
     fn hint_shell_returns_none() {
