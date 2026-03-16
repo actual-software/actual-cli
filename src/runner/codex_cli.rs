@@ -1,23 +1,13 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use regex::Regex;
-use std::sync::OnceLock;
 use tokio::process::Command;
 
 use crate::error::ActualError;
 use crate::tailoring::types::TailoringOutput;
 
 use super::subprocess::{resolve_output, TailoringRunner};
-
-/// Compiled regex for validating model names: alphanumeric start, then
-/// alphanumeric, dots, underscores, slashes, or hyphens, up to 100 chars total.
-static MODEL_NAME_RE: OnceLock<Regex> = OnceLock::new();
-
-fn model_name_regex() -> &'static Regex {
-    MODEL_NAME_RE
-        .get_or_init(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._/\-]{0,99}$").expect("valid regex"))
-}
+use super::util::{find_binary, model_name_regex, strip_markdown_json_fences};
 
 /// The default binary name to search for on PATH.
 const CODEX_BINARY_NAME: &str = "codex";
@@ -139,27 +129,9 @@ pub(crate) fn check_codex_auth_inner(
 /// Returns the absolute path to the binary on success, or
 /// `ActualError::CodexNotFound` if the binary cannot be located or is invalid.
 pub fn find_codex_binary() -> Result<PathBuf, ActualError> {
-    if let Ok(path_str) = std::env::var(CODEX_BINARY_ENV) {
-        let path = PathBuf::from(&path_str);
-        if !path.exists() {
-            return Err(ActualError::CodexNotFound);
-        }
-        if !path.is_file() {
-            return Err(ActualError::CodexNotFound);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path)
-                .map(|m| m.permissions().mode())
-                .unwrap_or(0);
-            if mode & 0o111 == 0 {
-                return Err(ActualError::CodexNotFound);
-            }
-        }
-        return Ok(path);
-    }
-    which::which(CODEX_BINARY_NAME).map_err(|_| ActualError::CodexNotFound)
+    find_binary(CODEX_BINARY_ENV, &[CODEX_BINARY_NAME], || {
+        ActualError::CodexNotFound
+    })
 }
 
 /// Convert an I/O error from subprocess operations into an `ActualError`.
@@ -309,28 +281,6 @@ async fn run_codex_subprocess(
 
     let parsed: TailoringOutput = serde_json::from_str(json_str)?;
     Ok(parsed)
-}
-
-/// Strip markdown JSON code fences from a string if present.
-///
-/// Handles both ` ```json\n...\n``` ` and ` ```\n...\n``` ` patterns.
-/// Returns the inner content if fences are found, otherwise returns the
-/// original string trimmed.
-fn strip_markdown_json_fences(s: &str) -> &str {
-    let trimmed = s.trim();
-
-    // Try ```json first, then bare ```
-    for prefix in &["```json", "```"] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            // Skip optional newline after opening fence
-            let rest = rest.strip_prefix('\n').unwrap_or(rest);
-            if let Some(inner) = rest.strip_suffix("```") {
-                return inner.trim();
-            }
-        }
-    }
-
-    trimmed
 }
 
 /// Extract an error detail message from Codex CLI output.
@@ -864,32 +814,6 @@ echo '{json}' > "$OUTPUT_FILE"
                 "expected Ok for model {model:?}"
             );
         }
-    }
-
-    // ---- strip_markdown_json_fences tests ----
-
-    #[test]
-    fn test_strip_fences_json_block() {
-        let input = "```json\n{\"key\": \"value\"}\n```";
-        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
-    }
-
-    #[test]
-    fn test_strip_fences_bare_block() {
-        let input = "```\n{\"key\": \"value\"}\n```";
-        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
-    }
-
-    #[test]
-    fn test_strip_fences_no_fences() {
-        let input = r#"{"key": "value"}"#;
-        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
-    }
-
-    #[test]
-    fn test_strip_fences_with_surrounding_whitespace() {
-        let input = "  \n```json\n{\"key\": \"value\"}\n```\n  ";
-        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
     }
 
     // ---- Additional: spawn failure (bad binary path) ----

@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use crate::error::ActualError;
 
+use super::util::find_binary;
+
 /// The default binary name to search for on PATH.
 const CLAUDE_BINARY_NAME: &str = "claude";
 
@@ -18,27 +20,9 @@ const CLAUDE_BINARY_ENV: &str = "CLAUDE_BINARY";
 /// Returns the absolute path to the binary on success, or
 /// `ActualError::ClaudeNotFound` if the binary cannot be located or is invalid.
 pub fn find_claude_binary() -> Result<PathBuf, ActualError> {
-    if let Ok(path_str) = std::env::var(CLAUDE_BINARY_ENV) {
-        let path = PathBuf::from(&path_str);
-        if !path.exists() {
-            return Err(ActualError::ClaudeNotFound);
-        }
-        if !path.is_file() {
-            return Err(ActualError::ClaudeNotFound);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path)
-                .map(|m| m.permissions().mode())
-                .unwrap_or(0);
-            if mode & 0o111 == 0 {
-                return Err(ActualError::ClaudeNotFound);
-            }
-        }
-        return Ok(path);
-    }
-    which::which(CLAUDE_BINARY_NAME).map_err(|_| ActualError::ClaudeNotFound)
+    find_binary(CLAUDE_BINARY_ENV, &[CLAUDE_BINARY_NAME], || {
+        ActualError::ClaudeNotFound
+    })
 }
 
 #[cfg(test)]

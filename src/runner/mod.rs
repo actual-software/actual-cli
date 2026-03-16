@@ -10,6 +10,7 @@ pub mod probe;
 pub mod prompts;
 pub mod schemas;
 pub mod subprocess;
+pub(crate) mod util;
 
 pub use anthropic_api::AnthropicApiRunner;
 pub use codex_cli::{find_codex_binary, CodexCliRunner};
