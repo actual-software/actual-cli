@@ -2513,6 +2513,27 @@ require github.com/another/indirect v4.0.0 // indirect
     }
 
     #[test]
+    fn test_parse_csproj_no_sdk_attribute() {
+        // Exercises the else-branch of `if let Some(cap) = sdk_re.captures(&content)`,
+        // i.e. a .csproj with no Project Sdk attribute but with PackageReferences.
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("App.csproj"),
+            r#"<Project>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+  </ItemGroup>
+</Project>"#,
+        )
+        .unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_csproj(dir.path(), &mut deps, &mut sources);
+        assert!(deps.contains("Newtonsoft.Json"));
+        assert!(!deps.contains("Microsoft.NET.Sdk.Web"));
+    }
+
+    #[test]
     fn test_parse_csproj_nonexistent_directory() {
         // Exercises the Err(_) => return branch in parse_csproj when read_dir fails.
         let mut deps = HashSet::new();
