@@ -489,9 +489,7 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
 
             // Signal abort if we detect a pathological loop.
             if repeat_count >= REPETITIVE_LINE_THRESHOLD {
-                *msg_for_stderr
-                    .lock()
-                    .expect("repetitive_msg mutex poisoned") = last_line.clone();
+                *msg_for_stderr.lock().unwrap_or_else(|e| e.into_inner()) = last_line.clone();
                 abort_for_stderr.notify_one();
                 break;
             }
@@ -536,9 +534,8 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                             .unwrap_or("unknown error")
                             .strip_prefix("Claude: ")
                             .unwrap_or(last_summary.as_deref().unwrap_or("unknown error"));
-                        *msg_for_stdout
-                            .lock()
-                            .expect("repetitive_msg mutex poisoned") = Some(raw.to_string());
+                        *msg_for_stdout.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(raw.to_string());
                         abort_for_stdout.notify_one();
                         return None;
                     }
@@ -570,7 +567,7 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
         Ok(Some(envelope)) => {
             let repeated = repetitive_msg
                 .lock()
-                .expect("repetitive_msg mutex poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .clone();
             if envelope.is_error == Some(true)
                 || envelope.subtype.as_deref() == Some("error_max_turns")
@@ -601,7 +598,7 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
             let stderr_str = String::from_utf8_lossy(&stderr_bytes).to_string();
             let repeated = repetitive_msg
                 .lock()
-                .expect("repetitive_msg mutex poisoned")
+                .unwrap_or_else(|e| e.into_inner())
                 .clone();
             Err(classify_subprocess_error(
                 None,
@@ -646,13 +643,13 @@ impl TailoringRunner for CliClaudeRunner {
         let event_tx = self
             .event_tx
             .lock()
-            .expect("event_tx mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone();
         run_subprocess_streaming(&self.binary_path, self.timeout, &args, event_tx).await
     }
 
     fn set_event_tx(&self, tx: UnboundedSender<String>) {
-        *self.event_tx.lock().expect("event_tx mutex poisoned") = Some(tx);
+        *self.event_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     }
 }
 
@@ -1687,6 +1684,27 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         runner.set_event_tx(tx);
         assert!(runner.event_tx.lock().unwrap().is_some());
+    }
+
+    /// Verify that `set_event_tx` and `run_tailoring` recover from a poisoned mutex
+    /// rather than propagating the panic.
+    #[test]
+    fn test_poisoned_event_tx_mutex_recovers() {
+        use std::sync::{Arc, Mutex};
+
+        let mutex: Arc<Mutex<Option<i32>>> = Arc::new(Mutex::new(None));
+        let mutex_clone = mutex.clone();
+
+        // Poison the mutex by panicking while holding the lock.
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = mutex_clone.lock().unwrap();
+            panic!("intentional panic to poison mutex");
+        });
+
+        // The mutex is now poisoned — unwrap_or_else(|e| e.into_inner()) should recover.
+        assert!(mutex.is_poisoned(), "mutex should be poisoned");
+        let value = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(value.is_none(), "recovered value should still be None");
     }
 
     /// Verify that tool-call events from the subprocess are forwarded via event_tx.
