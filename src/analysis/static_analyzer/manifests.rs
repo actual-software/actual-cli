@@ -38,6 +38,9 @@ pub enum ManifestSource {
     GradleVersionCatalog,
     PackageSwift,
     CsprojFile,
+    CMakeListsTxt,
+    VcpkgJson,
+    ConanFileTxt,
     ConfigFile,
 }
 
@@ -63,6 +66,9 @@ impl ManifestSource {
             }
             ManifestSource::PackageSwift => vec![Language::Swift],
             ManifestSource::CsprojFile => vec![Language::CSharp],
+            ManifestSource::CMakeListsTxt
+            | ManifestSource::VcpkgJson
+            | ManifestSource::ConanFileTxt => vec![Language::C, Language::Cpp],
             ManifestSource::ConfigFile => vec![],
         }
     }
@@ -102,6 +108,9 @@ pub fn parse_dependencies(project_dir: &Path) -> DependencyInfo {
     parse_gradle_version_catalog(project_dir, &mut deps, &mut sources);
     parse_package_swift(project_dir, &mut deps, &mut sources);
     parse_csproj(project_dir, &mut deps, &mut sources);
+    parse_cmake_lists(project_dir, &mut deps, &mut sources);
+    parse_vcpkg_json(project_dir, &mut deps, &mut sources);
+    parse_conan_file_txt(project_dir, &mut deps, &mut sources);
 
     let mut dependencies: Vec<String> = deps.into_iter().collect();
     dependencies.sort();
@@ -844,6 +853,116 @@ fn regex_csproj_package_reference() -> &'static regex::Regex {
     &RE
 }
 
+// ── CMakeLists.txt ────────────────────────────────────────────────────
+
+fn parse_cmake_lists(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
+    let path = project_dir.join("CMakeLists.txt");
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
+    };
+    for cap in regex_cmake_find_package().captures_iter(&content) {
+        let name = cap[1].to_string();
+        deps.insert(name.clone());
+        sources
+            .entry(name)
+            .or_insert(ManifestSource::CMakeListsTxt);
+    }
+    for cap in regex_cmake_fetch_content().captures_iter(&content) {
+        let name = cap[1].to_string();
+        deps.insert(name.clone());
+        sources
+            .entry(name)
+            .or_insert(ManifestSource::CMakeListsTxt);
+    }
+}
+
+fn regex_cmake_find_package() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)\bfind_package\s*\(\s*([A-Za-z][A-Za-z0-9_.-]*)")
+            .expect("valid regex — this is a programmer error")
+    });
+    &RE
+}
+
+fn regex_cmake_fetch_content() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)\bFetchContent_Declare\s*\(\s*([A-Za-z][A-Za-z0-9_.-]*)")
+            .expect("valid regex — this is a programmer error")
+    });
+    &RE
+}
+
+// ── vcpkg.json ────────────────────────────────────────────────────────
+
+fn parse_vcpkg_json(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
+    let path = project_dir.join("vcpkg.json");
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("failed to parse {}: {e}", path.display());
+            return;
+        }
+    };
+    if let Some(arr) = parsed.get("dependencies").and_then(|v| v.as_array()) {
+        for item in arr {
+            let name = if let Some(s) = item.as_str() {
+                s.to_string()
+            } else if let Some(n) = item.get("name").and_then(|v| v.as_str()) {
+                n.to_string()
+            } else {
+                continue;
+            };
+            deps.insert(name.clone());
+            sources.entry(name).or_insert(ManifestSource::VcpkgJson);
+        }
+    }
+}
+
+// ── conanfile.txt ─────────────────────────────────────────────────────
+
+fn parse_conan_file_txt(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
+    let path = project_dir.join("conanfile.txt");
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
+    };
+    let mut in_requires = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_requires = matches!(line, "[requires]" | "[build_requires]");
+            continue;
+        }
+        if !in_requires || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let name = line.split('/').next().unwrap_or(line).trim().to_string();
+        if !name.is_empty() {
+            deps.insert(name.clone());
+            sources
+                .entry(name)
+                .or_insert(ManifestSource::ConanFileTxt);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,6 +1055,9 @@ mod tests {
             ManifestSource::GradleVersionCatalog,
             ManifestSource::PackageSwift,
             ManifestSource::CsprojFile,
+            ManifestSource::CMakeListsTxt,
+            ManifestSource::VcpkgJson,
+            ManifestSource::ConanFileTxt,
             ManifestSource::ConfigFile,
         ];
         for src in &all_sources {
@@ -2584,6 +2706,226 @@ require github.com/another/indirect v4.0.0 // indirect
         assert_eq!(
             info.sources.get("Microsoft.NET.Sdk.Web"),
             Some(&ManifestSource::CsprojFile)
+        );
+    }
+
+    // ── CMakeLists.txt tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_manifest_source_compatible_languages_cmake() {
+        let langs = ManifestSource::CMakeListsTxt.compatible_languages();
+        assert_eq!(langs, vec![Language::C, Language::Cpp]);
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_vcpkg_json() {
+        let langs = ManifestSource::VcpkgJson.compatible_languages();
+        assert_eq!(langs, vec![Language::C, Language::Cpp]);
+    }
+
+    #[test]
+    fn test_manifest_source_compatible_languages_conan_file_txt() {
+        let langs = ManifestSource::ConanFileTxt.compatible_languages();
+        assert_eq!(langs, vec![Language::C, Language::Cpp]);
+    }
+
+    #[test]
+    fn test_parse_cmake_find_package() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.20)\nfind_package(Qt6 REQUIRED COMPONENTS Core)\n",
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_cmake_lists(dir.path(), &mut deps, &mut sources);
+
+        assert!(deps.contains("Qt6"), "expected Qt6 in deps");
+    }
+
+    #[test]
+    fn test_parse_cmake_fetch_content() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("CMakeLists.txt"),
+            "include(FetchContent)\nFetchContent_Declare(googletest URL https://example.com)\n",
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_cmake_lists(dir.path(), &mut deps, &mut sources);
+
+        assert!(deps.contains("googletest"), "expected googletest in deps");
+    }
+
+    #[test]
+    fn test_parse_cmake_no_file() {
+        let dir = tempdir().unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_cmake_lists(dir.path(), &mut deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_cmake_source_is_cmake() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("CMakeLists.txt"),
+            "find_package(Boost REQUIRED)\n",
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_cmake_lists(dir.path(), &mut deps, &mut sources);
+
+        assert_eq!(sources.get("Boost"), Some(&ManifestSource::CMakeListsTxt));
+    }
+
+    // ── vcpkg.json tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_vcpkg_json_strings() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("vcpkg.json"),
+            r#"{"name":"my-app","version":"1.0","dependencies":["zlib","openssl"]}"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_vcpkg_json(dir.path(), &mut deps, &mut sources);
+
+        assert!(deps.contains("zlib"));
+        assert!(deps.contains("openssl"));
+    }
+
+    #[test]
+    fn test_parse_vcpkg_json_objects() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("vcpkg.json"),
+            r#"{"dependencies":[{"name":"boost-regex","features":["icu"]}]}"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_vcpkg_json(dir.path(), &mut deps, &mut sources);
+
+        assert!(deps.contains("boost-regex"), "expected boost-regex in deps");
+    }
+
+    #[test]
+    fn test_parse_vcpkg_json_no_file() {
+        let dir = tempdir().unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_vcpkg_json(dir.path(), &mut deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_vcpkg_json_source_is_vcpkg() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("vcpkg.json"),
+            r#"{"dependencies":["sqlite3"]}"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_vcpkg_json(dir.path(), &mut deps, &mut sources);
+
+        assert_eq!(sources.get("sqlite3"), Some(&ManifestSource::VcpkgJson));
+    }
+
+    // ── conanfile.txt tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_parse_conan_file_txt_requires() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("conanfile.txt"),
+            "[requires]\nzlib/1.2.11\n",
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_conan_file_txt(dir.path(), &mut deps, &mut sources);
+
+        assert!(deps.contains("zlib"), "expected zlib in deps");
+    }
+
+    #[test]
+    fn test_parse_conan_file_txt_build_requires() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("conanfile.txt"),
+            "[build_requires]\ncmake/3.25.0\n",
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_conan_file_txt(dir.path(), &mut deps, &mut sources);
+
+        assert!(deps.contains("cmake"), "expected cmake in deps");
+    }
+
+    #[test]
+    fn test_parse_conan_file_txt_no_file() {
+        let dir = tempdir().unwrap();
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_conan_file_txt(dir.path(), &mut deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_conan_file_txt_source_is_conan() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("conanfile.txt"),
+            "[requires]\nboost/1.81.0\n",
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_conan_file_txt(dir.path(), &mut deps, &mut sources);
+
+        assert_eq!(sources.get("boost"), Some(&ManifestSource::ConanFileTxt));
+    }
+
+    #[test]
+    fn test_parse_dependencies_includes_cmake() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("CMakeLists.txt"),
+            "cmake_minimum_required(VERSION 3.20)\nfind_package(GTest REQUIRED)\n",
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+
+        assert!(
+            info.dependencies.contains(&"GTest".to_string()),
+            "expected GTest in dependencies"
+        );
+        assert_eq!(
+            info.sources.get("GTest"),
+            Some(&ManifestSource::CMakeListsTxt)
         );
     }
 }

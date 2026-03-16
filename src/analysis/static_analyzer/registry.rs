@@ -352,6 +352,44 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         framework_name: "entityframeworkcore",
         category: "data",
     },
+    // ── C / C++ ──────────────────────────────────────────────────────────
+    // CMake find_package() names (title-case) and vcpkg/Conan names (lowercase)
+
+    // Testing
+    FrameworkSignature { dependency: "GTest",       framework_name: "googletest",  category: "testing"     },
+    FrameworkSignature { dependency: "gtest",        framework_name: "googletest",  category: "testing"     },
+    FrameworkSignature { dependency: "googletest",   framework_name: "googletest",  category: "testing"     },
+    FrameworkSignature { dependency: "Catch2",       framework_name: "catch2",      category: "testing"     },
+    FrameworkSignature { dependency: "catch2",       framework_name: "catch2",      category: "testing"     },
+    FrameworkSignature { dependency: "doctest",      framework_name: "doctest",     category: "testing"     },
+
+    // GUI / Desktop
+    FrameworkSignature { dependency: "Qt5",          framework_name: "qt",          category: "desktop"     },
+    FrameworkSignature { dependency: "Qt6",          framework_name: "qt",          category: "desktop"     },
+    FrameworkSignature { dependency: "qt5",          framework_name: "qt",          category: "desktop"     },
+    FrameworkSignature { dependency: "qt6",          framework_name: "qt",          category: "desktop"     },
+    FrameworkSignature { dependency: "SDL2",         framework_name: "sdl2",        category: "desktop"     },
+    FrameworkSignature { dependency: "sdl2",         framework_name: "sdl2",        category: "desktop"     },
+    FrameworkSignature { dependency: "SFML",         framework_name: "sfml",        category: "desktop"     },
+    FrameworkSignature { dependency: "sfml",         framework_name: "sfml",        category: "desktop"     },
+
+    // Web / networking
+    FrameworkSignature { dependency: "cpp-httplib",  framework_name: "cpp-httplib", category: "web-backend" },
+    FrameworkSignature { dependency: "Pistache",     framework_name: "pistache",    category: "web-backend" },
+    FrameworkSignature { dependency: "pistache",     framework_name: "pistache",    category: "web-backend" },
+    FrameworkSignature { dependency: "crow",         framework_name: "crow",        category: "web-backend" },
+
+    // Libraries
+    FrameworkSignature { dependency: "Boost",        framework_name: "boost",       category: "library"     },
+    FrameworkSignature { dependency: "boost",        framework_name: "boost",       category: "library"     },
+    FrameworkSignature { dependency: "OpenSSL",      framework_name: "openssl",     category: "library"     },
+    FrameworkSignature { dependency: "openssl",      framework_name: "openssl",     category: "library"     },
+
+    // Data
+    FrameworkSignature { dependency: "SQLite3",      framework_name: "sqlite",      category: "data"        },
+    FrameworkSignature { dependency: "sqlite3",      framework_name: "sqlite",      category: "data"        },
+    FrameworkSignature { dependency: "PostgreSQL",   framework_name: "postgresql",  category: "data"        },
+    FrameworkSignature { dependency: "libpq",        framework_name: "postgresql",  category: "data"        },
 ];
 
 /// Look up a dependency name in the registry.
@@ -475,9 +513,45 @@ mod tests {
             "rails",
             "org.springframework.boot",
             "Microsoft.NET.Sdk.Web",
+            "GTest",
+            "Qt6",
         ];
         for dep in checks {
             assert!(lookup(dep).is_some());
         }
+    }
+
+    #[test]
+    fn test_lookup_gtest_cmake_name() {
+        let sig = lookup("GTest").expect("GTest should be in registry");
+        assert_eq!(sig.framework_name, "googletest");
+        assert_eq!(sig.category, "testing");
+    }
+
+    #[test]
+    fn test_lookup_gtest_pkg_name() {
+        let sig = lookup("gtest").expect("gtest should be in registry");
+        assert_eq!(sig.framework_name, "googletest");
+    }
+
+    #[test]
+    fn test_lookup_qt6() {
+        let sig = lookup("Qt6").expect("Qt6 should be in registry");
+        assert_eq!(sig.framework_name, "qt");
+        assert_eq!(sig.category, "desktop");
+    }
+
+    #[test]
+    fn test_lookup_boost() {
+        let sig = lookup("Boost").expect("Boost should be in registry");
+        assert_eq!(sig.framework_name, "boost");
+        assert_eq!(sig.category, "library");
+    }
+
+    #[test]
+    fn test_lookup_sqlite3() {
+        let sig = lookup("SQLite3").expect("SQLite3 should be in registry");
+        assert_eq!(sig.framework_name, "sqlite");
+        assert_eq!(sig.category, "data");
     }
 }
