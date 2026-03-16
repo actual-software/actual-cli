@@ -41,6 +41,7 @@ pub enum ManifestSource {
     CMakeListsTxt,
     VcpkgJson,
     ConanFileTxt,
+    ComposerJson,
     ConfigFile,
 }
 
@@ -69,6 +70,7 @@ impl ManifestSource {
             ManifestSource::CMakeListsTxt
             | ManifestSource::VcpkgJson
             | ManifestSource::ConanFileTxt => vec![Language::C, Language::Cpp],
+            ManifestSource::ComposerJson => vec![Language::Php],
             ManifestSource::ConfigFile => vec![],
         }
     }
@@ -111,6 +113,7 @@ pub fn parse_dependencies(project_dir: &Path) -> DependencyInfo {
     parse_cmake_lists(project_dir, &mut deps, &mut sources);
     parse_vcpkg_json(project_dir, &mut deps, &mut sources);
     parse_conan_file_txt(project_dir, &mut deps, &mut sources);
+    parse_composer_json(project_dir, &mut deps, &mut dev_deps, &mut sources);
 
     let mut dependencies: Vec<String> = deps.into_iter().collect();
     dependencies.sort();
@@ -867,6 +870,49 @@ fn parse_single_csproj(
     }
 }
 
+// ── composer.json ────────────────────────────────────────────────────
+
+fn parse_composer_json(
+    project_dir: &Path,
+    deps: &mut HashSet<String>,
+    dev_deps: &mut HashSet<String>,
+    sources: &mut HashMap<String, ManifestSource>,
+) {
+    let path = project_dir.join("composer.json");
+    let content = match read_manifest_file(&path) {
+        Some(c) => c,
+        None => return,
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("failed to parse {}: {e}", path.display());
+            return;
+        }
+    };
+
+    if let Some(obj) = parsed.get("require").and_then(|v| v.as_object()) {
+        for key in obj.keys().filter(|k| !is_composer_platform_req(k)) {
+            deps.insert(key.clone());
+            sources
+                .entry(key.clone())
+                .or_insert(ManifestSource::ComposerJson);
+        }
+    }
+    if let Some(obj) = parsed.get("require-dev").and_then(|v| v.as_object()) {
+        for key in obj.keys().filter(|k| !is_composer_platform_req(k)) {
+            dev_deps.insert(key.clone());
+            sources
+                .entry(key.clone())
+                .or_insert(ManifestSource::ComposerJson);
+        }
+    }
+}
+
+fn is_composer_platform_req(name: &str) -> bool {
+    name == "php" || name == "php-64bit" || name.starts_with("ext-") || name.starts_with("lib-")
+}
+
 fn regex_csproj_sdk() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r#"(?i)<Project\s[^>]*Sdk\s*=\s*"([^"]+)""#)
@@ -1082,6 +1128,7 @@ mod tests {
             ManifestSource::CMakeListsTxt,
             ManifestSource::VcpkgJson,
             ManifestSource::ConanFileTxt,
+            ManifestSource::ComposerJson,
             ManifestSource::ConfigFile,
         ];
         for src in &all_sources {
@@ -3053,5 +3100,157 @@ require github.com/another/indirect v4.0.0 // indirect
         parse_conan_file_txt(dir.path(), &mut deps, &mut sources);
         assert!(deps.contains("zlib"), "expected zlib");
         assert!(!deps.contains("cmake"), "cmake should not be a dep");
+    }
+
+    // ── composer.json tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_manifest_source_compatible_languages_composer_json() {
+        let langs = ManifestSource::ComposerJson.compatible_languages();
+        assert_eq!(langs, vec![Language::Php]);
+    }
+
+    #[test]
+    fn test_parse_composer_json_require() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"require": {"laravel/framework": "^10.0", "guzzlehttp/guzzle": "^7.0"}}"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut dev_deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_composer_json(dir.path(), &mut deps, &mut dev_deps, &mut sources);
+
+        assert!(deps.contains("laravel/framework"));
+        assert!(deps.contains("guzzlehttp/guzzle"));
+        assert!(dev_deps.is_empty());
+    }
+
+    #[test]
+    fn test_parse_composer_json_require_dev() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"require-dev": {"phpunit/phpunit": "^10.0"}}"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut dev_deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_composer_json(dir.path(), &mut deps, &mut dev_deps, &mut sources);
+
+        assert!(dev_deps.contains("phpunit/phpunit"));
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_parse_composer_json_filters_platform_reqs() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"require": {"php": "^8.1", "php-64bit": "^8.1", "ext-gd": "*", "lib-curl": "*", "laravel/framework": "^10.0"}}"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut dev_deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_composer_json(dir.path(), &mut deps, &mut dev_deps, &mut sources);
+
+        assert!(!deps.contains("php"));
+        assert!(!deps.contains("php-64bit"));
+        assert!(!deps.contains("ext-gd"));
+        assert!(!deps.contains("lib-curl"));
+        assert!(deps.contains("laravel/framework"));
+    }
+
+    #[test]
+    fn test_parse_composer_json_no_file() {
+        let dir = tempdir().unwrap();
+        let mut deps = HashSet::new();
+        let mut dev_deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_composer_json(dir.path(), &mut deps, &mut dev_deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(dev_deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_composer_json_invalid_json() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("composer.json"), "not valid json {{{").unwrap();
+        let mut deps = HashSet::new();
+        let mut dev_deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_composer_json(dir.path(), &mut deps, &mut dev_deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn test_parse_composer_json_no_require_key() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"name": "my/package", "description": "A package"}"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut dev_deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_composer_json(dir.path(), &mut deps, &mut dev_deps, &mut sources);
+        assert!(deps.is_empty());
+        assert!(dev_deps.is_empty());
+    }
+
+    #[test]
+    fn test_parse_composer_json_source_is_composer_json() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"require": {"laravel/framework": "^10.0"}, "require-dev": {"phpunit/phpunit": "^10.0"}}"#,
+        )
+        .unwrap();
+
+        let mut deps = HashSet::new();
+        let mut dev_deps = HashSet::new();
+        let mut sources = HashMap::new();
+        parse_composer_json(dir.path(), &mut deps, &mut dev_deps, &mut sources);
+
+        assert_eq!(
+            sources.get("laravel/framework"),
+            Some(&ManifestSource::ComposerJson)
+        );
+        assert_eq!(
+            sources.get("phpunit/phpunit"),
+            Some(&ManifestSource::ComposerJson)
+        );
+    }
+
+    #[test]
+    fn test_parse_dependencies_includes_composer() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("composer.json"),
+            r#"{"require": {"laravel/framework": "^10.0"}, "require-dev": {"phpunit/phpunit": "^10.0"}}"#,
+        )
+        .unwrap();
+
+        let info = parse_dependencies(dir.path());
+
+        assert!(info.dependencies.contains(&"laravel/framework".to_string()));
+        assert!(info
+            .dev_dependencies
+            .contains(&"phpunit/phpunit".to_string()));
+        assert_eq!(
+            info.sources.get("laravel/framework"),
+            Some(&ManifestSource::ComposerJson)
+        );
     }
 }

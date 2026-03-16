@@ -603,6 +603,77 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         framework_name: "postgresql",
         category: "data",
     },
+    // ── PHP ──────────────────────────────────────────────────────────────
+    FrameworkSignature {
+        dependency: "laravel/framework",
+        framework_name: "laravel",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "laravel/lumen-framework",
+        framework_name: "lumen",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "symfony/framework-bundle",
+        framework_name: "symfony",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "symfony/http-kernel",
+        framework_name: "symfony",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "slim/slim",
+        framework_name: "slim",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "cakephp/cakephp",
+        framework_name: "cakephp",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "codeigniter4/framework",
+        framework_name: "codeigniter",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "yiisoft/yii2",
+        framework_name: "yii",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "laminas/laminas-mvc",
+        framework_name: "laminas",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "drupal/core",
+        framework_name: "drupal",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "phpunit/phpunit",
+        framework_name: "phpunit",
+        category: "testing",
+    },
+    FrameworkSignature {
+        dependency: "pestphp/pest",
+        framework_name: "pest",
+        category: "testing",
+    },
+    FrameworkSignature {
+        dependency: "doctrine/orm",
+        framework_name: "doctrine",
+        category: "data",
+    },
+    FrameworkSignature {
+        dependency: "doctrine/dbal",
+        framework_name: "doctrine",
+        category: "data",
+    },
 ];
 
 /// Alternative spellings for canonical framework names.
@@ -837,6 +908,7 @@ mod tests {
             "GTest",
             "Qt6",
             "vapor",
+            "laravel/framework",
         ];
         for dep in checks {
             assert!(lookup(dep).is_some());
@@ -1035,5 +1107,26 @@ mod tests {
         assert!(names.contains(&"solid.js".to_string()));
         assert!(names.contains(&"solid-js".to_string()));
         assert!(names.contains(&"solid".to_string()));
+    }
+
+    #[test]
+    fn test_lookup_laravel() {
+        let sig = lookup("laravel/framework").expect("laravel/framework should be in registry");
+        assert_eq!(sig.framework_name, "laravel");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_symfony() {
+        let sig = lookup("symfony/framework-bundle")
+            .expect("symfony/framework-bundle should be in registry");
+        assert_eq!(sig.framework_name, "symfony");
+    }
+
+    #[test]
+    fn test_lookup_phpunit() {
+        let sig = lookup("phpunit/phpunit").expect("phpunit/phpunit should be in registry");
+        assert_eq!(sig.framework_name, "phpunit");
+        assert_eq!(sig.category, "testing");
     }
 }
