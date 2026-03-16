@@ -1,23 +1,13 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use regex::Regex;
-use std::sync::OnceLock;
 use tokio::process::Command;
 
 use crate::error::ActualError;
 use crate::tailoring::types::TailoringOutput;
 
 use super::subprocess::{resolve_output, TailoringRunner};
-
-/// Compiled regex for validating model names: alphanumeric start, then
-/// alphanumeric, dots, underscores, slashes, or hyphens, up to 100 chars total.
-static MODEL_NAME_RE: OnceLock<Regex> = OnceLock::new();
-
-fn model_name_regex() -> &'static Regex {
-    MODEL_NAME_RE
-        .get_or_init(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._/\-]{0,99}$").expect("valid regex"))
-}
+use super::util::{find_binary, model_name_regex, strip_markdown_json_fences};
 
 /// Environment variable that overrides the default binary lookup.
 /// Useful for testing and CI environments.
@@ -101,31 +91,9 @@ impl CursorCliRunner {
 /// Returns the absolute path to the binary on success, or
 /// `ActualError::CursorNotFound` if the binary cannot be located or is invalid.
 pub fn find_cursor_binary() -> Result<PathBuf, ActualError> {
-    if let Ok(path_str) = std::env::var(CURSOR_BINARY_ENV) {
-        let path = PathBuf::from(&path_str);
-        if !path.exists() {
-            return Err(ActualError::CursorNotFound);
-        }
-        if !path.is_file() {
-            return Err(ActualError::CursorNotFound);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&path)
-                .map(|m| m.permissions().mode())
-                .unwrap_or(0);
-            if mode & 0o111 == 0 {
-                return Err(ActualError::CursorNotFound);
-            }
-        }
-        return Ok(path);
-    }
-    // Try `cursor-agent` first (canonical Homebrew install), then fall back to
-    // `agent` for older or alternative installs.
-    which::which("cursor-agent")
-        .or_else(|_| which::which("agent"))
-        .map_err(|_| ActualError::CursorNotFound)
+    find_binary(CURSOR_BINARY_ENV, &["cursor-agent", "agent"], || {
+        ActualError::CursorNotFound
+    })
 }
 
 /// Convert an I/O error from subprocess operations into an `ActualError`.
@@ -191,28 +159,6 @@ struct CursorEnvelope {
     result: Option<String>,
     #[serde(default)]
     subtype: Option<String>,
-}
-
-/// Strip markdown JSON code fences from a string if present.
-///
-/// Handles both ` ```json\n...\n``` ` and ` ```\n...\n``` ` patterns.
-/// Returns the inner content if fences are found, otherwise returns the
-/// original string trimmed.
-fn strip_markdown_json_fences(s: &str) -> &str {
-    let trimmed = s.trim();
-
-    // Try ```json first, then bare ```
-    for prefix in &["```json", "```"] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            // Skip optional newline after opening fence
-            let rest = rest.strip_prefix('\n').unwrap_or(rest);
-            if let Some(inner) = rest.strip_suffix("```") {
-                return inner.trim();
-            }
-        }
-    }
-
-    trimmed
 }
 
 /// Spawn the Cursor binary, wait with timeout, and parse JSON output from
@@ -771,49 +717,6 @@ echo '{envelope}'
                 "expected Ok for model {model:?}"
             );
         }
-    }
-
-    // ---- Test 19: strip_markdown_json_fences tests ----
-
-    #[test]
-    fn test_strip_fences_json_block() {
-        let input = "```json\n{\"key\": \"value\"}\n```";
-        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
-    }
-
-    #[test]
-    fn test_strip_fences_bare_block() {
-        let input = "```\n{\"key\": \"value\"}\n```";
-        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
-    }
-
-    #[test]
-    fn test_strip_fences_no_fences() {
-        let input = r#"{"key": "value"}"#;
-        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
-    }
-
-    #[test]
-    fn test_strip_fences_with_surrounding_whitespace() {
-        let input = "  \n```json\n{\"key\": \"value\"}\n```\n  ";
-        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
-    }
-
-    #[test]
-    fn test_strip_fences_bare_block_no_newline() {
-        // Bare ``` immediately followed by content (no newline after opening fence)
-        let input = "```{\"key\": \"value\"}\n```";
-        assert_eq!(strip_markdown_json_fences(input), r#"{"key": "value"}"#);
-    }
-
-    #[test]
-    fn test_strip_fences_opening_fence_no_closing() {
-        // Opening ```json found but no closing ``` — returns trimmed input as-is
-        let input = "```json\n{\"key\": \"value\"}";
-        assert_eq!(
-            strip_markdown_json_fences(input),
-            "```json\n{\"key\": \"value\"}"
-        );
     }
 
     // ---- Test 20: with_api_key injects CURSOR_API_KEY env var ----
