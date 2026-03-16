@@ -24,7 +24,7 @@ coding_agent:
 github:
   token: $GITHUB_TOKEN
   repo: actual-software/actual-cli
-  branch_prefix: symphony/
+  branch_prefix: factory/
   auto_merge: false
 server:
   port: 7070
@@ -44,7 +44,7 @@ hooks:
     rustup component add clippy rustfmt llvm-tools-preview
   before_run: |
     ISSUE_KEY=$(basename "$(pwd)")
-    BRANCH="symphony/$(echo "$ISSUE_KEY" | tr '[:upper:]' '[:lower:]')"
+    BRANCH="factory/$(echo "$ISSUE_KEY" | tr '[:upper:]' '[:lower:]')"
     git fetch origin main
     # Preserve existing branch work on retries; only create if new
     git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH" origin/main
@@ -68,7 +68,7 @@ cat AGENTS.md
 
 2. Check if a PR already exists for this issue:
 ```bash
-EXISTING_PR=$(gh pr view "symphony/{{ issue.identifier | downcase }}" --json number,url,state,mergeable 2>/dev/null)
+EXISTING_PR=$(gh pr view "factory/{{ issue.identifier | downcase }}" --json number,url,state,mergeable 2>/dev/null)
 echo "$EXISTING_PR"
 ```
 If a PR exists, check its CI status and review comments first. You may need to fix an existing PR rather than start from scratch.
@@ -108,7 +108,7 @@ Check if these are resolved before proceeding.
 
 This is retry attempt #{{ attempt }}. A previous attempt failed. Before starting fresh:
 1. Check `git log` for any commits from the previous attempt
-2. Check if a PR already exists: `gh pr view "symphony/{{ issue.identifier | downcase }}" --json number,url,state,mergeable 2>/dev/null`
+2. Check if a PR already exists: `gh pr view "factory/{{ issue.identifier | downcase }}" --json number,url,state,mergeable 2>/dev/null`
 3. If a PR exists, check its CI status and review comments — you may just need to fix issues on the existing PR rather than starting over
 4. Run `cargo test` to see the current state
 5. Review what was done previously and continue from where it left off
@@ -162,10 +162,10 @@ git fetch origin main && git rebase origin/main
 # After resolving, re-run ALL quality gates before pushing.
 
 # 4. Push branch
-git push -u origin "symphony/{{ issue.identifier | downcase }}"
+git push -u origin "factory/{{ issue.identifier | downcase }}"
 
 # 5. Check if a PR already exists for this branch before creating one
-EXISTING_PR=$(gh pr view "symphony/{{ issue.identifier | downcase }}" --json number -q .number 2>/dev/null || echo "")
+EXISTING_PR=$(gh pr view "factory/{{ issue.identifier | downcase }}" --json number -q .number 2>/dev/null || echo "")
 if [ -z "$EXISTING_PR" ]; then
   gh pr create \
     --title "{{ issue.identifier }}: {{ issue.title }}" \
@@ -221,7 +221,7 @@ Common conflict sources when multiple workers run in parallel:
 ## PR Requirements
 
 - **Title format**: `ACTCLI-<N>: <description>` (use the Linear issue identifier)
-- **Branch format**: `symphony/<identifier>` (created by the before_run hook)
+- **Branch format**: `factory/<identifier>` (created by the before_run hook)
 - **All CI checks must be green** before the PR is considered complete
 - **All code review feedback must be addressed** — fix issues, push, re-verify
 - **PR must not have merge conflicts** — check `mergeable` status before reporting done
