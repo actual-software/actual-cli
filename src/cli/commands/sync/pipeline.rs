@@ -2486,7 +2486,7 @@ mod tests {
         let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline);
 
         assert_eq!(created, 0);
         assert_eq!(updated, 0);
@@ -2510,7 +2510,7 @@ mod tests {
         let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline);
 
         assert_eq!(created, 1);
         assert_eq!(updated, 0);
@@ -2534,7 +2534,7 @@ mod tests {
         let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline);
 
         assert_eq!(created, 0);
         assert_eq!(updated, 1);
@@ -2558,7 +2558,7 @@ mod tests {
         let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline);
 
         assert_eq!(created, 0);
         assert_eq!(updated, 0);
@@ -2596,7 +2596,7 @@ mod tests {
         let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
+            report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline);
 
         assert_eq!(created, 1);
         assert_eq!(updated, 1);
@@ -2615,7 +2615,7 @@ mod tests {
         }];
         let mut pipeline = TuiRenderer::new(false, true);
 
-        report_write_results(&results, 0, Duration::from_secs(3), &mut pipeline, 80);
+        report_write_results(&results, 0, Duration::from_secs(3), &mut pipeline);
 
         let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
@@ -2635,7 +2635,7 @@ mod tests {
         }];
         let mut pipeline = TuiRenderer::new(false, true);
 
-        report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline, 80);
+        report_write_results(&results, 0, Duration::from_secs(1), &mut pipeline);
 
         let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
@@ -2657,7 +2657,7 @@ mod tests {
         }];
         let mut pipeline = TuiRenderer::new(false, true);
 
-        report_write_results(&results, 0, Duration::from_millis(7300), &mut pipeline, 80);
+        report_write_results(&results, 0, Duration::from_millis(7300), &mut pipeline);
 
         let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
@@ -2685,7 +2685,7 @@ mod tests {
         ];
         let mut pipeline = TuiRenderer::new(false, true);
 
-        report_write_results(&results, 1, Duration::from_secs(2), &mut pipeline, 80);
+        report_write_results(&results, 1, Duration::from_secs(2), &mut pipeline);
 
         let log_text = pipeline.all_log_text();
         let stripped = console::strip_ansi_codes(&log_text);
@@ -2727,7 +2727,7 @@ mod tests {
         let mut pipeline = TuiRenderer::new(false, true);
 
         let (created, updated, failed) =
-            report_write_results(&results, 2, Duration::from_millis(4500), &mut pipeline, 80);
+            report_write_results(&results, 2, Duration::from_millis(4500), &mut pipeline);
 
         assert_eq!(created, 1);
         assert_eq!(updated, 1);
