@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 // ── Shared mutex for env-var serialization ───────────────────────────
 
 /// Global mutex used by integration tests to serialize access to
@@ -7,6 +5,9 @@
 /// `actual_cli::testutil::ENV_MUTEX` from within the same process
 /// context when it matters most, so we provide one here for
 /// `tests/` modules that need it.
+// Not every test binary uses ENV_MUTEX; suppress the warning for binaries
+// that don't need it.
+#[allow(dead_code)]
 pub static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ── RAII env-var guard ───────────────────────────────────────────────
@@ -16,6 +17,9 @@ pub static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// On construction, saves the previous value and sets the new one.
 /// On drop, restores the previous value (or removes the variable if it
 /// was absent before). Requires `ENV_MUTEX` to be held by the caller.
+// EnvGuard and its methods are only needed by some test binaries (e.g.
+// lib_test). Suppress dead_code warnings for the binaries that don't use it.
+#[allow(dead_code)]
 pub struct EnvGuard {
     key: String,
     old: Option<String>,
@@ -27,6 +31,7 @@ impl EnvGuard {
     /// The `_lock` parameter must be a guard obtained from `ENV_MUTEX` (or
     /// equivalent). Requiring it here makes it a **compile error** to call
     /// this function without holding the mutex, preventing silent data races.
+    #[allow(dead_code)]
     pub fn set(key: &str, val: &str, _lock: &std::sync::MutexGuard<'_, ()>) -> Self {
         let old = std::env::var(key).ok();
         #[allow(deprecated)]
@@ -44,6 +49,7 @@ impl EnvGuard {
     /// The `_lock` parameter must be a guard obtained from `ENV_MUTEX` (or
     /// equivalent). Requiring it here makes it a **compile error** to call
     /// this function without holding the mutex, preventing silent data races.
+    #[allow(dead_code)]
     pub fn remove(key: &str, _lock: &std::sync::MutexGuard<'_, ()>) -> Self {
         let old = std::env::var(key).ok();
         #[allow(deprecated)]
@@ -98,12 +104,18 @@ pub fn shell_single_quote_escape(s: &str) -> String {
 
 // ── Standard JSON constants ──────────────────────────────────────────
 
+// These constants are shared across multiple test binaries; not every binary
+// uses every constant, so suppress dead_code for those that don't.
+#[allow(dead_code)]
 pub const AUTH_OK: &str =
     r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "test@example.com"}"#;
+#[allow(dead_code)]
 pub const AUTH_FAIL: &str = r#"{"loggedIn": false}"#;
 
+#[allow(dead_code)]
 pub const ANALYSIS_SINGLE_PROJECT: &str = r#"{"is_monorepo": false, "projects": [{"path": ".", "name": "test-app", "languages": ["rust"], "frameworks": [], "package_manager": "cargo"}]}"#;
 
+#[allow(dead_code)]
 pub const ANALYSIS_MONOREPO: &str = r#"{"is_monorepo": true, "projects": [{"path": "apps/web", "name": "web-app", "languages": ["typescript"], "frameworks": [{"name": "nextjs", "category": "web-frontend"}], "package_manager": "npm"}, {"path": "apps/api", "name": "api-server", "languages": ["rust"], "frameworks": [], "package_manager": "cargo"}, {"path": "libs/shared", "name": "shared-lib", "languages": ["typescript"], "frameworks": [], "package_manager": "npm"}]}"#;
 
 // ── Platform support note ────────────────────────────────────────────
@@ -122,7 +134,9 @@ pub const ANALYSIS_MONOREPO: &str = r#"{"is_monorepo": true, "projects": [{"path
 // ── Fake binary builders (Unix only) ────────────────────────────────
 
 /// Create a fake Claude binary that handles `auth` and `--print` invocations.
+// Not every test binary needs this helper; suppress dead_code for those that don't.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub fn create_fake_claude_binary(
     dir: &std::path::Path,
     auth_json: &str,
@@ -158,7 +172,9 @@ pub fn create_fake_claude_binary(
 ///
 /// The tailoring response is wrapped in a `stream-json` result envelope so the
 /// production `run_subprocess_streaming` code can parse it correctly.
+// Not every test binary needs this helper; suppress dead_code for those that don't.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub fn create_fake_claude_binary_with_tailoring(
     dir: &std::path::Path,
     auth_json: &str,
@@ -214,7 +230,9 @@ pub fn create_fake_claude_binary_with_tailoring(
 }
 
 /// Create a fake Claude binary that captures all args on `--print` invocations.
+// Not every test binary needs this helper; suppress dead_code for those that don't.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub fn create_fake_claude_binary_capturing(
     dir: &std::path::Path,
     auth_json: &str,
@@ -260,7 +278,9 @@ pub fn create_fake_claude_binary_capturing(
 ///
 /// The tailoring response is wrapped in a `stream-json` result envelope so the
 /// production `run_subprocess_streaming` code can parse it correctly.
+// Not every test binary needs this helper; suppress dead_code for those that don't.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub fn create_fake_claude_binary_capturing_with_tailoring(
     dir: &std::path::Path,
     auth_json: &str,
@@ -329,7 +349,9 @@ fi
 /// `create_fake_claude_binary_capturing_with_tailoring`.
 ///
 /// Returns a list of invocations, where each invocation is a list of args.
+// Not every test binary needs this helper; suppress dead_code for those that don't.
 #[cfg(unix)]
+#[allow(dead_code)]
 pub fn parse_captured_invocations(content: &str) -> Vec<Vec<String>> {
     content
         .split("---INVOCATION---\n")
@@ -348,6 +370,8 @@ pub fn parse_captured_invocations(content: &str) -> Vec<Vec<String>> {
 // ── JSON builders ───────────────────────────────────────────────────
 
 /// Wrap an ADR array JSON string in a full MatchResponse envelope.
+// Not every test binary needs this helper; suppress dead_code for those that don't.
+#[allow(dead_code)]
 pub fn make_match_response_json(adrs_json: &str) -> String {
     let adrs: Vec<serde_json::Value> = serde_json::from_str(adrs_json).unwrap();
     let total = adrs.len() as u32;
@@ -379,6 +403,8 @@ pub fn make_match_response_json(adrs_json: &str) -> String {
 }
 
 /// Build a single ADR JSON object with sensible defaults.
+// Not every test binary needs this helper; suppress dead_code for those that don't.
+#[allow(dead_code)]
 pub fn make_adr_json(
     id: &str,
     title: &str,
@@ -408,6 +434,9 @@ pub fn make_adr_json(
 
 // ── TestEnv ─────────────────────────────────────────────────────────
 
+// TestEnv and its methods are shared across multiple test binaries; not every
+// binary uses every method, so suppress dead_code for those that don't.
+#[allow(dead_code)]
 pub struct TestEnv {
     pub dir: tempfile::TempDir,
     pub config_path: std::path::PathBuf,
@@ -418,6 +447,7 @@ pub struct TestEnv {
 // TestEnv is Unix-only; see the platform support note above.
 #[cfg(unix)]
 impl TestEnv {
+    #[allow(dead_code)]
     pub fn new(server: &mockito::Server, auth_json: &str, analysis_json: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("config.yaml");
@@ -431,6 +461,7 @@ impl TestEnv {
         }
     }
 
+    #[allow(dead_code)]
     pub fn new_with_tailoring(
         server: &mockito::Server,
         auth_json: &str,
@@ -454,6 +485,7 @@ impl TestEnv {
         }
     }
 
+    #[allow(dead_code)]
     pub fn cmd(&self) -> assert_cmd::Command {
         let mut cmd = assert_cmd::Command::from(assert_cmd::cargo::cargo_bin_cmd!("actual"));
         cmd.env("CLAUDE_BINARY", self.binary_path.to_str().unwrap());
@@ -462,14 +494,17 @@ impl TestEnv {
         cmd
     }
 
+    #[allow(dead_code)]
     pub fn read_file(&self, path: &str) -> String {
         std::fs::read_to_string(self.dir.path().join(path)).unwrap()
     }
 
+    #[allow(dead_code)]
     pub fn file_exists(&self, path: &str) -> bool {
         self.dir.path().join(path).exists()
     }
 
+    #[allow(dead_code)]
     pub fn write_file(&self, path: &str, content: &str) {
         let full_path = self.dir.path().join(path);
         if let Some(parent) = full_path.parent() {
@@ -481,6 +516,7 @@ impl TestEnv {
     /// Create a pnpm monorepo directory structure that the static analyzer
     /// will detect as a monorepo with projects at apps/web, apps/api, and
     /// libs/shared — matching the layout expected by ANALYSIS_MONOREPO.
+    #[allow(dead_code)]
     pub fn setup_monorepo(&self) {
         self.write_file(
             "pnpm-workspace.yaml",
