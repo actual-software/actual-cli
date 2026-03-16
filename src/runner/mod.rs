@@ -3,6 +3,7 @@ pub mod auth;
 pub mod binary;
 pub mod codex_cli;
 pub mod cursor_cli;
+pub mod http_retry;
 pub mod obfuscation;
 pub mod openai_api;
 pub mod options;

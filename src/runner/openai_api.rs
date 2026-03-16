@@ -7,10 +7,10 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::error::ActualError;
 use crate::tailoring::types::TailoringOutput;
 
+use super::http_retry::{
+    backoff_secs, extract_error_body, parse_retry_after, RetryState, MAX_RATE_LIMIT_RETRIES,
+};
 use super::subprocess::TailoringRunner;
-
-/// Maximum number of retries on HTTP 429 rate-limit responses.
-const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 
 /// Map a `reqwest::Error` from `send()` into an [`ActualError`].
 ///
@@ -42,22 +42,6 @@ fn map_body_read_error(e: reqwest::Error) -> ActualError {
     ActualError::RunnerFailed {
         message: format!("Failed to read OpenAI API response body: {e}"),
         stderr: String::new(),
-    }
-}
-
-/// Extract a truncated body string from an HTTP response byte result,
-/// returning a fallback message if the body could not be read.
-fn extract_error_body(
-    body_result: Result<impl AsRef<[u8]>, impl std::fmt::Display>,
-    max: usize,
-) -> String {
-    match body_result {
-        Ok(bytes) => {
-            let bytes = bytes.as_ref();
-            let truncated = &bytes[..bytes.len().min(max)];
-            String::from_utf8_lossy(truncated).into_owned()
-        }
-        Err(e) => format!("<body read error: {e}>"),
     }
 }
 
@@ -235,7 +219,7 @@ impl TailoringRunner for OpenAiApiRunner {
 
         let url = format!("{}/v1/responses", self.base_url);
 
-        let mut attempt = 0u32;
+        let mut retry = RetryState::new(MAX_RATE_LIMIT_RETRIES, self.retry_base);
         let api_response: ApiResponse = loop {
             let response = self
                 .client
@@ -274,8 +258,7 @@ impl TailoringRunner for OpenAiApiRunner {
                         });
                     }
                 }
-                attempt += 1;
-                if attempt > MAX_RATE_LIMIT_RETRIES {
+                if !retry.increment() {
                     tracing::debug!("OpenAI API error body: {body_text}");
                     return Err(ActualError::RunnerFailed {
                         message: format!(
@@ -285,17 +268,18 @@ impl TailoringRunner for OpenAiApiRunner {
                     });
                 }
                 // Respect Retry-After header if present, else use exponential backoff.
-                let wait_secs = retry_after.unwrap_or_else(|| 1u64 << (attempt - 1)); // 1s, 2s, 4s
-                let wait_secs = wait_secs.min(60);
+                let wait_secs = backoff_secs(retry.attempt(), retry_after);
                 tracing::warn!(
                     "OpenAI API rate limited, waiting {}s before retry {}/{}",
                     wait_secs,
-                    attempt,
+                    retry.attempt(),
                     MAX_RATE_LIMIT_RETRIES
                 );
                 if let Some(ref tx) = event_tx {
                     let _ = tx.send(format!(
-                        "Rate limited — retrying in {wait_secs}s ({attempt}/{MAX_RATE_LIMIT_RETRIES})..."
+                        "Rate limited — retrying in {wait_secs}s ({}/{})...",
+                        retry.attempt(),
+                        MAX_RATE_LIMIT_RETRIES
                     ));
                 }
                 tokio::time::sleep(self.retry_base * wait_secs as u32).await;
@@ -411,16 +395,6 @@ fn inject_additional_properties_false(value: &mut Value) {
             inject_additional_properties_false(v);
         }
     }
-}
-
-/// Parse the `Retry-After` header value into a number of seconds.
-///
-/// Returns `Some(seconds)` if the header is present and contains a valid
-/// non-negative integer.  Returns `None` if the header is absent, non-UTF-8,
-/// or not an integer (e.g., an HTTP-date string).
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let value = headers.get("retry-after")?.to_str().ok()?;
-    value.trim().parse::<u64>().ok()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
