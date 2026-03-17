@@ -950,4 +950,15 @@ mod tests {
         assert_eq!(TreeSitterAnalyzer::language_from_stem("haskell"), None);
         assert_eq!(TreeSitterAnalyzer::language_from_stem(""), None);
     }
+
+    #[test]
+    fn from_embedded_loads_query_packs() {
+        let analyzer = TreeSitterAnalyzer::from_embedded()
+            .expect("from_embedded should succeed with bundled query packs");
+        // Verify some packs were loaded — at minimum Rust, TypeScript, Python
+        assert!(
+            !analyzer.compiled_packs.is_empty(),
+            "expected compiled query packs from embedded assets"
+        );
+    }
 }
