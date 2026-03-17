@@ -312,6 +312,11 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         framework_name: "vert.x",
         category: "web-backend",
     },
+    FrameworkSignature {
+        dependency: "org.jetbrains.compose",
+        framework_name: "compose-multiplatform",
+        category: "mobile",
+    },
     // ── .NET / C# ────────────────────────────────────────────────────────
     // SDK attribute extracted from <Project Sdk="..."> — most reliable aspnetcore signal
     FrameworkSignature {
@@ -647,6 +652,14 @@ mod tests {
             .expect("Microsoft.EntityFrameworkCore should be in registry");
         assert_eq!(sig.framework_name, "entityframeworkcore");
         assert_eq!(sig.category, "data");
+    }
+
+    #[test]
+    fn test_lookup_compose_multiplatform() {
+        let sig =
+            lookup("org.jetbrains.compose").expect("org.jetbrains.compose should be in registry");
+        assert_eq!(sig.framework_name, "compose-multiplatform");
+        assert_eq!(sig.category, "mobile");
     }
 
     #[test]
