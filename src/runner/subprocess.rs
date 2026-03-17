@@ -364,6 +364,26 @@ fn looks_like_credit_error(msg: &str) -> bool {
     CREDIT_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
+/// Phrases that indicate Claude Code has hit a hard usage cap (as opposed to a
+/// transient rate limit). When Claude Code emits one of these messages it will
+/// go silent — it has exhausted the user's plan/daily limit and will not
+/// produce any further output. Detecting the first occurrence lets the CLI
+/// fast-fail instead of waiting for the hang timeout.
+const HARD_RATE_LIMIT_PHRASES: &[&str] = &["hit your limit"];
+
+/// Returns `true` if the message looks like a hard usage-cap exhaustion from
+/// Claude Code (e.g. "You've hit your limit · resets Mar 14 at 2pm").
+///
+/// Unlike transient rate limits, these indicate the session cannot continue
+/// until the cap resets, so the CLI should fast-fail rather than waiting for
+/// the hang timeout.
+fn looks_like_hard_rate_limit(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    HARD_RATE_LIMIT_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+}
+
 /// Classify an error result from the Claude Code subprocess into a more
 /// specific `ActualError` variant when possible.
 ///
@@ -378,10 +398,11 @@ fn classify_subprocess_error(
     stderr: &str,
     repetitive_message: Option<&str>,
 ) -> ActualError {
-    // If we detected a repetitive loop, check whether the message is
-    // credit-related before assuming it's a billing problem.
+    // If we detected a repetitive loop or a hard rate-limit, check whether
+    // the message is credit/billing-related before assuming it's a billing
+    // problem.
     if let Some(repeated_msg) = repetitive_message {
-        if looks_like_credit_error(repeated_msg) {
+        if looks_like_credit_error(repeated_msg) || looks_like_hard_rate_limit(repeated_msg) {
             return ActualError::CreditBalanceTooLow {
                 message: repeated_msg.to_string(),
             };
@@ -521,8 +542,22 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
                     } else {
                         repeat_count = 1;
                         last_summary = Some(summary.clone());
+                        // Extract the raw message (strip "Claude: " prefix if present).
+                        let raw = summary
+                            .strip_prefix("Claude: ")
+                            .unwrap_or(&summary)
+                            .to_string();
                         // Only forward the first occurrence.
                         let _ = tx.send(summary);
+                        // Fast-fail on the first occurrence of a hard rate-limit
+                        // message (e.g. "You've hit your limit · resets …").
+                        // Claude Code goes silent after emitting this, so waiting
+                        // for repetition or the hang timeout is unnecessary.
+                        if looks_like_hard_rate_limit(&raw) {
+                            *msg_for_stdout.lock().unwrap_or_else(|e| e.into_inner()) = Some(raw);
+                            abort_for_stdout.notify_one();
+                            return None;
+                        }
                     }
 
                     // Signal abort if the subprocess is stuck in a loop,
@@ -1991,6 +2026,88 @@ mod tests {
         assert!(!looks_like_credit_error("Something went wrong"));
         assert!(!looks_like_credit_error("timeout"));
         assert!(!looks_like_credit_error(""));
+    }
+
+    // ── looks_like_hard_rate_limit tests ──
+
+    #[test]
+    fn test_looks_like_hard_rate_limit_positive() {
+        // Exact phrasing from the issue report.
+        assert!(looks_like_hard_rate_limit(
+            "You've hit your limit · resets Mar 14 at 2pm (America/Los_Angeles)"
+        ));
+        // Case-insensitive variants.
+        assert!(looks_like_hard_rate_limit("HIT YOUR LIMIT"));
+        assert!(looks_like_hard_rate_limit("you've hit your limit"));
+    }
+
+    #[test]
+    fn test_looks_like_hard_rate_limit_negative() {
+        assert!(!looks_like_hard_rate_limit("Credit balance is too low"));
+        assert!(!looks_like_hard_rate_limit("Rate limit exceeded"));
+        assert!(!looks_like_hard_rate_limit("StructuredOutput"));
+        assert!(!looks_like_hard_rate_limit("Read src/main.rs"));
+        assert!(!looks_like_hard_rate_limit("Something went wrong"));
+        assert!(!looks_like_hard_rate_limit(""));
+    }
+
+    /// `classify_subprocess_error` should map a hard rate-limit message to
+    /// `CreditBalanceTooLow` even though it does not match `CREDIT_KEYWORDS`.
+    #[test]
+    fn test_classify_subprocess_error_hard_rate_limit_msg() {
+        let msg = "You've hit your limit · resets Mar 14 at 2pm (America/Los_Angeles)";
+        let err = classify_subprocess_error(None, "", "", Some(msg));
+        assert!(
+            matches!(err, ActualError::CreditBalanceTooLow { .. }),
+            "expected CreditBalanceTooLow for hard rate-limit msg, got: {err:?}"
+        );
+    }
+
+    /// Verify that a single "hit your limit" stdout message triggers an
+    /// immediate abort (fast-fail) without waiting for repetition or timeout.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_subprocess_streaming_hard_rate_limit_fast_fail() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        // Emit the rate-limit message ONCE, then sleep to simulate Claude Code
+        // going silent. The fast-fail should kill it before the sleep completes.
+        // Note: the JSON text must not contain single quotes since it is
+        // embedded in a single-quoted shell echo command.
+        let rate_limit_event = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "You have hit your limit - resets Mar 14 at 2pm"
+                }]
+            }
+        })
+        .to_string();
+        let script_content = format!("#!/bin/sh\necho '{}'\nsleep 30\n", rate_limit_event);
+        std::fs::write(&script, &script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let result: Result<serde_json::Value, _> =
+            run_subprocess_streaming(&script, Duration::from_secs(10), &[], Some(tx)).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ActualError::CreditBalanceTooLow { .. }),
+            "expected CreditBalanceTooLow on hard rate-limit, got: {err:?}"
+        );
+
+        // The rate-limit message should have been forwarded to the event channel.
+        let mut messages = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            messages.push(msg);
+        }
+        assert!(
+            messages.iter().any(|m| m.contains("hit your limit")),
+            "expected rate-limit message in events, got: {messages:?}"
+        );
     }
 
     // ── is_repetition_exempt tests ──
