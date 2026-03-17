@@ -621,10 +621,12 @@ fn parse_build_gradle(
 
         let plugin_re = regex_gradle_plugin_id();
         for cap in plugin_re.captures_iter(&content) {
-            // One of the 2 capture groups always matches
+            // One of the 4 capture groups always matches
             let plugin_id = cap
                 .get(1)
                 .or_else(|| cap.get(2))
+                .or_else(|| cap.get(3))
+                .or_else(|| cap.get(4))
                 .expect("regex guarantees at least one group matches")
                 .as_str()
                 .to_string();
@@ -1971,7 +1973,8 @@ all = ["uvicorn>=0.24"]
 
     #[test]
     fn test_build_gradle_no_matching_pattern() {
-        // A gradle file with no matching dependency patterns
+        // A gradle file with only a plugin declaration and no library dependencies.
+        // The plugin id is extracted as a dep; no group:artifact coords are present.
         let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("build.gradle"),
@@ -1979,8 +1982,41 @@ all = ["uvicorn>=0.24"]
         )
         .unwrap();
         let info = parse_dependencies(dir.path());
-        // No deps from this file
-        assert!(info.dependencies.is_empty());
+        assert!(info.dependencies.contains(&"java".to_string()));
+        // No group:artifact coordinates
+        assert!(!info.dependencies.iter().any(|d| d.contains(':')));
+    }
+
+    #[test]
+    fn test_build_gradle_plugin_id_kotlin_dsl() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("build.gradle.kts"),
+            "plugins {\n    id(\"org.jetbrains.compose\") version \"1.5.11\"\n    kotlin(\"multiplatform\")\n}\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"org.jetbrains.compose".to_string()));
+        assert_eq!(
+            info.sources.get("org.jetbrains.compose"),
+            Some(&ManifestSource::BuildGradle)
+        );
+    }
+
+    #[test]
+    fn test_build_gradle_plugin_id_groovy_dsl() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("build.gradle"),
+            "plugins {\n    id 'org.jetbrains.compose' version '1.5.11'\n}\n",
+        )
+        .unwrap();
+        let info = parse_dependencies(dir.path());
+        assert!(info
+            .dependencies
+            .contains(&"org.jetbrains.compose".to_string()));
     }
 
     #[test]
@@ -2364,6 +2400,7 @@ require github.com/another/indirect v4.0.0 // indirect
         let _ = regex_pom_group_id();
         let _ = regex_pom_artifact_id();
         let _ = regex_gradle_dependency();
+        let _ = regex_gradle_plugin_id();
         let _ = regex_swift_package_name();
         let _ = regex_swift_package_url();
     }

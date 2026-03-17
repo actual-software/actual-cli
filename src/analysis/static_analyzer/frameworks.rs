@@ -174,6 +174,43 @@ mod tests {
     }
 
     #[test]
+    fn test_deduplication_within_registry_lookup() {
+        // Two different dep keys that both map to the same framework_name should
+        // produce exactly one framework entry, exercising the seen.insert() == false
+        // branch inside detect_frameworks.
+        let dir = tempdir().unwrap();
+        let deps = DependencyInfo {
+            dependencies: vec![
+                "Microsoft.NET.Sdk.Web".to_string(),
+                "Microsoft.AspNetCore.App".to_string(),
+            ],
+            dev_dependencies: vec![],
+            ..Default::default()
+        };
+
+        let frameworks = detect_frameworks(&deps, dir.path());
+        let count = frameworks.iter().filter(|f| f.name == "aspnetcore").count();
+        assert_eq!(count, 1, "aspnetcore should appear exactly once");
+    }
+
+    #[test]
+    fn test_detect_compose_multiplatform_framework() {
+        let dir = tempdir().unwrap();
+        let deps = DependencyInfo {
+            dependencies: vec!["org.jetbrains.compose".to_string()],
+            dev_dependencies: vec![],
+            ..Default::default()
+        };
+
+        let frameworks = detect_frameworks(&deps, dir.path());
+        let compose = frameworks
+            .iter()
+            .find(|f| f.name == "compose-multiplatform")
+            .unwrap();
+        assert_eq!(compose.category, FrameworkCategory::Mobile);
+    }
+
+    #[test]
     fn test_detect_vertx_framework() {
         let dir = tempdir().unwrap();
         let deps = DependencyInfo {
@@ -311,13 +348,16 @@ mod tests {
 
     #[test]
     fn test_detect_config_no_terraform_files() {
-        // Dir with files but no .tf — terraform should NOT be detected
+        // Dir with a Dockerfile (triggers docker detection) but no .tf files —
+        // terraform should NOT be detected, but the iterator is non-empty so the
+        // closure body executes and all branches are covered.
         let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Dockerfile"), "FROM node:18").unwrap();
         fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
-        fs::write(dir.path().join("README.md"), "# Hello").unwrap();
 
         let frameworks = detect_config_frameworks(dir.path());
         let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"docker"));
         assert!(!names.contains(&"terraform"));
     }
 
@@ -391,10 +431,10 @@ mod tests {
 
     #[test]
     fn test_detect_config_nonexistent_dir() {
-        // read_dir fails for nonexistent path — tests the Err branch of read_dir
+        // read_dir fails for nonexistent path — tests the Err branch of read_dir.
+        // No config files can exist, so nothing should be detected.
         let frameworks = detect_config_frameworks(std::path::Path::new("/nonexistent/path/12345"));
-        // Should not panic, just skip terraform detection
-        assert!(!frameworks.iter().any(|f| f.name == "terraform"));
+        assert!(frameworks.is_empty());
     }
 
     #[test]
