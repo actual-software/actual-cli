@@ -627,6 +627,21 @@ fn parse_build_gradle(
                 .as_str();
             insert_gradle_coord(coord, deps, sources, ManifestSource::BuildGradle);
         }
+
+        let plugin_re = regex_gradle_plugin_id();
+        for cap in plugin_re.captures_iter(&content) {
+            // One of the 2 capture groups always matches
+            let plugin_id = cap
+                .get(1)
+                .or_else(|| cap.get(2))
+                .expect("regex guarantees at least one group matches")
+                .as_str()
+                .to_string();
+            deps.insert(plugin_id.clone());
+            sources
+                .entry(plugin_id)
+                .or_insert(ManifestSource::BuildGradle);
+        }
     }
 }
 
@@ -636,6 +651,19 @@ fn regex_gradle_dependency() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(
             r#"(?:implementation|api|compileOnly|runtimeOnly|testImplementation|testRuntimeOnly|kapt|annotationProcessor|classpath)\s*(?:\(\s*"([^"]+)"\s*\)|'([^']+)'|\(\s*'([^']+)'\s*\))"#,
+        )
+        .expect("valid regex — this is a programmer error")
+    });
+    &RE
+}
+
+fn regex_gradle_plugin_id() -> &'static regex::Regex {
+    // Matches plugin id declarations in a plugins {} block:
+    //   Kotlin DSL: id("org.jetbrains.compose") or id('org.jetbrains.compose')
+    //   Groovy DSL: id "org.jetbrains.compose"  or id 'org.jetbrains.compose'
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"\bid\s*(?:\(\s*"([^"]+)"\s*\)|\(\s*'([^']+)'\s*\)|"([^"]+)"|'([^']+)')"#,
         )
         .expect("valid regex — this is a programmer error")
     });

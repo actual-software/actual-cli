@@ -307,6 +307,11 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         framework_name: "micronaut",
         category: "web-backend",
     },
+    FrameworkSignature {
+        dependency: "io.vertx",
+        framework_name: "vert.x",
+        category: "web-backend",
+    },
     // ── .NET / C# ────────────────────────────────────────────────────────
     // SDK attribute extracted from <Project Sdk="..."> — most reliable aspnetcore signal
     FrameworkSignature {
@@ -642,6 +647,13 @@ mod tests {
             .expect("Microsoft.EntityFrameworkCore should be in registry");
         assert_eq!(sig.framework_name, "entityframeworkcore");
         assert_eq!(sig.category, "data");
+    }
+
+    #[test]
+    fn test_lookup_vertx() {
+        let sig = lookup("io.vertx").expect("io.vertx should be in registry");
+        assert_eq!(sig.framework_name, "vert.x");
+        assert_eq!(sig.category, "web-backend");
     }
 
     #[test]
