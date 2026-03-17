@@ -2,8 +2,6 @@
 
 How the `actual` companion skill is distributed to users across platforms.
 
-**Last updated**: March 2026
-
 ---
 
 ## Overview
@@ -240,7 +238,7 @@ TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/Library/Application
 curl -s -X POST "https://clawhub.ai/api/v1/skills" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Accept: application/json" \
-  -F "payload={\"slug\":\"actual\",\"displayName\":\"actual\",\"version\":\"<NEW_VERSION>\",\"changelog\":\"<what changed>\",\"acceptLicenseTerms\":true,\"tags\":[\"latest\"]}" \
+  -F 'payload={"slug":"actual","displayName":"actual","version":"<NEW_VERSION>","changelog":"<what changed>","acceptLicenseTerms":true,"tags":["latest"]}' \
   -F "files=@SKILL.md;filename=SKILL.md" \
   -F "files=@references/config-reference.md;filename=references/config-reference.md" \
   -F "files=@references/error-catalog.md;filename=references/error-catalog.md" \
@@ -272,17 +270,21 @@ If the change only affects the "ADR Pre-Check (OpenClaw)" section or the `metada
 
 ### Claude Code marketplace
 
-- **`marketplace.json` `source` field**: Must be `"./"` not `"."` — the latter causes a schema validation error.
-- **Conflicting manifests**: If `marketplace.json` includes a `skills` array AND `plugin.json` exists, Claude Code throws "conflicting manifests." Fix: remove `skills`/`strict` from marketplace.json and let auto-discovery find `skills/` from the plugin root.
-- **Aggressive caching**: Claude Code caches plugins. To force re-fetch: bump version in `plugin.json`, delete `~/.claude/plugins/cache/<marketplace-name>`, and reinstall.
-- **No `/skillname` invocation**: Skills installed via plugins don't appear with `/skillname` — they're auto-activated by the model based on context, or listed under `/skills`.
+| Gotcha | Status | Notes |
+|--------|--------|-------|
+| **`marketplace.json` `source` field** | Active | Must be `"./"` not `"."` — the latter causes a schema validation error |
+| **Conflicting manifests** | Active | If `marketplace.json` includes a `skills` array AND `plugin.json` exists, Claude Code throws "conflicting manifests." Fix: remove `skills`/`strict` from marketplace.json and let auto-discovery find `skills/` from the plugin root |
+| **Aggressive caching** | Active | Claude Code caches plugins. To force re-fetch: bump version in `plugin.json`, delete `~/.claude/plugins/cache/<marketplace-name>`, and reinstall |
+| **No `/skillname` invocation** | Active | Skills installed via plugins don't appear with `/skillname` — they're auto-activated by the model based on context, or listed under `/skills` |
 
 ### ClawdHub
 
-- **CLI v0.7.0 publish bug**: `clawhub publish` fails with "acceptLicenseTerms: invalid value". Known issue ([#648](https://github.com/openclaw/clawhub/issues/648)). Workaround: use direct curl API call.
-- **Account age gate**: GitHub accounts must be 14+ days old to publish skills. No workaround.
-- **Bun FormData bug**: When running under Bun, the CLI uses curl for multipart uploads. Subdirectory paths in filenames aren't created in the temp dir, causing ENOENT errors. Workaround: use Node.js or direct curl.
-- **MIT-0 license**: All skills published on ClawdHub are released under MIT-0 regardless of what's in the repo. The OpenClaw repo uses MIT-0 for consistency.
+| Gotcha | Status | Notes |
+|--------|--------|-------|
+| **CLI v0.7.0 publish bug** | Active | `clawhub publish` fails with "acceptLicenseTerms: invalid value". Known issue ([#648](https://github.com/openclaw/clawhub/issues/648)). Workaround: use direct curl API call |
+| **Account age gate** | Active | GitHub accounts must be 14+ days old to publish skills. No workaround |
+| **Bun FormData bug** | Active | When running under Bun, the CLI uses curl for multipart uploads. Subdirectory paths in filenames aren't created in the temp dir, causing ENOENT errors. Workaround: use Node.js or direct curl |
+| **MIT-0 license** | By design | All skills published on ClawdHub are released under MIT-0 regardless of what's in the repo. The OpenClaw repo uses MIT-0 for consistency |
 
 ---
 
