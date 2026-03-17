@@ -361,8 +361,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
 
     // Run signals analysis (tree-sitter + semgrep) to enrich the match request.
     let signals = rt.block_on(crate::analysis::signals::run_signals_analysis(
-        root_dir,
-        &analysis,
+        root_dir, &analysis,
     ));
 
     let request = build_match_request(&analysis, &config, &signals);

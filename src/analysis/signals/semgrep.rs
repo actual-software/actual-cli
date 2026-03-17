@@ -10,8 +10,7 @@ use super::{EvidenceSpan, SignalSource, ToolMatch};
 pub fn extract_embedded_rules() -> Result<(tempfile::TempDir, Vec<std::path::PathBuf>)> {
     use super::embedded::EmbeddedSemgrepRules;
 
-    let tmp = tempfile::TempDir::new()
-        .context("failed to create temp dir for semgrep rules")?;
+    let tmp = tempfile::TempDir::new().context("failed to create temp dir for semgrep rules")?;
     let mut rule_paths = Vec::new();
 
     for filename in EmbeddedSemgrepRules::iter() {
