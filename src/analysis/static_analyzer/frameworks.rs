@@ -174,6 +174,20 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_vertx_framework() {
+        let dir = tempdir().unwrap();
+        let deps = DependencyInfo {
+            dependencies: vec!["io.vertx".to_string()],
+            dev_dependencies: vec![],
+            ..Default::default()
+        };
+
+        let frameworks = detect_frameworks(&deps, dir.path());
+        let vertx = frameworks.iter().find(|f| f.name == "vert.x").unwrap();
+        assert_eq!(vertx.category, FrameworkCategory::WebBackend);
+    }
+
+    #[test]
     fn test_detect_frameworks_categories() {
         let dir = tempdir().unwrap();
         let deps = DependencyInfo {
