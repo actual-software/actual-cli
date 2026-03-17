@@ -950,12 +950,16 @@ mod tests {
 
     #[test]
     fn extract_embedded_rules_creates_files() {
-        let (tmp_dir, rule_paths) = super::extract_embedded_rules()
-            .expect("extract_embedded_rules should succeed");
+        let (tmp_dir, rule_paths) =
+            super::extract_embedded_rules().expect("extract_embedded_rules should succeed");
         assert!(!rule_paths.is_empty(), "expected at least one rule file");
         // Verify files actually exist on disk
         for path in &rule_paths {
-            assert!(path.exists(), "extracted rule file should exist: {}", path.display());
+            assert!(
+                path.exists(),
+                "extracted rule file should exist: {}",
+                path.display()
+            );
         }
         // tmp_dir cleanup happens on drop
         drop(tmp_dir);

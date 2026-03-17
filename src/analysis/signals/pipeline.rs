@@ -223,8 +223,8 @@ async fn analyze_project(
 mod tests {
     use super::*;
     use crate::analysis::types::{Project, RepoAnalysis};
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     fn make_temp_project(files: &[(&str, &str)]) -> TempDir {
         let dir = TempDir::new().unwrap();
@@ -283,10 +283,7 @@ mod tests {
 
     #[test]
     fn collect_source_files_finds_rust_files() {
-        let dir = make_temp_project(&[
-            ("src/main.rs", "fn main() {}"),
-            ("README.md", "# readme"),
-        ]);
+        let dir = make_temp_project(&[("src/main.rs", "fn main() {}"), ("README.md", "# readme")]);
         let files = collect_source_files(dir.path());
         assert_eq!(files.len(), 1);
         assert!(files[0].0.to_string_lossy().contains("main.rs"));
@@ -414,15 +411,16 @@ mod tests {
         fs::create_dir_all(dir.path().join("backend/src")).unwrap();
         fs::write(dir.path().join("backend/src/main.rs"), "pub fn serve() {}").unwrap();
         fs::create_dir_all(dir.path().join("frontend/src")).unwrap();
-        fs::write(dir.path().join("frontend/src/app.ts"), "export const app = {};").unwrap();
+        fs::write(
+            dir.path().join("frontend/src/app.ts"),
+            "export const app = {};",
+        )
+        .unwrap();
 
         let analysis = RepoAnalysis {
             is_monorepo: true,
             workspace_type: None,
-            projects: vec![
-                make_project("backend"),
-                make_project("frontend"),
-            ],
+            projects: vec![make_project("backend"), make_project("frontend")],
         };
         let results = run_signals_analysis(dir.path(), &analysis).await;
         assert!(results.contains_key("backend"), "expected IR for backend");
