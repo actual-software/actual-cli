@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::analysis::types::RepoAnalysis;
 use super::ir::{build_canonical_ir, CanonicalIR};
-use super::tree_sitter::TreeSitterAnalyzer;
-use super::semgrep::{extract_embedded_rules, SemgrepScanner};
 use super::language_resolver::TreeSitterLanguage;
+use super::semgrep::{extract_embedded_rules, SemgrepScanner};
+use super::tree_sitter::TreeSitterAnalyzer;
+use crate::analysis::types::RepoAnalysis;
 
 /// File extensions to include in signals analysis, mapped to TreeSitterLanguage.
 fn extension_to_language(ext: &str) -> Option<TreeSitterLanguage> {
@@ -28,8 +28,17 @@ fn extension_to_language(ext: &str) -> Option<TreeSitterLanguage> {
 
 /// Directories to exclude when walking for source files.
 const EXCLUDED_DIRS: &[&str] = &[
-    "node_modules", "target", ".git", "dist", "build", ".next",
-    "__pycache__", ".venv", "venv", "vendor", ".cargo",
+    "node_modules",
+    "target",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "vendor",
+    ".cargo",
 ];
 
 /// Max source file size to analyze (500 KB).
@@ -106,9 +115,7 @@ pub async fn run_signals_analysis(
         match extract_embedded_rules() {
             Ok(r) => (Some(r.0), r.1),
             Err(e) => {
-                tracing::warn!(
-                    "failed to extract semgrep rules: {e}; tree-sitter signals only"
-                );
+                tracing::warn!("failed to extract semgrep rules: {e}; tree-sitter signals only");
                 (None, Vec::new())
             }
         }
@@ -205,5 +212,9 @@ async fn analyze_project(
             .unwrap_or_default()
     };
 
-    Ok(build_canonical_ir(project_path, &primary_lang, &all_matches))
+    Ok(build_canonical_ir(
+        project_path,
+        &primary_lang,
+        &all_matches,
+    ))
 }
