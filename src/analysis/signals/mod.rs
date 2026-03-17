@@ -1,8 +1,13 @@
+pub mod embedded;
 pub mod ir;
 pub mod language_resolver;
+pub mod pipeline;
 pub mod rule_resolver;
 pub mod semgrep;
 pub mod tree_sitter;
+
+pub use ir::{build_canonical_ir, CanonicalIR};
+pub use pipeline::run_signals_analysis;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

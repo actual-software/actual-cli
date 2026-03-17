@@ -67,6 +67,9 @@ tempfile = "3"
 
 # Static analysis
 tokei = { version = "14", default-features = false }
+
+# Embedded assets
+rust-embed = { version = "8", features = ["interpolate-folder-path", "include-exclude"] }
 ignore = "0.4"
 
 # Tree-sitter parsing

@@ -154,8 +154,6 @@ impl TreeSitterAnalyzer {
 
     /// Load all `<lang>.scm` files from a directory and pre-compile queries.
     fn load_all_query_packs(dir: &Path) -> Result<HashMap<TreeSitterLanguage, Vec<CompiledQuery>>> {
-        let mut packs = HashMap::new();
-
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(e) => {
@@ -166,14 +164,38 @@ impl TreeSitterAnalyzer {
             }
         };
 
+        let mut all_content: Vec<(String, String)> = Vec::new();
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("scm") {
                 continue;
             }
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading query pack {}", path.display()))?;
+            all_content.push((filename, content));
+        }
 
-            let stem = path
+        Self::load_query_packs_from_content(&all_content)
+    }
+
+    /// Parse (filename, content) pairs into compiled query packs.
+    ///
+    /// Shared by `load_all_query_packs` (reads from disk) and `from_embedded`
+    /// (reads from embedded binary assets).
+    fn load_query_packs_from_content(
+        content: &[(String, String)],
+    ) -> Result<HashMap<TreeSitterLanguage, Vec<CompiledQuery>>> {
+        let mut packs = HashMap::new();
+
+        for (filename, file_content) in content {
+            // Accept "rust.scm" or paths like "rust.scm" (no subdirs for tree-sitter)
+            let stem = std::path::Path::new(filename.as_str())
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
@@ -188,9 +210,7 @@ impl TreeSitterAnalyzer {
                 None => continue, // skip languages without grammar crates
             };
 
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading query pack {}", path.display()))?;
-            let definitions = parse_query_pack(&content, stem);
+            let definitions = parse_query_pack(file_content, stem);
             let compiled = Self::compile_definitions(definitions, &ts_lang, stem);
             if !compiled.is_empty() {
                 packs.insert(language, compiled);
@@ -198,6 +218,27 @@ impl TreeSitterAnalyzer {
         }
 
         Ok(packs)
+    }
+
+    /// Load query packs from embedded binary assets (production use).
+    pub fn from_embedded() -> Result<Self> {
+        use super::embedded::EmbeddedTreeSitterQueries;
+
+        let mut all_content: Vec<(String, String)> = Vec::new();
+        for filename in EmbeddedTreeSitterQueries::iter() {
+            if let Some(file) = EmbeddedTreeSitterQueries::get(&filename) {
+                let content = std::str::from_utf8(file.data.as_ref())
+                    .with_context(|| format!("invalid UTF-8 in embedded query pack {filename}"))?
+                    .to_string();
+                all_content.push((filename.to_string(), content));
+            }
+        }
+
+        let compiled_packs = Self::load_query_packs_from_content(&all_content)?;
+        Ok(Self {
+            parser_cache: HashMap::new(),
+            compiled_packs,
+        })
     }
 
     /// Compile a list of query definitions against a tree-sitter language.

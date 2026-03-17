@@ -1,11 +1,14 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 
+use crate::analysis::signals::CanonicalIR;
 use crate::analysis::types::{FrameworkCategory, Language, RepoAnalysis};
 use crate::api::types::{
-    ApiErrorResponse, CategoriesResponse, FrameworksResponse, HealthResponse, LanguagesResponse,
-    MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse, TelemetryRequest,
+    ApiErrorResponse, CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, FrameworksResponse,
+    HealthResponse, LanguagesResponse, MatchFramework, MatchOptions, MatchProject, MatchRequest,
+    MatchResponse, TelemetryRequest,
 };
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -201,7 +204,14 @@ fn serialize_framework_category(category: &FrameworkCategory) -> String {
 ///
 /// Maps each analyzed project to a [`MatchProject`] with serialized language and framework
 /// strings, and builds [`MatchOptions`] from the config's filtering fields.
-pub fn build_match_request(analysis: &RepoAnalysis, config: &Config) -> MatchRequest {
+///
+/// `signals` maps project path → [`CanonicalIR`] from the signals pipeline. Pass an empty
+/// map when signals analysis was not run or not available.
+pub fn build_match_request(
+    analysis: &RepoAnalysis,
+    config: &Config,
+    signals: &HashMap<String, CanonicalIR>,
+) -> MatchRequest {
     let projects = analysis
         .projects
         .iter()
@@ -236,11 +246,26 @@ pub fn build_match_request(analysis: &RepoAnalysis, config: &Config) -> MatchReq
                 (langs, fws)
             };
 
+            let canonical_ir = signals.get(&project.path).map(|ir| CanonicalIRPayload {
+                ir_hash: ir.ir_hash.clone(),
+                taxonomy_version: ir.taxonomy_version.clone(),
+                facets: ir
+                    .facets_by_leaf_id
+                    .values()
+                    .map(|f| CanonicalIRFacet {
+                        facet_slot: f.facet_slot.clone(),
+                        rule_ids: f.rule_ids.clone(),
+                        confidence: f.confidence,
+                    })
+                    .collect(),
+            });
+
             MatchProject {
                 path: project.path.clone(),
                 name: project.name.clone(),
                 languages,
                 frameworks,
+                canonical_ir,
             }
         })
         .collect();
@@ -306,7 +331,7 @@ mod tests {
             ],
         };
 
-        let request = build_match_request(&analysis, &Config::default());
+        let request = build_match_request(&analysis, &Config::default(), &HashMap::new());
         assert_eq!(request.projects.len(), 3);
     }
 
@@ -323,7 +348,7 @@ mod tests {
             ..Config::default()
         };
 
-        let request = build_match_request(&analysis, &config);
+        let request = build_match_request(&analysis, &config, &HashMap::new());
         assert!(request.options.is_some());
         let options = request.options.unwrap();
         assert_eq!(
@@ -343,7 +368,7 @@ mod tests {
             max_per_framework: Some(5),
             ..Config::default()
         };
-        let request = build_match_request(&analysis, &config);
+        let request = build_match_request(&analysis, &config, &HashMap::new());
         assert!(request.options.is_some());
         let options = request.options.unwrap();
         assert_eq!(options.max_per_framework, Some(5));
@@ -357,7 +382,7 @@ mod tests {
             projects: vec![make_project(".", "app", vec![Language::Rust], vec![])],
         };
 
-        let request = build_match_request(&analysis, &Config::default());
+        let request = build_match_request(&analysis, &Config::default(), &HashMap::new());
         assert!(request.options.is_none());
     }
 
@@ -378,7 +403,7 @@ mod tests {
             )],
         };
 
-        let request = build_match_request(&analysis, &Config::default());
+        let request = build_match_request(&analysis, &Config::default(), &HashMap::new());
         assert!(request.projects[0]
             .languages
             .contains(&"typescript".to_string()));
@@ -396,6 +421,7 @@ mod tests {
                     name: "nextjs".to_string(),
                     category: "frontend".to_string(),
                 }],
+                canonical_ir: None,
             }],
             options: None,
         }
@@ -1161,7 +1187,7 @@ mod tests {
                 }),
             }],
         };
-        let request = build_match_request(&analysis, &Config::default());
+        let request = build_match_request(&analysis, &Config::default(), &HashMap::new());
         assert_eq!(request.projects.len(), 1);
         assert_eq!(request.projects[0].languages, vec!["rust".to_string()]);
         assert_eq!(request.projects[0].frameworks.len(), 1);
@@ -1205,7 +1231,7 @@ mod tests {
                 selection: None,
             }],
         };
-        let request = build_match_request(&analysis, &Config::default());
+        let request = build_match_request(&analysis, &Config::default(), &HashMap::new());
         assert_eq!(request.projects.len(), 1);
         assert_eq!(request.projects[0].languages.len(), 2);
         assert!(request.projects[0].languages.contains(&"rust".to_string()));
@@ -1376,7 +1402,7 @@ mod tests {
                 }),
             }],
         };
-        let request = build_match_request(&analysis, &Config::default());
+        let request = build_match_request(&analysis, &Config::default(), &HashMap::new());
         assert_eq!(request.projects.len(), 1);
         assert_eq!(request.projects[0].languages, vec!["python".to_string()]);
         assert!(request.projects[0].frameworks.is_empty());

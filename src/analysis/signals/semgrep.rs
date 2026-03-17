@@ -5,6 +5,29 @@ use tokio::process::Command;
 
 use super::{EvidenceSpan, SignalSource, ToolMatch};
 
+/// Extract embedded semgrep rules to a temporary directory.
+/// Returns the temp dir (caller must keep it alive) and the list of rule file paths.
+pub fn extract_embedded_rules() -> Result<(tempfile::TempDir, Vec<std::path::PathBuf>)> {
+    use super::embedded::EmbeddedSemgrepRules;
+
+    let tmp = tempfile::TempDir::new()
+        .context("failed to create temp dir for semgrep rules")?;
+    let mut rule_paths = Vec::new();
+
+    for filename in EmbeddedSemgrepRules::iter() {
+        if let Some(file) = EmbeddedSemgrepRules::get(&filename) {
+            let dest = tmp.path().join(filename.as_ref());
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&dest, file.data.as_ref())?;
+            rule_paths.push(dest);
+        }
+    }
+
+    Ok((tmp, rule_paths))
+}
+
 /// Maximum size of a single file written to the semgrep temp directory (10 MB).
 const MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
