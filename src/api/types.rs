@@ -10,12 +10,31 @@ pub struct MatchRequest {
     pub options: Option<MatchOptions>,
 }
 
+/// Compact representation of a single facet from a project's CanonicalIR.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalIRFacet {
+    pub facet_slot: String,
+    pub rule_ids: Vec<String>,
+    pub confidence: f64,
+}
+
+/// Compact representation of a project's CanonicalIR for the match request.
+/// Contains only what the server needs for matching: facet slots and rule IDs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CanonicalIRPayload {
+    pub ir_hash: String,
+    pub taxonomy_version: String,
+    pub facets: Vec<CanonicalIRFacet>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatchProject {
     pub path: String,
     pub name: String,
     pub languages: Vec<String>,
     pub frameworks: Vec<MatchFramework>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_ir: Option<CanonicalIRPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -263,6 +282,7 @@ mod tests {
                         category: "frontend".to_string(),
                     },
                 ],
+                canonical_ir: None,
             }],
             options: Some(MatchOptions {
                 include_general: Some(true),
@@ -368,6 +388,7 @@ mod tests {
                     name: "actix-web".to_string(),
                     category: "backend".to_string(),
                 }],
+                canonical_ir: None,
             }],
             options: Some(MatchOptions {
                 include_general: Some(false),

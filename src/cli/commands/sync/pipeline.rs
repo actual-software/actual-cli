@@ -358,7 +358,17 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         .unwrap_or(DEFAULT_API_URL)
         .to_owned();
 
-    let request = build_match_request(&analysis, &config);
+    pipeline.start(SyncPhase::Fetch, "Fetching ADRs...");
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| ActualError::InternalError(format!("Failed to create async runtime: {e}")))?;
+
+    // Run signals analysis (tree-sitter + semgrep) to enrich the match request.
+    let signals = rt.block_on(crate::analysis::signals::run_signals_analysis(
+        root_dir,
+        &analysis,
+    ));
+
+    let request = build_match_request(&analysis, &config, &signals);
     let client = ActualApiClient::new(&api_url)?;
 
     if args.verbose {
@@ -375,10 +385,6 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             );
         });
     }
-
-    pipeline.start(SyncPhase::Fetch, "Fetching ADRs...");
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| ActualError::InternalError(format!("Failed to create async runtime: {e}")))?;
 
     let root_dir_owned = root_dir.to_path_buf();
     // Resolve the effective output format: CLI flag takes precedence over config,
@@ -5130,6 +5136,7 @@ mod tests {
                     category: category.to_string(),
                 })
                 .collect(),
+            canonical_ir: None,
         }
     }
 
