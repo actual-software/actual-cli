@@ -218,3 +218,214 @@ async fn analyze_project(
         &all_matches,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::types::{Project, RepoAnalysis};
+    use tempfile::TempDir;
+    use std::fs;
+
+    fn make_temp_project(files: &[(&str, &str)]) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        for (name, content) in files {
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(path, content).unwrap();
+        }
+        dir
+    }
+
+    fn make_project(path: &str) -> Project {
+        Project {
+            path: path.to_string(),
+            name: "test".to_string(),
+            languages: vec![],
+            frameworks: vec![],
+            package_manager: None,
+            description: None,
+            dep_count: 0,
+            dev_dep_count: 0,
+            selection: None,
+        }
+    }
+
+    #[test]
+    fn extension_to_language_known() {
+        assert!(extension_to_language("rs").is_some());
+        assert!(extension_to_language("ts").is_some());
+        assert!(extension_to_language("tsx").is_some());
+        assert!(extension_to_language("js").is_some());
+        assert!(extension_to_language("jsx").is_some());
+        assert!(extension_to_language("mjs").is_some());
+        assert!(extension_to_language("cjs").is_some());
+        assert!(extension_to_language("py").is_some());
+        assert!(extension_to_language("go").is_some());
+        assert!(extension_to_language("java").is_some());
+        assert!(extension_to_language("cs").is_some());
+        assert!(extension_to_language("cpp").is_some());
+        assert!(extension_to_language("cc").is_some());
+        assert!(extension_to_language("cxx").is_some());
+        assert!(extension_to_language("c").is_some());
+        assert!(extension_to_language("php").is_some());
+    }
+
+    #[test]
+    fn extension_to_language_unknown() {
+        assert!(extension_to_language("xyz").is_none());
+        assert!(extension_to_language("md").is_none());
+        assert!(extension_to_language("").is_none());
+        assert!(extension_to_language("txt").is_none());
+        assert!(extension_to_language("json").is_none());
+    }
+
+    #[test]
+    fn collect_source_files_finds_rust_files() {
+        let dir = make_temp_project(&[
+            ("src/main.rs", "fn main() {}"),
+            ("README.md", "# readme"),
+        ]);
+        let files = collect_source_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.to_string_lossy().contains("main.rs"));
+    }
+
+    #[test]
+    fn collect_source_files_excludes_node_modules() {
+        let dir = make_temp_project(&[
+            ("src/index.ts", "export const x = 1;"),
+            ("node_modules/foo/index.ts", "// ignored"),
+        ]);
+        let files = collect_source_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.to_string_lossy().contains("index.ts"));
+        assert!(!files[0].0.to_string_lossy().contains("node_modules"));
+    }
+
+    #[test]
+    fn collect_source_files_excludes_target_dir() {
+        let dir = make_temp_project(&[
+            ("src/lib.rs", "pub fn foo() {}"),
+            ("target/debug/build.rs", "fn main() {}"),
+        ]);
+        let files = collect_source_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(!files[0].0.to_string_lossy().contains("target"));
+    }
+
+    #[test]
+    fn collect_source_files_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let files = collect_source_files(dir.path());
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn collect_source_files_skips_non_source_files() {
+        let dir = make_temp_project(&[
+            ("README.md", "# readme"),
+            ("Cargo.toml", "[package]"),
+            ("src/main.rs", "fn main() {}"),
+        ]);
+        let files = collect_source_files(dir.path());
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn collect_source_files_multiple_languages() {
+        let dir = make_temp_project(&[
+            ("src/main.rs", "fn main() {}"),
+            ("src/app.ts", "const x = 1;"),
+            ("src/util.py", "def foo(): pass"),
+            ("src/server.go", "package main"),
+        ]);
+        let files = collect_source_files(dir.path());
+        assert_eq!(files.len(), 4);
+    }
+
+    #[test]
+    fn collect_source_files_skips_large_files() {
+        let dir = TempDir::new().unwrap();
+        // Write a file larger than MAX_FILE_BYTES (512 * 1024 = 524288 bytes)
+        let large_content = "x".repeat(512 * 1024 + 1);
+        fs::write(dir.path().join("large.rs"), large_content).unwrap();
+        fs::write(dir.path().join("small.rs"), "fn main() {}").unwrap();
+        let files = collect_source_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.to_string_lossy().contains("small.rs"));
+    }
+
+    #[test]
+    fn walk_dir_unreadable_dir_does_not_panic() {
+        // Pass a nonexistent directory — walk_dir should return early without panic
+        let nonexistent = std::path::Path::new("/nonexistent/does/not/exist");
+        let mut out = Vec::new();
+        walk_dir(nonexistent, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_signals_analysis_empty_project_dir() {
+        let dir = TempDir::new().unwrap();
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![make_project(".")],
+        };
+        // Empty dir → no source files → analyze_project returns Err → project skipped
+        let results = run_signals_analysis(dir.path(), &analysis).await;
+        assert!(results.is_empty(), "empty project should produce no IR");
+    }
+
+    #[tokio::test]
+    async fn run_signals_analysis_no_projects() {
+        let dir = TempDir::new().unwrap();
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![],
+        };
+        let results = run_signals_analysis(dir.path(), &analysis).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_signals_analysis_with_rust_file() {
+        let dir = make_temp_project(&[(
+            "src/main.rs",
+            "pub fn greet(name: &str) -> String { format!(\"Hello, {}!\", name) }",
+        )]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![make_project(".")],
+        };
+        let results = run_signals_analysis(dir.path(), &analysis).await;
+        // Should produce an IR for the "." project (tree-sitter at minimum)
+        assert!(results.contains_key("."), "expected IR for root project");
+    }
+
+    #[tokio::test]
+    async fn run_signals_analysis_with_multiple_projects() {
+        let dir = TempDir::new().unwrap();
+        // Create two sub-project directories
+        fs::create_dir_all(dir.path().join("backend/src")).unwrap();
+        fs::write(dir.path().join("backend/src/main.rs"), "pub fn serve() {}").unwrap();
+        fs::create_dir_all(dir.path().join("frontend/src")).unwrap();
+        fs::write(dir.path().join("frontend/src/app.ts"), "export const app = {};").unwrap();
+
+        let analysis = RepoAnalysis {
+            is_monorepo: true,
+            workspace_type: None,
+            projects: vec![
+                make_project("backend"),
+                make_project("frontend"),
+            ],
+        };
+        let results = run_signals_analysis(dir.path(), &analysis).await;
+        assert!(results.contains_key("backend"), "expected IR for backend");
+        assert!(results.contains_key("frontend"), "expected IR for frontend");
+    }
+}
