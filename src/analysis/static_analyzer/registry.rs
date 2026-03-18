@@ -942,8 +942,7 @@ mod tests {
 
     #[test]
     fn test_lookup_compose_multiplatform_ui_subgroup() {
-        let sig = lookup("org.jetbrains.compose.ui")
-            .expect("compose ui subgroup should match");
+        let sig = lookup("org.jetbrains.compose.ui").expect("compose ui subgroup should match");
         assert_eq!(sig.framework_name, "compose-multiplatform");
     }
 
