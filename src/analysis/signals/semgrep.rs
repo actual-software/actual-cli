@@ -17,9 +17,7 @@ pub fn extract_embedded_rules() -> Result<(tempfile::TempDir, Vec<std::path::Pat
         let file = EmbeddedSemgrepRules::get(&filename)
             .expect("embedded file listed by iter() must be gettable");
         let dest = tmp.path().join(filename.as_ref());
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        std::fs::create_dir_all(dest.parent().unwrap_or(tmp.path()))?;
         std::fs::write(&dest, file.data.as_ref())?;
         rule_paths.push(dest);
     }
