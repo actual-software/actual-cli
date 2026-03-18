@@ -352,6 +352,23 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         framework_name: "entityframeworkcore",
         category: "data",
     },
+    // Avalonia UI
+    FrameworkSignature {
+        dependency: "Avalonia",
+        framework_name: "avalonia",
+        category: "desktop",
+    },
+    // .NET MAUI (detected via its main PackageReference)
+    FrameworkSignature {
+        dependency: "Microsoft.Maui.Controls",
+        framework_name: "maui",
+        category: "mobile",
+    },
+    FrameworkSignature {
+        dependency: "Microsoft.Maui.Dependencies",
+        framework_name: "maui",
+        category: "mobile",
+    },
     // ── C / C++ ──────────────────────────────────────────────────────────
     // CMake find_package() names (title-case) and vcpkg/Conan names (lowercase)
 
@@ -446,6 +463,31 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
     FrameworkSignature {
         dependency: "crow",
         framework_name: "crow",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "Drogon",
+        framework_name: "drogon",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "drogon",
+        framework_name: "drogon",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "oatpp",
+        framework_name: "oatpp",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "Poco",
+        framework_name: "poco",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "poco",
+        framework_name: "poco",
         category: "web-backend",
     },
     // Libraries
@@ -653,5 +695,63 @@ mod tests {
         let sig = lookup("SQLite3").expect("SQLite3 should be in registry");
         assert_eq!(sig.framework_name, "sqlite");
         assert_eq!(sig.category, "data");
+    }
+
+    #[test]
+    fn test_lookup_avalonia() {
+        let sig = lookup("Avalonia").expect("Avalonia should be in registry");
+        assert_eq!(sig.framework_name, "avalonia");
+        assert_eq!(sig.category, "desktop");
+    }
+
+    #[test]
+    fn test_lookup_maui_controls() {
+        let sig = lookup("Microsoft.Maui.Controls")
+            .expect("Microsoft.Maui.Controls should be in registry");
+        assert_eq!(sig.framework_name, "maui");
+        assert_eq!(sig.category, "mobile");
+    }
+
+    #[test]
+    fn test_lookup_maui_dependencies() {
+        let sig = lookup("Microsoft.Maui.Dependencies")
+            .expect("Microsoft.Maui.Dependencies should be in registry");
+        assert_eq!(sig.framework_name, "maui");
+        assert_eq!(sig.category, "mobile");
+    }
+
+    #[test]
+    fn test_lookup_drogon_cmake_name() {
+        let sig = lookup("Drogon").expect("Drogon should be in registry");
+        assert_eq!(sig.framework_name, "drogon");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_drogon_pkg_name() {
+        let sig = lookup("drogon").expect("drogon should be in registry");
+        assert_eq!(sig.framework_name, "drogon");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_oatpp() {
+        let sig = lookup("oatpp").expect("oatpp should be in registry");
+        assert_eq!(sig.framework_name, "oatpp");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_poco_cmake_name() {
+        let sig = lookup("Poco").expect("Poco should be in registry");
+        assert_eq!(sig.framework_name, "poco");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_poco_pkg_name() {
+        let sig = lookup("poco").expect("poco should be in registry");
+        assert_eq!(sig.framework_name, "poco");
+        assert_eq!(sig.category, "web-backend");
     }
 }
