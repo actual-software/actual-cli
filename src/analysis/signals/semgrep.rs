@@ -14,14 +14,14 @@ pub fn extract_embedded_rules() -> Result<(tempfile::TempDir, Vec<std::path::Pat
     let mut rule_paths = Vec::new();
 
     for filename in EmbeddedSemgrepRules::iter() {
-        if let Some(file) = EmbeddedSemgrepRules::get(&filename) {
-            let dest = tmp.path().join(filename.as_ref());
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&dest, file.data.as_ref())?;
-            rule_paths.push(dest);
+        let file = EmbeddedSemgrepRules::get(&filename)
+            .expect("embedded file listed by iter() must be gettable");
+        let dest = tmp.path().join(filename.as_ref());
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
         }
+        std::fs::write(&dest, file.data.as_ref())?;
+        rule_paths.push(dest);
     }
 
     Ok((tmp, rule_paths))
@@ -80,6 +80,20 @@ impl SemgrepScanner {
     /// Create a scanner with an explicit binary path (for tests).
     #[cfg(test)]
     fn with_binary(semgrep_bin: PathBuf, timeout: std::time::Duration) -> Self {
+        Self {
+            semgrep_bin,
+            timeout,
+        }
+    }
+
+    /// Create a scanner with an explicit binary path — accessible from all
+    /// test modules in the crate (e.g. `pipeline` tests that need a scanner
+    /// but cannot reach the private `with_binary` method).
+    #[cfg(test)]
+    pub(crate) fn with_binary_for_pipeline_test(
+        semgrep_bin: PathBuf,
+        timeout: std::time::Duration,
+    ) -> Self {
         Self {
             semgrep_bin,
             timeout,

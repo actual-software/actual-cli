@@ -226,12 +226,12 @@ impl TreeSitterAnalyzer {
 
         let mut all_content: Vec<(String, String)> = Vec::new();
         for filename in EmbeddedTreeSitterQueries::iter() {
-            if let Some(file) = EmbeddedTreeSitterQueries::get(&filename) {
-                let content = std::str::from_utf8(file.data.as_ref())
-                    .with_context(|| format!("invalid UTF-8 in embedded query pack {filename}"))?
-                    .to_string();
-                all_content.push((filename.to_string(), content));
-            }
+            let file = EmbeddedTreeSitterQueries::get(&filename)
+                .expect("embedded file listed by iter() must be gettable");
+            let content = std::str::from_utf8(file.data.as_ref())
+                .with_context(|| format!("invalid UTF-8 in embedded query pack {filename}"))?
+                .to_string();
+            all_content.push((filename.to_string(), content));
         }
 
         let compiled_packs = Self::load_query_packs_from_content(&all_content)?;

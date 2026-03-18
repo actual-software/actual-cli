@@ -88,20 +88,9 @@ pub async fn run_signals_analysis(
     working_dir: &Path,
     analysis: &RepoAnalysis,
 ) -> HashMap<String, CanonicalIR> {
-    let mut results = HashMap::new();
-
     // Build TreeSitterAnalyzer from embedded query packs (shared across projects).
-    let mut ts_analyzer = match TreeSitterAnalyzer::from_embedded() {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!(
-                "failed to load tree-sitter query packs: {e}; skipping signals analysis"
-            );
-            return results;
-        }
-    };
-
-    // Build SemgrepScanner (needs semgrep in PATH).
+    // Build SemgrepScanner (needs semgrep in PATH; None if unavailable).
+    let ts_result = TreeSitterAnalyzer::from_embedded();
     let scanner = match SemgrepScanner::new(Duration::from_secs(60)) {
         Ok(s) => Some(s),
         Err(e) => {
@@ -109,6 +98,32 @@ pub async fn run_signals_analysis(
             None
         }
     };
+
+    run_signals_analysis_inner(working_dir, analysis, ts_result, scanner).await
+}
+
+/// Inner implementation of signals analysis.
+///
+/// Accepts the tree-sitter analyzer as a `Result` so that tests can inject a
+/// pre-built analyzer (passing `Ok(analyzer)`) or exercise the failure path
+/// (passing `Err(...)`) without going through `TreeSitterAnalyzer::from_embedded()`.
+async fn run_signals_analysis_inner(
+    working_dir: &Path,
+    analysis: &RepoAnalysis,
+    ts_result: anyhow::Result<TreeSitterAnalyzer>,
+    scanner: Option<SemgrepScanner>,
+) -> HashMap<String, CanonicalIR> {
+    let mut ts_analyzer = match ts_result {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(
+                "failed to load tree-sitter query packs: {e}; skipping signals analysis"
+            );
+            return HashMap::new();
+        }
+    };
+
+    let mut results = HashMap::new();
 
     // Extract embedded semgrep rules to temp dir (once, shared across projects).
     let (_rule_tmp, rule_paths) = if scanner.is_some() {
@@ -425,5 +440,262 @@ mod tests {
         let results = run_signals_analysis(dir.path(), &analysis).await;
         assert!(results.contains_key("backend"), "expected IR for backend");
         assert!(results.contains_key("frontend"), "expected IR for frontend");
+    }
+
+    // ---- analyze_project direct tests ----
+
+    #[tokio::test]
+    async fn analyze_project_no_scanner_no_rules() {
+        let dir = make_temp_project(&[("src/main.rs", "pub fn hello() {}")]);
+        let mut ts_analyzer =
+            TreeSitterAnalyzer::from_embedded().expect("from_embedded should succeed");
+        let result = analyze_project(dir.path(), ".", &mut ts_analyzer, None, &[]).await;
+        assert!(
+            result.is_ok(),
+            "analyze_project should succeed: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_project_returns_err_when_no_source_files() {
+        // An empty dir has no source files → bail!("no source files found")
+        let dir = TempDir::new().unwrap();
+        let mut ts_analyzer =
+            TreeSitterAnalyzer::from_embedded().expect("from_embedded should succeed");
+        let result = analyze_project(dir.path(), ".", &mut ts_analyzer, None, &[]).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no source files found"));
+    }
+
+    #[tokio::test]
+    async fn analyze_project_with_scanner_and_empty_rule_paths() {
+        // scanner.is_some() but rule_paths is empty → inner semgrep block is skipped
+        // (covers `if let Some(scanner)` = Some branch AND `if !rule_paths.is_empty()` = false)
+        let dir = make_temp_project(&[("src/main.rs", "pub fn hello() {}")]);
+        let mut ts_analyzer =
+            TreeSitterAnalyzer::from_embedded().expect("from_embedded should succeed");
+
+        // Build a fake scanner pointing to /bin/true (or /usr/bin/true) which
+        // will not be invoked since rule_paths is empty.
+        let true_bin = which::which("true").unwrap_or_else(|_| PathBuf::from("/usr/bin/true"));
+        let scanner = SemgrepScanner::with_binary_for_pipeline_test(
+            true_bin,
+            std::time::Duration::from_secs(5),
+        );
+        let result = analyze_project(dir.path(), ".", &mut ts_analyzer, Some(&scanner), &[]).await;
+        assert!(
+            result.is_ok(),
+            "should succeed with scanner present but no rule_paths: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn analyze_project_with_scanner_and_rule_paths_scan_ok() {
+        // scanner.is_some() AND rule_paths is non-empty → scan_batch is called.
+        // Use a fake semgrep script that returns empty results so we can cover
+        // lines 184-199 (the semgrep batch section).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = make_temp_project(&[("src/main.rs", "pub fn hello() {}")]);
+            let mut ts_analyzer =
+                TreeSitterAnalyzer::from_embedded().expect("from_embedded should succeed");
+
+            // Create a fake semgrep script that outputs valid empty results.
+            let script_dir = TempDir::new().unwrap();
+            let script_path = script_dir.path().join("fake_semgrep.sh");
+            fs::write(
+                &script_path,
+                "#!/bin/sh\necho '{\"results\": [], \"errors\": []}'",
+            )
+            .unwrap();
+            fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            // Create a fake rule file so rule_paths is non-empty.
+            let rule_path = script_dir.path().join("test_rule.yml");
+            fs::write(&rule_path, "rules: []").unwrap();
+
+            let scanner = SemgrepScanner::with_binary_for_pipeline_test(
+                script_path,
+                std::time::Duration::from_secs(10),
+            );
+            let result = analyze_project(
+                dir.path(),
+                ".",
+                &mut ts_analyzer,
+                Some(&scanner),
+                &[rule_path],
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "analyze_project with fake semgrep should succeed: {:?}",
+                result
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn analyze_project_with_scanner_scan_batch_error() {
+        // scanner.is_some() AND rule_paths non-empty AND scan_batch returns Err
+        // → covers lines 195-197 (the Err arm of scan_batch match).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = make_temp_project(&[("src/main.rs", "pub fn hello() {}")]);
+            let mut ts_analyzer =
+                TreeSitterAnalyzer::from_embedded().expect("from_embedded should succeed");
+
+            // Create a fake semgrep script that exits non-zero (causes scan error).
+            let script_dir = TempDir::new().unwrap();
+            let script_path = script_dir.path().join("failing_semgrep.sh");
+            fs::write(&script_path, "#!/bin/sh\nexit 1").unwrap();
+            fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            // Create a fake rule file so rule_paths is non-empty.
+            let rule_path = script_dir.path().join("test_rule.yml");
+            fs::write(&rule_path, "rules: []").unwrap();
+
+            let scanner = SemgrepScanner::with_binary_for_pipeline_test(
+                script_path,
+                std::time::Duration::from_secs(10),
+            );
+            // analyze_project should still succeed (semgrep error is non-fatal,
+            // tree-sitter results are returned).
+            let result = analyze_project(
+                dir.path(),
+                ".",
+                &mut ts_analyzer,
+                Some(&scanner),
+                &[rule_path],
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "semgrep scan error should be non-fatal: {:?}",
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn walk_dir_skips_symlinks_to_nonexistent_targets() {
+        // Create a directory with a broken symlink — the entry is neither
+        // is_dir() nor is_file(), so it should be silently skipped.
+        let dir = TempDir::new().unwrap();
+        // Write a real source file so the overall collect is non-empty
+        fs::write(dir.path().join("real.rs"), "fn foo() {}").unwrap();
+        // Create a broken symlink (target does not exist)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink("/nonexistent/broken_target", dir.path().join("broken.rs")).unwrap();
+        }
+        // On non-Unix the symlink creation is skipped; the test still covers
+        // the real file path and walk_dir's happy path.
+        let files = collect_source_files(dir.path());
+        // Only the real file should be present; the broken symlink is skipped.
+        assert_eq!(
+            files.len(),
+            1,
+            "broken symlink should be silently skipped by walk_dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_signals_analysis_project_dir_not_exist() {
+        // If the project dir doesn't exist, collect_source_files returns empty →
+        // analyze_project returns Err → project is skipped (covers the Err branch).
+        let dir = TempDir::new().unwrap();
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![make_project("nonexistent_subdir")],
+        };
+        let results = run_signals_analysis(dir.path(), &analysis).await;
+        assert!(
+            results.is_empty(),
+            "nonexistent project dir should produce no IR"
+        );
+    }
+
+    // ---- run_signals_analysis_inner tests (inject pre-built components) ----
+
+    #[tokio::test]
+    async fn run_signals_analysis_inner_ts_analyzer_err() {
+        // When the ts_analyzer Result is Err, run_signals_analysis_inner should
+        // return an empty map immediately (covers the Err branch of the match).
+        let dir = TempDir::new().unwrap();
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![make_project(".")],
+        };
+        let ts_err: anyhow::Result<TreeSitterAnalyzer> =
+            Err(anyhow::anyhow!("simulated from_embedded failure"));
+        let results = run_signals_analysis_inner(dir.path(), &analysis, ts_err, None).await;
+        assert!(results.is_empty(), "Err ts_result should produce empty map");
+    }
+
+    #[tokio::test]
+    async fn run_signals_analysis_inner_no_scanner() {
+        // ts_analyzer succeeds, scanner is None → extract_embedded_rules is skipped
+        // (covers the `else` branch of `if scanner.is_some()`).
+        let dir = make_temp_project(&[("src/main.rs", "pub fn hello() {}")]);
+        let ts_analyzer =
+            TreeSitterAnalyzer::from_embedded().expect("from_embedded should succeed");
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![make_project(".")],
+        };
+        let results =
+            run_signals_analysis_inner(dir.path(), &analysis, Ok(ts_analyzer), None).await;
+        assert!(results.contains_key("."), "expected IR for root project");
+    }
+
+    #[tokio::test]
+    async fn run_signals_analysis_inner_with_scanner_no_semgrep_rules() {
+        // scanner.is_some() → extract_embedded_rules is called (covers the
+        // `if scanner.is_some()` branch and the Ok arm of extract_embedded_rules).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = make_temp_project(&[("src/main.rs", "pub fn hello() {}")]);
+            let ts_analyzer =
+                TreeSitterAnalyzer::from_embedded().expect("from_embedded should succeed");
+
+            // Create a fake semgrep script that outputs valid empty results.
+            let script_dir = TempDir::new().unwrap();
+            let script_path = script_dir.path().join("fake_semgrep.sh");
+            fs::write(
+                &script_path,
+                "#!/bin/sh\necho '{\"results\": [], \"errors\": []}'",
+            )
+            .unwrap();
+            fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let scanner = SemgrepScanner::with_binary_for_pipeline_test(
+                script_path,
+                std::time::Duration::from_secs(10),
+            );
+            let analysis = RepoAnalysis {
+                is_monorepo: false,
+                workspace_type: None,
+                projects: vec![make_project(".")],
+            };
+            let results =
+                run_signals_analysis_inner(dir.path(), &analysis, Ok(ts_analyzer), Some(scanner))
+                    .await;
+            assert!(results.contains_key("."), "expected IR for root project");
+        }
     }
 }
