@@ -674,6 +674,22 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         framework_name: "doctrine",
         category: "data",
     },
+    // WordPress (Composer-based installs)
+    FrameworkSignature {
+        dependency: "johnpbloch/wordpress",
+        framework_name: "wordpress",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "roots/wordpress",
+        framework_name: "wordpress",
+        category: "web-backend",
+    },
+    FrameworkSignature {
+        dependency: "wordpress/wordpress",
+        framework_name: "wordpress",
+        category: "web-backend",
+    },
 ];
 
 /// Alternative spellings for canonical framework names.
@@ -1128,5 +1144,25 @@ mod tests {
         let sig = lookup("phpunit/phpunit").expect("phpunit/phpunit should be in registry");
         assert_eq!(sig.framework_name, "phpunit");
         assert_eq!(sig.category, "testing");
+    }
+
+    #[test]
+    fn test_lookup_wordpress_johnpbloch() {
+        let sig =
+            lookup("johnpbloch/wordpress").expect("johnpbloch/wordpress should be in registry");
+        assert_eq!(sig.framework_name, "wordpress");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_wordpress_roots() {
+        let sig = lookup("roots/wordpress").expect("roots/wordpress should be in registry");
+        assert_eq!(sig.framework_name, "wordpress");
+    }
+
+    #[test]
+    fn test_lookup_wordpress_canonical() {
+        let sig = lookup("wordpress/wordpress").expect("wordpress/wordpress should be in registry");
+        assert_eq!(sig.framework_name, "wordpress");
     }
 }

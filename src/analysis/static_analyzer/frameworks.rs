@@ -86,6 +86,11 @@ pub fn detect_config_frameworks(project_dir: &Path) -> Vec<Framework> {
             "devops",
         ),
         (&["Dockerfile"], "docker", "devops"),
+        (
+            &["wp-config.php", "wp-config-sample.php", "wp-login.php"],
+            "wordpress",
+            "web-backend",
+        ),
     ];
 
     for (files, name, category) in config_checks {
@@ -110,6 +115,17 @@ pub fn detect_config_frameworks(project_dir: &Path) -> Vec<Framework> {
                 source: Some(ManifestSource::ConfigFile),
             });
         }
+    }
+
+    // Check for WordPress directory structure (wp-includes/ or wp-content/)
+    if (project_dir.join("wp-includes").is_dir() || project_dir.join("wp-content").is_dir())
+        && !frameworks.iter().any(|f| f.name == "wordpress")
+    {
+        frameworks.push(Framework {
+            name: "wordpress".to_string(),
+            category: FrameworkCategory::from_str_insensitive("web-backend"),
+            source: Some(ManifestSource::ConfigFile),
+        });
     }
 
     // Check for GitHub Actions
@@ -427,6 +443,57 @@ mod tests {
         let frameworks = detect_frameworks(&deps, dir.path());
         let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"docker"));
+    }
+
+    #[test]
+    fn test_detect_wordpress_via_wp_config() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("wp-config.php"), "<?php").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"wordpress"));
+    }
+
+    #[test]
+    fn test_detect_wordpress_via_wp_config_sample() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("wp-config-sample.php"), "<?php").unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"wordpress"));
+    }
+
+    #[test]
+    fn test_detect_wordpress_via_wp_includes_dir() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("wp-includes")).unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"wordpress"));
+    }
+
+    #[test]
+    fn test_detect_wordpress_via_wp_content_dir() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("wp-content")).unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let names: Vec<&str> = frameworks.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"wordpress"));
+    }
+
+    #[test]
+    fn test_detect_wordpress_not_duplicated_when_both_file_and_dir_present() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("wp-config.php"), "<?php").unwrap();
+        fs::create_dir(dir.path().join("wp-includes")).unwrap();
+
+        let frameworks = detect_config_frameworks(dir.path());
+        let count = frameworks.iter().filter(|f| f.name == "wordpress").count();
+        assert_eq!(count, 1, "wordpress should appear exactly once");
     }
 
     #[test]

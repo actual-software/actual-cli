@@ -68,3 +68,20 @@ rules:
       - pattern-either:
           - pattern-regex: "\\bSlim\\\\App\\b"
           - pattern: AppFactory::create()
+
+  - id: php.wordpress.framework
+    languages: [php]
+    message: WordPress framework detected
+    severity: INFO
+    metadata:
+      facet_slot: framework.app.detected
+      leaf_id: "19"
+      confidence: "0.8"
+    patterns:
+      - pattern-either:
+          - pattern: add_action(...)
+          - pattern: add_filter(...)
+          - pattern: register_post_type(...)
+          - pattern: wp_enqueue_scripts(...)
+          - pattern-regex: "\\bwp_enqueue_style\\s*\\("
+          - pattern-regex: "\\bget_template_part\\s*\\("
