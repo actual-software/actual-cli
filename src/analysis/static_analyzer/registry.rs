@@ -43,6 +43,11 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         category: "web-frontend",
     },
     FrameworkSignature {
+        dependency: "jquery",
+        framework_name: "jquery",
+        category: "web-frontend",
+    },
+    FrameworkSignature {
         dependency: "solid-js",
         framework_name: "solidjs",
         category: "web-frontend",
@@ -584,6 +589,8 @@ const FRAMEWORK_ALIASES: &[(&str, &str)] = &[
     ("hono.js", "hono"),
     // Remix
     ("remix.js", "remix"),
+    // jQuery
+    ("jquery.js", "jquery"),
 ];
 
 /// Normalize a framework name to its canonical form.
@@ -858,6 +865,13 @@ mod tests {
     fn test_lookup_solidjs() {
         let sig = lookup("solid-js").expect("solid-js should be in registry");
         assert_eq!(sig.framework_name, "solidjs");
+        assert_eq!(sig.category, "web-frontend");
+    }
+
+    #[test]
+    fn test_lookup_jquery() {
+        let sig = lookup("jquery").expect("jquery should be in registry");
+        assert_eq!(sig.framework_name, "jquery");
         assert_eq!(sig.category, "web-frontend");
     }
 
