@@ -4,6 +4,7 @@ use std::time::Duration;
 use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::analysis::signals::CanonicalIR;
+use crate::analysis::static_analyzer::registry::all_framework_names;
 use crate::analysis::types::{FrameworkCategory, Language, RepoAnalysis};
 use crate::api::types::{
     ApiErrorResponse, CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, FrameworksResponse,
@@ -222,9 +223,14 @@ pub fn build_match_request(
                 let fws = sel
                     .framework
                     .iter()
-                    .map(|fw| MatchFramework {
-                        name: fw.name.clone(),
-                        category: serialize_framework_category(&fw.category),
+                    .flat_map(|fw| {
+                        let category = serialize_framework_category(&fw.category);
+                        all_framework_names(&fw.name)
+                            .into_iter()
+                            .map(move |name| MatchFramework {
+                                name,
+                                category: category.clone(),
+                            })
                     })
                     .collect();
                 (langs, fws)
@@ -238,9 +244,14 @@ pub fn build_match_request(
                 let fws = project
                     .frameworks
                     .iter()
-                    .map(|fw| MatchFramework {
-                        name: fw.name.clone(),
-                        category: serialize_framework_category(&fw.category),
+                    .flat_map(|fw| {
+                        let category = serialize_framework_category(&fw.category);
+                        all_framework_names(&fw.name)
+                            .into_iter()
+                            .map(move |name| MatchFramework {
+                                name,
+                                category: category.clone(),
+                            })
                     })
                     .collect();
                 (langs, fws)
