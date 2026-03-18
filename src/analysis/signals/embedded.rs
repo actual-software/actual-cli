@@ -56,4 +56,29 @@ mod tests {
         let file = EmbeddedSemgrepRules::get("nonexistent_rule_that_does_not_exist.yml");
         assert!(file.is_none());
     }
+
+    #[test]
+    fn all_tree_sitter_query_files_are_gettable() {
+        for name in EmbeddedTreeSitterQueries::iter() {
+            let file = EmbeddedTreeSitterQueries::get(&name);
+            assert!(file.is_some());
+            // Verify content is non-empty valid UTF-8
+            let embedded = file.unwrap();
+            let content = std::str::from_utf8(embedded.data.as_ref());
+            assert!(content.is_ok());
+            assert!(!content.unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn all_semgrep_rule_files_are_gettable() {
+        for name in EmbeddedSemgrepRules::iter() {
+            let file = EmbeddedSemgrepRules::get(&name);
+            assert!(file.is_some());
+            let embedded = file.unwrap();
+            let content = std::str::from_utf8(embedded.data.as_ref());
+            assert!(content.is_ok());
+            assert!(!content.unwrap().is_empty());
+        }
+    }
 }

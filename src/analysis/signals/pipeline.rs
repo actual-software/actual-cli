@@ -597,11 +597,7 @@ mod tests {
         // the real file path and walk_dir's happy path.
         let files = collect_source_files(dir.path());
         // Only the real file should be present; the broken symlink is skipped.
-        assert_eq!(
-            files.len(),
-            1,
-            "broken symlink should be silently skipped by walk_dir"
-        );
+        assert_eq!(files.len(), 1);
     }
 
     #[tokio::test]
@@ -675,10 +671,7 @@ mod tests {
         };
         // Should produce an IR (from the readable file) rather than failing entirely
         let results = run_signals_analysis(dir.path(), &analysis).await;
-        assert!(
-            results.contains_key("."),
-            "should produce IR despite unreadable file"
-        );
+        assert!(results.contains_key("."));
 
         // Restore permissions so TempDir can clean up
         std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
