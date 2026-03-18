@@ -43,6 +43,11 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         category: "web-frontend",
     },
     FrameworkSignature {
+        dependency: "solid-js",
+        framework_name: "solidjs",
+        category: "web-frontend",
+    },
+    FrameworkSignature {
         dependency: "express",
         framework_name: "express",
         category: "web-backend",
@@ -544,6 +549,75 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
     },
 ];
 
+/// Alternative spellings for canonical framework names.
+///
+/// Each entry is `(alias, canonical)`. Aliases are lowercase. When building
+/// API match requests we expand a detected framework to include all of its
+/// aliases so that ADRs tagged with any spelling will match.
+const FRAMEWORK_ALIASES: &[(&str, &str)] = &[
+    // Next.js
+    ("next.js", "nextjs"),
+    ("next", "nextjs"),
+    // Nuxt
+    ("nuxt.js", "nuxt"),
+    ("nuxtjs", "nuxt"),
+    // Node.js (runtime, not a framework in our registry but common in ADR tags)
+    ("node.js", "nodejs"),
+    ("node", "nodejs"),
+    // SolidJS
+    ("solid.js", "solidjs"),
+    ("solid", "solidjs"),
+    ("solid-js", "solidjs"),
+    // Vue
+    ("vue.js", "vue"),
+    ("vuejs", "vue"),
+    // React
+    ("react.js", "react"),
+    ("reactjs", "react"),
+    // Express
+    ("express.js", "express"),
+    // Svelte
+    ("svelte.js", "svelte"),
+    // Astro
+    ("astro.js", "astro"),
+    // Hono
+    ("hono.js", "hono"),
+    // Remix
+    ("remix.js", "remix"),
+];
+
+/// Normalize a framework name to its canonical form.
+///
+/// If `name` is a known alias (e.g. `"next.js"`), returns the canonical name
+/// (e.g. `"nextjs"`). Unknown names are returned unchanged.
+pub fn normalize_framework_name(name: &str) -> &str {
+    let lower = name.to_lowercase();
+    FRAMEWORK_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == lower.as_str())
+        .map(|(_, canonical)| *canonical)
+        .unwrap_or(name)
+}
+
+/// Return all known names for a framework — canonical name first, then aliases.
+///
+/// `name` may be either the canonical name or any alias; both cases produce
+/// the same result. For example, `all_framework_names("next.js")` and
+/// `all_framework_names("nextjs")` both return `["nextjs", "next.js", "next"]`.
+///
+/// Used when building API match requests so that ADRs tagged with any
+/// spelling of a framework name are matched correctly.
+pub fn all_framework_names(name: &str) -> Vec<String> {
+    let canonical = normalize_framework_name(name);
+    let mut names = vec![canonical.to_string()];
+    for (alias, c) in FRAMEWORK_ALIASES {
+        if *c == canonical {
+            names.push(alias.to_string());
+        }
+    }
+    names
+}
+
 /// Look up a dependency name in the registry.
 ///
 /// For Go module paths, also tries prefix matching (e.g.
@@ -778,5 +852,100 @@ mod tests {
         let sig = lookup("poco").expect("poco should be in registry");
         assert_eq!(sig.framework_name, "poco");
         assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_solidjs() {
+        let sig = lookup("solid-js").expect("solid-js should be in registry");
+        assert_eq!(sig.framework_name, "solidjs");
+        assert_eq!(sig.category, "web-frontend");
+    }
+
+    // ── normalize_framework_name tests ──
+
+    #[test]
+    fn normalize_known_aliases() {
+        assert_eq!(normalize_framework_name("next.js"), "nextjs");
+        assert_eq!(normalize_framework_name("Next.js"), "nextjs");
+        assert_eq!(normalize_framework_name("next"), "nextjs");
+        assert_eq!(normalize_framework_name("nuxt.js"), "nuxt");
+        assert_eq!(normalize_framework_name("nuxtjs"), "nuxt");
+        assert_eq!(normalize_framework_name("node.js"), "nodejs");
+        assert_eq!(normalize_framework_name("node"), "nodejs");
+        assert_eq!(normalize_framework_name("solid.js"), "solidjs");
+        assert_eq!(normalize_framework_name("solid-js"), "solidjs");
+        assert_eq!(normalize_framework_name("solid"), "solidjs");
+        assert_eq!(normalize_framework_name("vue.js"), "vue");
+        assert_eq!(normalize_framework_name("vuejs"), "vue");
+        assert_eq!(normalize_framework_name("react.js"), "react");
+        assert_eq!(normalize_framework_name("reactjs"), "react");
+        assert_eq!(normalize_framework_name("express.js"), "express");
+        assert_eq!(normalize_framework_name("svelte.js"), "svelte");
+    }
+
+    #[test]
+    fn normalize_canonical_returns_unchanged() {
+        // Canonical names should pass through as-is
+        assert_eq!(normalize_framework_name("nextjs"), "nextjs");
+        assert_eq!(normalize_framework_name("react"), "react");
+        assert_eq!(normalize_framework_name("vue"), "vue");
+        assert_eq!(normalize_framework_name("solidjs"), "solidjs");
+        assert_eq!(normalize_framework_name("nuxt"), "nuxt");
+    }
+
+    #[test]
+    fn normalize_unknown_returns_unchanged() {
+        assert_eq!(normalize_framework_name("actix-web"), "actix-web");
+        assert_eq!(normalize_framework_name("django"), "django");
+        assert_eq!(normalize_framework_name("unknown-fw"), "unknown-fw");
+    }
+
+    // ── all_framework_names tests ──
+
+    #[test]
+    fn all_names_nextjs() {
+        let names = all_framework_names("nextjs");
+        assert!(names.contains(&"nextjs".to_string()));
+        assert!(names.contains(&"next.js".to_string()));
+        assert!(names.contains(&"next".to_string()));
+        // Canonical name should be first
+        assert_eq!(names[0], "nextjs");
+    }
+
+    #[test]
+    fn all_names_from_alias_same_as_from_canonical() {
+        // Whether you start from "next.js" or "nextjs" you get the same set
+        let from_canonical = all_framework_names("nextjs");
+        let from_alias = all_framework_names("next.js");
+        assert_eq!(
+            from_canonical
+                .iter()
+                .collect::<std::collections::HashSet<_>>(),
+            from_alias.iter().collect::<std::collections::HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn all_names_no_aliases_returns_just_canonical() {
+        // "actix-web" has no aliases — should return only itself
+        let names = all_framework_names("actix-web");
+        assert_eq!(names, vec!["actix-web".to_string()]);
+    }
+
+    #[test]
+    fn all_names_vue() {
+        let names = all_framework_names("vue");
+        assert!(names.contains(&"vue".to_string()));
+        assert!(names.contains(&"vue.js".to_string()));
+        assert!(names.contains(&"vuejs".to_string()));
+    }
+
+    #[test]
+    fn all_names_solidjs() {
+        let names = all_framework_names("solidjs");
+        assert!(names.contains(&"solidjs".to_string()));
+        assert!(names.contains(&"solid.js".to_string()));
+        assert!(names.contains(&"solid-js".to_string()));
+        assert!(names.contains(&"solid".to_string()));
     }
 }
