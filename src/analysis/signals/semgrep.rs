@@ -9,19 +9,16 @@ use super::{EvidenceSpan, SignalSource, ToolMatch};
 /// Returns the temp dir (caller must keep it alive) and the list of rule file paths.
 pub fn extract_embedded_rules() -> Result<(tempfile::TempDir, Vec<std::path::PathBuf>)> {
     use super::embedded::EmbeddedSemgrepRules;
-
     let tmp = tempfile::TempDir::new().context("failed to create temp dir for semgrep rules")?;
     let mut rule_paths = Vec::new();
-
-    for filename in EmbeddedSemgrepRules::iter() {
-        let file = EmbeddedSemgrepRules::get(&filename)
-            .expect("embedded file listed by iter() must be gettable");
-        let dest = tmp.path().join(filename.as_ref());
+    for name in EmbeddedSemgrepRules::iter() {
+        let dest = tmp.path().join(name);
         std::fs::create_dir_all(dest.parent().unwrap_or(tmp.path()))?;
-        std::fs::write(&dest, file.data.as_ref())?;
+        let data =
+            EmbeddedSemgrepRules::get(name).expect("file returned by iter() must be gettable");
+        std::fs::write(&dest, data)?;
         rule_paths.push(dest);
     }
-
     Ok((tmp, rule_paths))
 }
 
