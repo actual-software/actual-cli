@@ -282,6 +282,11 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         category: "testing",
     },
     FrameworkSignature {
+        dependency: "hanami",
+        framework_name: "hanami",
+        category: "web-backend",
+    },
+    FrameworkSignature {
         dependency: "sidekiq",
         framework_name: "sidekiq",
         category: "library",
@@ -670,6 +675,13 @@ mod tests {
     }
 
     #[test]
+    fn test_lookup_hanami() {
+        let sig = lookup("hanami").expect("hanami should be in registry");
+        assert_eq!(sig.framework_name, "hanami");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
     fn registry_has_entries_for_all_ecosystems() {
         // Spot-check at least one entry per ecosystem
         let checks = [
@@ -678,6 +690,7 @@ mod tests {
             "django",
             "github.com/gin-gonic/gin",
             "rails",
+            "hanami",
             "org.springframework.boot",
             "Microsoft.NET.Sdk.Web",
             "GTest",
