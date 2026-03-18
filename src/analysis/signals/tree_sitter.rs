@@ -223,17 +223,14 @@ impl TreeSitterAnalyzer {
     /// Load query packs from embedded binary assets (production use).
     pub fn from_embedded() -> Result<Self> {
         use super::embedded::EmbeddedTreeSitterQueries;
-
-        let mut all_content: Vec<(String, String)> = Vec::new();
-        for filename in EmbeddedTreeSitterQueries::iter() {
-            let file = EmbeddedTreeSitterQueries::get(&filename)
-                .expect("embedded file listed by iter() must be gettable");
-            let content = std::str::from_utf8(file.data.as_ref())
-                .with_context(|| format!("invalid UTF-8 in embedded query pack {filename}"))?
-                .to_string();
-            all_content.push((filename.to_string(), content));
-        }
-
+        let all_content: Vec<(String, String)> = EmbeddedTreeSitterQueries::iter()
+            .map(|name| {
+                let content = EmbeddedTreeSitterQueries::get(name)
+                    .expect("file returned by iter() must be gettable")
+                    .to_string();
+                (name.to_string(), content)
+            })
+            .collect();
         let compiled_packs = Self::load_query_packs_from_content(&all_content)?;
         Ok(Self {
             parser_cache: HashMap::new(),

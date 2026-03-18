@@ -111,9 +111,7 @@ async fn run_signals_analysis_inner(
     let mut ts_analyzer = match ts_result {
         Ok(a) => a,
         Err(e) => {
-            tracing::warn!(
-                "failed to load tree-sitter query packs: {e}; skipping signals analysis"
-            );
+            tracing::warn!("signals: ts query packs failed to load: {e}");
             return HashMap::new();
         }
     };
@@ -122,12 +120,9 @@ async fn run_signals_analysis_inner(
 
     // Extract embedded semgrep rules to temp dir (once, shared across projects).
     let (_rule_tmp, rule_paths) = if scanner.is_some() {
-        extract_embedded_rules()
-            .inspect_err(|e| {
-                tracing::warn!("failed to extract semgrep rules: {e}; tree-sitter signals only");
-            })
-            .ok()
-            .map_or((None, Vec::new()), |r| (Some(r.0), r.1))
+        let r = extract_embedded_rules()
+            .expect("embedded semgrep rules are always present in the binary");
+        (Some(r.0), r.1)
     } else {
         (None, Vec::new())
     };
