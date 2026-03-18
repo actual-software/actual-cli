@@ -67,10 +67,9 @@ fn walk_dir(current: &Path, out: &mut Vec<(PathBuf, TreeSitterLanguage)>) {
             walk_dir(&path, out);
         } else if path.is_file() {
             // Skip large files
-            if let Ok(meta) = entry.metadata() {
-                if meta.len() > MAX_FILE_BYTES {
-                    continue;
-                }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            if size > MAX_FILE_BYTES {
+                continue;
             }
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if let Some(lang) = extension_to_language(ext) {
@@ -91,13 +90,9 @@ pub async fn run_signals_analysis(
     // Build TreeSitterAnalyzer from embedded query packs (shared across projects).
     // Build SemgrepScanner (needs semgrep in PATH; None if unavailable).
     let ts_result = TreeSitterAnalyzer::from_embedded();
-    let scanner = match SemgrepScanner::new(Duration::from_secs(60)) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            tracing::warn!("semgrep not available: {e}; tree-sitter signals only");
-            None
-        }
-    };
+    let scanner = SemgrepScanner::new(Duration::from_secs(60))
+        .inspect_err(|e| tracing::warn!("semgrep not available: {e}; tree-sitter signals only"))
+        .ok();
 
     run_signals_analysis_inner(working_dir, analysis, ts_result, scanner).await
 }
@@ -127,13 +122,12 @@ async fn run_signals_analysis_inner(
 
     // Extract embedded semgrep rules to temp dir (once, shared across projects).
     let (_rule_tmp, rule_paths) = if scanner.is_some() {
-        match extract_embedded_rules() {
-            Ok(r) => (Some(r.0), r.1),
-            Err(e) => {
+        extract_embedded_rules()
+            .inspect_err(|e| {
                 tracing::warn!("failed to extract semgrep rules: {e}; tree-sitter signals only");
-                (None, Vec::new())
-            }
-        }
+            })
+            .ok()
+            .map_or((None, Vec::new()), |r| (Some(r.0), r.1))
     } else {
         (None, Vec::new())
     };
@@ -188,10 +182,11 @@ async fn analyze_project(
             continue;
         };
 
-        match ts_analyzer.query_file(&content, &rel, *lang) {
-            Ok(matches) => all_matches.extend(matches),
-            Err(e) => tracing::debug!(file = %rel, "tree-sitter query failed: {e}"),
-        }
+        all_matches.extend(
+            ts_analyzer
+                .query_file(&content, &rel, *lang)
+                .unwrap_or_default(),
+        );
     }
 
     // Semgrep analysis — batch.
@@ -659,6 +654,34 @@ mod tests {
         let results =
             run_signals_analysis_inner(dir.path(), &analysis, Ok(ts_analyzer), None).await;
         assert!(results.contains_key("."), "expected IR for root project");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_signals_analysis_skips_unreadable_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        // Create one readable and one unreadable Rust file
+        let readable = dir.path().join("lib.rs");
+        let unreadable = dir.path().join("secret.rs");
+        std::fs::write(&readable, "pub fn ok() {}").unwrap();
+        std::fs::write(&unreadable, "pub fn secret() {}").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![make_project(".")],
+        };
+        // Should produce an IR (from the readable file) rather than failing entirely
+        let results = run_signals_analysis(dir.path(), &analysis).await;
+        assert!(
+            results.contains_key("."),
+            "should produce IR despite unreadable file"
+        );
+
+        // Restore permissions so TempDir can clean up
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     #[tokio::test]
