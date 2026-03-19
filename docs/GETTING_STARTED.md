@@ -1,4 +1,5 @@
 # actual — Getting Started
+<!-- pipeline test: ACTCLI-115 -->
 
 `actual` generates and maintains AI instruction files (`CLAUDE.md`, `AGENTS.md`, or Cursor rules) for your codebase by pulling tailored Architecture Decision Records from Actual's API and writing them into your repo.
 
