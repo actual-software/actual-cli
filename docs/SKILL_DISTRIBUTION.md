@@ -83,7 +83,7 @@ clawhub install actual
 
 **ClawdHub details:**
 - Slug: `actual`
-- Owner: `poiley` (will transfer to `actual-software-inc` when account is 14+ days old)
+- Owner: `actual-software-inc`
 - Published via direct API call (see "Publishing" below)
 
 ---
@@ -297,7 +297,7 @@ If the change only affects the "ADR Pre-Check (OpenClaw)" section or the `metada
 | 3 | OpenClaw variant adds ADR Pre-Check section | Nudges OpenClaw agents to check for ADR context; standard variant doesn't need this |
 | 4 | Skill version independent of CLI version | Decouples release cadences; avoids phantom releases |
 | 5 | Standard variant uses Apache-2.0, OpenClaw uses MIT-0 | ClawdHub requires MIT-0 for all published skills; standard variant keeps Apache-2.0 for consistency with actual-cli |
-| 6 | Published to ClawdHub under personal account (poiley) | Service account (actual-software-inc) was too new (14-day age gate); will transfer ownership later |
+| 6 | Published to ClawdHub under `actual-software-inc` | Ownership transferred from `poiley` on 2026-03-26 via Clawhub transfer API |
 | 7 | Direct curl for ClawdHub publishing | CLI v0.7.0 has acceptLicenseTerms bug; curl workaround is reliable |
 | 8 | Container E2E fetches skill from GitHub | Skill no longer in-repo; E2E test downloads from actual-software/actual-skill at runtime |
 | 9 | CI workflow updated to point to standalone repos | Skill files moved; reminder now links to external repos instead of in-repo paths |
