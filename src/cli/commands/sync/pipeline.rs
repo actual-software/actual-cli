@@ -35,6 +35,9 @@ use super::cache::{
     compute_repo_key, compute_tailoring_cache_key, load_config_with_fallback,
     store_tailoring_cache, tailoring_cache_skip_msg,
 };
+use super::v2_output::{
+    generate_v2_output, inject_v2_governance, partition_adrs, write_v2_raw_files,
+};
 use super::write::confirm_and_write;
 
 pub(crate) fn resolve_cwd() -> std::path::PathBuf {
@@ -472,6 +475,15 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         args.model.as_deref().or(config.model.as_deref()),
     ));
 
+    // Partition into V1 and V2 ADRs (after cache key computation so the key
+    // covers all ADRs, including V2 ones).
+    let (v1_adrs, v2_adrs) = partition_adrs(filtered_adrs);
+    let v2_result = if v2_adrs.is_empty() {
+        None
+    } else {
+        Some(generate_v2_output(&v2_adrs))
+    };
+
     // Try cache (unless --force)
     let cached_output = if !args.force {
         tailoring_cache_key
@@ -495,7 +507,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         cached
     } else if args.no_tailor {
         pipeline.skip(SyncPhase::Tailor, "Tailoring skipped (--no-tailor)");
-        let out = raw_adrs_to_output(&filtered_adrs, &output_format);
+        let out = raw_adrs_to_output(&v1_adrs, &output_format);
         store_tailoring_cache(
             &mut config,
             cfg_path,
@@ -554,7 +566,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             let tailor_fut = tailor_all_projects(
                 runner,
                 &analysis.projects,
-                &filtered_adrs,
+                &v1_adrs,
                 &tailoring_config,
                 Some(progress_tx),
             );
@@ -606,6 +618,24 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
                 return Err(e);
             }
         }
+    };
+
+    // Inject V2 governance into output (if V2 ADRs were present)
+    let output = if let Some(ref v2) = v2_result {
+        // Write V2 raw files (docs/adr/ + .claude/rules/)
+        if !args.dry_run {
+            let v2_write_results = write_v2_raw_files(root_dir, &v2.raw_files);
+            for r in &v2_write_results {
+                if let Some(ref e) = r.error {
+                    let safe_path = console::strip_ansi_codes(&r.path);
+                    pipeline.println(&format!("  V2 file write failed: {safe_path}: {e}"));
+                }
+            }
+        }
+        // Inject governance pointer into CLAUDE.md managed section
+        inject_v2_governance(output, v2.governance_content.clone(), &output_format)
+    } else {
+        output
     };
 
     // Gap 7: surface the AI reasoning per file when --verbose is set, so
@@ -2893,8 +2923,10 @@ mod tests {
             applies_to: crate::api::types::AppliesTo {
                 languages: vec!["rust".to_string()],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: projects.into_iter().map(String::from).collect(),
+            ..Default::default()
         }
     }
 
@@ -3718,8 +3750,10 @@ mod tests {
             applies_to: crate::api::types::AppliesTo {
                 languages: vec!["rust".to_string()],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![".".to_string()],
+            ..Default::default()
         }
     }
 
@@ -3898,8 +3932,10 @@ mod tests {
             applies_to: crate::api::types::AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let mut adr_with_instructions = adr_no_instructions.clone();
         adr_with_instructions.instructions = Some(vec!["do this".to_string()]);
@@ -3929,8 +3965,10 @@ mod tests {
             applies_to: crate::api::types::AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let mut adr_with_frameworks = adr_no_frameworks.clone();
         adr_with_frameworks.applies_to.frameworks = vec!["actix-web".to_string()];

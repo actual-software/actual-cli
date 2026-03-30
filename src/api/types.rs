@@ -40,7 +40,7 @@ pub struct MatchResponse {
     pub metadata: MatchMetadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Adr {
     pub id: String,
     pub title: String,
@@ -50,19 +50,39 @@ pub struct Adr {
     pub category: AdrCategory,
     pub applies_to: AppliesTo,
     pub matched_projects: Vec<String>,
+    #[serde(default)]
+    pub schema_version: Option<u32>,
+    #[serde(default)]
+    pub content_md: Option<String>,
+    #[serde(default)]
+    pub content_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+impl Adr {
+    pub fn is_v2(&self) -> bool {
+        self.schema_version.is_some_and(|v| v >= 2) || self.content_md.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AdrCategory {
     pub id: String,
     pub name: String,
     pub path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AppliesTo {
     pub languages: Vec<String>,
     pub frameworks: Vec<String>,
+    #[serde(default)]
+    pub packages: Vec<String>,
+    #[serde(default)]
+    pub version_range: Option<String>,
+    #[serde(default)]
+    pub facets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -479,6 +499,229 @@ mod tests {
             request.metrics[0].tags.get("framework"),
             Some(&"nextjs".to_string())
         );
+    }
+
+    #[test]
+    fn test_is_v2_returns_false_for_v1_adr() {
+        let adr = Adr {
+            id: "adr-001".to_string(),
+            title: "V1 ADR".to_string(),
+            context: None,
+            policies: vec![],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-1".to_string(),
+                name: "General".to_string(),
+                path: "General".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+                packages: vec![],
+                version_range: None,
+                facets: vec![],
+            },
+            matched_projects: vec![],
+            schema_version: None,
+            content_md: None,
+            content_json: None,
+            source: None,
+        };
+        assert!(!adr.is_v2());
+    }
+
+    #[test]
+    fn test_is_v2_returns_true_when_schema_version_is_2() {
+        let adr = Adr {
+            id: "adr-002".to_string(),
+            title: "V2 ADR".to_string(),
+            context: None,
+            policies: vec![],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-1".to_string(),
+                name: "General".to_string(),
+                path: "General".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+                packages: vec![],
+                version_range: None,
+                facets: vec![],
+            },
+            matched_projects: vec![],
+            schema_version: Some(2),
+            content_md: None,
+            content_json: None,
+            source: None,
+        };
+        assert!(adr.is_v2());
+    }
+
+    #[test]
+    fn test_is_v2_returns_true_when_schema_version_is_greater_than_2() {
+        let adr = Adr {
+            id: "adr-003".to_string(),
+            title: "V3 ADR".to_string(),
+            context: None,
+            policies: vec![],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-1".to_string(),
+                name: "General".to_string(),
+                path: "General".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+                packages: vec![],
+                version_range: None,
+                facets: vec![],
+            },
+            matched_projects: vec![],
+            schema_version: Some(3),
+            content_md: None,
+            content_json: None,
+            source: None,
+        };
+        assert!(adr.is_v2());
+    }
+
+    #[test]
+    fn test_is_v2_returns_true_when_content_md_present_without_schema_version() {
+        let adr = Adr {
+            id: "adr-004".to_string(),
+            title: "Content MD ADR".to_string(),
+            context: None,
+            policies: vec![],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-1".to_string(),
+                name: "General".to_string(),
+                path: "General".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+                packages: vec![],
+                version_range: None,
+                facets: vec![],
+            },
+            matched_projects: vec![],
+            schema_version: None,
+            content_md: Some("# My ADR\n\nContent here.".to_string()),
+            content_json: None,
+            source: None,
+        };
+        assert!(adr.is_v2());
+    }
+
+    #[test]
+    fn test_is_v2_returns_false_when_schema_version_is_1() {
+        let adr = Adr {
+            id: "adr-005".to_string(),
+            title: "Schema v1 ADR".to_string(),
+            context: None,
+            policies: vec![],
+            instructions: None,
+            category: AdrCategory {
+                id: "cat-1".to_string(),
+                name: "General".to_string(),
+                path: "General".to_string(),
+            },
+            applies_to: AppliesTo {
+                languages: vec![],
+                frameworks: vec![],
+                packages: vec![],
+                version_range: None,
+                facets: vec![],
+            },
+            matched_projects: vec![],
+            schema_version: Some(1),
+            content_md: None,
+            content_json: None,
+            source: None,
+        };
+        assert!(!adr.is_v2());
+    }
+
+    #[test]
+    fn test_deserialize_v2_adr_with_all_fields() {
+        let json = r##"{
+            "matched_adrs": [
+                {
+                    "id": "v2-adr-001",
+                    "title": "Use async/await consistently",
+                    "context": "Modern Rust uses async/await for async code.",
+                    "policies": ["Prefer async/await over callbacks"],
+                    "instructions": null,
+                    "category": {
+                        "id": "cat-1",
+                        "name": "Async Patterns",
+                        "path": "Async Patterns"
+                    },
+                    "applies_to": {
+                        "languages": ["rust"],
+                        "frameworks": [],
+                        "packages": ["tokio"],
+                        "version_range": ">=1.0",
+                        "facets": ["backend"]
+                    },
+                    "matched_projects": ["src"],
+                    "schema_version": 2,
+                    "content_md": "# Async Patterns",
+                    "content_json": {"agent_documentation": "Use async/await for all async operations."},
+                    "source": "https://example.com/adrs/v2-adr-001"
+                }
+            ],
+            "metadata": {
+                "total_matched": 1,
+                "by_framework": {},
+                "deduplicated_count": 1
+            }
+        }"##;
+
+        let response: MatchResponse = serde_json::from_str(json).unwrap();
+        let adr = &response.matched_adrs[0];
+        assert_eq!(adr.id, "v2-adr-001");
+        assert_eq!(adr.schema_version, Some(2));
+        assert_eq!(adr.content_md.as_deref(), Some("# Async Patterns"));
+        assert!(adr.content_json.is_some());
+        assert_eq!(
+            adr.source.as_deref(),
+            Some("https://example.com/adrs/v2-adr-001")
+        );
+        assert_eq!(adr.applies_to.packages, vec!["tokio"]);
+        assert_eq!(adr.applies_to.version_range.as_deref(), Some(">=1.0"));
+        assert_eq!(adr.applies_to.facets, vec!["backend"]);
+        assert!(adr.is_v2());
+    }
+
+    #[test]
+    fn test_deserialize_v1_adr_missing_v2_fields_still_works() {
+        // Existing V1 JSON without new optional fields must still deserialize.
+        let json = r#"{
+            "id": "v1-adr",
+            "title": "Old ADR",
+            "context": null,
+            "policies": ["Do something"],
+            "instructions": null,
+            "category": {"id": "c1", "name": "General", "path": "General"},
+            "applies_to": {"languages": ["rust"], "frameworks": []},
+            "matched_projects": []
+        }"#;
+
+        let adr: Adr = serde_json::from_str(json).unwrap();
+        assert_eq!(adr.id, "v1-adr");
+        assert!(adr.schema_version.is_none());
+        assert!(adr.content_md.is_none());
+        assert!(adr.content_json.is_none());
+        assert!(adr.source.is_none());
+        assert!(adr.applies_to.packages.is_empty());
+        assert!(adr.applies_to.version_range.is_none());
+        assert!(adr.applies_to.facets.is_empty());
+        assert!(!adr.is_v2());
     }
 
     #[test]
