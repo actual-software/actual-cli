@@ -8,7 +8,7 @@ is collected, where it goes, and how to opt out.
 
 ### Telemetry counters (anonymous)
 
-On each successful run of `actual adr-bot`, the CLI sends four counter metrics:
+On each successful run of `actual adr-bot`, the CLI sends counter metrics:
 
 | Metric | Description |
 |--------|-------------|
@@ -16,14 +16,25 @@ On each successful run of `actual adr-bot`, the CLI sends four counter metrics:
 | `cli.sync.adrs_tailored` | Number of ADRs successfully tailored by the LLM |
 | `cli.sync.adrs_rejected` | Number of ADRs filtered out |
 | `cli.sync.adrs_written` | Number of ADRs written to output files |
+| `cli.sync.adrs_recommended` | Number of ADRs matched and recommended for this repo (only emitted when > 0) |
 
-Each metric includes three tags:
+Each metric includes these tags:
 
 | Tag | Description |
 |-----|-------------|
 | `repo_hash` | SHA-256 hash of `(repo_url + commit_hash)` -- the raw URL and commit are **never** sent |
+| `repo_url_hash` | SHA-256 hash of the normalized repo URL alone -- stable across commits, used to count unique repos |
 | `source` | Always `"actual-cli"` |
 | `version` | CLI version string (e.g. `"0.1.2"`) |
+
+The `cli.sync.adrs_recommended` metric also includes:
+
+| Tag | Description |
+|-----|-------------|
+| `adr_ids` | Comma-separated list of ADR IDs that were matched for this repo (e.g. `"adr-001,adr-002"`) |
+
+ADR IDs are internal Actual AI identifiers and are not sensitive. Repository identity
+remains one-way hashed -- raw URLs are never sent.
 
 **No personally identifiable information is collected.** No usernames, email
 addresses, IP addresses, file contents, file paths, or source code are
@@ -97,8 +108,9 @@ cargo build --release --no-default-features
 ## Data retention
 
 Telemetry counters are aggregated and do not contain identifiers that could
-be traced back to individual users. The `repo_hash` is a one-way SHA-256
-hash -- the original repository URL cannot be recovered from it.
+be traced back to individual users. Both `repo_hash` and `repo_url_hash` are
+one-way SHA-256 hashes -- the original repository URL cannot be recovered from
+either of them.
 
 ## Changes to this policy
 

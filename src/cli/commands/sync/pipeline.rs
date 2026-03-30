@@ -22,7 +22,7 @@ use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfi
 use crate::tailoring::filter::pre_filter_rejected;
 use crate::tailoring::types::{TailoringEvent, TailoringOutput};
 #[cfg(feature = "telemetry")]
-use crate::telemetry::identity::hash_repo_identity;
+use crate::telemetry::identity::{hash_repo_identity, hash_repo_url};
 #[cfg(feature = "telemetry")]
 use crate::telemetry::metrics::SyncMetrics;
 #[cfg(feature = "telemetry")]
@@ -712,6 +712,21 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
 
         let commit_hash = get_git_head(root_dir).unwrap_or_default();
         let repo_hash = hash_repo_identity(&repo_url, &commit_hash);
+        let repo_url_hash = hash_repo_url(&repo_url);
+
+        // Collect unique ADR IDs from all output files.
+        let matched_adr_ids: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            let mut ids = Vec::new();
+            for file in &output.files {
+                for id in file.adr_ids() {
+                    if seen.insert(id.clone()) {
+                        ids.push(id);
+                    }
+                }
+            }
+            ids
+        };
 
         let adrs_fetched = output.summary.total_input as u64;
         let adrs_written = (sync_result.files_created + sync_result.files_updated) as u64;
@@ -721,7 +736,9 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             adrs_rejected: output.summary.not_applicable as u64,
             adrs_written,
             repo_hash,
+            repo_url_hash,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            matched_adr_ids,
         };
 
         if let Ok(tel_rt) = tokio::runtime::Builder::new_current_thread()
