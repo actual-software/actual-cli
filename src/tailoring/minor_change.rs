@@ -33,11 +33,9 @@ pub(crate) fn is_minor_change(old: &str, new: &str) -> bool {
     let old_words: HashSet<&str> = old_norm.split_whitespace().collect();
     let new_words: HashSet<&str> = new_norm.split_whitespace().collect();
 
+    // union > 0 here: if both word sets were empty, old_norm == new_norm would
+    // have returned true above.
     let union = old_words.union(&new_words).count();
-    if union == 0 {
-        return true;
-    }
-
     let intersection = old_words.intersection(&new_words).count();
     (intersection as f64 / union as f64) >= 0.85
 }
@@ -64,10 +62,12 @@ fn file_has_only_minor_changes(file: &FileOutput, existing_content: &str) -> boo
     }
 
     for section in &file.sections {
-        let existing = match existing_sections.iter().find(|s| s.id == section.adr_id) {
-            Some(e) => e,
-            None => return false,
-        };
+        // The id-set equality check above guarantees every new id exists in
+        // existing_sections, so `find` will always return Some here.
+        let existing = existing_sections
+            .iter()
+            .find(|s| s.id == section.adr_id)
+            .expect("invariant: new_ids == existing_ids");
         if !is_minor_change(&existing.content, &section.content) {
             return false;
         }
