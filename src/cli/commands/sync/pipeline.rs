@@ -655,6 +655,10 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         }
     }
 
+    // Filter files whose only changes are minor (word reordering, small wording
+    // edits) to avoid unnecessary writes.
+    let output = crate::tailoring::minor_change::filter_minor_changes(output, root_dir);
+
     // ── Phase 3: confirm + write (fully implemented) ──
     // pipeline stays alive through confirm+write so output goes into the TUI
     // log pane. It drops naturally at end of run_sync.
