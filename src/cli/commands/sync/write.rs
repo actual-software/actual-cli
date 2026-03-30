@@ -222,12 +222,5 @@ pub(crate) fn report_write_results(
 
     pipeline.println("");
     pipeline.println(&format!("  {}", theme::muted(&summary)));
-    pipeline.println("");
-    pipeline.println(&format!(
-        "  {} {}",
-        "Share, manage, and auto-generate ADRs with your team at",
-        theme::accent("https://app.actual.ai"),
-    ));
-
     (files_created, files_updated, files_failed)
 }

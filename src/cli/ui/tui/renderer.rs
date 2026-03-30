@@ -337,21 +337,6 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
 
                 let version_title = format!(" actual v{} ", ctx.version);
 
-                // Right-aligned URL title for the logo box top border.
-                // Only add it when the box is wide enough to fit both titles
-                // without overlapping (version ~16 chars + URL 19 chars + 2 borders = ~37).
-                let url = "https://app.actual.ai";
-                let url_display = format!(" {url} ");
-                let url_display_len = url_display.len() as u16;
-                let version_title_len = version_title.len() as u16;
-                let min_width_for_url = version_title_len + url_display_len + 2 + 2; // borders + gap
-                let box_width = left_chunks[0].width;
-                let url_title: Option<Line<'_>> = if box_width >= min_width_for_url {
-                    Some(Line::from(url_display.clone()).right_aligned())
-                } else {
-                    None
-                };
-
                 let banner_widget = if use_color {
                     // Build colored Lines — each line's color is determined by its absolute y in the frame.
                     // Content starts at left_chunks[0].y + 1 (inside the top border).
@@ -365,23 +350,17 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                             Line::from(Span::styled(text.clone(), Style::default().fg(color)))
                         })
                         .collect();
-                    let mut block = Block::default()
+                    let block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .title(version_title.as_str());
-                    if let Some(ref title) = url_title {
-                        block = block.title_top(title.clone());
-                    }
                     Paragraph::new(colored_lines).block(block)
                 } else {
                     let banner_text = padded_banner.join("\n");
-                    let mut block = Block::default()
+                    let block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .title(version_title.as_str());
-                    if let Some(ref title) = url_title {
-                        block = block.title_top(title.clone());
-                    }
                     Paragraph::new(banner_text).block(block)
                 };
                 frame.render_widget(Clear, left_chunks[0]);
