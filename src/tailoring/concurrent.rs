@@ -500,8 +500,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         }
     }
 
@@ -885,8 +887,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adr2 = Adr {
             id: "adr-002".to_string(),
@@ -902,8 +906,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adrs = vec![adr1, adr2];
 
@@ -968,8 +974,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adr2 = Adr {
             id: "adr-002".to_string(),
@@ -985,8 +993,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adr3 = Adr {
             id: "adr-003".to_string(),
@@ -1002,8 +1012,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adrs = vec![adr1, adr2, adr3];
 
@@ -1062,8 +1074,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adr2 = Adr {
             id: "adr-002".to_string(),
@@ -1079,8 +1093,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adrs = vec![adr1, adr2];
 
@@ -1341,8 +1357,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adr2 = Adr {
             id: "adr-002".to_string(),
@@ -1358,8 +1376,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adrs = vec![adr1, adr2];
 
@@ -1693,8 +1713,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adr2 = Adr {
             id: "adr-002".to_string(),
@@ -1710,8 +1732,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         };
         let adrs = vec![adr1, adr2];
 

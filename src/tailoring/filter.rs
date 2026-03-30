@@ -37,8 +37,10 @@ mod tests {
             applies_to: AppliesTo {
                 languages: vec![],
                 frameworks: vec![],
+                ..Default::default()
             },
             matched_projects: vec![],
+            ..Default::default()
         }
     }
 

@@ -1,6 +1,7 @@
 mod adr_utils;
 mod cache;
 mod pipeline;
+mod v2_output;
 mod write;
 
 use crate::cli::args::SyncArgs;
