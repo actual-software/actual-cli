@@ -74,7 +74,9 @@ mod tests {
             adrs_rejected: 1,
             adrs_written: 2,
             repo_hash: "abc123".to_string(),
+            repo_url_hash: "urlhash123".to_string(),
             version: "1.0.0".to_string(),
+            matched_adr_ids: vec![],
         }
     }
 

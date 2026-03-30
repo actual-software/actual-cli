@@ -13,6 +13,34 @@ pub fn hash_repo_identity(repo_url: &str, commit_hash: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Produce a stable SHA-256 hash of a normalized repo URL alone.
+///
+/// Unlike [`hash_repo_identity`], this hash does not include the commit hash,
+/// so it remains stable across commits and can be used to count unique repos.
+///
+/// Normalization: strip trailing `.git`, trailing slashes, lowercase.
+/// Returns a 64-character lowercase hex string.
+pub fn hash_repo_url(repo_url: &str) -> String {
+    let normalized = normalize_repo_url(repo_url);
+    let mut hasher = Sha256::new();
+    hasher.update(normalized.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Normalize a repo URL for stable hashing across minor formatting differences.
+///
+/// - Trims whitespace
+/// - Lowercases the URL
+/// - Strips a trailing `.git` suffix
+/// - Strips trailing slashes
+fn normalize_repo_url(repo_url: &str) -> String {
+    let url = repo_url.trim().to_lowercase();
+    let url = url.trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    let url = url.trim_end_matches('/');
+    url.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +114,132 @@ mod tests {
             hash.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
             "hash of empty inputs must be valid lowercase hex"
+        );
+    }
+
+    // ── hash_repo_url tests ──
+
+    /// hash_repo_url returns a 64-character lowercase hex string.
+    #[test]
+    fn test_hash_repo_url_returns_64_char_hex() {
+        let hash = hash_repo_url("https://github.com/org/repo");
+        assert_eq!(hash.len(), 64);
+        assert!(hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    }
+
+    /// Same URL always produces the same hash.
+    #[test]
+    fn test_hash_repo_url_deterministic() {
+        let a = hash_repo_url("https://github.com/org/repo");
+        let b = hash_repo_url("https://github.com/org/repo");
+        assert_eq!(a, b);
+    }
+
+    /// Different URLs produce different hashes.
+    #[test]
+    fn test_hash_repo_url_different_urls_differ() {
+        let a = hash_repo_url("https://github.com/org/repo");
+        let b = hash_repo_url("https://github.com/org/other");
+        assert_ne!(a, b);
+    }
+
+    /// hash_repo_url differs from hash_repo_identity for the same URL.
+    #[test]
+    fn test_hash_repo_url_differs_from_identity_hash() {
+        let url_hash = hash_repo_url("https://github.com/org/repo");
+        let identity_hash = hash_repo_identity("https://github.com/org/repo", "abc123");
+        assert_ne!(
+            url_hash, identity_hash,
+            "url-only hash must differ from url+commit hash"
+        );
+    }
+
+    /// Trailing .git is stripped before hashing, so both forms collide.
+    #[test]
+    fn test_hash_repo_url_strips_dot_git() {
+        let without = hash_repo_url("https://github.com/org/repo");
+        let with_git = hash_repo_url("https://github.com/org/repo.git");
+        assert_eq!(without, with_git, ".git suffix must be normalized away");
+    }
+
+    /// Trailing slashes are stripped before hashing.
+    #[test]
+    fn test_hash_repo_url_strips_trailing_slashes() {
+        let without = hash_repo_url("https://github.com/org/repo");
+        let with_slash = hash_repo_url("https://github.com/org/repo/");
+        assert_eq!(
+            without, with_slash,
+            "trailing slash must be normalized away"
+        );
+    }
+
+    /// URL is lowercased before hashing.
+    #[test]
+    fn test_hash_repo_url_lowercased() {
+        let lower = hash_repo_url("https://github.com/org/repo");
+        let upper = hash_repo_url("https://GITHUB.COM/ORG/REPO");
+        assert_eq!(lower, upper, "URL must be lowercased before hashing");
+    }
+
+    /// Combination of .git suffix and trailing slash normalizes correctly.
+    #[test]
+    fn test_hash_repo_url_git_and_slash() {
+        let base = hash_repo_url("https://github.com/org/repo");
+        let messy = hash_repo_url("https://github.com/org/repo.git/");
+        assert_eq!(base, messy, ".git and trailing slash must both be stripped");
+    }
+
+    /// Empty URL produces a valid 64-char hash.
+    #[test]
+    fn test_hash_repo_url_empty() {
+        let hash = hash_repo_url("");
+        assert_eq!(hash.len(), 64);
+        assert!(hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    }
+
+    // ── normalize_repo_url tests ──
+
+    #[test]
+    fn test_normalize_repo_url_trims_whitespace() {
+        assert_eq!(
+            normalize_repo_url("  https://github.com/org/repo  "),
+            "https://github.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_repo_url_lowercases() {
+        assert_eq!(
+            normalize_repo_url("HTTPS://GITHUB.COM/ORG/REPO"),
+            "https://github.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_repo_url_strips_git_suffix() {
+        assert_eq!(
+            normalize_repo_url("https://github.com/org/repo.git"),
+            "https://github.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_repo_url_strips_trailing_slash() {
+        assert_eq!(
+            normalize_repo_url("https://github.com/org/repo/"),
+            "https://github.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_repo_url_strips_git_then_slash() {
+        assert_eq!(
+            normalize_repo_url("https://github.com/org/repo.git/"),
+            "https://github.com/org/repo"
         );
     }
 }
