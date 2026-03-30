@@ -1068,7 +1068,11 @@ fn auto_select_for_project(project: &mut Project) {
     let selected_fw = project
         .frameworks
         .iter()
-        .find(|fw| fw.is_compatible_with(&selected_lang.language))
+        .filter(|fw| fw.is_compatible_with(&selected_lang.language))
+        .min_by_key(|fw| match &fw.source {
+            Some(crate::analysis::static_analyzer::manifests::ManifestSource::ConfigFile) => 1u8,
+            _ => 0u8,
+        })
         .cloned();
 
     project.selection = Some(ProjectSelection {
@@ -5915,6 +5919,67 @@ mod tests {
             project.selection.is_none(),
             "projects with no languages should not get a selection"
         );
+    }
+
+    #[test]
+    fn test_auto_select_prefers_manifest_over_config_file_framework() {
+        // Regression test: docker (ConfigFile) must NOT beat nextjs (PackageJson)
+        // even though "docker" sorts before "nextjs" alphabetically.
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::TypeScript,
+                loc: 5000,
+            }],
+            vec![
+                Framework {
+                    name: "docker".to_string(),
+                    category: FrameworkCategory::Devops,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::ConfigFile,
+                    ),
+                },
+                Framework {
+                    name: "nextjs".to_string(),
+                    category: FrameworkCategory::WebFrontend,
+                    source: Some(
+                        crate::analysis::static_analyzer::manifests::ManifestSource::PackageJson,
+                    ),
+                },
+            ],
+        );
+
+        auto_select_for_project(&mut project);
+
+        let sel = project.selection.unwrap();
+        assert_eq!(sel.language.language, Language::TypeScript);
+        assert_eq!(
+            sel.framework.unwrap().name,
+            "nextjs",
+            "manifest-sourced nextjs should beat config-file-sourced docker"
+        );
+    }
+
+    #[test]
+    fn test_auto_select_config_file_framework_selected_when_only_option() {
+        // If the only compatible framework is ConfigFile-sourced, it should still be selected.
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::TypeScript,
+                loc: 5000,
+            }],
+            vec![Framework {
+                name: "docker".to_string(),
+                category: FrameworkCategory::Devops,
+                source: Some(
+                    crate::analysis::static_analyzer::manifests::ManifestSource::ConfigFile,
+                ),
+            }],
+        );
+
+        auto_select_for_project(&mut project);
+
+        let sel = project.selection.unwrap();
+        assert_eq!(sel.framework.unwrap().name, "docker");
     }
 
     // ── user_select_for_project tests ──
