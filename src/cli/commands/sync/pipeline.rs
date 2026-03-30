@@ -3606,6 +3606,36 @@ mod tests {
         "metadata": {"total_matched": 1, "by_framework": {}, "deduplicated_count": 1}
     }"#;
 
+    /// Match response containing a V2 ADR (has schema_version + content_md).
+    const V2_ADR_MATCH_RESPONSE: &str = r##"{
+        "matched_adrs": [{
+            "id": "adr-v2-001",
+            "title": "Adopt structured logging",
+            "context": "Structured logging improves observability.",
+            "policies": ["Use tracing crate for all logging"],
+            "instructions": null,
+            "category": {"id": "cat-2", "name": "Observability", "path": "Observability"},
+            "applies_to": {"languages": ["rust"], "frameworks": []},
+            "matched_projects": ["."],
+            "schema_version": 2,
+            "content_md": "# Adopt Structured Logging\n\nStructured logging improves observability.",
+            "content_json": {"agent_documentation": "Use tracing::info! for request-level logs."},
+            "source": "ai_generated"
+        }],
+        "metadata": {"total_matched": 1, "by_framework": {}, "deduplicated_count": 1}
+    }"##;
+
+    fn mock_api_server_with_v2_adrs() -> mockito::ServerGuard {
+        let mut server = mockito::Server::new();
+        server
+            .mock("POST", "/adrs/match")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(V2_ADR_MATCH_RESPONSE)
+            .create();
+        server
+    }
+
     fn mock_api_server_with_adrs() -> mockito::ServerGuard {
         let mut server = mockito::Server::new();
         server
@@ -3615,6 +3645,110 @@ mod tests {
             .with_body(ADR_MATCH_RESPONSE)
             .create();
         server
+    }
+
+    // ── V2 ADR pipeline integration tests ──
+
+    #[test]
+    fn test_run_sync_v2_adrs_writes_three_tier_files() {
+        let server = mock_api_server_with_v2_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, true, &server.url());
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "V2 sync should succeed: {result:?}");
+
+        // Tier 2: docs/adr/ file should exist with content_md
+        let adr_file = dir.path().join("docs/adr/adopt-structured-logging.md");
+        assert!(adr_file.exists(), "docs/adr/ file should be created");
+        let content = std::fs::read_to_string(&adr_file).unwrap();
+        assert!(content.contains("Adopt Structured Logging"));
+
+        // Tier 3: .claude/rules/ file should exist with agent_documentation
+        let rules_file = dir.path().join(".claude/rules/adopt-structured-logging.md");
+        assert!(rules_file.exists(), ".claude/rules/ file should be created");
+        let rules_content = std::fs::read_to_string(&rules_file).unwrap();
+        assert!(
+            rules_content.contains("tracing::info!"),
+            "rules file should contain agent docs: {rules_content}"
+        );
+
+        // Tier 1: CLAUDE.md should have governance pointer
+        let claude_md = dir.path().join("CLAUDE.md");
+        assert!(claude_md.exists(), "CLAUDE.md should be created");
+        let claude_content = std::fs::read_to_string(&claude_md).unwrap();
+        assert!(
+            claude_content.contains("adr_governance"),
+            "CLAUDE.md should contain governance pointer"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_v2_adrs_dry_run_skips_file_writes() {
+        let server = mock_api_server_with_v2_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(true, false, true, true, &server.url());
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+        );
+        assert!(result.is_ok(), "V2 dry-run should succeed: {result:?}");
+
+        // V2 files should NOT be written in dry-run mode
+        assert!(
+            !dir.path()
+                .join("docs/adr/adopt-structured-logging.md")
+                .exists(),
+            "docs/adr/ should not be created in dry-run"
+        );
+        assert!(
+            !dir.path()
+                .join(".claude/rules/adopt-structured-logging.md")
+                .exists(),
+            ".claude/rules/ should not be created in dry-run"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_v2_adrs_write_error_is_logged_gracefully() {
+        let server = mock_api_server_with_v2_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        // Block "docs" path by creating a FILE where the directory needs to be
+        std::fs::write(dir.path().join("docs"), "blocker").unwrap();
+
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, true, &server.url());
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+        );
+        // Sync should still succeed even when V2 file writes fail
+        assert!(
+            result.is_ok(),
+            "V2 write failure should not abort sync: {result:?}"
+        );
     }
 
     #[test]

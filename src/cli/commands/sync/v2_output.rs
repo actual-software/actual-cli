@@ -605,6 +605,41 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_v2_output_content_json_without_agent_or_enforcement_falls_back() {
+        let mut adr = make_v2_adr("adr-005b", "JSON No Match");
+        // content_json present but neither agent_documentation nor enforcement is a string
+        adr.content_json = Some(serde_json::json!({"other_field": 42}));
+        let output = generate_v2_output(&[adr]);
+
+        let rules_file = output
+            .raw_files
+            .iter()
+            .find(|f| f.path.starts_with(".claude/rules/"))
+            .unwrap();
+        // Should fall through to policies
+        assert!(rules_file.content.contains("- Policy one"));
+    }
+
+    #[test]
+    fn test_generate_adr_doc_fallback_empty_policies_and_no_context() {
+        let mut adr = make_v2_adr("adr-005c", "Minimal Fallback");
+        adr.content_md = None;
+        adr.context = None;
+        adr.policies = vec![];
+        let output = generate_v2_output(&[adr]);
+
+        let docs_file = output
+            .raw_files
+            .iter()
+            .find(|f| f.path.starts_with("docs/adr/"))
+            .unwrap();
+        // Should contain only the title header
+        assert!(docs_file.content.contains("# Minimal Fallback"));
+        assert!(!docs_file.content.contains("## Context"));
+        assert!(!docs_file.content.contains("## Policies"));
+    }
+
+    #[test]
     fn test_generate_v2_output_rules_file_has_frontmatter() {
         let adr = make_v2_adr("adr-006", "Frontmatter Test");
         let output = generate_v2_output(&[adr]);
