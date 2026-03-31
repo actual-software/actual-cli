@@ -44,6 +44,9 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@934c8243ef762518efe4cd4a73c56c5d3a6ac1e8  # cargo-llvm-cov
 
+      - name: Install semgrep
+        run: pip install semgrep
+
       - name: Run coverage
         run: |
           # Exclude main.rs (thin binary wrapper with process::exit),
