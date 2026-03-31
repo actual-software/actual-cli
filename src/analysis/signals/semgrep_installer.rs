@@ -1,6 +1,5 @@
 use anyhow::{bail, Result};
 use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
 use sha2::Digest;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
@@ -73,21 +72,12 @@ fn verify_sha256(data: &[u8], expected: &str) -> Result<()> {
 async fn download_with_progress(url: &str) -> Result<Vec<u8>> {
     let client = reqwest::Client::new();
     let response = client.get(url).send().await?;
-    let total = response.content_length();
-    let pb = ProgressBar::new(total.unwrap_or(0));
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("  {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})")
-            .unwrap_or_else(|_| ProgressStyle::default_bar()),
-    );
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        pb.inc(chunk.len() as u64);
         bytes.extend_from_slice(&chunk);
     }
-    pb.finish_and_clear();
     Ok(bytes)
 }
 
@@ -108,8 +98,6 @@ pub(crate) async fn ensure_semgrep_core() -> Result<PathBuf> {
         std::fs::create_dir_all(parent)?;
     }
 
-    eprintln!("Downloading semgrep-core v{SEMGREP_VERSION} for this platform...\n");
-
     let wheel_bytes = download_with_progress(&info.url).await?;
     verify_sha256(&wheel_bytes, &info.sha256)?;
     let binary = extract_semgrep_core_from_wheel(&wheel_bytes)?;
@@ -120,7 +108,6 @@ pub(crate) async fn ensure_semgrep_core() -> Result<PathBuf> {
     std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))?;
     std::fs::rename(&tmp_path, &cache_path)?;
 
-    eprintln!("semgrep-core cached at {}\n", cache_path.display());
     Ok(cache_path)
 }
 
