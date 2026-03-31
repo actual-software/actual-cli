@@ -92,9 +92,8 @@ mod tests {
     fn test_estimate_section_chars_basic() {
         let section = make_section("adr-1", "hello");
         let chars = estimate_section_chars(&section);
-        let expected = "<!-- adr:adr-1 start -->\n".len()
-            + "hello\n".len()
-            + "<!-- adr:adr-1 end -->\n".len();
+        let expected =
+            "<!-- adr:adr-1 start -->\n".len() + "hello\n".len() + "<!-- adr:adr-1 end -->\n".len();
         assert_eq!(chars, expected);
     }
 
@@ -208,7 +207,10 @@ mod tests {
     #[test]
     fn test_budget_with_governance_and_many_adrs() {
         // Simulate: governance pointer + 30 ADR sections, each ~4k chars
-        let gov = make_section("v2-governance", "<adr_governance source=\"docs/adr/\">\nADRs govern this project.\n</adr_governance>");
+        let gov = make_section(
+            "v2-governance",
+            "<adr_governance source=\"docs/adr/\">\nADRs govern this project.\n</adr_governance>",
+        );
         let mut sections = vec![gov];
         for i in 0..30 {
             sections.push(make_section(&format!("adr-{i:03}"), &"x".repeat(4_000)));
