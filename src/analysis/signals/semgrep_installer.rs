@@ -39,8 +39,7 @@ pub(crate) fn platform_wheel_info() -> Option<WheelInfo> {
 /// Returns the OS-appropriate path where semgrep-core will be cached.
 /// Path: `<data_local_dir>/actual/semgrep-core`
 pub(crate) fn semgrep_core_cache_path() -> PathBuf {
-    let base = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.local/share"));
+    let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("~/.local/share"));
     base.join("actual").join("semgrep-core")
 }
 
@@ -163,7 +162,10 @@ mod tests {
         let data = b"hello world";
         let result = verify_sha256(data, "deadbeef");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("checksum mismatch"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("checksum mismatch"));
     }
 
     #[test]
@@ -191,7 +193,10 @@ mod tests {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let result = rt.block_on(ensure_semgrep_core());
             assert!(result.is_err());
-            assert!(result.unwrap_err().to_string().contains("unsupported platform"));
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported platform"));
         }
         // On supported platforms: test just passes (documents the contract)
     }
@@ -209,6 +214,9 @@ mod tests {
 
         let result = extract_semgrep_core_from_wheel(&wheel_bytes);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("semgrep/bin/semgrep-core"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("semgrep/bin/semgrep-core"));
     }
 }
