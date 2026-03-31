@@ -320,6 +320,22 @@ mod tests {
     use super::*;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
+    /// Write content to `path`, fsync it, and mark it executable.
+    ///
+    /// Using `File::create` + `write_all` + `sync_all` + explicit `drop` (rather
+    /// than `std::fs::write`) guarantees the kernel sees no open write fds before
+    /// the file is exec'd, preventing spurious ETXTBSY errors under CI load.
+    #[cfg(unix)]
+    fn write_executable_script(path: &std::path::Path, content: &[u8]) {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(content).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     // ── error helper function tests ───────────────────────────────────────────
 
     #[test]
@@ -537,12 +553,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_is_codex_available_no_auth() {
-        use std::os::unix::fs::PermissionsExt;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-codex");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&fake, b"#!/bin/sh\nexit 0\n");
         let _guard = EnvGuard::set("CODEX_BINARY", fake.to_str().unwrap());
         let _key_guard = EnvGuard::remove("OPENAI_API_KEY");
         // Point HOME to a temp dir so ~/.codex/auth.json doesn't exist
@@ -560,12 +574,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_is_codex_available_with_api_key() {
-        use std::os::unix::fs::PermissionsExt;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-codex");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&fake, b"#!/bin/sh\nexit 0\n");
         let _guard = EnvGuard::set("CODEX_BINARY", fake.to_str().unwrap());
         let _key_guard = EnvGuard::set("OPENAI_API_KEY", "sk-openai-test");
         assert!(is_codex_available(None).is_ok());
@@ -574,12 +586,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_is_codex_available_config_key() {
-        use std::os::unix::fs::PermissionsExt;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-codex");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&fake, b"#!/bin/sh\nexit 0\n");
         let _guard = EnvGuard::set("CODEX_BINARY", fake.to_str().unwrap());
         let _key_guard = EnvGuard::remove("OPENAI_API_KEY");
         assert!(is_codex_available(Some("sk-openai-from-config")).is_ok());
@@ -600,12 +610,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_is_cursor_available_with_api_key() {
-        use std::os::unix::fs::PermissionsExt;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-cursor");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&fake, b"#!/bin/sh\nexit 0\n");
         let _guard = EnvGuard::set("CURSOR_BINARY", fake.to_str().unwrap());
         let _key_guard = EnvGuard::set("CURSOR_API_KEY", "cursor-test-key");
         assert!(is_cursor_available(None).is_ok());
@@ -614,12 +622,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_is_cursor_available_config_key() {
-        use std::os::unix::fs::PermissionsExt;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-cursor");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&fake, b"#!/bin/sh\nexit 0\n");
         let _guard = EnvGuard::set("CURSOR_BINARY", fake.to_str().unwrap());
         let _key_guard = EnvGuard::remove("CURSOR_API_KEY");
         assert!(is_cursor_available(Some("cursor-config-key")).is_ok());
@@ -628,12 +634,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_is_cursor_available_no_auth() {
-        use std::os::unix::fs::PermissionsExt;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-cursor");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&fake, b"#!/bin/sh\nexit 0\n");
         let _guard = EnvGuard::set("CURSOR_BINARY", fake.to_str().unwrap());
         let _key_guard = EnvGuard::remove("CURSOR_API_KEY");
         // Point HOME to temp dir so ~/.cursor/auth.json doesn't exist
@@ -662,13 +666,11 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_is_claude_available_auth_probe_error() {
-        use std::os::unix::fs::PermissionsExt;
         // Binary exists but exits with non-zero + no JSON → probe_claude_auth returns Err
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-claude-crash.sh");
-        std::fs::write(&fake, "#!/bin/sh\necho 'crash'; exit 1\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&fake, b"#!/bin/sh\necho 'crash'; exit 1\n");
         let _guard = EnvGuard::set("CLAUDE_BINARY", fake.to_str().unwrap());
         let result = is_claude_available();
         assert!(result.is_err());
@@ -681,12 +683,10 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_is_claude_available_not_logged_in() {
-        use std::os::unix::fs::PermissionsExt;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-claude.sh");
-        std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":false}'\n").unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&fake, b"#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":false}'\n");
         let _guard = EnvGuard::set("CLAUDE_BINARY", fake.to_str().unwrap());
         let result = is_claude_available();
         assert!(result.is_err());
@@ -699,16 +699,13 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_is_claude_available_logged_in() {
-        use std::os::unix::fs::PermissionsExt;
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-claude.sh");
-        std::fs::write(
+        write_executable_script(
             &fake,
-            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            b"#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\n",
+        );
         let _guard = EnvGuard::set("CLAUDE_BINARY", fake.to_str().unwrap());
         assert!(is_claude_available().is_ok());
     }
@@ -718,16 +715,12 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn test_probe_claude_auth_sync_success() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            b"#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\n",
+        );
 
         let result = probe_claude_auth(&script, Duration::from_secs(5));
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
@@ -752,16 +745,12 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_success() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            b"#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\n",
+        );
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
@@ -771,16 +760,12 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_not_logged_in() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":false}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            b"#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":false}'\n",
+        );
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(result.is_ok(), "expected Ok(status), got: {result:?}");
@@ -803,12 +788,9 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_subprocess_failure() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(&script, "#!/bin/sh\necho 'error output' >&2\nexit 1\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&script, b"#!/bin/sh\necho 'error output' >&2\nexit 1\n");
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(
@@ -823,16 +805,12 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_nonzero_exit_but_logged_in() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            b"#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}'\nexit 1\n",
+        );
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(
@@ -846,16 +824,12 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_nonzero_exit_not_logged_in() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":false}'\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            b"#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":false}'\nexit 1\n",
+        );
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(
@@ -867,12 +841,9 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_invalid_json() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' 'not json'\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&script, b"#!/bin/sh\nprintf '%s\\n' 'not json'\n");
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(
@@ -887,15 +858,13 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_no_json_flag_text_output() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
         // When --json is passed: print error to stderr and exit 1.
         // When called without --json: print plain text and exit 0.
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\n\
+            b"#!/bin/sh\n\
              for arg in \"$@\"; do\n\
                if [ \"$arg\" = \"--json\" ]; then\n\
                  printf \"unknown option '--json'\\n\" >&2\n\
@@ -904,9 +873,7 @@ mod tests {
              done\n\
              printf 'Logged in as user@example.com\\n'\n\
              exit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(
@@ -921,13 +888,11 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_no_json_flag_json_output() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\n\
+            b"#!/bin/sh\n\
              for arg in \"$@\"; do\n\
                if [ \"$arg\" = \"--json\" ]; then\n\
                  printf \"unknown option '--json'\\n\" >&2\n\
@@ -936,9 +901,7 @@ mod tests {
              done\n\
              printf '{\"loggedIn\":true,\"authMethod\":\"claude.ai\"}\\n'\n\
              exit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(
@@ -955,13 +918,11 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_no_json_flag_fallback_fails() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\n\
+            b"#!/bin/sh\n\
              for arg in \"$@\"; do\n\
                if [ \"$arg\" = \"--json\" ]; then\n\
                  printf \"unknown option '--json'\\n\" >&2\n\
@@ -970,9 +931,7 @@ mod tests {
              done\n\
              printf 'Not logged in\\n' >&2\n\
              exit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(
@@ -986,14 +945,12 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_json_flag_error_in_stdout() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
         // --json error goes to stdout (not stderr)
-        std::fs::write(
+        write_executable_script(
             &script,
-            "#!/bin/sh\n\
+            b"#!/bin/sh\n\
              for arg in \"$@\"; do\n\
                if [ \"$arg\" = \"--json\" ]; then\n\
                  printf \"unknown option '--json'\\n\"\n\
@@ -1002,9 +959,7 @@ mod tests {
              done\n\
              printf 'Logged in\\n'\n\
              exit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let result = probe_claude_auth_async(&script, Duration::from_secs(5)).await;
         assert!(
@@ -1032,12 +987,9 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_no_json_timeout() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&script, b"#!/bin/sh\nsleep 30\n");
 
         let result = probe_claude_auth_async_no_json(&script, Duration::from_millis(100)).await;
         assert!(
@@ -1049,12 +1001,9 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn test_probe_claude_auth_async_timeout() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&script, b"#!/bin/sh\nsleep 30\n");
 
         let result = probe_claude_auth_async(&script, Duration::from_millis(100)).await;
         assert!(
