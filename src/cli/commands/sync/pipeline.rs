@@ -6,6 +6,7 @@ use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::types::{Project, ProjectSelection, RepoAnalysis};
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
+use crate::api::types::Adr;
 use crate::cli::args::SyncArgs;
 use crate::cli::ui::confirm::format_project_summary_plain;
 use crate::cli::ui::header::{AuthDisplay, RunnerDisplay};
@@ -15,8 +16,9 @@ use crate::cli::ui::theme;
 use crate::cli::ui::tui::renderer::TuiRenderer;
 use crate::config::paths::{load_from, save_to};
 use crate::config::rejections::{clear_rejections, get_rejections};
-use crate::config::types::{DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_SECS};
+use crate::config::types::{Config, DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_SECS};
 use crate::error::ActualError;
+use crate::generation::OutputFormat;
 use crate::runner::subprocess::TailoringRunner;
 use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfig};
 use crate::tailoring::filter::pre_filter_rejected;
@@ -38,7 +40,7 @@ use super::cache::{
 use super::v2_output::{
     generate_v2_output, inject_v2_governance, partition_adrs, write_v2_raw_files,
 };
-use super::write::confirm_and_write;
+use super::write::{confirm_and_write, SyncResult};
 
 pub(crate) fn resolve_cwd() -> std::path::PathBuf {
     match std::env::current_dir() {
@@ -86,6 +88,30 @@ fn tilde_collapse(path: &Path, home_dir: Option<&std::path::PathBuf>) -> String 
         }
     }
     path.display().to_string()
+}
+
+/// Result of the environment-check phase.
+// Fields are consumed by tests; in non-test builds the result is only checked
+// for errors (via `?`) so the fields themselves are not read.
+#[allow(dead_code)]
+pub(crate) struct EnvironmentPhaseResult {
+    pub(crate) is_git: bool,
+    pub(crate) env_api_url: String,
+}
+
+/// Result of the fetch phase, carrying all data needed by subsequent phases.
+pub(crate) struct FetchPhaseResult {
+    pub(crate) filtered_adrs: Vec<Adr>,
+    pub(crate) existing_paths: String,
+    pub(crate) api_url: String,
+    pub(crate) config: Config,
+    pub(crate) output_format: OutputFormat,
+}
+
+/// Result of the tailor phase.
+pub(crate) struct TailorPhaseResult {
+    pub(crate) output: TailoringOutput,
+    pub(crate) config: Config,
 }
 
 /// Core sync logic.
@@ -138,12 +164,57 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     runner_display: Option<&RunnerDisplay>,
     runner_probe: Option<Box<dyn Fn() -> Result<(), ActualError>>>,
 ) -> Result<(), ActualError> {
-    // ── Phase 1: env check + analysis ──
-
-    // 1. Create pipeline. The banner and version are shown in the left-column
-    //    banner box (rendered by the TUI directly), not in the log pane.
     let mut pipeline = TuiRenderer::new_with_version(false, args.no_tui, env!("CARGO_PKG_VERSION"));
 
+    run_environment_phase(
+        &mut pipeline,
+        args,
+        cfg_path,
+        root_dir,
+        auth_display,
+        runner_display,
+        runner_probe,
+    )?;
+
+    let analysis = run_analysis_phase(&mut pipeline, args, root_dir, cfg_path, term)?;
+
+    let fetch = run_fetch_phase(&mut pipeline, args, root_dir, cfg_path, &analysis)?;
+    let api_url = fetch.api_url.clone();
+    let output_format = fetch.output_format.clone();
+
+    let TailorPhaseResult { output, config } = run_tailor_phase(
+        &mut pipeline,
+        args,
+        root_dir,
+        cfg_path,
+        runner,
+        &analysis,
+        fetch,
+    )?;
+
+    let sync_result =
+        run_write_phase(&mut pipeline, args, root_dir, &output, &output_format, term)?;
+
+    #[cfg(not(feature = "telemetry"))]
+    let _ = &sync_result;
+
+    #[cfg(feature = "telemetry")]
+    run_telemetry(root_dir, &output, &sync_result, &api_url, &config);
+
+    pipeline.wait_for_keypress();
+    Ok(())
+}
+
+/// Phase 1: environment check (git detection, config display, runner probe).
+pub(crate) fn run_environment_phase(
+    pipeline: &mut TuiRenderer,
+    args: &SyncArgs,
+    cfg_path: &Path,
+    root_dir: &Path,
+    auth_display: Option<&AuthDisplay>,
+    runner_display: Option<&RunnerDisplay>,
+    runner_probe: Option<Box<dyn Fn() -> Result<(), ActualError>>>,
+) -> Result<EnvironmentPhaseResult, ActualError> {
     pipeline.start(SyncPhase::Environment, "Checking environment...");
 
     // Load config early so we can show server URL and cache status in the
@@ -283,7 +354,21 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         );
     }
 
-    // 3. Run analysis (cached if in a git repo)
+    Ok(EnvironmentPhaseResult {
+        is_git,
+        env_api_url,
+    })
+}
+
+/// Phase 2: repository analysis, project filtering, auto-selection, and confirmation.
+pub(crate) fn run_analysis_phase(
+    pipeline: &mut TuiRenderer,
+    args: &SyncArgs,
+    root_dir: &Path,
+    cfg_path: &Path,
+    term: &dyn TerminalIO,
+) -> Result<crate::analysis::types::RepoAnalysis, ActualError> {
+    // Run analysis (cached if in a git repo)
     pipeline.start(SyncPhase::Analysis, "Analyzing repository...");
     let analysis = match run_analysis_cached(root_dir, cfg_path, args.force) {
         Ok(outcome) => {
@@ -301,7 +386,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         }
     };
 
-    // 4. Filter by --project if specified
+    // Filter by --project if specified
     let analysis = match filter_projects(analysis, &args.projects) {
         Ok(filtered) => filtered,
         Err(e) => {
@@ -311,13 +396,13 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         }
     };
 
-    // 5. Auto-select language/framework for each project
+    // Auto-select language/framework for each project
     let mut analysis = analysis;
     for project in &mut analysis.projects {
         auto_select_for_project(project);
     }
 
-    // 6. Confirmation loop (unless --force)
+    // Confirmation loop (unless --force)
     if args.force {
         // Show project summary even in --force mode for visibility.
         // Use pipeline.println() so the output stays inside the TUI log pane
@@ -327,12 +412,21 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             pipeline.println(line);
         }
     } else {
-        confirm_or_change_loop(&mut analysis, &mut pipeline, term)?;
+        confirm_or_change_loop(&mut analysis, pipeline, term)?;
     }
 
-    // ── Phase 2: fetch + tailor ──
+    Ok(analysis)
+}
 
-    // 2a. Reload config from disk (to pick up any external changes) and handle --reset-rejections.
+/// Phase 3: fetch ADRs from API, apply rejection filter, and resolve output format.
+pub(crate) fn run_fetch_phase(
+    pipeline: &mut TuiRenderer,
+    args: &SyncArgs,
+    root_dir: &Path,
+    cfg_path: &Path,
+    analysis: &crate::analysis::types::RepoAnalysis,
+) -> Result<FetchPhaseResult, ActualError> {
+    // Reload config from disk (to pick up any external changes) and handle --reset-rejections.
     // Note: config was already loaded above for the Environment step; reload here for freshness.
     let mut config = load_from(cfg_path)?;
     let repo_key = compute_repo_key(root_dir);
@@ -350,7 +444,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
 
     let rejected_ids = get_rejections(&config, &repo_key);
 
-    // 2b. Fetch ADRs from API with retry
+    // Fetch ADRs from API with retry
     let api_url: String = args
         .api_url
         .as_deref()
@@ -364,10 +458,10 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
 
     // Run signals analysis (tree-sitter + semgrep) to enrich the match request.
     let signals = rt.block_on(crate::analysis::signals::run_signals_analysis(
-        root_dir, &analysis,
+        root_dir, analysis,
     ));
 
-    let request = build_match_request(&analysis, &config, &signals);
+    let request = build_match_request(analysis, &config, &signals);
     let client = ActualApiClient::new(&api_url)?;
 
     if args.verbose {
@@ -415,7 +509,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
                 }
             },
             &DELAYS_503,
-            &mut pipeline,
+            pipeline,
         )
         .await;
 
@@ -454,7 +548,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         });
     }
 
-    // 2c. Filter by rejections
+    // Filter by rejections
     let filtered_adrs = pre_filter_rejected(&response.matched_adrs, &rejected_ids);
 
     if !rejected_ids.is_empty() && args.verbose {
@@ -464,7 +558,32 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         });
     }
 
-    // 2d. Tailor or skip (--no-tailor), with caching
+    Ok(FetchPhaseResult {
+        filtered_adrs,
+        existing_paths,
+        api_url,
+        config,
+        output_format,
+    })
+}
+
+/// Phase 4: tailor ADRs (or skip with --no-tailor), with caching.
+pub(crate) fn run_tailor_phase<R: TailoringRunner>(
+    pipeline: &mut TuiRenderer,
+    args: &SyncArgs,
+    root_dir: &Path,
+    cfg_path: &Path,
+    runner: &R,
+    analysis: &crate::analysis::types::RepoAnalysis,
+    fetch: FetchPhaseResult,
+) -> Result<TailorPhaseResult, ActualError> {
+    let FetchPhaseResult {
+        filtered_adrs,
+        existing_paths,
+        api_url: _,
+        mut config,
+        output_format,
+    } = fetch;
 
     // Compute cache key from all tailoring inputs.
     // HEAD commit is intentionally excluded — unrelated commits should not
@@ -567,6 +686,9 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         let (kb_poller, nav_rx, cancel) = super::super::sync_kb_poller::setup(pipeline.is_tui());
         pipeline.set_nav_rx_opt(nav_rx);
 
+        let rt = tokio::runtime::Runtime::new().map_err(|e| {
+            ActualError::InternalError(format!("Failed to create async runtime: {e}"))
+        })?;
         let result = rt.block_on(async {
             let tailor_fut = tailor_all_projects(
                 runner,
@@ -579,7 +701,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
                 tailor_fut,
                 &mut progress_rx,
                 &mut event_rx,
-                &mut pipeline,
+                pipeline,
                 project_count,
                 cancel,
             )
@@ -659,102 +781,108 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     // edits) to avoid unnecessary writes.
     let output = crate::tailoring::minor_change::filter_minor_changes(output, root_dir);
 
-    // ── Phase 3: confirm + write (fully implemented) ──
-    // pipeline stays alive through confirm+write so output goes into the TUI
-    // log pane. It drops naturally at end of run_sync.
-    let sync_result = confirm_and_write(
-        &output,
+    Ok(TailorPhaseResult { output, config })
+}
+
+/// Phase 5: confirm and write files to disk.
+pub(crate) fn run_write_phase(
+    pipeline: &mut TuiRenderer,
+    args: &SyncArgs,
+    root_dir: &Path,
+    output: &TailoringOutput,
+    output_format: &OutputFormat,
+    term: &dyn TerminalIO,
+) -> Result<SyncResult, ActualError> {
+    confirm_and_write(
+        output,
         root_dir,
         args.force,
         args.dry_run,
         args.full,
-        &output_format,
+        output_format,
         term,
-        &mut pipeline,
-    )?;
-    // Keep `sync_result` alive when telemetry is compiled out.
-    #[cfg(not(feature = "telemetry"))]
-    let _ = &sync_result;
+        pipeline,
+    )
+}
 
-    // ── Telemetry (fire-and-forget) ──
-    // Only fires on the happy path (after `?` above). Errors in telemetry are
-    // silently swallowed inside `report_metrics`. Runtime build failures cause
-    // telemetry to be silently skipped (fire-and-forget preserved).
-    #[cfg(feature = "telemetry")]
-    {
-        // Fetch git remote URL for repo identity hashing.
-        let repo_url = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()
-            .and_then(|rt| {
-                rt.block_on(async {
-                    let mut cmd = tokio::process::Command::new("git");
-                    cmd.args(["remote", "get-url", "origin"]);
-                    cmd.current_dir(root_dir);
-                    cmd.stdin(std::process::Stdio::null());
-                    cmd.kill_on_drop(true);
-                    let child = cmd
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .spawn()
-                        .ok()?;
-                    let out = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        child.wait_with_output(),
-                    )
-                    .await
-                    .ok()?
+/// Phase 6: fire-and-forget telemetry reporting.
+#[cfg(feature = "telemetry")]
+pub(crate) fn run_telemetry(
+    root_dir: &Path,
+    output: &TailoringOutput,
+    sync_result: &SyncResult,
+    api_url: &str,
+    config: &Config,
+) {
+    // Fetch git remote URL for repo identity hashing.
+    let repo_url = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()
+        .and_then(|rt| {
+            rt.block_on(async {
+                let mut cmd = tokio::process::Command::new("git");
+                cmd.args(["remote", "get-url", "origin"]);
+                cmd.current_dir(root_dir);
+                cmd.stdin(std::process::Stdio::null());
+                cmd.kill_on_drop(true);
+                let child = cmd
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
                     .ok()?;
-                    out.status
-                        .success()
-                        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-                        .filter(|s| !s.is_empty())
-                })
+                let out = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    child.wait_with_output(),
+                )
+                .await
+                .ok()?
+                .ok()?;
+                out.status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                    .filter(|s| !s.is_empty())
             })
-            .unwrap_or_default();
+        })
+        .unwrap_or_default();
 
-        let commit_hash = get_git_head(root_dir).unwrap_or_default();
-        let repo_hash = hash_repo_identity(&repo_url, &commit_hash);
-        let repo_url_hash = hash_repo_url(&repo_url);
+    let commit_hash = get_git_head(root_dir).unwrap_or_default();
+    let repo_hash = hash_repo_identity(&repo_url, &commit_hash);
+    let repo_url_hash = hash_repo_url(&repo_url);
 
-        // Collect unique ADR IDs from all output files.
-        let matched_adr_ids: Vec<String> = {
-            let mut seen = std::collections::HashSet::new();
-            let mut ids = Vec::new();
-            for file in &output.files {
-                for id in file.adr_ids() {
-                    if seen.insert(id.clone()) {
-                        ids.push(id);
-                    }
+    // Collect unique ADR IDs from all output files.
+    let matched_adr_ids: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut ids = Vec::new();
+        for file in &output.files {
+            for id in file.adr_ids() {
+                if seen.insert(id.clone()) {
+                    ids.push(id);
                 }
             }
-            ids
-        };
-
-        let adrs_fetched = output.summary.total_input as u64;
-        let adrs_written = (sync_result.files_created + sync_result.files_updated) as u64;
-        let metrics = SyncMetrics {
-            adrs_fetched,
-            adrs_tailored: output.summary.applicable as u64,
-            adrs_rejected: output.summary.not_applicable as u64,
-            adrs_written,
-            repo_hash,
-            repo_url_hash,
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            matched_adr_ids,
-        };
-
-        if let Ok(tel_rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            tel_rt.block_on(report_metrics(&metrics, &config, &api_url));
         }
-    }
+        ids
+    };
 
-    pipeline.wait_for_keypress();
-    Ok(())
+    let adrs_fetched = output.summary.total_input as u64;
+    let adrs_written = (sync_result.files_created + sync_result.files_updated) as u64;
+    let metrics = SyncMetrics {
+        adrs_fetched,
+        adrs_tailored: output.summary.applicable as u64,
+        adrs_rejected: output.summary.not_applicable as u64,
+        adrs_written,
+        repo_hash,
+        repo_url_hash,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        matched_adr_ids,
+    };
+
+    if let Ok(tel_rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        tel_rt.block_on(report_metrics(&metrics, config, api_url));
+    }
 }
 
 /// Execute an API call with 503 backoff, showing live TUI messages during each wait.
@@ -6735,5 +6863,155 @@ mod tests {
             call_count, 3,
             "should be called 3 times: fail, fail, succeed"
         );
+    }
+
+    // ── Phase function unit tests ──
+
+    #[test]
+    fn test_environment_phase_probe_failure() {
+        // Test the runner probe error path
+        let dir = tempfile::tempdir().unwrap();
+        let mut pipeline = TuiRenderer::new_with_version(false, true, "0.0.0");
+        let args = make_sync_args(false, false, true, false, "http://unused");
+        let probe: Box<dyn Fn() -> Result<(), ActualError>> =
+            Box::new(|| Err(ActualError::ClaudeNotFound));
+        let result = run_environment_phase(
+            &mut pipeline,
+            &args,
+            &dir.path().join("config.yaml"),
+            dir.path(),
+            None,
+            None,
+            Some(probe),
+        );
+        assert!(matches!(result, Err(ActualError::ClaudeNotFound)));
+    }
+
+    #[test]
+    fn test_environment_phase_probe_success() {
+        // Test that a successful probe returns Ok
+        let dir = tempfile::tempdir().unwrap();
+        let mut pipeline = TuiRenderer::new_with_version(false, true, "0.0.0");
+        let args = make_sync_args(false, false, true, false, "http://unused");
+        let probe: Box<dyn Fn() -> Result<(), ActualError>> = Box::new(|| Ok(()));
+        let result = run_environment_phase(
+            &mut pipeline,
+            &args,
+            &dir.path().join("config.yaml"),
+            dir.path(),
+            None,
+            None,
+            Some(probe),
+        );
+        assert!(result.is_ok());
+        assert!(!result.unwrap().is_git); // temp dir is not a git repo
+    }
+
+    #[test]
+    fn test_analysis_phase_force_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new_with_version(false, true, "0.0.0");
+        let args = make_sync_args(false, false, true, false, "http://unused");
+        let result = run_analysis_phase(
+            &mut pipeline,
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_analysis_phase_project_filter_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new_with_version(false, true, "0.0.0");
+        let mut args = make_sync_args(false, false, true, false, "http://unused");
+        args.projects = vec!["nonexistent-project".to_string()];
+        let result = run_analysis_phase(
+            &mut pipeline,
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+        );
+        // Empty project list from empty dir, filter for a name that doesn't exist
+        // The analysis on empty dir returns projects = [], filter_projects on empty list with any filter returns Err
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fetch_phase_success() {
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let mut pipeline = TuiRenderer::new_with_version(false, true, "0.0.0");
+        let args = make_sync_args(false, false, true, false, &server.url());
+        // Need a minimal analysis to pass to fetch phase
+        let analysis = crate::analysis::types::RepoAnalysis {
+            projects: vec![],
+            is_monorepo: false,
+            workspace_type: None,
+        };
+        let result = run_fetch_phase(
+            &mut pipeline,
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &analysis,
+        );
+        assert!(result.is_ok());
+        let fetch = result.unwrap();
+        assert!(fetch.filtered_adrs.is_empty()); // empty match response
+    }
+
+    #[test]
+    fn test_tailor_phase_no_tailor_flag() {
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let mut pipeline = TuiRenderer::new_with_version(false, true, "0.0.0");
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, true, &server.url()); // no_tailor=true
+        let analysis = crate::analysis::types::RepoAnalysis {
+            projects: vec![],
+            is_monorepo: false,
+            workspace_type: None,
+        };
+        let fetch = FetchPhaseResult {
+            filtered_adrs: vec![],
+            existing_paths: String::new(),
+            api_url: server.url(),
+            config: crate::config::types::Config::default(),
+            output_format: crate::generation::OutputFormat::default(),
+        };
+        let result = run_tailor_phase(
+            &mut pipeline,
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &runner,
+            &analysis,
+            fetch,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_write_phase_dry_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let mut pipeline = TuiRenderer::new_with_version(false, true, "0.0.0");
+        let args = make_sync_args(true, false, true, false, "http://unused"); // dry_run=true
+        let output = make_output(vec![make_file("CLAUDE.md", "# Content\n", vec!["ADR-001"])]);
+        let result = run_write_phase(
+            &mut pipeline,
+            &args,
+            dir.path(),
+            &output,
+            &OutputFormat::ClaudeMd,
+            &term,
+        );
+        assert!(result.is_ok());
     }
 }
