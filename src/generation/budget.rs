@@ -202,4 +202,64 @@ mod tests {
         assert_eq!(selected[0].adr_id, "v2-governance");
         assert_eq!(excluded, 1);
     }
+
+    // ── Realistic scenario tests ──
+
+    #[test]
+    fn test_budget_with_governance_and_many_adrs() {
+        // Simulate: governance pointer + 30 ADR sections, each ~4k chars
+        let gov = make_section("v2-governance", "<adr_governance source=\"docs/adr/\">\nADRs govern this project.\n</adr_governance>");
+        let mut sections = vec![gov];
+        for i in 0..30 {
+            sections.push(make_section(&format!("adr-{i:03}"), &"x".repeat(4_000)));
+        }
+
+        // With MAX_MANAGED_CHARS budget (~120k), about 28-29 sections fit
+        let (selected, excluded) = select_sections_within_budget(&sections, MAX_MANAGED_CHARS);
+        assert!(selected.len() > 1); // governance + some ADRs
+        assert!(selected[0].adr_id == "v2-governance"); // governance always first
+        assert!(excluded > 0); // some excluded
+        assert_eq!(selected.len() + excluded, 31); // all accounted for
+
+        // Total chars of selected sections should be within budget
+        let total_chars: usize = selected.iter().map(|s| estimate_section_chars(s)).sum();
+        assert!(total_chars <= MAX_MANAGED_CHARS);
+    }
+
+    #[test]
+    fn test_budget_governance_only_when_severely_constrained() {
+        let gov = make_section("v2-governance", "gov");
+        let sections = vec![
+            gov,
+            make_section("adr-1", &"x".repeat(1_000)),
+            make_section("adr-2", &"x".repeat(1_000)),
+        ];
+        // Budget of 100 chars — only governance fits (it's always included)
+        let (selected, excluded) = select_sections_within_budget(&sections, 100);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].adr_id, "v2-governance");
+        assert_eq!(excluded, 2);
+    }
+
+    #[test]
+    fn test_budget_preserves_section_order() {
+        let sections = vec![
+            make_section("v2-governance", "gov"),
+            make_section("adr-a", "content-a"),
+            make_section("adr-b", "content-b"),
+            make_section("adr-c", "content-c"),
+        ];
+        let (selected, _) = select_sections_within_budget(&sections, 100_000);
+        let ids: Vec<&str> = selected.iter().map(|s| s.adr_id.as_str()).collect();
+        assert_eq!(ids, &["v2-governance", "adr-a", "adr-b", "adr-c"]);
+    }
+
+    #[test]
+    fn test_budget_compute_with_existing_file_no_markers() {
+        // File exists but has no managed section — all content is user-written
+        let existing = "# My Project\n\nHere are my notes.\n";
+        let budget = compute_managed_budget(Some(existing));
+        let expected = CHAR_LIMIT.saturating_sub(existing.len());
+        assert_eq!(budget, expected.min(MAX_MANAGED_CHARS));
+    }
 }
