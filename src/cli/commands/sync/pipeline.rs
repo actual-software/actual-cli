@@ -6733,4 +6733,128 @@ mod tests {
             "should be called 3 times: fail, fail, succeed"
         );
     }
+
+    // ── apply_content_budget tests ──
+
+    #[test]
+    fn test_apply_content_budget_no_root_file() {
+        let output = TailoringOutput {
+            files: vec![],
+            skipped_adrs: vec![],
+            summary: crate::tailoring::types::TailoringSummary::default(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (result, info) =
+            super::apply_content_budget(output, dir.path(), &OutputFormat::ClaudeMd);
+        assert!(result.files.is_empty());
+        assert!(info.is_none());
+    }
+
+    #[test]
+    fn test_apply_content_budget_sections_within_budget() {
+        use crate::tailoring::types::AdrSection;
+        let output = TailoringOutput {
+            files: vec![crate::tailoring::types::FileOutput {
+                path: "CLAUDE.md".to_string(),
+                sections: vec![
+                    AdrSection {
+                        adr_id: "v2-governance".to_string(),
+                        content: "gov".to_string(),
+                    },
+                    AdrSection {
+                        adr_id: "adr-1".to_string(),
+                        content: "short".to_string(),
+                    },
+                ],
+                reasoning: String::new(),
+            }],
+            skipped_adrs: vec![],
+            summary: crate::tailoring::types::TailoringSummary::default(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (result, info) =
+            super::apply_content_budget(output, dir.path(), &OutputFormat::ClaudeMd);
+        assert_eq!(result.files[0].sections.len(), 2);
+        assert!(info.is_none());
+    }
+
+    #[test]
+    fn test_apply_content_budget_detects_migration() {
+        use crate::tailoring::types::AdrSection;
+        let dir = tempfile::tempdir().unwrap();
+
+        // Pre-populate with an existing CLAUDE.md that has inline ADR sections
+        let existing = "\
+# Project Guidelines
+
+<!-- managed:actual-start -->
+<!-- version: 1 -->
+<!-- adr-ids: adr-old -->
+
+<!-- adr:adr-old start -->
+## Old Rule
+- Old policy
+<!-- adr:adr-old end -->
+
+<!-- managed:actual-end -->";
+        std::fs::write(dir.path().join("CLAUDE.md"), existing).unwrap();
+
+        let output = TailoringOutput {
+            files: vec![crate::tailoring::types::FileOutput {
+                path: "CLAUDE.md".to_string(),
+                sections: vec![AdrSection {
+                    adr_id: "v2-governance".to_string(),
+                    content: "gov".to_string(),
+                }],
+                reasoning: String::new(),
+            }],
+            skipped_adrs: vec![],
+            summary: crate::tailoring::types::TailoringSummary::default(),
+        };
+        let (_, info) = super::apply_content_budget(output, dir.path(), &OutputFormat::ClaudeMd);
+        let info = info.expect("should detect migration");
+        assert!(info.migrated);
+        assert_eq!(info.excluded_count, 0);
+    }
+
+    #[test]
+    fn test_apply_content_budget_excludes_over_budget() {
+        use crate::tailoring::types::AdrSection;
+        let dir = tempfile::tempdir().unwrap();
+
+        // Pre-populate with a huge non-managed CLAUDE.md to constrain budget
+        let user_content = "x".repeat(159_900);
+        let existing = format!(
+            "{user_content}\n{}\n<!-- version: 1 -->\n{}",
+            markers::START_MARKER,
+            markers::END_MARKER,
+        );
+        std::fs::write(dir.path().join("CLAUDE.md"), &existing).unwrap();
+
+        let output = TailoringOutput {
+            files: vec![crate::tailoring::types::FileOutput {
+                path: "CLAUDE.md".to_string(),
+                sections: vec![
+                    AdrSection {
+                        adr_id: "v2-governance".to_string(),
+                        content: "gov".to_string(),
+                    },
+                    AdrSection {
+                        adr_id: "adr-1".to_string(),
+                        content: "x".repeat(500),
+                    },
+                ],
+                reasoning: String::new(),
+            }],
+            skipped_adrs: vec![],
+            summary: crate::tailoring::types::TailoringSummary::default(),
+        };
+        let (result, info) =
+            super::apply_content_budget(output, dir.path(), &OutputFormat::ClaudeMd);
+        let info = info.expect("should report exclusions");
+        assert_eq!(info.excluded_count, 1);
+        // Governance always included
+        assert_eq!(result.files[0].sections.len(), 1);
+        assert_eq!(result.files[0].sections[0].adr_id, "v2-governance");
+    }
 }
