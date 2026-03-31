@@ -1236,11 +1236,11 @@ fn filter_projects(
     })
 }
 
-/// Compute a stable repo key by hashing the git origin URL.
-///
-/// Falls back to hashing the root directory path if not a git repo or
-/// if the remote URL cannot be determined. Applies a 5-second timeout to
-/// the git subprocess; on timeout, silently falls back to the path hash.
+// Compute a stable repo key by hashing the git origin URL.
+//
+// Falls back to hashing the root directory path if not a git repo or
+// if the remote URL cannot be determined. Applies a 5-second timeout to
+// the git subprocess; on timeout, silently falls back to the path hash.
 
 /// Result of applying the content budget to the managed section.
 struct BudgetResult {
