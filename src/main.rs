@@ -21,7 +21,8 @@ fn main() {
 fn init_logging(cli: &Cli) {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,tokei=error"));
 
     // Detect TUI mode: adr-bot command with --no-tui not set.
     let is_tui = matches!(&cli.command, Command::AdrBot(a) if !a.no_tui);
