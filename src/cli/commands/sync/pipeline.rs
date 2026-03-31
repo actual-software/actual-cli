@@ -6943,4 +6943,110 @@ mod tests {
         assert_eq!(result.files[0].sections.len(), 1);
         assert_eq!(result.files[0].sections[0].adr_id, "v2-governance");
     }
+
+    // ── run_sync budget notification branch coverage ──
+
+    #[test]
+    fn test_run_sync_budget_migration_notification() {
+        // Exercises lines 656-659: the migration TUI message printed when inline
+        // V1 ADR sections are detected in the existing root file.
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Pre-populate CLAUDE.md with inline V1 ADR sections so migration is detected.
+        let existing = "\
+# Project Notes
+
+<!-- managed:actual-start -->
+<!-- version: 1 -->
+<!-- adr-ids: adr-old -->
+
+<!-- adr:adr-old start -->
+## Old Rule
+- Old policy
+<!-- adr:adr-old end -->
+
+<!-- managed:actual-end -->";
+        std::fs::write(dir.path().join("CLAUDE.md"), existing).unwrap();
+
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_TAILORING_JSON);
+        let args = SyncArgs {
+            dry_run: true,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+            no_tui: false,
+            output_format: None,
+            runner: None,
+            show_errors: false,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "budget migration notification test should succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_sync_budget_exclusion_notification() {
+        // Exercises lines 661-667: the exclusion TUI message printed when ADR
+        // sections are dropped to stay within the character budget.
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+
+        // ~159,900 chars of non-managed content collapses the budget to ~100 chars,
+        // causing adr-001 (too large for the budget) to be excluded.
+        let user_content = "x".repeat(159_900);
+        let existing = format!(
+            "{user_content}\n<!-- managed:actual-start -->\n<!-- version: 1 -->\n<!-- managed:actual-end -->"
+        );
+        std::fs::write(dir.path().join("CLAUDE.md"), &existing).unwrap();
+
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_TAILORING_JSON);
+        let args = SyncArgs {
+            dry_run: true,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+            no_tui: false,
+            output_format: None,
+            runner: None,
+            show_errors: false,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "budget exclusion notification test should succeed: {result:?}"
+        );
+    }
 }
