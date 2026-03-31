@@ -130,15 +130,6 @@ async fn run_signals_analysis_inner(
     for project in &analysis.projects {
         let project_dir = working_dir.join(&project.path);
 
-        let source_files = collect_source_files(&project_dir);
-        if source_files.is_empty() {
-            tracing::debug!(
-                project = %project.path,
-                "signals analysis skipped: no source files found"
-            );
-            continue;
-        }
-
         match analyze_project(
             &project_dir,
             &project.path,

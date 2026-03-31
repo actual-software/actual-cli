@@ -6662,6 +6662,38 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_sync_semgrep_not_found_aborts_in_environment_phase() {
+        // Override PATH to an empty directory so `which::which("semgrep")` fails,
+        // exercising the SemgrepNotFound error path in the Environment phase.
+        let _lock = crate::testutil::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let empty_dir = tempfile::tempdir().unwrap();
+        let _path_guard =
+            crate::testutil::EnvGuard::set("PATH", empty_dir.path().to_str().unwrap());
+
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, "http://unused");
+        let result = super::run_sync_with_probe(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            matches!(result, Err(ActualError::SemgrepNotFound)),
+            "expected SemgrepNotFound when semgrep is absent from PATH, got: {result:?}"
+        );
+    }
+
     // ── fetch_with_503_backoff unit tests ──
 
     #[tokio::test(start_paused = true)]
