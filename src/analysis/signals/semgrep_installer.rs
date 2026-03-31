@@ -1,3 +1,7 @@
+use anyhow::{bail, Result};
+use sha2::Digest;
+use std::path::PathBuf;
+
 pub(crate) const SEMGREP_VERSION: &str = "1.156.0";
 
 pub(crate) struct WheelInfo {
@@ -28,6 +32,25 @@ pub(crate) fn platform_wheel_info() -> Option<WheelInfo> {
     }
 }
 
+/// Returns the OS-appropriate path where semgrep-core will be cached.
+/// Path: `<data_local_dir>/actual/semgrep-core`
+pub(crate) fn semgrep_core_cache_path() -> PathBuf {
+    let base = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.local/share"));
+    base.join("actual").join("semgrep-core")
+}
+
+/// Verifies the SHA256 checksum of `data` against the `expected` hex string.
+fn verify_sha256(data: &[u8], expected: &str) -> Result<()> {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(data);
+    let actual = format!("{:x}", hasher.finalize());
+    if actual != expected {
+        bail!("checksum mismatch: expected {expected}, got {actual}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,5 +62,33 @@ mod tests {
         let info = info.unwrap();
         assert!(!info.url.is_empty());
         assert_eq!(info.sha256.len(), 64); // hex SHA256
+    }
+
+    #[test]
+    fn cache_path_is_in_data_dir() {
+        let path = semgrep_core_cache_path();
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains("actual") || path_str.contains("local"),
+            "cache path should be under user data dir, got: {path_str}"
+        );
+        assert!(path_str.ends_with("semgrep-core"));
+    }
+
+    #[test]
+    fn sha256_verify_correct_data() {
+        let data = b"hello world";
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(data);
+        let hash = format!("{:x}", hasher.finalize());
+        assert!(verify_sha256(data, &hash).is_ok());
+    }
+
+    #[test]
+    fn sha256_verify_wrong_hash_errors() {
+        let data = b"hello world";
+        let result = verify_sha256(data, "deadbeef");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("checksum mismatch"));
     }
 }
