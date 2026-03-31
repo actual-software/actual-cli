@@ -994,4 +994,35 @@ mod tests {
         assert_eq!(result.skipped_adrs.len(), 1);
         assert_eq!(result.skipped_adrs[0].id, "adr-skip");
     }
+
+    #[test]
+    fn test_generate_v2_output_with_v1_adrs() {
+        // V1 ADRs have no content_md, no content_json, no schema_version
+        let v1_adr = make_v1_adr("adr-v1", "Use Strict Mode");
+        assert!(!v1_adr.is_v2());
+
+        let output = generate_v2_output(&[v1_adr]);
+
+        // Should still produce 2 files
+        assert_eq!(output.raw_files.len(), 2);
+
+        let docs_file = output
+            .raw_files
+            .iter()
+            .find(|f| f.path.starts_with("docs/adr/"))
+            .expect("expected docs/adr/ file");
+        assert_eq!(docs_file.path, "docs/adr/use-strict-mode.md");
+        // V1 fallback: title + policies
+        assert!(docs_file.content.contains("# Use Strict Mode"));
+        assert!(docs_file.content.contains("Do something"));
+
+        let rules_file = output
+            .raw_files
+            .iter()
+            .find(|f| f.path.starts_with(".claude/rules/"))
+            .expect("expected .claude/rules/ file");
+        assert_eq!(rules_file.path, ".claude/rules/use-strict-mode.md");
+        // V1 fallback: policies as bullet points
+        assert!(rules_file.content.contains("- Do something"));
+    }
 }
