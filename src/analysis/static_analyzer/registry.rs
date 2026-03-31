@@ -282,11 +282,21 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
         category: "testing",
     },
     FrameworkSignature {
+        dependency: "hanami",
+        framework_name: "hanami",
+        category: "web-backend",
+    },
+    FrameworkSignature {
         dependency: "sidekiq",
         framework_name: "sidekiq",
         category: "library",
     },
     // ── Java/Kotlin ──────────────────────────────────────────────────
+    FrameworkSignature {
+        dependency: "org.jetbrains.compose",
+        framework_name: "compose-multiplatform",
+        category: "desktop",
+    },
     FrameworkSignature {
         dependency: "org.springframework.boot",
         framework_name: "spring-boot",
@@ -548,6 +558,8 @@ pub const FRAMEWORK_REGISTRY: &[FrameworkSignature] = &[
 ///
 /// For Go module paths, also tries prefix matching (e.g.
 /// `github.com/gin-gonic/gin/v2` will match `github.com/gin-gonic/gin`).
+/// For JVM group IDs, also tries prefix matching with `.` as the boundary
+/// (e.g. `org.jetbrains.compose.runtime` matches `org.jetbrains.compose`).
 pub fn lookup(dependency: &str) -> Option<&'static FrameworkSignature> {
     // Exact match first
     if let Some(sig) = FRAMEWORK_REGISTRY
@@ -567,7 +579,16 @@ pub fn lookup(dependency: &str) -> Option<&'static FrameworkSignature> {
         });
     }
 
-    None
+    // Prefix match for JVM group IDs (e.g. `org.jetbrains.compose.runtime` matches
+    // registry entry `org.jetbrains.compose`). Require the next character to be '.'
+    // or ':' to avoid false positives at package boundaries.
+    FRAMEWORK_REGISTRY.iter().find(|s| {
+        dependency.starts_with(s.dependency)
+            && matches!(
+                dependency.as_bytes().get(s.dependency.len()),
+                Some(&b'.') | Some(&b':')
+            )
+    })
 }
 
 #[cfg(test)]
@@ -655,17 +676,46 @@ mod tests {
     }
 
     #[test]
-    fn test_lookup_compose_multiplatform() {
-        let sig =
-            lookup("org.jetbrains.compose").expect("org.jetbrains.compose should be in registry");
-        assert_eq!(sig.framework_name, "compose-multiplatform");
-        assert_eq!(sig.category, "mobile");
-    }
-
-    #[test]
     fn test_lookup_vertx() {
         let sig = lookup("io.vertx").expect("io.vertx should be in registry");
         assert_eq!(sig.framework_name, "vert.x");
+        assert_eq!(sig.category, "web-backend");
+    }
+
+    #[test]
+    fn test_lookup_compose_multiplatform_exact_subgroup() {
+        // Group extracted from "org.jetbrains.compose.runtime:runtime-desktop:1.6.0"
+        let sig = lookup("org.jetbrains.compose.runtime")
+            .expect("compose subgroup should match via prefix");
+        assert_eq!(sig.framework_name, "compose-multiplatform");
+        assert_eq!(sig.category, "desktop");
+    }
+
+    #[test]
+    fn test_lookup_compose_multiplatform_group_artifact() {
+        // group:artifact form extracted from the same coordinate
+        let sig = lookup("org.jetbrains.compose.runtime:runtime-desktop")
+            .expect("compose group:artifact should match via prefix");
+        assert_eq!(sig.framework_name, "compose-multiplatform");
+    }
+
+    #[test]
+    fn test_lookup_compose_multiplatform_ui_subgroup() {
+        let sig = lookup("org.jetbrains.compose.ui").expect("compose ui subgroup should match");
+        assert_eq!(sig.framework_name, "compose-multiplatform");
+    }
+
+    #[test]
+    fn test_lookup_jvm_prefix_no_false_positive() {
+        // "org.jetbrains.composex" must NOT match "org.jetbrains.compose"
+        // because the boundary char is 'x', not '.' or ':'
+        assert!(lookup("org.jetbrains.composex").is_none());
+    }
+
+    #[test]
+    fn test_lookup_hanami() {
+        let sig = lookup("hanami").expect("hanami should be in registry");
+        assert_eq!(sig.framework_name, "hanami");
         assert_eq!(sig.category, "web-backend");
     }
 
@@ -678,6 +728,7 @@ mod tests {
             "django",
             "github.com/gin-gonic/gin",
             "rails",
+            "hanami",
             "org.springframework.boot",
             "Microsoft.NET.Sdk.Web",
             "GTest",
