@@ -947,7 +947,10 @@ mod tests {
     async fn test_probe_claude_auth_async_no_json_exits_nonzero() {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("fake-claude.sh");
-        write_executable_script(&script, b"#!/bin/sh\nprintf 'Not logged in\\n' >&2\nexit 1\n");
+        write_executable_script(
+            &script,
+            b"#!/bin/sh\nprintf 'Not logged in\\n' >&2\nexit 1\n",
+        );
 
         let result = probe_claude_auth_async_no_json(&script, Duration::from_secs(5)).await;
         assert!(
