@@ -135,9 +135,9 @@ pub(crate) fn run_sync<R: TailoringRunner>(
 /// and an optional semgrep availability check.
 ///
 /// `semgrep_check` is an optional override for the semgrep availability check.
-/// When `None`, the real `which::which("semgrep")` is used.  Tests pass
-/// `Some(Box::new(|| false))` to exercise the not-found path without
-/// manipulating the process `PATH`.
+/// When `None`, `ensure_semgrep_core()` runs the real auto-download.  Tests pass
+/// `Some(Box::new(|| true/false))` to exercise availability paths without
+/// network I/O or disk side-effects.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     args: &SyncArgs,
@@ -6713,6 +6713,76 @@ mod tests {
         assert!(
             !matches!(result, Err(ActualError::SemgrepNotFound)),
             "semgrep unavailability should degrade gracefully, not abort: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_sync_semgrep_check_true_shows_found() {
+        // Inject a semgrep_check that always returns true — exercises the
+        // `Some(true)` branch (pipeline.println "Found").
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let result = super::run_sync_with_probe(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+            None,
+            Some(Box::new(|| true)),
+        );
+        assert!(
+            result.is_ok(),
+            "semgrep found path should succeed: {result:?}"
+        );
+    }
+
+    // Mutex to serialize tests that mutate the ACTUAL_SEMGREP_CORE_PATH env var.
+    static SEMGREP_PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn run_sync_semgrep_none_ensure_core_fails_degrades_gracefully() {
+        // When semgrep_check is None the real ensure_semgrep_core() path runs.
+        // Point the cache path (via env var) at a location whose parent is a
+        // regular file — create_dir_all() fails with ENOTDIR, so ensure_semgrep_core
+        // returns Err.  This covers the Err arm and the "Downloading..." message.
+        let _lock = SEMGREP_PATH_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // Create a regular file where the parent directory would need to be.
+        let parent_as_file = dir.path().join("notadir");
+        std::fs::write(&parent_as_file, b"I am a file, not a directory").unwrap();
+        let bad_cache_path = parent_as_file.join("semgrep-core");
+        // SAFETY: guarded by SEMGREP_PATH_ENV_LOCK; no other thread may set this var concurrently.
+        unsafe { std::env::set_var("ACTUAL_SEMGREP_CORE_PATH", &bad_cache_path) };
+
+        let server = mock_api_server();
+        let dir2 = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let result = super::run_sync_with_probe(
+            &args,
+            dir2.path(),
+            &dir2.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+            None,
+            None, // no override → else block → ensure_semgrep_core() → Err
+        );
+
+        // SAFETY: cleanup before any other test can observe the env var.
+        unsafe { std::env::remove_var("ACTUAL_SEMGREP_CORE_PATH") };
+
+        assert!(
+            !matches!(result, Err(ActualError::SemgrepNotFound)),
+            "ensure_semgrep_core failure should degrade gracefully, not SemgrepNotFound: {result:?}"
         );
     }
 
