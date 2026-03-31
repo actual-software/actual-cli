@@ -4,6 +4,7 @@ pub mod language_resolver;
 pub mod pipeline;
 pub mod rule_resolver;
 pub mod semgrep;
+pub(crate) mod semgrep_installer;
 pub mod tree_sitter;
 
 pub use ir::{build_canonical_ir, CanonicalIR};
