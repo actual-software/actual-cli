@@ -174,7 +174,11 @@ mod tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(&mut buf);
         let opts = zip::write::FileOptions::<()>::default();
-        zip.start_file("semgrep-1.156.0.data/purelib/semgrep/bin/semgrep-core", opts).unwrap();
+        zip.start_file(
+            "semgrep-1.156.0.data/purelib/semgrep/bin/semgrep-core",
+            opts,
+        )
+        .unwrap();
         zip.write_all(b"fake binary content").unwrap();
         zip.finish().unwrap();
         let wheel_bytes = buf.into_inner();
