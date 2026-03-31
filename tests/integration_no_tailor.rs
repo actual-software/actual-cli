@@ -53,9 +53,14 @@ mod tests {
         // Policies as bullet points
         assert!(content.contains("- Always use thiserror for errors"));
         assert!(content.contains("- Never use unwrap in production code"));
-        // Metadata comments
-        assert!(content.contains("<!-- adr-ids: adr-001 -->"));
+        // Metadata comments (v2-governance is now always present since all ADRs get per-file output)
+        assert!(content.contains("adr-001"));
         assert!(content.contains("<!-- version: 1 -->"));
+        // Governance pointer (all ADRs now get per-file output)
+        assert!(content.contains("adr_governance"));
+        // Per-file output: docs/adr/ and .claude/rules/ files created
+        assert!(env.file_exists("docs/adr/use-error-types.md"));
+        assert!(env.file_exists(".claude/rules/use-error-types.md"));
     }
 
     #[test]
@@ -366,8 +371,13 @@ mod tests {
         assert!(web.contains("## Web Only Rule"));
         assert!(web.contains("- Use Next.js app router"));
 
-        // No root CLAUDE.md or other project files
-        assert!(!env.file_exists("CLAUDE.md"));
+        // Root CLAUDE.md is now created with governance pointer (all ADRs get per-file output)
+        assert!(env.file_exists("CLAUDE.md"));
+        let root = env.read_file("CLAUDE.md");
+        assert!(root.contains("adr_governance"));
+        // But no inline ADR content in root (ADR is scoped to apps/web)
+        assert!(!root.contains("## Web Only Rule"));
+        // No other project files
         assert!(!env.file_exists("apps/api/CLAUDE.md"));
     }
 

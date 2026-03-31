@@ -480,14 +480,18 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         args.model.as_deref().or(config.model.as_deref()),
     ));
 
-    // Partition into V1 and V2 ADRs (after cache key computation so the key
-    // covers all ADRs, including V2 ones).
-    let (v1_adrs, v2_adrs) = partition_adrs(filtered_adrs);
-    let v2_result = if v2_adrs.is_empty() {
+    // Generate per-file output for ALL ADRs (V1 and V2).
+    // Every ADR gets docs/adr/<slug>.md + .claude/rules/<slug>.md regardless
+    // of schema version. V1 ADRs use the generate_adr_doc/generate_rules_file
+    // fallback paths (policies as bullets).
+    let v2_result = if filtered_adrs.is_empty() {
         None
     } else {
-        Some(generate_v2_output(&v2_adrs))
+        Some(generate_v2_output(&filtered_adrs))
     };
+
+    // V1 ADRs still go through tailoring for inline CLAUDE.md content.
+    let (v1_adrs, _v2_adrs) = partition_adrs(filtered_adrs);
 
     // Try cache (unless --force)
     let cached_output = if !args.force {

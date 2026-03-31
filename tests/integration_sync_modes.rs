@@ -324,10 +324,15 @@ User footer";
             "expected version 2 after re-sync, got:\n{content}"
         );
 
-        // ADR IDs updated
+        // ADR IDs updated (v2-governance now always present since all ADRs get per-file output)
         assert!(
-            content.contains("<!-- adr-ids: adr-002 -->"),
-            "expected adr-ids updated to adr-002, got:\n{content}"
+            content.contains("adr-002"),
+            "expected adr-002 in managed section, got:\n{content}"
+        );
+        // Governance pointer present
+        assert!(
+            content.contains("adr_governance"),
+            "expected governance pointer in managed section, got:\n{content}"
         );
     }
 
@@ -876,11 +881,22 @@ User footer";
             "expected web policy in apps/web/CLAUDE.md, got:\n{web}"
         );
 
-        // No root or other project CLAUDE.md
+        // Root CLAUDE.md is now created with governance pointer (all ADRs get per-file output)
         assert!(
-            !env.file_exists("CLAUDE.md"),
-            "expected no root CLAUDE.md with --project filter"
+            env.file_exists("CLAUDE.md"),
+            "expected root CLAUDE.md with governance pointer"
         );
+        let root = env.read_file("CLAUDE.md");
+        assert!(
+            root.contains("adr_governance"),
+            "expected governance pointer in root CLAUDE.md, got:\n{root}"
+        );
+        // But no inline web-specific content in root
+        assert!(
+            !root.contains("## Web Only Rule"),
+            "expected no web rule in root CLAUDE.md, got:\n{root}"
+        );
+        // No other project files
         assert!(
             !env.file_exists("apps/api/CLAUDE.md"),
             "expected no apps/api/CLAUDE.md with --project filter"
