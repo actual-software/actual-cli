@@ -59,10 +59,9 @@ pub struct SemgrepScanner {
 impl SemgrepScanner {
     /// Create a new scanner, downloading semgrep-core if necessary.
     pub async fn new(timeout: std::time::Duration) -> Result<Self> {
-        let semgrep_bin =
-            crate::analysis::signals::semgrep_installer::ensure_semgrep_core()
-                .await
-                .context("failed to obtain semgrep-core binary")?;
+        let semgrep_bin = crate::analysis::signals::semgrep_installer::ensure_semgrep_core()
+            .await
+            .context("failed to obtain semgrep-core binary")?;
         Ok(Self {
             semgrep_bin,
             timeout,
@@ -363,8 +362,8 @@ pub(crate) fn merge_rule_files(rule_files: &[PathBuf]) -> Result<tempfile::Named
         serde_yaml::Value::Sequence(all_rules),
     );
     let merged = serde_yaml::to_string(&serde_yaml::Value::Mapping(map))?;
-    let mut tmp = tempfile::NamedTempFile::new()
-        .context("failed to create temp file for merged rules")?;
+    let mut tmp =
+        tempfile::NamedTempFile::new().context("failed to create temp file for merged rules")?;
     use std::io::Write;
     tmp.write_all(merged.as_bytes())
         .context("failed to write merged rules")?;
@@ -373,12 +372,10 @@ pub(crate) fn merge_rule_files(rule_files: &[PathBuf]) -> Result<tempfile::Named
 
 /// Write a newline-delimited list of paths to a `NamedTempFile`.
 fn write_targets_file(paths: &[PathBuf]) -> Result<tempfile::NamedTempFile> {
-    let mut tmp = tempfile::NamedTempFile::new()
-        .context("failed to create targets tempfile")?;
+    let mut tmp = tempfile::NamedTempFile::new().context("failed to create targets tempfile")?;
     use std::io::Write;
     for path in paths {
-        writeln!(tmp, "{}", path.display())
-            .context("failed to write to targets file")?;
+        writeln!(tmp, "{}", path.display()).context("failed to write to targets file")?;
     }
     Ok(tmp)
 }
@@ -1120,7 +1117,8 @@ EOJSON
         std::fs::write(tmp_a.path(), rule_a).unwrap();
         std::fs::write(tmp_b.path(), rule_b).unwrap();
 
-        let merged_path = merge_rule_files(&[tmp_a.path().to_path_buf(), tmp_b.path().to_path_buf()]).unwrap();
+        let merged_path =
+            merge_rule_files(&[tmp_a.path().to_path_buf(), tmp_b.path().to_path_buf()]).unwrap();
         let content = std::fs::read_to_string(merged_path.path()).unwrap();
 
         assert!(content.contains("rule-a"), "rule-a missing from merged");
@@ -1134,10 +1132,7 @@ EOJSON
 
     #[test]
     fn write_targets_file_contains_all_paths() {
-        let paths = vec![
-            PathBuf::from("/tmp/a.rs"),
-            PathBuf::from("/tmp/b.py"),
-        ];
+        let paths = vec![PathBuf::from("/tmp/a.rs"), PathBuf::from("/tmp/b.py")];
         let tmp = write_targets_file(&paths).unwrap();
         let content = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(content.contains("/tmp/a.rs"));
@@ -1151,7 +1146,10 @@ EOJSON
         let rules = PathBuf::from("/tmp/merged.yml");
         let targets = PathBuf::from("/tmp/targets.txt");
         let args = SemgrepScanner::build_core_args(&rules, &targets);
-        let args_str: Vec<_> = args.iter().map(|a| a.to_string_lossy().to_string()).collect();
+        let args_str: Vec<_> = args
+            .iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
         assert!(args_str.contains(&"-rules".to_string()));
         assert!(args_str.contains(&"/tmp/merged.yml".to_string()));
         assert!(args_str.contains(&"-targets".to_string()));
