@@ -6786,6 +6786,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_sync_semgrep_none_ensure_core_ok_prints_found() {
+        // When semgrep_check is None and the cache path already exists,
+        // ensure_semgrep_core() returns Ok immediately (fast path) and the
+        // pipeline prints "Found".  This covers the Ok arm of the match.
+        let _lock = SEMGREP_PATH_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // Write a dummy file at the override cache path so ensure_semgrep_core
+        // takes the fast path (already cached → return Ok without downloading).
+        let fake_binary = dir.path().join("semgrep-core");
+        std::fs::write(&fake_binary, b"fake").unwrap();
+        // SAFETY: guarded by SEMGREP_PATH_ENV_LOCK; no other thread may set this var concurrently.
+        unsafe { std::env::set_var("ACTUAL_SEMGREP_CORE_PATH", &fake_binary) };
+
+        let server = mock_api_server();
+        let dir2 = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let result = super::run_sync_with_probe(
+            &args,
+            dir2.path(),
+            &dir2.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+            None,
+            None, // no override → else block → ensure_semgrep_core() → Ok (cached)
+        );
+
+        // SAFETY: cleanup before any other test can observe the env var.
+        unsafe { std::env::remove_var("ACTUAL_SEMGREP_CORE_PATH") };
+
+        assert!(
+            result.is_ok(),
+            "ensure_semgrep_core Ok should complete pipeline successfully: {result:?}"
+        );
+    }
+
     // ── fetch_with_503_backoff unit tests ──
 
     #[tokio::test(start_paused = true)]

@@ -329,11 +329,17 @@ mod tests {
     fn write_executable_script(path: &std::path::Path, content: &[u8]) {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
-        let mut file = std::fs::File::create(path).unwrap();
+        // Write to a sibling .tmp file, set permissions, then atomically rename.
+        // This avoids ETXTBSY (os error 26) on Linux, which can occur when the
+        // kernel hasn't fully released a write-open file descriptor before exec
+        // is attempted on the same path.
+        let tmp = path.with_extension("sh.tmp");
+        let mut file = std::fs::File::create(&tmp).unwrap();
         file.write_all(content).unwrap();
         file.sync_all().unwrap();
         drop(file);
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
     }
 
     // ── error helper function tests ───────────────────────────────────────────
