@@ -15,6 +15,10 @@ pub enum ActualError {
     #[error("Cursor agent CLI (cursor-agent) not found. Install from: https://cursor.com/install")]
     CursorNotFound,
 
+    /// The semgrep binary was not found.
+    #[error("semgrep not found. Install with: pip install semgrep")]
+    SemgrepNotFound,
+
     #[error("Claude Code is not authenticated")]
     ClaudeNotAuthenticated,
 
@@ -93,6 +97,7 @@ impl ActualError {
             | Self::CodexNotAuthenticated
             | Self::CursorNotFound
             | Self::CursorNotAuthenticated
+            | Self::SemgrepNotFound
             | Self::ApiKeyMissing { .. }
             | Self::CodexCliModelRequiresApiKey { .. }
             | Self::NoRunnerAvailable { .. } => 2,
@@ -112,6 +117,9 @@ impl ActualError {
             Self::CodexNotFound => Some(Cow::Borrowed("npm install -g @openai/codex")),
             Self::CursorNotFound => {
                 Some(Cow::Borrowed("curl https://cursor.com/install -fsS | bash"))
+            }
+            Self::SemgrepNotFound => {
+                Some(Cow::Borrowed("pip install semgrep\n  or: brew install semgrep"))
             }
             Self::ClaudeNotAuthenticated => Some(Cow::Borrowed("claude auth login")),
             Self::CodexNotAuthenticated => {

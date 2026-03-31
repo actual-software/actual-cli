@@ -261,6 +261,24 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         ));
     }
 
+    // Semgrep check
+    match which::which("semgrep") {
+        Ok(_) => {
+            pipeline.println(&format!("  {:<9} {} Found", "Semgrep", theme::SUCCESS));
+        }
+        Err(_) => {
+            pipeline.println(&format!(
+                "  {:<9} {} Not found — install with: pip install semgrep",
+                "Semgrep",
+                theme::ERROR
+            ));
+            pipeline.println("");
+            pipeline.error(SyncPhase::Environment, "semgrep is required but not installed");
+            pipeline.finish_remaining();
+            return Err(ActualError::SemgrepNotFound);
+        }
+    }
+
     // Blank line for visual breathing room.
     pipeline.println("");
 
