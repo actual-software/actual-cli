@@ -186,6 +186,7 @@ mod tests {
         assert_eq!(ActualError::CodexNotFound.exit_code(), 2);
         assert_eq!(ActualError::CursorNotFound.exit_code(), 2);
         assert_eq!(ActualError::CursorNotAuthenticated.exit_code(), 2);
+        assert_eq!(ActualError::SemgrepNotFound.exit_code(), 2);
         assert_eq!(
             ActualError::RunnerFailed {
                 message: "fail".to_string(),
@@ -284,6 +285,13 @@ mod tests {
         assert!(
             msg.contains("cursor.com"),
             "expected 'cursor.com' in: {msg}"
+        );
+
+        let msg = ActualError::SemgrepNotFound.to_string();
+        assert!(msg.contains("not found"), "expected 'not found' in: {msg}");
+        assert!(
+            msg.contains("pip install semgrep"),
+            "expected install hint in: {msg}"
         );
 
         let msg = ActualError::ClaudeNotAuthenticated.to_string();
@@ -470,6 +478,21 @@ mod tests {
         assert_eq!(
             ActualError::CursorNotFound.hint(),
             Some(Cow::Borrowed("curl https://cursor.com/install -fsS | bash"))
+        );
+    }
+
+    #[test]
+    fn test_hint_semgrep_not_found() {
+        let hint = ActualError::SemgrepNotFound
+            .hint()
+            .expect("expected Some hint for SemgrepNotFound");
+        assert!(
+            hint.contains("pip install semgrep"),
+            "expected pip install hint in: {hint:?}"
+        );
+        assert!(
+            hint.contains("brew install semgrep"),
+            "expected brew install hint in: {hint:?}"
         );
     }
 
