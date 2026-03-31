@@ -128,16 +128,17 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         runner_display,
         None,
         None,
+        None,
     )
 }
 
 /// Inner implementation of [`run_sync`] that accepts an optional runner probe
-/// and an optional semgrep availability check.
+/// and optional semgrep overrides for testing.
 ///
-/// `semgrep_check` is an optional override for the semgrep availability check.
-/// When `None`, the real `which::which("semgrep")` is used.  Tests pass
-/// `Some(Box::new(|| false))` to exercise the not-found path without
-/// manipulating the process `PATH`.
+/// `semgrep_check` overrides the boolean availability check (used when `Some`).
+/// `semgrep_ensure` overrides `ensure_semgrep_core()` in the `None`-check path;
+/// when both are `None` the real download/cache logic runs.
+/// Tests inject these to avoid network I/O and disk operations.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     args: &SyncArgs,
@@ -149,6 +150,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     runner_display: Option<&RunnerDisplay>,
     runner_probe: Option<Box<dyn Fn() -> Result<(), ActualError>>>,
     semgrep_check: Option<Box<dyn Fn() -> bool>>,
+    semgrep_ensure: Option<Box<dyn Fn() -> anyhow::Result<std::path::PathBuf>>>,
 ) -> Result<(), ActualError> {
     // ── Phase 1: env check + analysis ──
 
@@ -299,7 +301,12 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
                 semgrep_installer::SEMGREP_VERSION
             ));
         }
-        match rt.block_on(semgrep_installer::ensure_semgrep_core()) {
+        let ensure_result = if let Some(ensure_fn) = semgrep_ensure {
+            ensure_fn()
+        } else {
+            rt.block_on(semgrep_installer::ensure_semgrep_core())
+        };
+        match ensure_result {
             Ok(_) => {
                 pipeline.println(&format!("  {:<9} {} Found", "Semgrep", theme::SUCCESS));
             }
@@ -6657,6 +6664,7 @@ mod tests {
             None,
             Some(probe),
             None,
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::CodexNotAuthenticated)),
@@ -6679,6 +6687,7 @@ mod tests {
             &dir.path().join("config.yaml"),
             &term,
             &runner,
+            None,
             None,
             None,
             None,
@@ -6709,10 +6718,67 @@ mod tests {
             None,
             None,
             Some(Box::new(|| false)),
+            None,
         );
         assert!(
             !matches!(result, Err(ActualError::SemgrepNotFound)),
             "semgrep unavailability should degrade gracefully, not abort: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_sync_semgrep_ensure_ok_prints_found() {
+        // When semgrep_check is None and semgrep_ensure returns Ok, the
+        // pipeline should report "Found" and complete successfully.
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let result = super::run_sync_with_probe(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+            None,
+            None,
+            Some(Box::new(|| Ok(std::path::PathBuf::from("/mock/semgrep-core")))),
+        );
+        assert!(
+            result.is_ok(),
+            "ensure_semgrep_core Ok should not abort pipeline: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_sync_semgrep_ensure_err_degrades_gracefully() {
+        // When semgrep_check is None and semgrep_ensure returns Err, the
+        // pipeline should print a warning and continue rather than aborting.
+        let server = mock_api_server();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(VALID_ANALYSIS_JSON);
+        let args = make_sync_args(false, false, true, false, &server.url());
+        let result = super::run_sync_with_probe(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+            None,
+            None,
+            Some(Box::new(|| {
+                Err(anyhow::anyhow!("mock semgrep-core download failure"))
+            })),
+        );
+        assert!(
+            result.is_ok(),
+            "ensure_semgrep_core Err should degrade gracefully, not abort: {result:?}"
         );
     }
 
