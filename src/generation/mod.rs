@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod format;
 pub mod markers;
 pub mod merge;
