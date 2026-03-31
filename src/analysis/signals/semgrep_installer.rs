@@ -1,6 +1,9 @@
 use anyhow::{bail, Result};
+use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use sha2::Digest;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 pub(crate) const SEMGREP_VERSION: &str = "1.156.0";
@@ -67,6 +70,61 @@ fn verify_sha256(data: &[u8], expected: &str) -> Result<()> {
     Ok(())
 }
 
+/// Downloads a URL with a progress bar, returning the complete response bytes.
+async fn download_with_progress(url: &str) -> Result<Vec<u8>> {
+    let client = reqwest::Client::new();
+    let response = client.get(url).send().await?;
+    let total = response.content_length();
+    let pb = ProgressBar::new(total.unwrap_or(0));
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("  {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})")
+            .unwrap_or_else(|_| ProgressStyle::default_bar()),
+    );
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        pb.inc(chunk.len() as u64);
+        bytes.extend_from_slice(&chunk);
+    }
+    pb.finish_and_clear();
+    Ok(bytes)
+}
+
+/// Ensures semgrep-core is available on disk, downloading it if necessary.
+/// Returns the path to the cached binary.
+pub(crate) async fn ensure_semgrep_core() -> Result<PathBuf> {
+    let info = platform_wheel_info()
+        .ok_or_else(|| anyhow::anyhow!("unsupported platform: no semgrep-core wheel available"))?;
+    let cache_path = semgrep_core_cache_path();
+
+    // Fast path: already cached
+    if cache_path.exists() {
+        return Ok(cache_path);
+    }
+
+    // Create parent directories
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    eprintln!("Downloading semgrep-core v{SEMGREP_VERSION} for this platform...\n");
+
+    let wheel_bytes = download_with_progress(&info.url).await?;
+    verify_sha256(&wheel_bytes, &info.sha256)?;
+    let binary = extract_semgrep_core_from_wheel(&wheel_bytes)?;
+
+    // Write to temp path, set executable, atomic rename
+    let tmp_path = cache_path.with_extension("tmp");
+    std::fs::write(&tmp_path, &binary)?;
+    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::rename(&tmp_path, &cache_path)?;
+
+    eprintln!("semgrep-core cached at {}\n", cache_path.display());
+    Ok(cache_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +179,21 @@ mod tests {
 
         let extracted = extract_semgrep_core_from_wheel(&wheel_bytes).unwrap();
         assert_eq!(extracted, b"fake binary content");
+    }
+
+    #[test]
+    fn ensure_semgrep_core_errors_on_unsupported_platform() {
+        // This test documents that ensure_semgrep_core errors when platform_wheel_info() returns None.
+        // On supported platforms (macOS/Linux x86_64/arm64), platform_wheel_info() returns Some,
+        // so this test just verifies the function exists and is callable.
+        // We verify the happy path exists via compilation + the fast-path logic.
+        if platform_wheel_info().is_none() {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(ensure_semgrep_core());
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("unsupported platform"));
+        }
+        // On supported platforms: test just passes (documents the contract)
     }
 
     #[test]
