@@ -87,6 +87,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-
 
+      - name: Install semgrep
+        run: pip install semgrep
+
       - name: Run tests
         run: |
           cargo test --workspace --features integration 2>&1 | tee test-output.txt
