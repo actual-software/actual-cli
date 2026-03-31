@@ -213,7 +213,18 @@ impl SemgrepScanner {
         }
 
         let (temp_dir, file_map) = Self::prepare_temp_files(files)?;
-        let args = Self::build_args(rule_files, temp_dir.path());
+
+        // Build targets file from temp paths
+        let temp_paths: Vec<PathBuf> = file_map.keys().cloned().collect();
+        let targets_file = write_targets_file(&temp_paths)?;
+
+        // Merge all rule files into one YAML (semgrep-core requires a single file)
+        let merged_rules = merge_rule_files(rule_files)?;
+
+        let args = Self::build_core_args(
+            &merged_rules.path().to_path_buf(),
+            &targets_file.path().to_path_buf(),
+        );
 
         // Build and run the command.  `kill_on_drop(true)` ensures the
         // child is killed if the future is cancelled by a timeout rather
@@ -1075,9 +1086,15 @@ mod tests {
             PathBuf::from("/nonexistent/binary/semgrep"),
             std::time::Duration::from_secs(5),
         );
+        let rule_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rule_tmp.path(),
+            "rules:\n  - id: r\n    message: m\n    languages: [js]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n",
+        )
+        .unwrap();
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
-            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .scan_batch(&files, &[rule_tmp.path().to_path_buf()])
             .await;
         assert!(result.is_err());
         assert!(result
@@ -1088,12 +1105,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_batch_with_echo_script() {
-        // Create a fake "semgrep" script that outputs valid JSON
+        // Create a fake "semgrep-core" script that outputs valid JSON
         let temp = tempfile::tempdir().unwrap();
         let script_path = temp.path().join("fake_semgrep.sh");
         std::fs::write(
             &script_path,
-            "#!/bin/sh\necho '{\"results\": [], \"errors\": []}'",
+            "#!/bin/sh\necho '{\"matches\": [], \"errors\": []}'",
         )
         .unwrap();
 
@@ -1104,10 +1121,17 @@ mod tests {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        let rule_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rule_tmp.path(),
+            "rules:\n  - id: r\n    message: m\n    languages: [js]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n",
+        )
+        .unwrap();
+
         let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
-            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .scan_batch(&files, &[rule_tmp.path().to_path_buf()])
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
@@ -1115,18 +1139,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_batch_script_with_findings() {
-        // This script discovers the actual temp dir from its last argument (the scan dir)
-        // and outputs JSON with a path that matches what prepare_temp_files creates,
-        // so that the path-remapping logic in process_output is exercised.
+        // This script reads the -targets file to discover the actual temp path,
+        // then outputs JSON with that path so path-remapping in process_output is exercised.
+        // Args received: -rules <rules_file> -targets <targets_file> -json
         let temp = tempfile::tempdir().unwrap();
         let script_path = temp.path().join("fake_semgrep_findings.sh");
-        // The script uses $SCAN_DIR (last argument) to construct a path matching
-        // the temp file layout: <scan_dir>/f0/test.js
         let script_content = r#"#!/bin/sh
-# Last argument is the scan directory
-for arg; do SCAN_DIR="$arg"; done
+# Parse -targets argument
+TARGETS_FILE=""
+while [ $# -gt 0 ]; do
+    if [ "$1" = "-targets" ]; then
+        TARGETS_FILE="$2"
+        shift 2
+    else
+        shift
+    fi
+done
+# Read the first path from the targets file
+FILE_PATH=$(head -n 1 "$TARGETS_FILE")
 cat <<EOJSON
-{"results": [{"check_id": "test.rule", "path": "${SCAN_DIR}/f0/test.js", "start": {"line": 1, "col": 1, "offset": 0}, "end": {"line": 1, "col": 10, "offset": 9}, "extra": {"metadata": {"facet_slot": "boundaries.api", "leaf_id": "99", "confidence": "0.8"}, "lines": "const x = 1;"}}]}
+{"matches": [{"check_id": "test.rule", "path": "${FILE_PATH}", "start": {"line": 1, "col": 1, "offset": 0}, "end": {"line": 1, "col": 10, "offset": 9}, "extra": {"metadata": {"facet_slot": "boundaries.api", "leaf_id": "99", "confidence": "0.8"}, "lines": "const x = 1;"}}], "errors": []}
 EOJSON
 "#;
         std::fs::write(&script_path, script_content).unwrap();
@@ -1137,10 +1169,17 @@ EOJSON
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        let rule_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rule_tmp.path(),
+            "rules:\n  - id: r\n    message: m\n    languages: [js]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n",
+        )
+        .unwrap();
+
         let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
-            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .scan_batch(&files, &[rule_tmp.path().to_path_buf()])
             .await;
         assert!(result.is_ok());
         let matches = result.unwrap();
@@ -1171,10 +1210,17 @@ EOJSON
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        let rule_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rule_tmp.path(),
+            "rules:\n  - id: r\n    message: m\n    languages: [js]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n",
+        )
+        .unwrap();
+
         let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
-            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .scan_batch(&files, &[rule_tmp.path().to_path_buf()])
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1202,10 +1248,17 @@ EOJSON
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        let rule_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rule_tmp.path(),
+            "rules:\n  - id: r\n    message: m\n    languages: [js]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n",
+        )
+        .unwrap();
+
         let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
-            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .scan_batch(&files, &[rule_tmp.path().to_path_buf()])
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1235,10 +1288,17 @@ EOJSON
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        let rule_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rule_tmp.path(),
+            "rules:\n  - id: r\n    message: m\n    languages: [js]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n",
+        )
+        .unwrap();
+
         let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
-            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .scan_batch(&files, &[rule_tmp.path().to_path_buf()])
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("no JSON output"));
@@ -1256,10 +1316,17 @@ EOJSON
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        let rule_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rule_tmp.path(),
+            "rules:\n  - id: r\n    message: m\n    languages: [js]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n",
+        )
+        .unwrap();
+
         let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
-            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .scan_batch(&files, &[rule_tmp.path().to_path_buf()])
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("failed to parse"));
@@ -1373,6 +1440,13 @@ EOJSON
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
+        let rule_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rule_tmp.path(),
+            "rules:\n  - id: r\n    message: m\n    languages: [js]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n",
+        )
+        .unwrap();
+
         let scanner = SemgrepScanner::with_binary(
             script_path,
             // Very short timeout to trigger quickly
@@ -1380,7 +1454,7 @@ EOJSON
         );
         let files = vec![(PathBuf::from("test.js"), "const x = 1;".to_string())];
         let result = scanner
-            .scan_batch(&files, &[PathBuf::from("rules.yml")])
+            .scan_batch(&files, &[rule_tmp.path().to_path_buf()])
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
@@ -1436,6 +1510,41 @@ EOJSON
         assert!(args_str.contains(&"/tmp/targets.txt".to_string()));
         assert!(args_str.contains(&"-json".to_string()));
         assert!(!args_str.contains(&"scan".to_string()));
+    }
+
+    // ---- scan_batch uses semgrep-core interface ----
+
+    #[tokio::test]
+    async fn scan_batch_uses_semgrep_core_interface() {
+        // Create a fake semgrep-core that outputs valid semgrep-core JSON (matches key)
+        let temp = tempfile::tempdir().unwrap();
+        let script_path = temp.path().join("semgrep-core");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho '{\"matches\":[],\"errors\":[]}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &script_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let scanner = SemgrepScanner::with_binary(script_path, std::time::Duration::from_secs(5));
+
+        let rule_tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            rule_tmp.path(),
+            "rules:\n  - id: test-rule\n    message: test\n    languages: [python]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n",
+        ).unwrap();
+
+        let files = vec![(PathBuf::from("test.py"), "foo()".to_string())];
+        let result = scanner
+            .scan_batch(&files, &[rule_tmp.path().to_path_buf()])
+            .await;
+        assert!(result.is_ok(), "scan_batch failed: {:?}", result);
+        assert_eq!(result.unwrap().len(), 0);
     }
 
     // ---- parse_findings accepts "matches" key (6d) ----
