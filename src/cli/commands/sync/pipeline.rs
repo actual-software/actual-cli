@@ -276,7 +276,10 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
                 theme::ERROR
             ));
             pipeline.println("");
-            pipeline.error(SyncPhase::Environment, "semgrep is required but not installed");
+            pipeline.error(
+                SyncPhase::Environment,
+                "semgrep is required but not installed",
+            );
             pipeline.finish_remaining();
             return Err(ActualError::SemgrepNotFound);
         }
