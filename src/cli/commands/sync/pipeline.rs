@@ -17,6 +17,9 @@ use crate::config::paths::{load_from, save_to};
 use crate::config::rejections::{clear_rejections, get_rejections};
 use crate::config::types::{DEFAULT_BATCH_SIZE, DEFAULT_CONCURRENCY, DEFAULT_TIMEOUT_SECS};
 use crate::error::ActualError;
+use crate::generation::budget;
+use crate::generation::markers;
+use crate::generation::OutputFormat;
 use crate::runner::subprocess::TailoringRunner;
 use crate::tailoring::concurrent::{tailor_all_projects, ConcurrentTailoringConfig};
 use crate::tailoring::filter::pre_filter_rejected;
@@ -647,6 +650,24 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         output
     };
 
+    // Enforce character budget on the root file managed section.
+    let (output, budget_result) = apply_content_budget(output, root_dir, &output_format);
+    if let Some(ref info) = budget_result {
+        if info.migrated {
+            pipeline.println(
+                "  \u{2139} Migrating inline ADRs to per-file format (docs/adr/ + .claude/rules/)",
+            );
+        }
+        if info.excluded_count > 0 {
+            let safe_filename = console::strip_ansi_codes(output_format.filename());
+            pipeline.println(&format!(
+                "  \u{26a0} {} ADRs excluded from {} to stay within token limit. \
+                 Full content available in docs/adr/",
+                info.excluded_count, safe_filename,
+            ));
+        }
+    }
+
     // Gap 7: surface the AI reasoning per file when --verbose is set, so
     // the user can see why the model generated each output file.
     if args.verbose {
@@ -1220,6 +1241,64 @@ fn filter_projects(
 /// Falls back to hashing the root directory path if not a git repo or
 /// if the remote URL cannot be determined. Applies a 5-second timeout to
 /// the git subprocess; on timeout, silently falls back to the path hash.
+
+/// Result of applying the content budget to the managed section.
+struct BudgetResult {
+    /// Number of ADR sections excluded from the root file.
+    excluded_count: usize,
+    /// Whether existing inline ADR sections were detected (migration from V1 inline format).
+    migrated: bool,
+}
+
+/// Enforce the character budget on the root file's managed section.
+///
+/// Reads the existing root file (if any) to measure non-managed content,
+/// computes the managed-section budget, and trims sections that exceed it.
+/// The `v2-governance` section is always preserved regardless of budget.
+fn apply_content_budget(
+    mut output: TailoringOutput,
+    root_dir: &Path,
+    format: &OutputFormat,
+) -> (TailoringOutput, Option<BudgetResult>) {
+    let root_filename = format.filename();
+    let root_file_idx = output.files.iter().position(|f| f.path == root_filename);
+
+    let Some(idx) = root_file_idx else {
+        return (output, None);
+    };
+
+    // Read existing file content to measure non-managed space
+    let existing_path = root_dir.join(root_filename);
+    let existing_content = std::fs::read_to_string(&existing_path).ok();
+
+    // Detect migration: existing managed section has inline ADR sections
+    // (i.e. sections other than v2-governance)
+    let migrated = existing_content
+        .as_ref()
+        .and_then(|c| markers::extract_managed_content(c))
+        .map(|managed| {
+            let sections = markers::extract_adr_sections(managed);
+            sections.iter().any(|s| s.id != "v2-governance")
+        })
+        .unwrap_or(false);
+
+    // Compute budget and trim sections
+    let char_budget = budget::compute_managed_budget(existing_content.as_deref());
+    let (trimmed, excluded_count) =
+        budget::select_sections_within_budget(&output.files[idx].sections, char_budget);
+    output.files[idx].sections = trimmed;
+
+    let info = if migrated || excluded_count > 0 {
+        Some(BudgetResult {
+            excluded_count,
+            migrated,
+        })
+    } else {
+        None
+    };
+
+    (output, info)
+}
 
 #[cfg(test)]
 mod tests {
