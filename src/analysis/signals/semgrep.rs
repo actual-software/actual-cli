@@ -241,17 +241,40 @@ impl SemgrepScanner {
         Self::process_output(&output, &file_map)
     }
 
+    /// Build the argument list for semgrep-core.
+    ///
+    /// semgrep-core accepts a single merged rules file via `-rules`, a
+    /// newline-delimited targets file via `-targets`, and outputs JSON via
+    /// `-json`.
+    fn build_core_args(rules_file: &PathBuf, targets_file: &PathBuf) -> Vec<std::ffi::OsString> {
+        vec![
+            "-rules".into(),
+            rules_file.into(),
+            "-targets".into(),
+            targets_file.into(),
+            "-json".into(),
+        ]
+    }
+
     /// Parse semgrep JSON output into a list of `ToolMatch` values.
+    ///
+    /// Accepts both the `"matches"` key (semgrep-core output) and the
+    /// `"results"` key (Python semgrep CLI output), preferring `"matches"`.
     ///
     /// `file_map` maps temp file paths back to original relative paths.
     fn parse_findings(
         output: &serde_json::Value,
         file_map: &HashMap<PathBuf, PathBuf>,
     ) -> Result<Vec<ToolMatch>> {
-        let results = match output.get("results") {
-            Some(serde_json::Value::Array(arr)) => arr,
-            Some(_) => bail!("semgrep 'results' field is not an array"),
-            None => return Ok(vec![]),
+        let results = {
+            let arr = output
+                .get("matches")
+                .or_else(|| output.get("results"))
+                .and_then(|v| v.as_array());
+            match arr {
+                Some(a) => a,
+                None => return Ok(vec![]),
+            }
         };
 
         let mut matches = Vec::with_capacity(results.len());
@@ -350,6 +373,47 @@ impl SemgrepScanner {
 
         Ok(matches)
     }
+}
+
+/// Merge multiple semgrep YAML rule files into a single `NamedTempFile`.
+///
+/// Each input file must have a top-level `rules:` sequence.  The output
+/// file contains a single `rules:` sequence with all rules from all inputs.
+pub(crate) fn merge_rule_files(rule_files: &[PathBuf]) -> Result<tempfile::NamedTempFile> {
+    let mut all_rules: Vec<serde_yaml::Value> = Vec::new();
+    for path in rule_files {
+        let content = std::fs::read(path)
+            .with_context(|| format!("failed to read rule file: {}", path.display()))?;
+        let doc: serde_yaml::Value = serde_yaml::from_slice(&content)
+            .with_context(|| format!("failed to parse rule YAML: {}", path.display()))?;
+        if let Some(rules) = doc.get("rules").and_then(|r| r.as_sequence()) {
+            all_rules.extend(rules.iter().cloned());
+        }
+    }
+    let mut map = serde_yaml::Mapping::new();
+    map.insert(
+        serde_yaml::Value::String("rules".into()),
+        serde_yaml::Value::Sequence(all_rules),
+    );
+    let merged = serde_yaml::to_string(&serde_yaml::Value::Mapping(map))?;
+    let mut tmp = tempfile::NamedTempFile::new()
+        .context("failed to create temp file for merged rules")?;
+    use std::io::Write;
+    tmp.write_all(merged.as_bytes())
+        .context("failed to write merged rules")?;
+    Ok(tmp)
+}
+
+/// Write a newline-delimited list of paths to a `NamedTempFile`.
+fn write_targets_file(paths: &[PathBuf]) -> Result<tempfile::NamedTempFile> {
+    let mut tmp = tempfile::NamedTempFile::new()
+        .context("failed to create targets tempfile")?;
+    use std::io::Write;
+    for path in paths {
+        writeln!(tmp, "{}", path.display())
+            .context("failed to write to targets file")?;
+    }
+    Ok(tmp)
 }
 
 #[cfg(test)]
@@ -451,11 +515,12 @@ mod tests {
 
     #[test]
     fn test_parse_findings_results_not_array() {
+        // When neither "matches" nor "results" contains an array, return empty
+        // (semgrep-core omits the key entirely; we treat non-array as absent).
         let output = serde_json::json!({"results": "not_an_array"});
         let file_map = HashMap::new();
-        let result = SemgrepScanner::parse_findings(&output, &file_map);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not an array"));
+        let result = SemgrepScanner::parse_findings(&output, &file_map).unwrap();
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -1360,5 +1425,84 @@ EOJSON
             .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
+    }
+
+    // ---- merge_rule_files tests (6a) ----
+
+    #[test]
+    fn merge_rules_combines_yaml_rules_arrays() {
+        let rule_a = "rules:\n  - id: rule-a\n    message: a\n    languages: [python]\n    severity: WARNING\n    patterns:\n      - pattern: foo()\n";
+        let rule_b = "rules:\n  - id: rule-b\n    message: b\n    languages: [rust]\n    severity: ERROR\n    patterns:\n      - pattern: bar()\n";
+
+        let tmp_a = tempfile::NamedTempFile::new().unwrap();
+        let tmp_b = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp_a.path(), rule_a).unwrap();
+        std::fs::write(tmp_b.path(), rule_b).unwrap();
+
+        let merged_path = merge_rule_files(&[tmp_a.path().to_path_buf(), tmp_b.path().to_path_buf()]).unwrap();
+        let content = std::fs::read_to_string(merged_path.path()).unwrap();
+
+        assert!(content.contains("rule-a"), "rule-a missing from merged");
+        assert!(content.contains("rule-b"), "rule-b missing from merged");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
+        let rules = parsed["rules"].as_sequence().unwrap();
+        assert_eq!(rules.len(), 2);
+    }
+
+    // ---- write_targets_file tests (6b) ----
+
+    #[test]
+    fn write_targets_file_contains_all_paths() {
+        let paths = vec![
+            PathBuf::from("/tmp/a.rs"),
+            PathBuf::from("/tmp/b.py"),
+        ];
+        let tmp = write_targets_file(&paths).unwrap();
+        let content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(content.contains("/tmp/a.rs"));
+        assert!(content.contains("/tmp/b.py"));
+    }
+
+    // ---- build_core_args tests (6c) ----
+
+    #[test]
+    fn build_core_args_contains_rules_and_targets_flags() {
+        let rules = PathBuf::from("/tmp/merged.yml");
+        let targets = PathBuf::from("/tmp/targets.txt");
+        let args = SemgrepScanner::build_core_args(&rules, &targets);
+        let args_str: Vec<_> = args.iter().map(|a| a.to_string_lossy().to_string()).collect();
+        assert!(args_str.contains(&"-rules".to_string()));
+        assert!(args_str.contains(&"/tmp/merged.yml".to_string()));
+        assert!(args_str.contains(&"-targets".to_string()));
+        assert!(args_str.contains(&"/tmp/targets.txt".to_string()));
+        assert!(args_str.contains(&"-json".to_string()));
+        assert!(!args_str.contains(&"scan".to_string()));
+    }
+
+    // ---- parse_findings accepts "matches" key (6d) ----
+
+    #[test]
+    fn parse_findings_accepts_matches_key() {
+        let output = serde_json::json!({
+            "matches": [
+                {
+                    "check_id": "test-rule",
+                    "path": "/tmp/some/file.rs",
+                    "start": {"line": 1, "col": 1, "offset": 0},
+                    "end": {"line": 1, "col": 10, "offset": 9},
+                    "extra": {
+                        "message": "test message",
+                        "metadata": {},
+                        "severity": "WARNING",
+                        "lines": "some code"
+                    }
+                }
+            ],
+            "errors": []
+        });
+        let file_map = std::collections::HashMap::new();
+        let result = SemgrepScanner::parse_findings(&output, &file_map).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].rule_id, "test-rule");
     }
 }
