@@ -49,7 +49,7 @@ fn extract_semgrep_core_from_wheel(wheel_bytes: &[u8]) -> Result<Vec<u8>> {
     let mut archive = zip::ZipArchive::new(cursor)?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        if entry.name() == "semgrep/bin/semgrep-core" {
+        if entry.name().ends_with("semgrep/bin/semgrep-core") {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
             return Ok(buf);
@@ -174,7 +174,7 @@ mod tests {
         let mut buf = std::io::Cursor::new(Vec::new());
         let mut zip = zip::ZipWriter::new(&mut buf);
         let opts = zip::write::FileOptions::<()>::default();
-        zip.start_file("semgrep/bin/semgrep-core", opts).unwrap();
+        zip.start_file("semgrep-1.156.0.data/purelib/semgrep/bin/semgrep-core", opts).unwrap();
         zip.write_all(b"fake binary content").unwrap();
         zip.finish().unwrap();
         let wheel_bytes = buf.into_inner();
