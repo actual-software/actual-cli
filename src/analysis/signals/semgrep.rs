@@ -57,15 +57,12 @@ pub struct SemgrepScanner {
 }
 
 impl SemgrepScanner {
-    /// Create a new scanner, verifying that the semgrep binary is available.
-    pub fn new(timeout: std::time::Duration) -> Result<Self> {
-        Self::with_name("semgrep", timeout)
-    }
-
-    /// Create a scanner by looking up a named binary in PATH.
-    fn with_name(name: &str, timeout: std::time::Duration) -> Result<Self> {
+    /// Create a new scanner, downloading semgrep-core if necessary.
+    pub async fn new(timeout: std::time::Duration) -> Result<Self> {
         let semgrep_bin =
-            which::which(name).with_context(|| format!("{name} binary not found in PATH"))?;
+            crate::analysis::signals::semgrep_installer::ensure_semgrep_core()
+                .await
+                .context("failed to obtain semgrep-core binary")?;
         Ok(Self {
             semgrep_bin,
             timeout,
@@ -1033,44 +1030,6 @@ mod tests {
         }
         // tmp_dir cleanup happens on drop
         drop(tmp_dir);
-    }
-
-    // ---- scanner creation tests ----
-
-    #[test]
-    fn test_new_delegates_to_with_name() {
-        // new() is a one-liner: Self::with_name("semgrep", timeout).
-        // Verify that new() and with_name("semgrep", ...) agree on
-        // success/failure. This is not a pure tautology: if new() were
-        // accidentally changed to look up a different binary name, the two
-        // calls would disagree when exactly one of those names is in PATH.
-        // The delegation body is also auditable by inspection (one line).
-        let timeout = std::time::Duration::from_secs(30);
-        let result_new = SemgrepScanner::new(timeout);
-        let result_with_name = SemgrepScanner::with_name("semgrep", timeout);
-        assert_eq!(result_new.is_ok(), result_with_name.is_ok());
-    }
-
-    #[test]
-    fn test_with_name_finds_existing_binary() {
-        // Use "sh" which exists on all Unix systems, exercising the Ok path
-        // of with_name (and transitively new's internal logic).
-        let result = SemgrepScanner::with_name("sh", std::time::Duration::from_secs(5));
-        assert!(result.is_ok());
-        let scanner = result.unwrap();
-        assert!(!scanner.semgrep_bin.as_os_str().is_empty());
-        assert_eq!(scanner.timeout, std::time::Duration::from_secs(5));
-    }
-
-    #[test]
-    fn test_with_name_fails_for_nonexistent_binary() {
-        let result = SemgrepScanner::with_name(
-            "nonexistent_binary_xyz_12345",
-            std::time::Duration::from_secs(5),
-        );
-        assert!(result.is_err());
-        let msg = result.err().unwrap().to_string();
-        assert!(msg.contains("not found in PATH"));
     }
 
     // ---- scan_batch early-return tests ----
