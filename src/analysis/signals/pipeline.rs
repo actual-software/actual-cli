@@ -90,7 +90,8 @@ pub async fn run_signals_analysis(
     // Build TreeSitterAnalyzer from embedded query packs (shared across projects).
     // Build SemgrepScanner (needs semgrep in PATH; None if unavailable).
     let ts_result = TreeSitterAnalyzer::from_embedded();
-    let scanner = SemgrepScanner::new(Duration::from_secs(60)).await
+    let scanner = SemgrepScanner::new(Duration::from_secs(60))
+        .await
         .inspect_err(|e| tracing::debug!("semgrep not available: {e}; tree-sitter signals only"))
         .ok();
 
