@@ -42,7 +42,15 @@ pub(crate) fn platform_wheel_info() -> Option<WheelInfo> {
 
 /// Returns the OS-appropriate path where semgrep-core will be cached.
 /// Path: `<data_local_dir>/actual/semgrep-core`
+///
+/// In test builds, the `ACTUAL_SEMGREP_CORE_PATH` environment variable overrides
+/// the path so tests can inject a pre-created file or an unwritable path without
+/// touching the real cache on disk.
 pub(crate) fn semgrep_core_cache_path() -> PathBuf {
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("ACTUAL_SEMGREP_CORE_PATH") {
+        return PathBuf::from(path);
+    }
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("~/.local/share"));
     base.join("actual").join("semgrep-core")
 }
@@ -164,6 +172,21 @@ mod tests {
         let path_str = path.to_string_lossy();
         assert!(path_str.contains("actual") || path_str.contains("local"));
         assert!(path_str.ends_with("semgrep-core"));
+    }
+
+    // Mutex to serialize tests that mutate ACTUAL_SEMGREP_CORE_PATH.
+    static CACHE_PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn cache_path_env_override_is_respected() {
+        let _lock = CACHE_PATH_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let override_path = dir.path().join("custom-semgrep-core");
+        // SAFETY: guarded by CACHE_PATH_ENV_LOCK.
+        unsafe { std::env::set_var("ACTUAL_SEMGREP_CORE_PATH", &override_path) };
+        let result = semgrep_core_cache_path();
+        unsafe { std::env::remove_var("ACTUAL_SEMGREP_CORE_PATH") };
+        assert_eq!(result, override_path);
     }
 
     #[test]
