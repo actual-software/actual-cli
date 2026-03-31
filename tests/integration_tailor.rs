@@ -148,6 +148,7 @@ mod tests {
         assert!(content.contains("<!-- managed:actual-start -->"));
         assert!(content.contains("<!-- managed:actual-end -->"));
         // Metadata (v2-governance now always present since all ADRs get per-file output)
+        assert!(content.contains("<!-- adr-ids:"));
         assert!(content.contains("adr-001"));
         assert!(content.contains("<!-- version: 1 -->"));
         assert!(content.contains("adr_governance"));

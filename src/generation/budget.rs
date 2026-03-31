@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(selected.len() + excluded, 31); // all accounted for
 
         // Total chars of selected sections should be within budget
-        let total_chars: usize = selected.iter().map(|s| estimate_section_chars(s)).sum();
+        let total_chars: usize = selected.iter().map(estimate_section_chars).sum();
         assert!(total_chars <= MAX_MANAGED_CHARS);
     }
 
