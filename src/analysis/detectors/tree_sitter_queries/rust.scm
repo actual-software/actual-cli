@@ -91,7 +91,7 @@
 ; @leaf_id: 17
 ; @confidence: 0.9
 (function_item
-  "async"
+  (function_modifiers "async")
   name: (identifier) @fn_name)
 
 ; @rule_id: ts.rust.await_expression
@@ -122,23 +122,19 @@
 ; @facet_slot: test.frameworks
 ; @leaf_id: 39
 ; @confidence: 0.95
-(function_item
-  (attribute_item
-    (attribute
-      (identifier) @attr (#eq? @attr "test")))
-  name: (identifier) @fn_name)
+(attribute_item
+  (attribute
+    (identifier) @attr (#eq? @attr "test")))
 
 ; @rule_id: ts.rust.test_module
 ; @facet_slot: test.frameworks
 ; @leaf_id: 39
 ; @confidence: 0.9
-(mod_item
-  (attribute_item
-    (attribute
-      (identifier) @attr (#eq? @attr "cfg")
-      arguments: (token_tree) @args))
-  (#match? @args "test")
-  name: (identifier) @mod_name)
+((attribute_item
+  (attribute
+    (identifier) @attr (#eq? @attr "cfg")
+    arguments: (token_tree) @args))
+ (#match? @args "test"))
 
 ; =============================================================================
 ; OBSERVABILITY - Tracing (leaf_id: 46, 48)

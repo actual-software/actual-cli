@@ -91,7 +91,7 @@ pub async fn run_signals_analysis(
     // Build SemgrepScanner (needs semgrep in PATH; None if unavailable).
     let ts_result = TreeSitterAnalyzer::from_embedded();
     let scanner = SemgrepScanner::new(Duration::from_secs(60))
-        .inspect_err(|e| tracing::warn!("semgrep not available: {e}; tree-sitter signals only"))
+        .inspect_err(|e| tracing::debug!("semgrep not available: {e}; tree-sitter signals only"))
         .ok();
 
     run_signals_analysis_inner(working_dir, analysis, ts_result, scanner).await
@@ -160,7 +160,8 @@ async fn analyze_project(
 ) -> anyhow::Result<CanonicalIR> {
     let source_files = collect_source_files(project_dir);
     if source_files.is_empty() {
-        anyhow::bail!("no source files found");
+        tracing::debug!(project = %project_path, "signals analysis skipped: no source files found");
+        return Ok(build_canonical_ir("", "", &[]));
     }
 
     let mut all_matches = Vec::new();

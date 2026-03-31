@@ -50,7 +50,7 @@
 ; @leaf_id: 24
 ; @confidence: 0.8
 (namespace_definition
-  name: (identifier) @namespace_name)
+  name: (namespace_identifier) @namespace_name)
 
 ; =============================================================================
 ; INCLUDES - Dependencies (leaf_id: 20)
