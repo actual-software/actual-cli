@@ -83,11 +83,7 @@ async fn download_with_progress(url: &str) -> Result<Vec<u8>> {
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         bytes.extend_from_slice(&chunk);
-        tracing::debug!(
-            "downloading semgrep-core: {}/{} bytes",
-            bytes.len(),
-            total
-        );
+        tracing::debug!("downloading semgrep-core: {}/{} bytes", bytes.len(), total);
     }
     Ok(bytes)
 }
