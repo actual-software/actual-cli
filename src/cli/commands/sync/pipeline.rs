@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use crate::analysis::cache::{get_git_branch, get_git_head, run_analysis_cached};
 use crate::analysis::confirm::ConfirmAction;
+use crate::analysis::signals::semgrep_installer;
 use crate::analysis::types::{Project, ProjectSelection, RepoAnalysis};
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
@@ -272,26 +273,44 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         ));
     }
 
-    // Semgrep check
-    let semgrep_found = semgrep_check
-        .as_ref()
-        .map(|f| f())
-        .unwrap_or_else(|| which::which("semgrep").is_ok());
-    if semgrep_found {
-        pipeline.println(&format!("  {:<9} {} Found", "Semgrep", theme::SUCCESS));
+    // Semgrep check — ensure semgrep-core is cached (auto-download on first use).
+    // The runtime is created here so the async download can run during the
+    // Environment phase, where pipeline.println() surfaces status cleanly
+    // through the TUI log pane rather than via direct stderr writes.
+    // `semgrep_check` overrides this for tests (avoids network + disk I/O).
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| ActualError::InternalError(format!("Failed to create async runtime: {e}")))?;
+    if let Some(check) = semgrep_check {
+        if check() {
+            pipeline.println(&format!("  {:<9} {} Found", "Semgrep", theme::SUCCESS));
+        } else {
+            pipeline.println(&format!(
+                "  {:<9} {} Unavailable — scan may be limited",
+                "Semgrep",
+                theme::WARN
+            ));
+        }
     } else {
-        pipeline.println(&format!(
-            "  {:<9} {} Not found — install with: pip install semgrep",
-            "Semgrep",
-            theme::ERROR
-        ));
-        pipeline.println("");
-        pipeline.error(
-            SyncPhase::Environment,
-            "semgrep is required but not installed",
-        );
-        pipeline.finish_remaining();
-        return Err(ActualError::SemgrepNotFound);
+        let semgrep_cache = semgrep_installer::semgrep_core_cache_path();
+        if !semgrep_cache.exists() {
+            pipeline.println(&format!(
+                "  {:<9} Downloading v{}...",
+                "Semgrep",
+                semgrep_installer::SEMGREP_VERSION
+            ));
+        }
+        match rt.block_on(semgrep_installer::ensure_semgrep_core()) {
+            Ok(_) => {
+                pipeline.println(&format!("  {:<9} {} Found", "Semgrep", theme::SUCCESS));
+            }
+            Err(e) => {
+                pipeline.println(&format!(
+                    "  {:<9} {} Unavailable — scan may be limited: {e}",
+                    "Semgrep",
+                    theme::WARN
+                ));
+            }
+        }
     }
 
     // Blank line for visual breathing room.
@@ -392,8 +411,6 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         .to_owned();
 
     pipeline.start(SyncPhase::Fetch, "Fetching ADRs...");
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| ActualError::InternalError(format!("Failed to create async runtime: {e}")))?;
 
     // Run signals analysis (tree-sitter + semgrep) to enrich the match request.
     let signals = rt.block_on(crate::analysis::signals::run_signals_analysis(
@@ -6674,13 +6691,14 @@ mod tests {
     }
 
     #[test]
-    fn run_sync_semgrep_not_found_aborts_in_environment_phase() {
-        // Inject a semgrep_check that always returns false to exercise the
-        // SemgrepNotFound error path without touching the process PATH.
+    fn run_sync_semgrep_unavailable_degrades_gracefully() {
+        // Inject a semgrep_check that always returns false — semgrep unavailability
+        // should now print a warning and continue rather than aborting with SemgrepNotFound.
+        let server = mock_api_server();
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
-        let args = make_sync_args(false, false, true, false, "http://unused");
+        let args = make_sync_args(false, false, true, false, &server.url());
         let result = super::run_sync_with_probe(
             &args,
             dir.path(),
@@ -6693,8 +6711,8 @@ mod tests {
             Some(Box::new(|| false)),
         );
         assert!(
-            matches!(result, Err(ActualError::SemgrepNotFound)),
-            "expected SemgrepNotFound from injected check, got: {result:?}"
+            !matches!(result, Err(ActualError::SemgrepNotFound)),
+            "semgrep unavailability should degrade gracefully, not abort: {result:?}"
         );
     }
 
