@@ -130,6 +130,15 @@ async fn run_signals_analysis_inner(
     for project in &analysis.projects {
         let project_dir = working_dir.join(&project.path);
 
+        let source_files = collect_source_files(&project_dir);
+        if source_files.is_empty() {
+            tracing::debug!(
+                project = %project.path,
+                "signals analysis skipped: no source files found"
+            );
+            continue;
+        }
+
         match analyze_project(
             &project_dir,
             &project.path,
@@ -160,8 +169,7 @@ async fn analyze_project(
 ) -> anyhow::Result<CanonicalIR> {
     let source_files = collect_source_files(project_dir);
     if source_files.is_empty() {
-        tracing::debug!(project = %project_path, "signals analysis skipped: no source files found");
-        return Ok(build_canonical_ir("", "", &[]));
+        anyhow::bail!("no source files found");
     }
 
     let mut all_matches = Vec::new();
