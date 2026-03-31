@@ -996,10 +996,7 @@ EOJSON
         let result = canonicalize_with_context(&nonexistent);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("failed to canonicalize"),
-            "expected 'failed to canonicalize' in error, got: {msg}"
-        );
+        assert!(msg.contains("failed to canonicalize"), "{msg}");
     }
 
     #[test]
@@ -1011,10 +1008,7 @@ EOJSON
         let result = SemgrepScanner::prepare_temp_files(&files);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("too large"),
-            "expected 'too large' in error, got: {msg}"
-        );
+        assert!(msg.contains("too large"), "{msg}");
     }
 
     #[test]

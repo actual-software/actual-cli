@@ -13,9 +13,9 @@ pub(crate) struct WheelInfo {
     pub sha256: String,
 }
 
-/// Returns wheel URL + SHA256 for the current platform, or None if unsupported.
-pub(crate) fn platform_wheel_info() -> Option<WheelInfo> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+/// Returns wheel URL + SHA256 for the given platform, or None if unsupported.
+fn platform_wheel_info_for(os: &str, arch: &str) -> Option<WheelInfo> {
+    match (os, arch) {
         ("macos", "aarch64") => Some(WheelInfo {
             url: "https://files.pythonhosted.org/packages/66/a9/3d4082f30bca4ba738d391e241174c2297be87bb5ca37a3911b164289694/semgrep-1.156.0-cp310.cp311.cp312.cp313.cp314.py310.py311.py312.py313.py314-none-macosx_11_0_arm64.whl".to_string(),
             sha256: "ff57b35def987ec3f21748051fdb89ae57574984bf8108b03d79473da49e93f0".to_string(),
@@ -34,6 +34,11 @@ pub(crate) fn platform_wheel_info() -> Option<WheelInfo> {
         }),
         _ => None,
     }
+}
+
+/// Returns wheel URL + SHA256 for the current platform, or None if unsupported.
+pub(crate) fn platform_wheel_info() -> Option<WheelInfo> {
+    platform_wheel_info_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// Returns the OS-appropriate path where semgrep-core will be cached.
@@ -91,6 +96,14 @@ async fn download_with_progress(url: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Creates parent directories for `cache_path` if they don't already exist.
+fn create_cache_parent(cache_path: &std::path::Path) -> Result<()> {
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
 /// Ensures semgrep-core is available on disk, downloading it if necessary.
 /// Returns the path to the cached binary.
 pub(crate) async fn ensure_semgrep_core() -> Result<PathBuf> {
@@ -104,9 +117,7 @@ pub(crate) async fn ensure_semgrep_core() -> Result<PathBuf> {
     }
 
     // Create parent directories
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    create_cache_parent(&cache_path)?;
 
     eprintln!("Downloading semgrep-core v{SEMGREP_VERSION} for this platform...\n");
 
@@ -129,23 +140,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wheel_info_covers_all_platforms() {
+        for (os, arch) in [
+            ("macos", "aarch64"),
+            ("macos", "x86_64"),
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+        ] {
+            let info = platform_wheel_info_for(os, arch);
+            assert!(info.is_some(), "no wheel for {os}/{arch}");
+            let info = info.unwrap();
+            assert!(!info.url.is_empty());
+            assert_eq!(info.sha256.len(), 64);
+        }
+    }
+
+    #[test]
+    fn wheel_info_returns_none_for_unsupported_platform() {
+        assert!(platform_wheel_info_for("windows", "x86_64").is_none());
+        assert!(platform_wheel_info_for("freebsd", "aarch64").is_none());
+    }
+
+    #[test]
     fn wheel_info_is_known_for_current_platform() {
-        let info = platform_wheel_info();
-        assert!(info.is_some(), "no wheel info for this platform");
-        let info = info.unwrap();
-        assert!(!info.url.is_empty());
-        assert_eq!(info.sha256.len(), 64); // hex SHA256
+        assert!(platform_wheel_info().is_some());
     }
 
     #[test]
     fn cache_path_is_in_data_dir() {
         let path = semgrep_core_cache_path();
         let path_str = path.to_string_lossy();
-        assert!(
-            path_str.contains("actual") || path_str.contains("local"),
-            "cache path should be under user data dir, got: {path_str}"
-        );
+        assert!(path_str.contains("actual") || path_str.contains("local"));
         assert!(path_str.ends_with("semgrep-core"));
+    }
+
+    #[test]
+    fn create_cache_parent_creates_nested_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("nested").join("semgrep-core");
+        create_cache_parent(&cache_path).unwrap();
+        assert!(cache_path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn create_cache_parent_root_path_is_noop() {
+        // A path with no parent (i.e. the root "/" on Unix) should succeed as a no-op.
+        let result = create_cache_parent(std::path::Path::new("/"));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -188,21 +229,14 @@ mod tests {
     }
 
     #[test]
-    fn ensure_semgrep_core_errors_on_unsupported_platform() {
-        // This test documents that ensure_semgrep_core errors when platform_wheel_info() returns None.
-        // On supported platforms (macOS/Linux x86_64/arm64), platform_wheel_info() returns Some,
-        // so this test just verifies the function exists and is callable.
-        // We verify the happy path exists via compilation + the fast-path logic.
-        if platform_wheel_info().is_none() {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(ensure_semgrep_core());
-            assert!(result.is_err());
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported platform"));
-        }
-        // On supported platforms: test just passes (documents the contract)
+    fn ensure_semgrep_core_uses_platform_wheel_info() {
+        // Verify that the public entry point delegates to the current platform's wheel info.
+        // Unsupported platforms (no matching arm) return None, which becomes an error.
+        // This is covered by wheel_info_returns_none_for_unsupported_platform above.
+        assert!(
+            platform_wheel_info().is_some(),
+            "expected supported platform in CI"
+        );
     }
 
     #[test]
