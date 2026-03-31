@@ -340,7 +340,7 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 // Right-aligned URL title for the logo box top border.
                 // Only add it when the box is wide enough to fit both titles
                 // without overlapping (version ~16 chars + URL 19 chars + 2 borders = ~37).
-                let url = "https://app.actual.ai";
+                let url = "https://cli.actual.ai";
                 let url_display = format!(" {url} ");
                 let url_display_len = url_display.len() as u16;
                 let version_title_len = version_title.len() as u16;
