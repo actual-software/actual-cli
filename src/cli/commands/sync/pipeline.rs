@@ -126,10 +126,17 @@ pub(crate) fn run_sync<R: TailoringRunner>(
         auth_display,
         runner_display,
         None,
+        None,
     )
 }
 
-/// Inner implementation of [`run_sync`] that accepts an optional runner probe.
+/// Inner implementation of [`run_sync`] that accepts an optional runner probe
+/// and an optional semgrep availability check.
+///
+/// `semgrep_check` is an optional override for the semgrep availability check.
+/// When `None`, the real `which::which("semgrep")` is used.  Tests pass
+/// `Some(Box::new(|| false))` to exercise the not-found path without
+/// manipulating the process `PATH`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     args: &SyncArgs,
@@ -140,6 +147,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     auth_display: Option<&AuthDisplay>,
     runner_display: Option<&RunnerDisplay>,
     runner_probe: Option<Box<dyn Fn() -> Result<(), ActualError>>>,
+    semgrep_check: Option<Box<dyn Fn() -> bool>>,
 ) -> Result<(), ActualError> {
     // ── Phase 1: env check + analysis ──
 
@@ -265,24 +273,25 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     }
 
     // Semgrep check
-    match which::which("semgrep") {
-        Ok(_) => {
-            pipeline.println(&format!("  {:<9} {} Found", "Semgrep", theme::SUCCESS));
-        }
-        Err(_) => {
-            pipeline.println(&format!(
-                "  {:<9} {} Not found — install with: pip install semgrep",
-                "Semgrep",
-                theme::ERROR
-            ));
-            pipeline.println("");
-            pipeline.error(
-                SyncPhase::Environment,
-                "semgrep is required but not installed",
-            );
-            pipeline.finish_remaining();
-            return Err(ActualError::SemgrepNotFound);
-        }
+    let semgrep_found = semgrep_check
+        .as_ref()
+        .map(|f| f())
+        .unwrap_or_else(|| which::which("semgrep").is_ok());
+    if semgrep_found {
+        pipeline.println(&format!("  {:<9} {} Found", "Semgrep", theme::SUCCESS));
+    } else {
+        pipeline.println(&format!(
+            "  {:<9} {} Not found — install with: pip install semgrep",
+            "Semgrep",
+            theme::ERROR
+        ));
+        pipeline.println("");
+        pipeline.error(
+            SyncPhase::Environment,
+            "semgrep is required but not installed",
+        );
+        pipeline.finish_remaining();
+        return Err(ActualError::SemgrepNotFound);
     }
 
     // Blank line for visual breathing room.
@@ -6630,6 +6639,7 @@ mod tests {
             None,
             None,
             Some(probe),
+            None,
         );
         assert!(
             matches!(result, Err(ActualError::CodexNotAuthenticated)),
@@ -6655,6 +6665,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(
             result.is_ok(),
@@ -6662,18 +6673,10 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn run_sync_semgrep_not_found_aborts_in_environment_phase() {
-        // Override PATH to an empty directory so `which::which("semgrep")` fails,
-        // exercising the SemgrepNotFound error path in the Environment phase.
-        let _lock = crate::testutil::ENV_MUTEX
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let empty_dir = tempfile::tempdir().unwrap();
-        let _path_guard =
-            crate::testutil::EnvGuard::set("PATH", empty_dir.path().to_str().unwrap());
-
+        // Inject a semgrep_check that always returns false to exercise the
+        // SemgrepNotFound error path without touching the process PATH.
         let dir = tempfile::tempdir().unwrap();
         let term = MockTerminal::new(vec![]);
         let runner = MockRunner::new(VALID_ANALYSIS_JSON);
@@ -6687,10 +6690,11 @@ mod tests {
             None,
             None,
             None,
+            Some(Box::new(|| false)),
         );
         assert!(
             matches!(result, Err(ActualError::SemgrepNotFound)),
-            "expected SemgrepNotFound when semgrep is absent from PATH, got: {result:?}"
+            "expected SemgrepNotFound from injected check, got: {result:?}"
         );
     }
 

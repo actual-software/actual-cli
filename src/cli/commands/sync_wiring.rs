@@ -400,6 +400,7 @@ fn run_codex_cli(
         Some(&auth_display),
         Some(&runner_display),
         Some(runner_probe),
+        None,
     );
     // Fall back to the OpenAI Responses API when Codex CLI reports a
     // model-level error (e.g. "model is not supported").  This lets
