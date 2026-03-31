@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use sha2::Digest;
+use std::io::Read;
 use std::path::PathBuf;
 
 pub(crate) const SEMGREP_VERSION: &str = "1.156.0";
@@ -38,6 +39,21 @@ pub(crate) fn semgrep_core_cache_path() -> PathBuf {
     let base = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("~/.local/share"));
     base.join("actual").join("semgrep-core")
+}
+
+/// Extracts the `semgrep/bin/semgrep-core` binary from a PyPI wheel (zip) archive.
+fn extract_semgrep_core_from_wheel(wheel_bytes: &[u8]) -> Result<Vec<u8>> {
+    let cursor = std::io::Cursor::new(wheel_bytes);
+    let mut archive = zip::ZipArchive::new(cursor)?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        if entry.name() == "semgrep/bin/semgrep-core" {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            return Ok(buf);
+        }
+    }
+    bail!("semgrep/bin/semgrep-core not found in wheel archive")
 }
 
 /// Verifies the SHA256 checksum of `data` against the `expected` hex string.
@@ -90,5 +106,36 @@ mod tests {
         let result = verify_sha256(data, "deadbeef");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn extract_semgrep_core_from_bytes_succeeds_on_valid_zip() {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::FileOptions::<()>::default();
+        zip.start_file("semgrep/bin/semgrep-core", opts).unwrap();
+        zip.write_all(b"fake binary content").unwrap();
+        zip.finish().unwrap();
+        let wheel_bytes = buf.into_inner();
+
+        let extracted = extract_semgrep_core_from_wheel(&wheel_bytes).unwrap();
+        assert_eq!(extracted, b"fake binary content");
+    }
+
+    #[test]
+    fn extract_semgrep_core_errors_when_entry_missing() {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::FileOptions::<()>::default();
+        zip.start_file("semgrep/something_else.txt", opts).unwrap();
+        zip.write_all(b"irrelevant").unwrap();
+        zip.finish().unwrap();
+        let wheel_bytes = buf.into_inner();
+
+        let result = extract_semgrep_core_from_wheel(&wheel_bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("semgrep/bin/semgrep-core"));
     }
 }
