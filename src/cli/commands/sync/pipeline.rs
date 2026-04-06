@@ -162,6 +162,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     // works during all phases, not just tailoring.
     let (nav_poller, nav_rx) = super::super::sync_kb_poller::setup_nav_only(pipeline.is_tui());
     pipeline.set_nav_rx_opt(nav_rx);
+    let mut nav_poller = Some(nav_poller);
 
     pipeline.start(SyncPhase::Environment, "Checking environment...");
 
@@ -623,7 +624,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         // Stop the nav-only poller before starting the tailoring poller
         // (which also handles quit/cancel keys) to avoid two threads reading
         // crossterm events simultaneously.
-        drop(nav_poller);
+        drop(nav_poller.take());
 
         // In TUI mode (raw mode active) the terminal consumes keyboard input,
         // so OS-level SIGINT from Ctrl+C may not reach the process reliably.
@@ -853,6 +854,12 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             tel_rt.block_on(report_metrics(&metrics, &config, &api_url));
         }
     }
+
+    // Stop the nav poller (if still alive) before entering review mode,
+    // so its background thread doesn't compete for crossterm key events
+    // with `wait_for_keypress`'s direct key reader.
+    drop(nav_poller.take());
+    pipeline.set_nav_rx_opt(None);
 
     pipeline.wait_for_keypress();
     Ok(())
