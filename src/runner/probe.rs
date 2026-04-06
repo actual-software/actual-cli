@@ -322,17 +322,17 @@ mod tests {
 
     /// Write content to `path`, fsync it, and mark it executable.
     ///
-    /// Using `File::create` + `write_all` + `sync_all` + explicit `drop` (rather
-    /// than `std::fs::write`) guarantees the kernel sees no open write fds before
-    /// the file is exec'd, preventing spurious ETXTBSY errors under CI load.
+    /// Write a shell script to `path` with executable permissions, using an
+    /// atomic rename to prevent ETXTBSY (os error 26) under CI load.
+    ///
+    /// The sequence is: write to `.tmp` sibling → `sync_all` → close fd →
+    /// `chmod 755` → rename to final path → `fsync` parent directory.
+    /// The parent-dir fsync ensures the rename is visible to subsequent
+    /// `exec` calls on Linux, where directory metadata can lag behind.
     #[cfg(unix)]
     fn write_executable_script(path: &std::path::Path, content: &[u8]) {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
-        // Write to a sibling .tmp file, set permissions, then atomically rename.
-        // This avoids ETXTBSY (os error 26) on Linux, which can occur when the
-        // kernel hasn't fully released a write-open file descriptor before exec
-        // is attempted on the same path.
         let tmp = path.with_extension("sh.tmp");
         let mut file = std::fs::File::create(&tmp).unwrap();
         file.write_all(content).unwrap();
@@ -340,6 +340,13 @@ mod tests {
         drop(file);
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::rename(&tmp, path).unwrap();
+        // Fsync the parent directory so the rename is durable and visible
+        // to exec on Linux (prevents ETXTBSY under heavy parallel CI load).
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
     }
 
     // ── error helper function tests ───────────────────────────────────────────
