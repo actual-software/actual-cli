@@ -43,8 +43,6 @@ impl LogPane {
     }
 
     /// Returns all raw buffer lines without wrapping or padding.
-    /// Useful in tests for asserting log content without width/height artefacts.
-    #[cfg(test)]
     pub fn raw_lines(&self) -> Vec<&str> {
         self.buffer.iter().map(String::as_str).collect()
     }

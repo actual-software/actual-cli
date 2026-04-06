@@ -6,6 +6,17 @@ const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦
 /// Horizontal padding reserved on the right side of step lines (matches the left prefix width).
 const RIGHT_PAD: usize = 2;
 
+/// Brief descriptions for each sync step, shown below Waiting steps so
+/// first-time users understand what's coming. Each must be ≤38 chars to
+/// fit within the 42-char inner width of the Steps box.
+pub const STEP_DESCRIPTIONS: &[&str] = &[
+    "Verifies auth, tools, and repo setup",
+    "Scans code for languages and structure",
+    "Downloads ADRs matching your stack",
+    "AI adapts ADRs to your codebase",
+    "Confirms and writes rule files",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepStatus {
     Waiting,
@@ -44,6 +55,11 @@ impl StepsPane {
         Self {
             steps: labels.iter().map(|l| Step::new(l)).collect(),
         }
+    }
+
+    /// Return the description for a step at the given index, if available.
+    pub fn description(index: usize) -> Option<&'static str> {
+        STEP_DESCRIPTIONS.get(index).copied()
     }
 
     /// Returns the icon character for a step status.
@@ -456,5 +472,43 @@ mod tests {
         assert!(rendered.ends_with("[1.0s]"));
         // Left side starts with 2-space prefix
         assert!(rendered.starts_with("  "));
+    }
+
+    // --- description tests ---
+
+    #[test]
+    fn test_description_returns_correct_text() {
+        assert_eq!(
+            StepsPane::description(0),
+            Some("Verifies auth, tools, and repo setup")
+        );
+        assert_eq!(
+            StepsPane::description(4),
+            Some("Confirms and writes rule files")
+        );
+    }
+
+    #[test]
+    fn test_description_out_of_bounds() {
+        assert_eq!(StepsPane::description(5), None);
+        assert_eq!(StepsPane::description(100), None);
+    }
+
+    #[test]
+    fn test_descriptions_fit_inner_width() {
+        // Steps box inner width is 42 chars. With 6-char indent, descriptions
+        // must be ≤36 chars. We allow up to 38 chars for the raw description.
+        for (i, desc) in STEP_DESCRIPTIONS.iter().enumerate() {
+            assert!(
+                desc.len() <= 38,
+                "description[{i}] is {} chars, exceeds 38: {desc:?}",
+                desc.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_descriptions_count_matches_steps() {
+        assert_eq!(STEP_DESCRIPTIONS.len(), 5);
     }
 }
