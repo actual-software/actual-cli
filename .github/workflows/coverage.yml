@@ -55,7 +55,20 @@ jobs:
           # on real TTY), tui-test crate PTY files (pty.rs, session.rs —
           # OS-level pseudo-terminal management with untestable TTY error
           # paths), and test files from coverage measurement.
-          cargo llvm-cov --lib --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
+          # Run lib tests + all integration tests except tui_e2e (which hangs
+          # under coverage instrumentation due to crossterm TTY interactions).
+          cargo llvm-cov --lib \
+            --test cli_test \
+            --test integration_errors \
+            --test integration_http_runners \
+            --test integration_no_tailor \
+            --test integration_smoke \
+            --test integration_static_analyzer \
+            --test integration_sync_modes \
+            --test integration_tailor \
+            --test lib_test \
+            --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' \
+            --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
           COV_EXIT=${PIPESTATUS[0]}
           echo "cov_exit=$COV_EXIT" >> $GITHUB_ENV
 
