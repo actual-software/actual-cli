@@ -4,7 +4,9 @@ use std::time::Duration;
 use crate::analysis::cache::{get_git_branch, get_git_head, run_analysis_cached};
 use crate::analysis::confirm::ConfirmAction;
 use crate::analysis::signals::semgrep_installer;
-use crate::analysis::types::{Project, ProjectSelection, RepoAnalysis};
+use crate::analysis::types::{
+    Framework, FrameworkCategory, Project, ProjectSelection, RepoAnalysis,
+};
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
 use crate::cli::args::SyncArgs;
@@ -155,6 +157,11 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     // 1. Create pipeline. The banner and version are shown in the left-column
     //    banner box (rendered by the TUI directly), not in the log pane.
     let mut pipeline = TuiRenderer::new_with_version(false, args.no_tui, env!("CARGO_PKG_VERSION"));
+
+    // Start a nav-only keyboard poller so navigation (↑/↓, scroll, fullscreen)
+    // works during all phases, not just tailoring.
+    let (nav_poller, nav_rx) = super::super::sync_kb_poller::setup_nav_only(pipeline.is_tui());
+    pipeline.set_nav_rx_opt(nav_rx);
 
     pipeline.start(SyncPhase::Environment, "Checking environment...");
 
@@ -613,6 +620,11 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         runner.set_event_tx(event_tx);
 
+        // Stop the nav-only poller before starting the tailoring poller
+        // (which also handles quit/cancel keys) to avoid two threads reading
+        // crossterm events simultaneously.
+        drop(nav_poller);
+
         // In TUI mode (raw mode active) the terminal consumes keyboard input,
         // so OS-level SIGINT from Ctrl+C may not reach the process reliably.
         // `sync_kb_poller::setup` optionally spawns a background poller thread
@@ -651,6 +663,23 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
                         output.summary.applicable, output.summary.files_generated
                     ),
                 );
+
+                // When tailoring produced no files, explain why so the user
+                // isn't left wondering what happened.
+                if output.files.is_empty() && !output.skipped_adrs.is_empty() {
+                    pipeline.println("");
+                    pipeline.println(&format!(
+                        "  {} of {} ADRs were not applicable to this codebase:",
+                        output.skipped_adrs.len(),
+                        output.summary.total_input
+                    ));
+                    for adr in &output.skipped_adrs {
+                        let safe_id = console::strip_ansi_codes(&adr.id);
+                        let safe_reason = console::strip_ansi_codes(&adr.reason);
+                        pipeline.println(&format!("    {safe_id}: {safe_reason}"));
+                    }
+                }
+
                 store_tailoring_cache(
                     &mut config,
                     cfg_path,
@@ -1131,6 +1160,12 @@ fn handle_confirm_action(
 /// so index 0 is the top language. The first framework whose manifest source is
 /// compatible with that language is selected; if none are compatible, `framework`
 /// is set to `None`.
+///
+/// Config-file-sourced infrastructure frameworks (Devops/BuildSystem categories)
+/// are excluded from auto-selection because they describe deployment tooling
+/// rather than application frameworks, producing odd combinations like
+/// "JavaScript/Docker". They remain in `project.frameworks` for display and are
+/// still available via interactive selection.
 fn auto_select_for_project(project: &mut Project) {
     if project.languages.is_empty() {
         return;
@@ -1141,6 +1176,7 @@ fn auto_select_for_project(project: &mut Project) {
         .frameworks
         .iter()
         .filter(|fw| fw.is_compatible_with(&selected_lang.language))
+        .filter(|fw| !is_infra_config_framework(fw))
         .min_by_key(|fw| match &fw.source {
             Some(crate::analysis::static_analyzer::manifests::ManifestSource::ConfigFile) => 1u8,
             _ => 0u8,
@@ -1152,6 +1188,20 @@ fn auto_select_for_project(project: &mut Project) {
         framework: selected_fw,
         auto_selected: true,
     });
+}
+
+/// Returns `true` for frameworks that are config-file-sourced AND belong to an
+/// infrastructure category (Devops or BuildSystem). These are deployment/CI
+/// tooling rather than application frameworks, so they should not be
+/// auto-selected as the primary framework for ADR matching.
+fn is_infra_config_framework(fw: &Framework) -> bool {
+    matches!(
+        fw.source,
+        Some(crate::analysis::static_analyzer::manifests::ManifestSource::ConfigFile)
+    ) && matches!(
+        fw.category,
+        FrameworkCategory::Devops | FrameworkCategory::BuildSystem
+    )
 }
 
 /// Let the user select language and framework interactively.
@@ -6090,8 +6140,9 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_select_config_file_framework_selected_when_only_option() {
-        // If the only compatible framework is ConfigFile-sourced, it should still be selected.
+    fn test_auto_select_skips_infra_config_framework_when_only_option() {
+        // Config-file-sourced infra frameworks (Devops/BuildSystem) should NOT be
+        // auto-selected — they describe deployment tooling, not application frameworks.
         let mut project = make_project_for_selection(
             vec![LanguageStat {
                 language: Language::TypeScript,
@@ -6109,7 +6160,38 @@ mod tests {
         auto_select_for_project(&mut project);
 
         let sel = project.selection.unwrap();
-        assert_eq!(sel.framework.unwrap().name, "docker");
+        assert!(
+            sel.framework.is_none(),
+            "infra config-file framework should not be auto-selected"
+        );
+    }
+
+    #[test]
+    fn test_auto_select_config_file_app_framework_selected_when_only_option() {
+        // Config-file-sourced *application* frameworks (e.g. nextjs from next.config.js)
+        // should still be auto-selected — only infra categories are skipped.
+        let mut project = make_project_for_selection(
+            vec![LanguageStat {
+                language: Language::TypeScript,
+                loc: 5000,
+            }],
+            vec![Framework {
+                name: "nextjs".to_string(),
+                category: FrameworkCategory::WebFrontend,
+                source: Some(
+                    crate::analysis::static_analyzer::manifests::ManifestSource::ConfigFile,
+                ),
+            }],
+        );
+
+        auto_select_for_project(&mut project);
+
+        let sel = project.selection.unwrap();
+        assert_eq!(
+            sel.framework.unwrap().name,
+            "nextjs",
+            "config-file app framework should still be auto-selected"
+        );
     }
 
     // ── user_select_for_project tests ──

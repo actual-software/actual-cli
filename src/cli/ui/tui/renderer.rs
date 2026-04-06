@@ -15,6 +15,7 @@ use ratatui::{
     Terminal,
 };
 
+use super::clipboard::copy_to_clipboard;
 use super::gradient::{color_for_y, paint_gradient_border};
 use super::log::LogPane;
 use super::steps::{StepStatus, StepsPane};
@@ -44,6 +45,10 @@ pub enum NavCmd {
     ScrollTop,
     /// Jump to the bottom of the log pane (newest content, follow mode).
     ScrollBottom,
+    /// Copy the currently viewed step's log output to the system clipboard.
+    CopyOutput,
+    /// Toggle full-screen output mode (hides the left sidebar).
+    ToggleFullscreen,
 }
 
 /// Abstraction over crossterm event reading so the event loop can be tested
@@ -110,6 +115,10 @@ pub struct RenderContext<'a> {
     pub scroll_offset: usize,
     pub selected: Option<usize>,
     pub version: &'a str,
+    /// Brief flash message (e.g. "Copied to clipboard!") shown in the hint line.
+    pub flash_message: Option<&'a str>,
+    /// When true, the output pane fills the entire terminal (left sidebar hidden).
+    pub fullscreen: bool,
 }
 
 /// Trait-erased interface to a live ratatui terminal.
@@ -198,9 +207,15 @@ fn build_hint_line(
     let has_hint = ctx.hint
         || ctx.confirm.is_some()
         || ctx.file_select.is_some()
-        || ctx.single_select.is_some();
+        || ctx.single_select.is_some()
+        || ctx.flash_message.is_some();
     if !has_hint {
         return None;
+    }
+
+    // Show flash message (e.g. "Copied!") when present, overriding normal hints.
+    if let Some(flash) = ctx.flash_message {
+        return Some(Line::from(format!(" {flash} ")).right_aligned());
     }
 
     let hint_text = if ctx.confirm.is_some() {
@@ -211,14 +226,19 @@ fn build_hint_line(
         " \u{2191}/\u{2193} navigate  Enter select  Esc cancel ".to_string()
     } else {
         let max = ctx.log.max_scroll_wrapped(log_height, log_width);
+        let fs_hint = if ctx.fullscreen {
+            "f/Esc exit fullscreen"
+        } else {
+            "f expand"
+        };
         if max > 0 {
             format!(
-                " ↑/↓ steps  u/d scroll  g/G top/bottom  q quit  [{}/{}] ",
+                " ↑/↓ steps  u/d scroll  g/G top/bottom  y copy  {fs_hint}  q quit  [{}/{}] ",
                 ctx.scroll_offset.min(max),
                 max
             )
         } else {
-            " ↑/↓ steps  q quit ".to_string()
+            format!(" ↑/↓ steps  y copy  {fs_hint}  q quit ")
         }
     };
 
@@ -237,6 +257,9 @@ const BANNER_BOX_HEIGHT: u16 = 15;
 
 /// Horizontal padding (left + right) applied inside the Output panel border.
 const HORIZ_PAD: usize = 2;
+
+/// How long a flash message stays visible before auto-expiring.
+const FLASH_DURATION: Duration = Duration::from_secs(2);
 
 /// Render the steps and log panes into an arbitrary ratatui terminal backend.
 ///
@@ -259,9 +282,9 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                 || ctx.confirm.is_some()
                 || ctx.file_select.is_some()
                 || ctx.single_select.is_some();
-            // In wide mode, hints go into the Output pane's bottom border — no separate footer row.
+            // In wide/fullscreen mode, hints go into the Output pane's bottom border — no separate footer row.
             // In narrow mode, keep the footer row since there's no bordered panel.
-            let needs_footer_row = has_hint && cols < 80;
+            let needs_footer_row = has_hint && !ctx.fullscreen && cols < 80;
             let outer_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(if needs_footer_row {
@@ -276,7 +299,9 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
             // ── Footer hint row (narrow mode only) ──
             if needs_footer_row {
                 let approx_log_height = content_area.height.saturating_sub(2) as usize;
-                let hint_text = if ctx.confirm.is_some() {
+                let hint_text = if let Some(flash) = ctx.flash_message {
+                    format!("  {flash}")
+                } else if ctx.confirm.is_some() {
                     "  \u{2190} \u{2192} select  Enter confirm".to_string()
                 } else if ctx.file_select.is_some() {
                     "  \u{2191}/\u{2193} move  Space toggle  Enter confirm  Esc cancel".to_string()
@@ -287,21 +312,89 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
                     let max = ctx
                         .log
                         .max_scroll_wrapped(approx_log_height, approx_log_width);
+                    let fs_hint = if ctx.fullscreen {
+                        "f/Esc exit fullscreen"
+                    } else {
+                        "f expand"
+                    };
                     if max > 0 {
                         format!(
-                            "  ↑/↓ steps  u/d scroll  g/G top/bottom  q quit  [{}/{}]",
+                            "  ↑/↓ steps  u/d scroll  g/G top/bottom  y copy  {fs_hint}  q quit  [{}/{}]",
                             ctx.scroll_offset.min(max),
                             max
                         )
                     } else {
-                        "  ↑/↓ steps  q quit".to_string()
+                        format!("  ↑/↓ steps  y copy  {fs_hint}  q quit")
                     }
                 };
                 frame.render_widget(Clear, footer_area);
                 frame.render_widget(Paragraph::new(hint_text), footer_area);
             }
 
-            if cols >= 80 {
+            if ctx.fullscreen {
+                // ── Full-screen output mode: output pane fills entire content area ──
+                const OUTPUT_PADDING: usize = 2;
+                let log_inner_height = content_area.height.saturating_sub(2) as usize;
+                let overlay_extra = if ctx.confirm.is_some() {
+                    CONFIRM_LINES
+                } else if let Some(fs) = ctx.file_select {
+                    file_select_line_count(fs.items.len())
+                } else if let Some(ss) = ctx.single_select {
+                    single_select_line_count(ss.items.len())
+                } else {
+                    0
+                };
+                let log_height = log_inner_height.saturating_sub(OUTPUT_PADDING + overlay_extra);
+                let log_width =
+                    content_area.width.saturating_sub(2 + 2 * HORIZ_PAD as u16) as usize;
+                let mut log_lines =
+                    ctx.log
+                        .render_to_string(log_height, log_width, ctx.scroll_offset);
+                let pad = " ".repeat(log_width);
+                log_lines.insert(0, pad.clone());
+                if let Some(cs) = ctx.confirm {
+                    log_lines.push(String::new());
+                    append_confirm_lines(&mut log_lines, cs);
+                } else if let Some(fs) = ctx.file_select {
+                    log_lines.push(String::new());
+                    append_file_select_lines(&mut log_lines, fs);
+                } else if let Some(ss) = ctx.single_select {
+                    append_single_select_lines(&mut log_lines, ss);
+                } else {
+                    log_lines.push(pad);
+                }
+                let log_text = log_lines.join("\n");
+
+                // Show version + step name in title since the sidebar is hidden.
+                let step_label = ctx
+                    .selected
+                    .and_then(|i| ctx.steps.steps.get(i))
+                    .map(|s| s.label.as_str())
+                    .unwrap_or("Output");
+                let version_title =
+                    format!(" actual v{} \u{2500}\u{2500} {step_label} ", ctx.version);
+
+                // Right-aligned URL title, same as the banner box.
+                let url_display = " https://cli.actual.ai ";
+                let url_title = Line::from(url_display.to_string()).right_aligned();
+
+                let hint_line = build_hint_line(&ctx, log_height, log_width);
+                let mut output_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(version_title.as_str())
+                    .title_top(url_title)
+                    .padding(Padding::horizontal(HORIZ_PAD as u16));
+                if let Some(hint) = hint_line {
+                    output_block = output_block.title_bottom(hint);
+                }
+                let log_widget = Paragraph::new(log_text).block(output_block);
+                frame.render_widget(Clear, content_area);
+                frame.render_widget(log_widget, content_area);
+                if use_color {
+                    paint_gradient_border(frame.buffer_mut(), content_area, frame_area);
+                }
+            } else if cols >= 80 {
                 // ── Horizontal split: left (banner + steps) | right (output) ──
                 let h_chunks = Layout::default()
                     .direction(Direction::Horizontal)
@@ -392,10 +485,23 @@ pub fn render_to<B: Backend>(terminal: &mut Terminal<B>, ctx: RenderContext<'_>)
 
                 // Steps box (bottom-left)
                 let step_inner_width = (LEFT_COL_WIDTH as usize).saturating_sub(2);
-                let mut step_lines = ctx.steps.render_lines(step_inner_width, ctx.selected);
-                // Add one line of padding at the top and bottom of the Steps section.
-                step_lines.insert(0, String::new());
-                step_lines.push(String::new());
+                let mut step_lines: Vec<String> = Vec::new();
+                step_lines.push(String::new()); // top padding
+                for (i, step) in ctx.steps.steps.iter().enumerate() {
+                    step_lines.push(StepsPane::render_step(
+                        step,
+                        step_inner_width,
+                        ctx.selected == Some(i),
+                    ));
+                    // Show a description subtitle below Waiting steps so
+                    // first-time users understand what each step does.
+                    if matches!(step.status, StepStatus::Waiting) {
+                        if let Some(desc) = StepsPane::description(i) {
+                            step_lines.push(format!("      {desc}"));
+                        }
+                    }
+                }
+                step_lines.push(String::new()); // bottom padding
                 let step_text = step_lines.join("\n");
                 let step_widget = Paragraph::new(step_text).block(
                     Block::default()
@@ -550,6 +656,11 @@ pub struct TuiRenderer {
     viewing_step: Option<usize>,
     /// Lines scrolled up from the bottom of the log pane (0 = pinned to bottom).
     scroll_offset: usize,
+    /// Brief flash message shown in the hint line (e.g. "Copied to clipboard!").
+    /// Auto-expires after [`FLASH_DURATION`].
+    flash_message: Option<(String, Instant)>,
+    /// Whether the output pane is expanded to fill the entire terminal.
+    fullscreen: bool,
     /// Version string shown in the banner box title.
     version: String,
     /// Receives navigation commands from the background keyboard poller during execution.
@@ -610,6 +721,8 @@ impl TuiRenderer {
             selected_step: None,
             viewing_step: None,
             scroll_offset: 0,
+            flash_message: None,
+            fullscreen: false,
             version: version.to_string(),
             nav_rx: None,
         }
@@ -664,6 +777,8 @@ impl TuiRenderer {
             selected_step: None,
             viewing_step: None,
             scroll_offset: 0,
+            flash_message: None,
+            fullscreen: false,
             version: "0.0.0-test".to_string(),
             nav_rx: None,
         }
@@ -735,6 +850,22 @@ impl TuiRenderer {
                 self.scroll_offset = usize::MAX;
             }
             NavCmd::ScrollBottom => {
+                self.scroll_offset = 0;
+            }
+            NavCmd::CopyOutput => {
+                let log_idx = self.viewing_step.unwrap_or(self.active_step);
+                let text = self.logs[log_idx].raw_lines().join("\n");
+                if copy_to_clipboard(&text) {
+                    self.flash_message = Some(("Copied to clipboard!".to_string(), Instant::now()));
+                } else {
+                    self.flash_message = Some((
+                        "Copy failed (no clipboard command found)".to_string(),
+                        Instant::now(),
+                    ));
+                }
+            }
+            NavCmd::ToggleFullscreen => {
+                self.fullscreen = !self.fullscreen;
                 self.scroll_offset = 0;
             }
         }
@@ -928,6 +1059,8 @@ impl TuiRenderer {
                 let Ok(key) = source.next_key() else {
                     break;
                 };
+                // Clear any flash message from the previous key.
+                self.flash_message = None;
                 // Compute log_height matching render_to's formula exactly.
                 // render_to uses:
                 //   Wide (>=80): no footer row, box borders = -2, OUTPUT_PADDING = -2 → log = rows-4
@@ -936,12 +1069,14 @@ impl TuiRenderer {
                 let (log_height, log_width): (usize, usize) = {
                     let rows = rows as usize;
                     let cols = cols as usize;
-                    let height = if cols >= 80 {
+                    let height = if self.fullscreen || cols >= 80 {
                         rows.saturating_sub(4)
                     } else {
                         rows.saturating_sub(2)
                     };
-                    let width = if cols >= 80 {
+                    let width = if self.fullscreen {
+                        cols.saturating_sub(2 + 2 * HORIZ_PAD)
+                    } else if cols >= 80 {
                         cols.saturating_sub(LEFT_COL_WIDTH as usize + 2 + 2 * HORIZ_PAD)
                     } else {
                         cols.saturating_sub(2)
@@ -957,11 +1092,25 @@ impl TuiRenderer {
                 let max = self.logs[log_idx].max_scroll_wrapped(log_height, log_width);
                 match (key.code, key.modifiers) {
                     // Quit
-                    (KeyCode::Char('q'), _)
-                    | (KeyCode::Char('Q'), _)
-                    | (KeyCode::Esc, _)
-                    | (KeyCode::Enter, _) => break,
+                    (KeyCode::Char('q'), _) | (KeyCode::Char('Q'), _) | (KeyCode::Enter, _) => {
+                        break
+                    }
+                    (KeyCode::Esc, _) => {
+                        if self.fullscreen {
+                            self.fullscreen = false;
+                            self.scroll_offset = 0;
+                            self.draw();
+                        } else {
+                            break;
+                        }
+                    }
                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break,
+                    // Toggle full-screen output mode
+                    (KeyCode::Char('f'), _) => {
+                        self.fullscreen = !self.fullscreen;
+                        self.scroll_offset = 0;
+                        self.draw();
+                    }
                     // Navigate to previous step (↑)
                     (KeyCode::Up, _) => {
                         self.selected_step = Some(cur.saturating_sub(1));
@@ -994,10 +1143,25 @@ impl TuiRenderer {
                         self.scroll_offset = 0;
                         self.draw();
                     }
+                    // Copy current step's log output to system clipboard
+                    (KeyCode::Char('y'), _) => {
+                        let text = self.logs[log_idx].raw_lines().join("\n");
+                        if copy_to_clipboard(&text) {
+                            self.flash_message =
+                                Some(("Copied to clipboard!".to_string(), Instant::now()));
+                        } else {
+                            self.flash_message = Some((
+                                "Copy failed (no clipboard command found)".to_string(),
+                                Instant::now(),
+                            ));
+                        }
+                        self.draw();
+                    }
                     _ => {}
                 }
             }
             self.hint = false;
+            self.flash_message = None;
             self.scroll_offset = 0;
             self.selected_step = None;
         }
@@ -1406,6 +1570,14 @@ impl TuiRenderer {
 
         // Build the context and attempt the draw while the Tui borrow is active,
         // then handle any error after the borrow is released.
+
+        // Expire flash messages after FLASH_DURATION.
+        if let Some((_, created)) = &self.flash_message {
+            if created.elapsed() >= FLASH_DURATION {
+                self.flash_message = None;
+            }
+        }
+
         let draw_error = if let Mode::Tui(ref mut terminal) = self.mode {
             // During execution, `viewing_step` overrides `selected_step` for log display.
             // In post-sync review mode only `selected_step` is set.
@@ -1416,6 +1588,7 @@ impl TuiRenderer {
             // The selection indicator follows `viewing_step` during execution,
             // falling back to `selected_step` in post-sync review mode.
             let selected = self.viewing_step.or(self.selected_step);
+            let flash = self.flash_message.as_ref().map(|(msg, _)| msg.as_str());
             let ctx = RenderContext {
                 steps: &self.steps,
                 log: &self.logs[log_idx],
@@ -1426,6 +1599,8 @@ impl TuiRenderer {
                 scroll_offset: self.scroll_offset,
                 selected,
                 version: &self.version,
+                flash_message: flash,
+                fullscreen: self.fullscreen,
             };
             terminal.draw_frame(ctx).err().map(|e| e.to_string())
         } else {
@@ -1507,6 +1682,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -1536,6 +1713,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -1566,6 +1745,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -1601,6 +1782,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -1964,6 +2147,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -1985,6 +2170,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -2018,6 +2205,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -2036,6 +2225,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -2084,6 +2275,421 @@ mod tests {
         assert!(!r.hint, "hint should be reset after empty-steps break");
         assert_eq!(r.scroll_offset, 0);
         assert!(r.selected_step.is_none());
+    }
+
+    // ── wait_for_keypress: copy keybinding tests ──
+
+    #[test]
+    fn test_wait_for_keypress_y_sets_flash_message() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // Push some log content so there is something to copy.
+        r.println("line one");
+        r.println("line two");
+        // Press 'y' to copy, then 'q' to quit review mode.
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![y, q]);
+        r.wait_for_keypress_impl(&mut source);
+        // After exit, flash_message is cleared.
+        assert!(r.flash_message.is_none());
+        // Events should be consumed.
+        assert!(source.events.is_empty());
+    }
+
+    #[test]
+    fn test_wait_for_keypress_y_clears_on_next_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.println("some content");
+        // Press 'y' (copy), then Down (clears flash), then 'q' (quit).
+        let y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![y, down, q]);
+        r.wait_for_keypress_impl(&mut source);
+        assert!(r.flash_message.is_none());
+        assert!(source.events.is_empty());
+    }
+
+    // ── NavCmd::CopyOutput tests ──
+
+    #[test]
+    fn test_handle_nav_cmd_copy_output() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.push_log(0, "test content");
+        r.handle_nav_cmd(NavCmd::CopyOutput);
+        // flash_message should be set (either success or failure depending on
+        // whether a clipboard command is available in the test environment).
+        assert!(
+            r.flash_message.is_some(),
+            "flash_message should be set after CopyOutput"
+        );
+    }
+
+    // ── build_hint_line: flash message and 'y copy' ──
+
+    #[test]
+    fn test_hint_line_shows_y_copy() {
+        let steps = StepsPane::new(&["Environment"]);
+        let log = LogPane::new();
+        let ctx = RenderContext {
+            steps: &steps,
+            log: &log,
+            confirm: None,
+            file_select: None,
+            single_select: None,
+            hint: true,
+            scroll_offset: 0,
+            selected: None,
+            version: "0.0.0",
+            flash_message: None,
+            fullscreen: false,
+        };
+        let hint = build_hint_line(&ctx, 20, 80);
+        assert!(hint.is_some());
+        let text: String = hint
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            text.contains("y copy"),
+            "hint should contain 'y copy', got: {text}"
+        );
+    }
+
+    #[test]
+    fn test_hint_line_shows_flash_message() {
+        let steps = StepsPane::new(&["Environment"]);
+        let log = LogPane::new();
+        let ctx = RenderContext {
+            steps: &steps,
+            log: &log,
+            confirm: None,
+            file_select: None,
+            single_select: None,
+            hint: false,
+            scroll_offset: 0,
+            selected: None,
+            fullscreen: false,
+            version: "0.0.0",
+            flash_message: Some("Copied to clipboard!"),
+        };
+        let hint = build_hint_line(&ctx, 20, 80);
+        assert!(hint.is_some());
+        let text: String = hint
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            text.contains("Copied to clipboard!"),
+            "hint should show flash message, got: {text}"
+        );
+    }
+
+    #[test]
+    fn test_render_to_with_flash_message() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let log = LogPane::new();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                file_select: None,
+                single_select: None,
+                hint: true,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+                flash_message: Some("Copied to clipboard!"),
+                fullscreen: false,
+            },
+        )
+        .unwrap();
+    }
+
+    // ── fullscreen mode tests ──
+
+    #[test]
+    fn test_render_to_fullscreen() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&["Environment", "Analysis", "Fetch ADRs", "Tailoring"]);
+        let mut log = LogPane::new();
+        log.push("fullscreen test line".to_string());
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                file_select: None,
+                single_select: None,
+                hint: true,
+                scroll_offset: 0,
+                selected: Some(0),
+                version: "0.0.0",
+                flash_message: None,
+                fullscreen: true,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_toggle_fullscreen_nav_cmd() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        assert!(!r.fullscreen);
+        r.handle_nav_cmd(NavCmd::ToggleFullscreen);
+        assert!(r.fullscreen);
+        r.handle_nav_cmd(NavCmd::ToggleFullscreen);
+        assert!(!r.fullscreen);
+    }
+
+    #[test]
+    fn test_toggle_fullscreen_resets_scroll() {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.scroll_offset = 10;
+        r.handle_nav_cmd(NavCmd::ToggleFullscreen);
+        assert_eq!(r.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_wait_for_keypress_f_toggles_fullscreen() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.println("some content");
+        // Press f (enter fullscreen), f (exit fullscreen), q (quit)
+        let f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![f, f, q]);
+        r.wait_for_keypress_impl(&mut source);
+        assert!(
+            !r.fullscreen,
+            "fullscreen should be off after toggle on/off"
+        );
+        assert!(source.events.is_empty());
+    }
+
+    #[test]
+    fn test_wait_for_keypress_esc_exits_fullscreen() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        r.println("some content");
+        // Press f (enter fullscreen), Esc (exit fullscreen, NOT quit), q (quit)
+        let f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![f, esc, q]);
+        r.wait_for_keypress_impl(&mut source);
+        assert!(!r.fullscreen);
+        assert!(source.events.is_empty(), "all events should be consumed");
+    }
+
+    #[test]
+    fn test_wait_for_keypress_esc_quits_when_not_fullscreen() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let mut r = TuiRenderer::new_with_tui(terminal);
+        // Esc without fullscreen should quit immediately
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![esc]);
+        r.wait_for_keypress_impl(&mut source);
+        assert!(source.events.is_empty());
+    }
+
+    #[test]
+    fn test_fullscreen_hint_text() {
+        let steps = StepsPane::new(&["Environment"]);
+        let log = LogPane::new();
+        let ctx = RenderContext {
+            steps: &steps,
+            log: &log,
+            confirm: None,
+            file_select: None,
+            single_select: None,
+            hint: true,
+            scroll_offset: 0,
+            selected: None,
+            version: "0.0.0",
+            flash_message: None,
+            fullscreen: true,
+        };
+        let hint = build_hint_line(&ctx, 20, 80);
+        assert!(hint.is_some());
+        let text: String = hint
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            text.contains("exit fullscreen"),
+            "fullscreen hint should contain 'exit fullscreen', got: {text}"
+        );
+    }
+
+    #[test]
+    fn test_non_fullscreen_hint_shows_expand() {
+        let steps = StepsPane::new(&["Environment"]);
+        let log = LogPane::new();
+        let ctx = RenderContext {
+            steps: &steps,
+            log: &log,
+            confirm: None,
+            file_select: None,
+            single_select: None,
+            hint: true,
+            scroll_offset: 0,
+            selected: None,
+            version: "0.0.0",
+            flash_message: None,
+            fullscreen: false,
+        };
+        let hint = build_hint_line(&ctx, 20, 80);
+        assert!(hint.is_some());
+        let text: String = hint
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            text.contains("f expand"),
+            "non-fullscreen hint should contain 'f expand', got: {text}"
+        );
+    }
+
+    // ── step description rendering tests ──
+
+    #[test]
+    fn test_render_to_wide_shows_descriptions_for_waiting_steps() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let steps = StepsPane::new(&[
+            "Environment",
+            "Analysis",
+            "Fetch ADRs",
+            "Tailoring",
+            "Write Files",
+        ]);
+        let log = LogPane::new();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                file_select: None,
+                single_select: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
+            },
+        )
+        .unwrap();
+        // Check that a description appears in the buffer
+        let buf = terminal.backend().buffer().clone();
+        let mut found_desc = false;
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            if line.contains("Verifies auth") {
+                found_desc = true;
+                break;
+            }
+        }
+        assert!(found_desc, "description should appear in rendered output");
+    }
+
+    #[test]
+    fn test_render_to_wide_hides_description_for_running_step() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut steps = StepsPane::new(&[
+            "Environment",
+            "Analysis",
+            "Fetch ADRs",
+            "Tailoring",
+            "Write Files",
+        ]);
+        steps.steps[0].status = StepStatus::Running { tick: 0 };
+        let log = LogPane::new();
+        render_to(
+            &mut terminal,
+            RenderContext {
+                steps: &steps,
+                log: &log,
+                confirm: None,
+                file_select: None,
+                single_select: None,
+                hint: false,
+                scroll_offset: 0,
+                selected: None,
+                version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
+            },
+        )
+        .unwrap();
+        // Check that the Environment description does NOT appear
+        let buf = terminal.backend().buffer().clone();
+        let mut found_env_desc = false;
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            if line.contains("Verifies auth") {
+                found_env_desc = true;
+                break;
+            }
+        }
+        assert!(!found_env_desc, "Running step should NOT show description");
+        // But a Waiting step's description should still appear
+        let mut found_analysis_desc = false;
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push(buf[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            if line.contains("Scans code") {
+                found_analysis_desc = true;
+                break;
+            }
+        }
+        assert!(
+            found_analysis_desc,
+            "Waiting step should still show description"
+        );
     }
 
     // ── confirm_project tests ──
@@ -2353,6 +2959,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -2380,6 +2988,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -2407,6 +3017,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -2430,6 +3042,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -2457,6 +3071,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -2490,6 +3106,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -2518,6 +3136,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -3218,6 +3838,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -3246,6 +3868,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
@@ -3539,6 +4163,8 @@ mod tests {
                 scroll_offset: 0,
                 selected: None,
                 version: "0.0.0",
+                flash_message: None,
+                fullscreen: false,
             },
         )
         .unwrap();
