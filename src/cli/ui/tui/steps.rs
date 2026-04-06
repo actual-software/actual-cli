@@ -498,12 +498,8 @@ mod tests {
     fn test_descriptions_fit_inner_width() {
         // Steps box inner width is 42 chars. With 6-char indent, descriptions
         // must be ≤36 chars. We allow up to 38 chars for the raw description.
-        for (i, desc) in STEP_DESCRIPTIONS.iter().enumerate() {
-            assert!(
-                desc.len() <= 38,
-                "description[{i}] is {} chars, exceeds 38: {desc:?}",
-                desc.len()
-            );
+        for desc in STEP_DESCRIPTIONS {
+            assert!(desc.len() <= 38);
         }
     }
 

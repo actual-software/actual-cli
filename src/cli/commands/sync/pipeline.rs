@@ -4083,6 +4083,46 @@ mod tests {
         );
     }
 
+    /// Tailoring JSON where all ADRs were skipped (none applicable).
+    const TAILORING_ALL_SKIPPED_JSON: &str = r#"{"files":[],"skipped_adrs":[{"id":"adr-001","reason":"Not applicable to Rust projects"}],"summary":{"total_input":1,"applicable":0,"not_applicable":1,"files_generated":0}}"#;
+
+    #[test]
+    fn test_run_sync_tailoring_all_skipped_shows_reasons() {
+        let server = mock_api_server_with_adrs();
+        let dir = tempfile::tempdir().unwrap();
+        let term = MockTerminal::new(vec![]);
+        let runner = MockRunner::new(TAILORING_ALL_SKIPPED_JSON);
+        let args = SyncArgs {
+            dry_run: false,
+            full: false,
+            force: true,
+            reset_rejections: false,
+            projects: vec![],
+            model: None,
+            api_url: Some(server.url()),
+            verbose: false,
+            no_tailor: false,
+            max_budget_usd: None,
+            no_tui: false,
+            output_format: None,
+            runner: None,
+            show_errors: false,
+        };
+        let result = run_sync(
+            &args,
+            dir.path(),
+            &dir.path().join("config.yaml"),
+            &term,
+            &runner,
+            None,
+            None,
+        );
+        assert!(
+            result.is_ok(),
+            "expected success when all ADRs skipped: {result:?}"
+        );
+    }
+
     // ── compute_tailoring_cache_key tests ──
 
     /// Build a minimal test [`Adr`] with the given id and policies for cache key tests.

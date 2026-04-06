@@ -6,15 +6,23 @@ use std::process::{Command, Stdio};
 /// Returns `true` if the text was successfully copied, `false` otherwise.
 /// Silently returns `false` if no clipboard command is available.
 pub fn copy_to_clipboard(text: &str) -> bool {
-    if cfg!(target_os = "macos") {
-        pipe_to_command("pbcopy", &[], text)
-    } else if cfg!(target_os = "windows") {
-        pipe_to_command("clip", &[], text)
-    } else {
-        // Linux/BSD: try xclip first, then xsel
-        pipe_to_command("xclip", &["-selection", "clipboard"], text)
-            || pipe_to_command("xsel", &["--clipboard", "--input"], text)
-    }
+    copy_to_clipboard_impl(text)
+}
+
+#[cfg(target_os = "macos")]
+fn copy_to_clipboard_impl(text: &str) -> bool {
+    pipe_to_command("pbcopy", &[], text)
+}
+
+#[cfg(target_os = "windows")]
+fn copy_to_clipboard_impl(text: &str) -> bool {
+    pipe_to_command("clip", &[], text)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn copy_to_clipboard_impl(text: &str) -> bool {
+    pipe_to_command("xclip", &["-selection", "clipboard"], text)
+        || pipe_to_command("xsel", &["--clipboard", "--input"], text)
 }
 
 /// Pipe `text` to a command's stdin. Returns `true` on success.

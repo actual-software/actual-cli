@@ -342,10 +342,9 @@ mod tests {
         std::fs::rename(&tmp, path).unwrap();
         // Fsync the parent directory so the rename is durable and visible
         // to exec on Linux (prevents ETXTBSY under heavy parallel CI load).
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
+        let parent = path.parent().expect("test script path must have a parent");
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
         }
     }
 
