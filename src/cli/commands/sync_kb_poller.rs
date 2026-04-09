@@ -96,6 +96,22 @@ pub fn setup(
     (kb_poller, nav_rx, cancel_fut)
 }
 
+/// Map a key code to a navigation command, if applicable.
+fn match_nav_key(code: crossterm::event::KeyCode) -> Option<NavCmd> {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Up => Some(NavCmd::StepUp),
+        KeyCode::Down => Some(NavCmd::StepDown),
+        KeyCode::PageUp | KeyCode::Char('u') => Some(NavCmd::ScrollUp),
+        KeyCode::PageDown | KeyCode::Char('d') => Some(NavCmd::ScrollDown),
+        KeyCode::Home | KeyCode::Char('g') => Some(NavCmd::ScrollTop),
+        KeyCode::End | KeyCode::Char('G') => Some(NavCmd::ScrollBottom),
+        KeyCode::Char('y') => Some(NavCmd::CopyOutput),
+        KeyCode::Char('f') => Some(NavCmd::ToggleFullscreen),
+        _ => None,
+    }
+}
+
 /// Spawn a nav-only crossterm-poller thread (ignores quit keys).
 fn spawn_nav_thread() -> (KbPollerInner, std::sync::mpsc::Receiver<NavCmd>) {
     let (nav_tx, nav_rx) = std::sync::mpsc::channel::<NavCmd>();
@@ -103,7 +119,7 @@ fn spawn_nav_thread() -> (KbPollerInner, std::sync::mpsc::Receiver<NavCmd>) {
     let stop_flag = stop.clone();
 
     let handle = std::thread::spawn(move || {
-        use crossterm::event::{poll, read, Event, KeyCode};
+        use crossterm::event::{poll, read, Event};
 
         loop {
             if stop_flag.load(Ordering::Relaxed) {
@@ -111,18 +127,7 @@ fn spawn_nav_thread() -> (KbPollerInner, std::sync::mpsc::Receiver<NavCmd>) {
             }
             if let Ok(true) = poll(std::time::Duration::from_millis(100)) {
                 if let Ok(Event::Key(key)) = read() {
-                    let nav_cmd = match key.code {
-                        KeyCode::Up => Some(NavCmd::StepUp),
-                        KeyCode::Down => Some(NavCmd::StepDown),
-                        KeyCode::PageUp | KeyCode::Char('u') => Some(NavCmd::ScrollUp),
-                        KeyCode::PageDown | KeyCode::Char('d') => Some(NavCmd::ScrollDown),
-                        KeyCode::Home | KeyCode::Char('g') => Some(NavCmd::ScrollTop),
-                        KeyCode::End | KeyCode::Char('G') => Some(NavCmd::ScrollBottom),
-                        KeyCode::Char('y') => Some(NavCmd::CopyOutput),
-                        KeyCode::Char('f') => Some(NavCmd::ToggleFullscreen),
-                        _ => None,
-                    };
-                    if let Some(cmd) = nav_cmd {
+                    if let Some(cmd) = match_nav_key(key.code) {
                         let _ = nav_tx.send(cmd);
                     }
                 }
@@ -166,18 +171,7 @@ fn spawn_thread() -> (
                         break;
                     }
                     // Navigation keys: send NavCmd events (non-blocking, ignore if receiver dropped)
-                    let nav_cmd = match key.code {
-                        KeyCode::Up => Some(NavCmd::StepUp),
-                        KeyCode::Down => Some(NavCmd::StepDown),
-                        KeyCode::PageUp | KeyCode::Char('u') => Some(NavCmd::ScrollUp),
-                        KeyCode::PageDown | KeyCode::Char('d') => Some(NavCmd::ScrollDown),
-                        KeyCode::Home | KeyCode::Char('g') => Some(NavCmd::ScrollTop),
-                        KeyCode::End | KeyCode::Char('G') => Some(NavCmd::ScrollBottom),
-                        KeyCode::Char('y') => Some(NavCmd::CopyOutput),
-                        KeyCode::Char('f') => Some(NavCmd::ToggleFullscreen),
-                        _ => None,
-                    };
-                    if let Some(cmd) = nav_cmd {
+                    if let Some(cmd) = match_nav_key(key.code) {
                         let _ = nav_tx.send(cmd);
                     }
                 }

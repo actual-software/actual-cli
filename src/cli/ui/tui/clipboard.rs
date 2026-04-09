@@ -21,11 +21,16 @@ fn copy_to_clipboard_impl(text: &str) -> bool {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn copy_to_clipboard_impl(text: &str) -> bool {
-    pipe_to_command("xclip", &["-selection", "clipboard"], text)
+    pipe_to_command("wl-copy", &[], text)
+        || pipe_to_command("xclip", &["-selection", "clipboard"], text)
         || pipe_to_command("xsel", &["--clipboard", "--input"], text)
 }
 
 /// Pipe `text` to a command's stdin. Returns `true` on success.
+///
+/// Note: `child.wait()` has no timeout. Standard clipboard commands (`pbcopy`,
+/// `clip`, `wl-copy`, `xclip`, `xsel`) exit promptly, but a misbehaving
+/// command could block indefinitely.
 fn pipe_to_command(cmd: &str, args: &[&str], text: &str) -> bool {
     let child = Command::new(cmd)
         .args(args)
