@@ -34,7 +34,7 @@ pub enum SyncPhase {
 /// Keep in sync with the `SyncPhase` enum variants. Update this whenever
 /// a variant is added or removed. The compile-time assert below catches
 /// mismatches between this constant and the `PHASE_LABELS` array.
-const PHASE_COUNT: usize = 5;
+pub const PHASE_COUNT: usize = 5;
 
 /// Display labels for each phase, indexed by `SyncPhase` discriminant.
 /// The typed array `[&str; PHASE_COUNT]` ensures the label count matches

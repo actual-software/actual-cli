@@ -854,20 +854,26 @@ impl TuiRenderer {
             }
             NavCmd::CopyOutput => {
                 let log_idx = self.viewing_step.unwrap_or(self.active_step);
-                let text = self.logs[log_idx].raw_lines().join("\n");
-                if copy_to_clipboard(&text) {
-                    self.flash_message = Some(("Copied to clipboard!".to_string(), Instant::now()));
-                } else {
-                    self.flash_message = Some((
-                        "Copy failed (no clipboard command found)".to_string(),
-                        Instant::now(),
-                    ));
-                }
+                self.copy_and_flash(log_idx);
             }
             NavCmd::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
                 self.scroll_offset = 0;
             }
+        }
+    }
+
+    /// Copy the given step's log output to the system clipboard and set a
+    /// flash message indicating success or failure.
+    fn copy_and_flash(&mut self, log_idx: usize) {
+        let text = self.logs[log_idx].raw_lines().join("\n");
+        if copy_to_clipboard(&text) {
+            self.flash_message = Some(("Copied to clipboard!".to_string(), Instant::now()));
+        } else {
+            self.flash_message = Some((
+                "Copy failed (no clipboard command found)".to_string(),
+                Instant::now(),
+            ));
         }
     }
 
@@ -1145,16 +1151,7 @@ impl TuiRenderer {
                     }
                     // Copy current step's log output to system clipboard
                     (KeyCode::Char('y'), _) => {
-                        let text = self.logs[log_idx].raw_lines().join("\n");
-                        if copy_to_clipboard(&text) {
-                            self.flash_message =
-                                Some(("Copied to clipboard!".to_string(), Instant::now()));
-                        } else {
-                            self.flash_message = Some((
-                                "Copy failed (no clipboard command found)".to_string(),
-                                Instant::now(),
-                            ));
-                        }
+                        self.copy_and_flash(log_idx);
                         self.draw();
                     }
                     _ => {}

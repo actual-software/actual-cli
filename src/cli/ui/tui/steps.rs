@@ -505,6 +505,7 @@ mod tests {
 
     #[test]
     fn test_descriptions_count_matches_steps() {
-        assert_eq!(STEP_DESCRIPTIONS.len(), 5);
+        use crate::cli::ui::progress::PHASE_COUNT;
+        assert_eq!(STEP_DESCRIPTIONS.len(), PHASE_COUNT);
     }
 }

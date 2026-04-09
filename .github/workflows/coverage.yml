@@ -57,6 +57,7 @@ jobs:
           # paths), and test files from coverage measurement.
           # Run lib tests + all integration tests except tui_e2e (which hangs
           # under coverage instrumentation due to crossterm TTY interactions).
+          # ⚠ When adding new test files, update this list to include them.
           cargo llvm-cov --lib \
             --test cli_test \
             --test integration_errors \

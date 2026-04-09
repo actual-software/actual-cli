@@ -625,6 +625,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         // (which also handles quit/cancel keys) to avoid two threads reading
         // crossterm events simultaneously.
         drop(nav_poller.take());
+        pipeline.set_nav_rx_opt(None);
 
         // In TUI mode (raw mode active) the terminal consumes keyboard input,
         // so OS-level SIGINT from Ctrl+C may not reach the process reliably.
