@@ -1,0 +1,10 @@
+---
+globs: ["**/*"]
+alwaysApply: false
+---
+
+# Adopt Secure Secrets Management in CI/CD Pipeline
+
+## Policies
+
+1. Implement a dedicated secrets management system integrated into the CI/CD pipeline that separates secret storage from code. This includes using environment variables, encrypted secret stores, or dedicated secrets management services (such as HashiCorp Vault, AWS Secrets Manager, or CI platform-native solutions) to inject credentials at runtime rather than hardcoding them in configuration files or source code. The pattern is consistently applied across CLI commands and testing infrastructure to ensure uniform security practices.
