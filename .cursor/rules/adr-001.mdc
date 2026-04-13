@@ -1,0 +1,10 @@
+---
+globs: ["**/*"]
+alwaysApply: false
+---
+
+# Adopt Modular Library Architecture for Test and Benchmark Infrastructure
+
+## Policies
+
+1. Implement a modular library architecture where core functionality is organized into reusable library modules that can be consumed by benchmarks, tests, and test utilities. This decision establishes a clear separation between production code (src/), test utilities (src/testutil.rs), integration tests (tests/), and performance benchmarks (benches/), with each component importing and utilizing core library modules as needed. The architecture promotes code reuse by centralizing common test utilities in dedicated modules that can be shared across different testing contexts.
