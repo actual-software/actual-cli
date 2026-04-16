@@ -218,10 +218,15 @@ pub fn build_match_request(
         .iter()
         .map(|project| {
             let (languages, frameworks) = if let Some(ref sel) = project.selection {
-                // Selection exists: send only the selected language + framework
+                // Selection exists: send the selected language but ALL detected
+                // frameworks. The selection narrows the language for tailoring/TUI
+                // display, but the match request must cast a wide net — sending
+                // only the single auto-selected framework caused downstream
+                // frameworks (e.g. nextjs, react) to be silently dropped,
+                // resulting in 0 ADR matches for monorepo projects (ACTCLI-119).
                 let langs = vec![serialize_language(&sel.language.language)];
-                let fws = sel
-                    .framework
+                let fws = project
+                    .frameworks
                     .iter()
                     .flat_map(|fw| {
                         let category = serialize_framework_category(&fw.category);
@@ -1151,7 +1156,12 @@ mod tests {
     // --- build_match_request with ProjectSelection tests ---
 
     #[test]
-    fn test_build_match_request_uses_selection() {
+    fn test_build_match_request_selection_sends_all_frameworks() {
+        // ACTCLI-119: when a selection exists, the match request must include
+        // ALL detected frameworks (not just the single selected one). The
+        // selected language still narrows the language list to one, but every
+        // framework the analyzer detected should reach the API so that
+        // secondary frameworks (e.g. nextjs, react) are not silently dropped.
         let analysis = RepoAnalysis {
             is_monorepo: false,
             workspace_type: None,
@@ -1200,9 +1210,87 @@ mod tests {
         };
         let request = build_match_request(&analysis, &Config::default(), &HashMap::new());
         assert_eq!(request.projects.len(), 1);
+        // Language is narrowed to the selected one
         assert_eq!(request.projects[0].languages, vec!["rust".to_string()]);
-        assert_eq!(request.projects[0].frameworks.len(), 1);
-        assert_eq!(request.projects[0].frameworks[0].name, "actix-web");
+        // ALL detected frameworks must be sent, not just the selected one
+        assert_eq!(request.projects[0].frameworks.len(), 2);
+        let fw_names: Vec<&str> = request.projects[0]
+            .frameworks
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(fw_names.contains(&"actix-web"), "actix-web must be included");
+        assert!(fw_names.contains(&"diesel"), "diesel must be included");
+    }
+
+    #[test]
+    fn test_build_match_request_selection_monorepo_nextjs_scenario() {
+        // Regression test for ACTCLI-119: monorepo project with nextjs/react
+        // detected but jest auto-selected. All frameworks must reach the API.
+        let analysis = RepoAnalysis {
+            is_monorepo: true,
+            workspace_type: None,
+            projects: vec![Project {
+                path: "actual-ai-app".to_string(),
+                name: "actual-ai-app".to_string(),
+                languages: vec![LanguageStat {
+                    language: Language::TypeScript,
+                    loc: 10000,
+                }],
+                frameworks: vec![
+                    Framework {
+                        name: "jest".to_string(),
+                        category: FrameworkCategory::Testing,
+                        source: None,
+                    },
+                    Framework {
+                        name: "nextjs".to_string(),
+                        category: FrameworkCategory::WebFrontend,
+                        source: None,
+                    },
+                    Framework {
+                        name: "react".to_string(),
+                        category: FrameworkCategory::WebFrontend,
+                        source: None,
+                    },
+                ],
+                package_manager: None,
+                description: None,
+                dep_count: 0,
+                dev_dep_count: 0,
+                // auto_select_for_project picked jest (first compatible), not nextjs
+                selection: Some(ProjectSelection {
+                    language: LanguageStat {
+                        language: Language::TypeScript,
+                        loc: 10000,
+                    },
+                    framework: Some(Framework {
+                        name: "jest".to_string(),
+                        category: FrameworkCategory::Testing,
+                        source: None,
+                    }),
+                    auto_selected: true,
+                }),
+            }],
+        };
+        let request = build_match_request(&analysis, &Config::default(), &HashMap::new());
+        assert_eq!(request.projects.len(), 1);
+        assert_eq!(
+            request.projects[0].languages,
+            vec!["typescript".to_string()]
+        );
+        // All three frameworks must be sent so the bank can match nextjs ADRs.
+        // Note: all_framework_names() expands canonical names to include aliases
+        // (nextjs → ["nextjs", "next.js", "next"], react → ["react", "react.js", "reactjs"])
+        // so the flattened list has more entries than the number of input frameworks.
+        let fw_names: Vec<&str> = request.projects[0]
+            .frameworks
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(fw_names.contains(&"jest"), "jest must be included");
+        assert!(fw_names.contains(&"nextjs"), "nextjs must be included");
+        assert!(fw_names.contains(&"react"), "react must be included");
     }
 
     #[test]
@@ -1378,6 +1466,9 @@ mod tests {
 
     #[test]
     fn test_build_match_request_selection_no_framework() {
+        // ACTCLI-119: even when selection.framework is None (user chose a language
+        // but no framework), the match request must still send all detected project
+        // frameworks so the API can surface relevant ADRs.
         let analysis = RepoAnalysis {
             is_monorepo: false,
             workspace_type: None,
@@ -1415,7 +1506,10 @@ mod tests {
         };
         let request = build_match_request(&analysis, &Config::default(), &HashMap::new());
         assert_eq!(request.projects.len(), 1);
+        // Language is narrowed to the selected one
         assert_eq!(request.projects[0].languages, vec!["python".to_string()]);
-        assert!(request.projects[0].frameworks.is_empty());
+        // All detected frameworks are sent even though no framework was selected
+        assert_eq!(request.projects[0].frameworks.len(), 1);
+        assert_eq!(request.projects[0].frameworks[0].name, "actix-web");
     }
 }
