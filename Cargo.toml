@@ -33,7 +33,7 @@ serde_yml = "0.0.12"
 serde_yaml = "0.9"
 toml = "1.1"
 regex = "1"
-zip = "2"
+zip = "8"
 
 # Error handling
 thiserror = "2"
