@@ -52,3 +52,9 @@ benches/*_results*.json
 # Session recordings
 *.cast
 
+# Terraform — downloaded plugins and local state (lock files ARE committed)
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
