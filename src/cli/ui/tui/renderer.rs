@@ -1061,10 +1061,7 @@ impl TuiRenderer {
             self.hint = true;
             self.scroll_offset = 0;
             self.draw();
-            loop {
-                let Ok(key) = source.next_key() else {
-                    break;
-                };
+            while let Ok(key) = source.next_key() {
                 // Clear any flash message from the previous key.
                 self.flash_message = None;
                 // Compute log_height matching render_to's formula exactly.
