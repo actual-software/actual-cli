@@ -325,6 +325,12 @@ pub enum Command {
     Status(StatusArgs),
     /// Check Claude Code authentication status
     Auth,
+    /// Sign in to your Actual AI account via browser OAuth
+    Login(LoginArgs),
+    /// Sign out of your Actual AI account and clear local credentials
+    Logout,
+    /// Show the signed-in Actual AI account and organization
+    Whoami,
     /// View or edit configuration
     Config(ConfigArgs),
     /// List all available AI backend runners
@@ -419,6 +425,24 @@ pub struct SyncArgs {
     /// other Claude Code diagnostics appear on stderr.
     #[arg(long)]
     pub show_errors: bool,
+}
+
+/// Arguments for the `login` command
+#[derive(Parser, Debug)]
+pub struct LoginArgs {
+    /// Organization to sign in to. Required for accounts that belong to more
+    /// than one organization; single-org accounts are auto-selected.
+    #[arg(long, value_name = "ORG_ID")]
+    pub org: Option<String>,
+
+    /// Auth server base URL (e.g. http://localhost:4000 for the mock auth
+    /// server). Falls back to the ACTUAL_AUTH_URL environment variable.
+    #[arg(long, value_name = "URL")]
+    pub api_url: Option<String>,
+
+    /// Print the sign-in URL instead of opening a browser (useful over SSH).
+    #[arg(long)]
+    pub no_browser: bool,
 }
 
 /// Arguments for the `status` command

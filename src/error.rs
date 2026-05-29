@@ -22,6 +22,9 @@ pub enum ActualError {
     #[error("Claude Code is not authenticated")]
     ClaudeNotAuthenticated,
 
+    #[error("Not signed in to Actual AI")]
+    NotLoggedIn,
+
     #[error("Codex CLI is not authenticated. Set OPENAI_API_KEY or run: codex login")]
     CodexNotAuthenticated,
 
@@ -100,6 +103,7 @@ impl ActualError {
             | Self::SemgrepNotFound
             | Self::ApiKeyMissing { .. }
             | Self::CodexCliModelRequiresApiKey { .. }
+            | Self::NotLoggedIn
             | Self::NoRunnerAvailable { .. } => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } | Self::ServiceUnavailable => 3,
@@ -122,6 +126,7 @@ impl ActualError {
                 Some(Cow::Borrowed("pip install semgrep\n  or: brew install semgrep"))
             }
             Self::ClaudeNotAuthenticated => Some(Cow::Borrowed("claude auth login")),
+            Self::NotLoggedIn => Some(Cow::Borrowed("actual login")),
             Self::CodexNotAuthenticated => {
                 Some(Cow::Borrowed("Set OPENAI_API_KEY or run: codex login"))
             }

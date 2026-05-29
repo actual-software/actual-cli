@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod api;
+pub mod auth;
 pub mod branding;
 pub mod cli;
 pub mod config;
@@ -20,8 +21,8 @@ pub use error::ActualError;
 
 // Re-export CLI types for backward compatibility with tests
 pub use cli::args::{
-    CacheAction, CacheArgs, Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs, ModelsArgs,
-    RunnerChoice, StatusArgs, SyncArgs,
+    CacheAction, CacheArgs, Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs, LoginArgs,
+    ModelsArgs, RunnerChoice, StatusArgs, SyncArgs,
 };
 
 pub fn run(cli: Cli) -> Result<(), ActualError> {
@@ -29,6 +30,9 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::AdrBot(args) => cli::commands::sync::exec(args),
         Command::Status(args) => cli::commands::status::exec(args),
         Command::Auth => cli::commands::auth::exec(),
+        Command::Login(args) => cli::commands::login::exec(args),
+        Command::Logout => cli::commands::logout::exec(),
+        Command::Whoami => cli::commands::whoami::exec(),
         Command::Config(args) => cli::commands::config::exec(args),
         Command::Runners => cli::commands::runners::exec(),
         Command::Models(args) => cli::commands::models::exec(args.no_fetch),
