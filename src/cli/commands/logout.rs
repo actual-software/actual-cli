@@ -92,4 +92,51 @@ mod tests {
             "local credentials must be cleared after logout"
         );
     }
+
+    fn creds_with(auth_url: Option<String>) -> StoredCredentials {
+        StoredCredentials {
+            access_token: "a".to_string(),
+            refresh_token: "r".to_string(),
+            token_type: "Bearer".to_string(),
+            expires_at: None,
+            scope: None,
+            organization_id: "org".to_string(),
+            member_id: "m".to_string(),
+            email: None,
+            subject: None,
+            auth_url,
+        }
+    }
+
+    #[test]
+    fn test_logout_revokes_then_clears() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut server = mockito::Server::new();
+        let m = server
+            .mock("POST", "/api/oauth/revoke")
+            .with_status(200)
+            .create();
+
+        store::save(&creds_with(Some(server.url()))).unwrap();
+        exec().unwrap();
+        m.assert();
+        assert!(store::load().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_logout_revoke_failure_still_clears() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        // Unreachable auth server → revoke fails → warning branch; creds still cleared.
+        store::save(&creds_with(Some("http://127.0.0.1:1".to_string()))).unwrap();
+        exec().unwrap();
+        assert!(store::load().unwrap().is_none());
+    }
 }

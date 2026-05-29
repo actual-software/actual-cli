@@ -414,4 +414,80 @@ mod tests {
         let path = credentials_path().unwrap();
         assert_eq!(path, tmp.path().join(CREDENTIALS_FILENAME));
     }
+
+    #[test]
+    fn test_default_path_save_load_delete_roundtrip() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let creds = sample();
+        assert!(load().unwrap().is_none());
+        save(&creds).unwrap();
+        assert_eq!(load().unwrap().unwrap(), creds);
+        delete().unwrap();
+        assert!(load().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_load_from_read_error_on_directory() {
+        // Reading a path that is a directory triggers a non-NotFound read error.
+        let dir = tempdir().unwrap();
+        let err = load_from(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("Failed to read credentials file"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_delete_from_error_on_directory() {
+        // remove_file on a directory errors with something other than NotFound.
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+        let err = delete_from(&sub).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to remove credentials file"),
+            "got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_to_open_error_when_path_is_directory() {
+        // write_secure opens the path for writing; a directory path fails there.
+        let dir = tempdir().unwrap();
+        let as_dir = dir.path().join("creds-dir");
+        std::fs::create_dir(&as_dir).unwrap();
+        let err = save_to(&sample(), &as_dir).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to open credentials file for writing"),
+            "got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_save_to_create_dir_error() {
+        // Parent under a file (/dev/null) → create_dir_all fails (ENOTDIR).
+        let path = PathBuf::from("/dev/null/nope/credentials.yaml");
+        let err = save_to(&sample(), &path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to create config directory"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_save_to_path_without_parent() {
+        // "/" has no parent → exercises the skipped-create-dir branch; the
+        // secure write then fails (can't open "/" for writing).
+        let err = save_to(&sample(), Path::new("/")).unwrap_err();
+        assert!(err.to_string().contains("Failed to"), "got: {err}");
+    }
 }

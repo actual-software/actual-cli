@@ -87,4 +87,13 @@ mod tests {
         c.scope = None;
         print_identity(&c);
     }
+
+    #[test]
+    fn test_print_identity_falls_back_to_subject() {
+        // email absent + subject present → exercises the subject fallback branch.
+        let mut c = creds();
+        c.email = None;
+        c.subject = Some("sub-123".to_string());
+        print_identity(&c);
+    }
 }

@@ -252,13 +252,42 @@ pub async fn login(
     cfg: &OAuthConfig,
     organization_id: Option<String>,
     open_browser: bool,
+    opener: &dyn Fn(&str),
     timeout: Duration,
 ) -> Result<StoredCredentials, ActualError> {
-    let http = build_http_client(&cfg.base_url)?;
     let pkce_pair = PkcePair::generate();
     let state = pkce::generate_state();
-
     let server = LoopbackServer::bind().await?;
+    login_with(
+        cfg,
+        organization_id,
+        open_browser,
+        opener,
+        timeout,
+        pkce_pair,
+        state,
+        server,
+    )
+    .await
+}
+
+/// Inner login flow with the PKCE pair, `state`, and bound loopback injected.
+///
+/// Splitting these out of [`login`] lets tests drive the full happy path
+/// (feed the loopback with a redirect carrying a known `state`) without a real
+/// browser. In production [`login`] supplies freshly generated/bound values.
+#[allow(clippy::too_many_arguments)]
+async fn login_with(
+    cfg: &OAuthConfig,
+    organization_id: Option<String>,
+    open_browser: bool,
+    opener: &dyn Fn(&str),
+    timeout: Duration,
+    pkce_pair: PkcePair,
+    state: String,
+    server: LoopbackServer,
+) -> Result<StoredCredentials, ActualError> {
+    let http = build_http_client(&cfg.base_url)?;
     let redirect_uri = server.redirect_uri();
 
     let auth_url = build_authorize_url(
@@ -272,8 +301,9 @@ pub async fn login(
     println!("Opening your browser to sign in to Actual AI…");
     println!("If it doesn't open, visit this URL:\n\n  {auth_url}\n");
     if open_browser {
-        // Best-effort: failure here is non-fatal — the URL is already printed.
-        let _ = open::that(&auth_url);
+        // Best-effort: the URL is already printed, so a failure to launch is
+        // non-fatal. The concrete opener is injected by the caller.
+        opener(&auth_url);
     }
 
     let redirect = server.wait_for_code(&state, timeout).await?;
@@ -747,5 +777,163 @@ mod tests {
         let creds = creds_with_auth(None, "r");
         // Nothing to revoke against; should succeed silently.
         revoke(&creds).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_login_with_success_drives_full_flow() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let mut server = mockito::Server::new_async().await;
+        let tok = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            // token_type omitted → also exercises the `default_bearer` serde default.
+            .with_body(
+                r#"{"access_token":"at","expires_in":3600,"refresh_token":"rt","scope":"openid"}"#,
+            )
+            .create_async()
+            .await;
+        let who = server
+            .mock("GET", "/whoami")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"sub":"u1","email":"dev@example.com","organization_id":"org-1","member_id":"m-1","scope":"openid"}"#,
+            )
+            .create_async()
+            .await;
+
+        let cfg = test_cfg(&server.url());
+        let pkce = PkcePair::generate();
+        let state = "known-state".to_string();
+        let loopback = LoopbackServer::bind().await.unwrap();
+        let port = loopback.port();
+
+        // Feed the loopback with the redirect carrying the known state.
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let req = format!("GET /callback?code=the-code&state={st} HTTP/1.1\r\nHost: x\r\n\r\n");
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf).await;
+        });
+
+        // open_browser=true with a no-op opener covers the opener call without a browser.
+        let opener = |_: &str| {};
+        let creds = login_with(
+            &cfg,
+            Some("org-1".to_string()),
+            true,
+            &opener,
+            Duration::from_secs(5),
+            pkce,
+            state,
+            loopback,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(creds.access_token, "at");
+        assert_eq!(creds.token_type, "Bearer"); // defaulted
+        assert_eq!(creds.refresh_token, "rt");
+        assert_eq!(creds.organization_id, "org-1");
+        assert_eq!(creds.auth_url.as_deref(), Some(cfg.base_url.as_str()));
+        tok.assert_async().await;
+        who.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_login_wrapper_times_out_without_redirect() {
+        // Exercises the `login` wrapper (pkce/state/bind) + login_with up to the
+        // wait; no redirect arrives, so it times out quickly.
+        let cfg = test_cfg("http://127.0.0.1:1");
+        let opener = |_: &str| {};
+        let result = login(&cfg, None, true, &opener, Duration::from_millis(100)).await;
+        assert!(
+            matches!(result, Err(ActualError::ApiError(ref m)) if m.contains("Timed out")),
+            "got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_auth_url_empty_env_errors() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::set("ACTUAL_AUTH_URL", "");
+        let err = resolve_auth_url(None).unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_refresh_error_status() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(400)
+            .with_body(r#"{"error":"invalid_grant"}"#)
+            .create_async()
+            .await;
+        let creds = creds_with_auth(Some(server.url()), "stale");
+        let err = refresh(&creds).await.unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("invalid_grant")));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_revoke_uses_access_token_when_no_refresh() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/revoke")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "token".into(),
+                "the-access".into(),
+            ))
+            .with_status(200)
+            .create_async()
+            .await;
+        let mut creds = creds_with_auth(Some(server.url()), ""); // empty refresh token
+        creds.access_token = "the-access".to_string();
+        revoke(&creds).await.unwrap();
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_revoke_error_status() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/revoke")
+            .with_status(500)
+            .with_body("boom")
+            .create_async()
+            .await;
+        let creds = creds_with_auth(Some(server.url()), "r");
+        let err = revoke(&creds).await.unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("Revocation failed")));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_login_with_authorize_url_error() {
+        // base_url passes the loopback HTTP-client guard (localhost) but fails
+        // URL parsing (invalid port) → exercises the build_authorize_url `?`
+        // error path inside login_with.
+        let cfg = test_cfg("http://127.0.0.1:99999");
+        let server = LoopbackServer::bind().await.unwrap();
+        let opener = |_: &str| {};
+        let err = login_with(
+            &cfg,
+            None,
+            false,
+            &opener,
+            Duration::from_secs(1),
+            PkcePair::generate(),
+            "s".to_string(),
+            server,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(_)), "got: {err:?}");
     }
 }
