@@ -770,4 +770,17 @@ mod tests {
     fn test_service_unavailable_is_not_model_error() {
         assert!(!ActualError::ServiceUnavailable.is_model_error());
     }
+
+    #[test]
+    fn test_not_logged_in_exit_code_hint_and_display() {
+        assert_eq!(ActualError::NotLoggedIn.exit_code(), 2);
+        assert_eq!(
+            ActualError::NotLoggedIn.hint(),
+            Some(Cow::Borrowed("actual login"))
+        );
+        assert_eq!(
+            ActualError::NotLoggedIn.to_string(),
+            "Not signed in to Actual AI"
+        );
+    }
 }

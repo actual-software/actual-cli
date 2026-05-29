@@ -18,6 +18,9 @@ pub fn exec(args: &LoginArgs) -> Result<(), ActualError> {
         &cfg,
         args.org.clone(),
         !args.no_browser,
+        &|url| {
+            let _ = open::that(url);
+        },
         DEFAULT_LOGIN_TIMEOUT,
     ))?;
 

@@ -68,4 +68,47 @@ mod tests {
 
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_run_whoami_logged_out_returns_err() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        use tempfile::tempdir;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        // Exercises the Command::Whoami dispatch arm (not signed in → error).
+        let cli = Cli::parse_from(["actual", "whoami"]);
+        assert!(run(cli).is_err());
+    }
+
+    #[test]
+    fn test_run_logout_not_signed_in_returns_ok() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        use tempfile::tempdir;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        // Exercises the Command::Logout dispatch arm (not signed in → ok).
+        let cli = Cli::parse_from(["actual", "logout"]);
+        assert!(run(cli).is_ok());
+    }
+
+    #[test]
+    fn test_run_login_without_auth_url_returns_err() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::remove("ACTUAL_AUTH_URL");
+
+        // Exercises the Command::Login dispatch arm; resolve_auth_url errors
+        // before any network/browser work.
+        let cli = Cli::parse_from(["actual", "login", "--no-browser"]);
+        assert!(run(cli).is_err());
+    }
 }

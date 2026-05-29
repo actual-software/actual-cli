@@ -58,6 +58,10 @@ jobs:
           # Run lib tests + all integration tests except tui_e2e (which hangs
           # under coverage instrumentation due to crossterm TTY interactions).
           # ⚠ When adding new test files, update this list to include them.
+          # cli/commands/login.rs is the interactive browser-OAuth command shell
+          # (launches a real browser + binds a loopback redirect listener); like
+          # the PTY/renderer files above it cannot execute under CI. Its logic is
+          # unit-tested in auth/oauth.rs (login_with happy path) + auth/loopback.rs.
           cargo llvm-cov --lib \
             --test cli_test \
             --test integration_errors \
@@ -68,7 +72,7 @@ jobs:
             --test integration_sync_modes \
             --test integration_tailor \
             --test lib_test \
-            --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' \
+            --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' \
             --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
           COV_EXIT=${PIPESTATUS[0]}
           echo "cov_exit=$COV_EXIT" >> $GITHUB_ENV
@@ -76,7 +80,7 @@ jobs:
       - name: Generate text report
         if: always()
         run: |
-          cargo llvm-cov report --lib --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' 2>&1 | tee coverage-summary.txt || true
+          cargo llvm-cov report --lib --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' 2>&1 | tee coverage-summary.txt || true
 
       - name: Enforce 100% coverage
         if: always()
@@ -169,7 +173,7 @@ jobs:
       - name: Generate HTML report
         if: always()
         run: |
-          cargo llvm-cov report --lib --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' --html --output-dir coverage-html 2>/dev/null || true
+          cargo llvm-cov report --lib --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' --html --output-dir coverage-html 2>/dev/null || true
 
       - name: Upload coverage artifacts
         if: always()

@@ -387,4 +387,115 @@ mod tests {
         assert!(uri.starts_with("http://127.0.0.1:"));
         assert!(uri.ends_with("/callback"));
     }
+
+    #[test]
+    fn test_parse_query_bare_key() {
+        // A param with no `=` exercises the `None` split branch.
+        let q = parse_query("flag&code=c");
+        assert_eq!(param(&q, "flag"), Some(String::new()));
+        assert_eq!(param(&q, "code"), Some("c".to_string()));
+    }
+
+    #[test]
+    fn test_percent_decode_invalid_hex_passthrough() {
+        // %ZZ: to_digit returns None → bytes pass through unchanged.
+        assert_eq!(percent_decode("%ZZ"), "%ZZ");
+        assert_eq!(percent_decode("a%2"), "a%2");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_code_skips_stray_request_then_succeeds() {
+        let server = LoopbackServer::bind().await.unwrap();
+        let port = server.port();
+        let handle =
+            tokio::spawn(async move { server.wait_for_code("s", Duration::from_secs(5)).await });
+
+        // A stray request with no code/state (e.g. favicon) → 404, loop continues.
+        let mut stray = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stray
+            .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut sresp = Vec::new();
+        let _ = stray.read_to_end(&mut sresp).await;
+        assert!(String::from_utf8_lossy(&sresp).contains("404 Not Found"));
+
+        // Then the real callback.
+        let mut ok = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        ok.write_all(b"GET /callback?code=c&state=s HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut oresp = Vec::new();
+        let _ = ok.read_to_end(&mut oresp).await;
+
+        let redirect = handle.await.unwrap().unwrap();
+        assert_eq!(redirect.code, "c");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_code_error_without_description() {
+        let server = LoopbackServer::bind().await.unwrap();
+        let port = server.port();
+        let handle =
+            tokio::spawn(async move { server.wait_for_code("s", Duration::from_secs(5)).await });
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        // error param but NO error_description → exercises the empty-desc branch.
+        stream
+            .write_all(b"GET /callback?error=access_denied HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        let _ = stream.read_to_end(&mut resp).await;
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("access_denied")));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_code_eof_without_crlf_uses_fallback_parse() {
+        // Bytes with no CRLF, then EOF → read hits n==0 and the fallback
+        // first-line parse runs, still extracting the code.
+        let server = LoopbackServer::bind().await.unwrap();
+        let port = server.port();
+        let handle =
+            tokio::spawn(
+                async move { server.wait_for_code("s", Duration::from_millis(500)).await },
+            );
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream
+            .write_all(b"GET /callback?code=c&state=s")
+            .await
+            .unwrap(); // no CRLF
+        stream.shutdown().await.unwrap(); // EOF
+        let mut resp = Vec::new();
+        let _ = stream.read_to_end(&mut resp).await;
+        let result = handle.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "fallback parse should extract code: {result:?}"
+        );
+        assert_eq!(result.unwrap().code, "c");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_code_oversized_without_crlf_hits_cap() {
+        // >16 KiB with no CRLF → the CAP break path; no valid callback → 404,
+        // then the accept loop waits and times out.
+        let server = LoopbackServer::bind().await.unwrap();
+        let port = server.port();
+        let handle =
+            tokio::spawn(
+                async move { server.wait_for_code("s", Duration::from_millis(400)).await },
+            );
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let big = vec![b'x'; 17 * 1024];
+        stream.write_all(&big).await.unwrap();
+        let _ = stream.shutdown().await;
+        let mut resp = Vec::new();
+        let _ = stream.read_to_end(&mut resp).await;
+        let result = handle.await.unwrap();
+        assert!(
+            matches!(result, Err(ActualError::ApiError(ref m)) if m.contains("Timed out")),
+            "got: {result:?}"
+        );
+    }
 }
