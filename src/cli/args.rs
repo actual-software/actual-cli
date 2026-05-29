@@ -359,6 +359,12 @@ pub struct AdvisorArgs {
     /// Required against the dev advisor mock, which expects a UUID org id.
     #[arg(long, value_name = "ORG_ID")]
     pub org: Option<String>,
+
+    /// Scope the query to a specific connected repository (UUID). When omitted,
+    /// the query runs at org level. Auto-detection from the git remote is not
+    /// available yet — it requires the connected-repos API.
+    #[arg(long, value_name = "REPO_ID")]
+    pub repo: Option<String>,
 }
 
 /// Arguments for the `adr-bot` command
