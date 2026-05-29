@@ -186,6 +186,122 @@ pub struct TelemetryMetric {
     pub tags: HashMap<String, String>,
 }
 
+// --- Advisor query types (POST /v1/advisor/query, GET /v1/advisor/query/:id) ---
+
+/// The client surface initiating an advisor query. The CLI always sends `cli`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdvisorSurface {
+    pub kind: String,
+}
+
+impl AdvisorSurface {
+    /// The CLI surface (`{ "kind": "cli" }`).
+    pub fn cli() -> Self {
+        Self {
+            kind: "cli".to_string(),
+        }
+    }
+}
+
+/// Result-delivery sink. The CLI polls for its own result, so it always sends
+/// `none`; the other sink types exist server-side for the Slack/GitHub surfaces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AdvisorSink {
+    None,
+}
+
+/// Request body for `POST /v1/advisor/query`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AdvisorQueryRequest {
+    pub org_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_unique_id: Option<String>,
+    pub query: String,
+    pub surface: AdvisorSurface,
+    pub sink: AdvisorSink,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// Lifecycle state of an advisor job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvisorJobStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl AdvisorJobStatus {
+    /// `true` once the job has reached a terminal state.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed)
+    }
+}
+
+/// Response from `POST /v1/advisor/query` — the job has been accepted.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AdvisorQueryStarted {
+    pub query_id: String,
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    pub status: AdvisorJobStatus,
+}
+
+/// Status + result of an advisor job (`GET /v1/advisor/query/:id`). Extra
+/// server fields (request echo, sink delivery, timestamps) are ignored.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AdvisorQueryStatus {
+    pub query_id: String,
+    pub status: AdvisorJobStatus,
+    #[serde(default)]
+    pub result: Option<AdvisorOutput>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The advisor's answer.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AdvisorOutput {
+    pub summary: String,
+    pub interpreter: AdvisorInterpreter,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AdvisorInterpreter {
+    pub summary: String,
+    #[serde(default)]
+    pub related_adrs: Vec<RelatedAdr>,
+}
+
+/// An ADR the advisor judged relevant to the query.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct RelatedAdr {
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub policy: String,
+    pub instructions: String,
+    pub scope: String,
+    pub relevance_reason: String,
+    pub confidence: f64,
+}
+
+/// Outcome of a single poll of `GET /v1/advisor/query/:id`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AdvisorPoll {
+    /// `304 Not Modified` — the terminal result is unchanged from the ETag sent.
+    NotModified,
+    /// A status body, with the server's `Retry-After` (seconds) and `ETag` hints.
+    Update {
+        status: AdvisorQueryStatus,
+        retry_after: Option<u64>,
+        etag: Option<String>,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,5 +877,103 @@ mod tests {
         let details = response.error.details.unwrap();
         assert_eq!(details["field"], "projects");
         assert_eq!(details["reason"], "empty array");
+    }
+
+    // --- Advisor query type tests ---
+
+    #[test]
+    fn test_advisor_surface_cli() {
+        assert_eq!(AdvisorSurface::cli().kind, "cli");
+    }
+
+    #[test]
+    fn test_advisor_job_status_is_terminal() {
+        assert!(!AdvisorJobStatus::Pending.is_terminal());
+        assert!(!AdvisorJobStatus::Running.is_terminal());
+        assert!(AdvisorJobStatus::Succeeded.is_terminal());
+        assert!(AdvisorJobStatus::Failed.is_terminal());
+    }
+
+    #[test]
+    fn test_advisor_job_status_serde() {
+        assert_eq!(
+            serde_json::to_value(AdvisorJobStatus::Succeeded).unwrap(),
+            serde_json::json!("succeeded")
+        );
+        let s: AdvisorJobStatus = serde_json::from_value(serde_json::json!("failed")).unwrap();
+        assert_eq!(s, AdvisorJobStatus::Failed);
+    }
+
+    #[test]
+    fn test_advisor_sink_none_serializes_with_type_tag() {
+        assert_eq!(
+            serde_json::to_value(AdvisorSink::None).unwrap(),
+            serde_json::json!({ "type": "none" })
+        );
+    }
+
+    #[test]
+    fn test_advisor_query_request_serialization() {
+        let req = AdvisorQueryRequest {
+            org_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            repo_unique_id: None,
+            query: "why?".to_string(),
+            surface: AdvisorSurface::cli(),
+            sink: AdvisorSink::None,
+            idempotency_key: None,
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["surface"]["kind"], "cli");
+        assert_eq!(v["sink"]["type"], "none");
+        assert_eq!(v["org_id"], "11111111-1111-1111-1111-111111111111");
+        // Absent optionals are omitted.
+        assert!(v.get("repo_unique_id").is_none());
+        assert!(v.get("idempotency_key").is_none());
+    }
+
+    #[test]
+    fn test_advisor_query_request_includes_optionals_when_set() {
+        let req = AdvisorQueryRequest {
+            org_id: "o".to_string(),
+            repo_unique_id: Some("22222222-2222-2222-2222-222222222222".to_string()),
+            query: "q".to_string(),
+            surface: AdvisorSurface::cli(),
+            sink: AdvisorSink::None,
+            idempotency_key: Some("idem-1".to_string()),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["repo_unique_id"], "22222222-2222-2222-2222-222222222222");
+        assert_eq!(v["idempotency_key"], "idem-1");
+    }
+
+    #[test]
+    fn test_advisor_query_status_deserialize_ignores_extra_fields() {
+        // The server echoes request/sink_delivery/timestamps; we ignore them.
+        let json = r#"{
+            "query_id": "q1",
+            "workflow_id": "wf1",
+            "status": "succeeded",
+            "request": { "anything": true },
+            "sink_delivery": null,
+            "created_at": "2026-05-29T00:00:00Z",
+            "result": {
+                "summary": "top-level summary",
+                "interpreter": {
+                    "summary": "interp summary",
+                    "related_adrs": [{
+                        "id": "a1", "name": "n1", "title": "t1", "policy": "p1",
+                        "instructions": "i1", "scope": "s1", "relevance_reason": "r1",
+                        "confidence": 0.75
+                    }]
+                }
+            },
+            "error": null
+        }"#;
+        let status: AdvisorQueryStatus = serde_json::from_str(json).unwrap();
+        assert_eq!(status.status, AdvisorJobStatus::Succeeded);
+        let out = status.result.expect("result present");
+        assert_eq!(out.summary, "top-level summary");
+        assert_eq!(out.interpreter.related_adrs.len(), 1);
+        assert_eq!(out.interpreter.related_adrs[0].confidence, 0.75);
     }
 }

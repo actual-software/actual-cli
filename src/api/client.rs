@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ETAG, IF_NONE_MATCH, RETRY_AFTER, USER_AGENT};
 
 use crate::analysis::signals::CanonicalIR;
 use crate::analysis::static_analyzer::registry::all_framework_names;
 use crate::analysis::types::{FrameworkCategory, Language, RepoAnalysis};
 use crate::api::types::{
-    ApiErrorResponse, CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, FrameworksResponse,
-    HealthResponse, LanguagesResponse, MatchFramework, MatchOptions, MatchProject, MatchRequest,
-    MatchResponse, TelemetryRequest,
+    AdvisorPoll, AdvisorQueryRequest, AdvisorQueryStarted, AdvisorQueryStatus, ApiErrorResponse,
+    CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, FrameworksResponse, HealthResponse,
+    LanguagesResponse, MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse,
+    TelemetryRequest,
 };
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -22,6 +23,7 @@ const USER_AGENT_VALUE: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_
 pub struct ActualApiClient {
     client: reqwest::Client,
     base_url: String,
+    bearer_token: Option<String>,
 }
 
 impl ActualApiClient {
@@ -69,6 +71,93 @@ impl ActualApiClient {
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
+            bearer_token: None,
+        })
+    }
+
+    /// Attach a platform bearer token (from `actual login`) to authenticated
+    /// requests. Returns the client for chaining.
+    pub fn with_bearer(mut self, token: impl Into<String>) -> Self {
+        self.bearer_token = Some(token.into());
+        self
+    }
+
+    /// Apply the bearer token to a request builder, if one is set.
+    fn authed(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.bearer_token {
+            Some(token) => rb.bearer_auth(token),
+            None => rb,
+        }
+    }
+
+    /// Start an asynchronous advisor query. Returns the `query_id` to poll.
+    pub async fn start_advisor_query(
+        &self,
+        request: &AdvisorQueryRequest,
+    ) -> Result<AdvisorQueryStarted, ActualError> {
+        let url = format!("{}/v1/advisor/query", self.base_url);
+        let response = self
+            .authed(self.client.post(&url).json(request))
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ActualError::NotLoggedIn);
+        }
+        if !status.is_success() {
+            return Err(Self::map_error_response(status, response).await);
+        }
+        response
+            .json::<AdvisorQueryStarted>()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))
+    }
+
+    /// Poll an advisor query once. Pass the terminal `ETag` as `if_none_match`
+    /// to receive `304 Not Modified` once the result has settled.
+    pub async fn poll_advisor_query(
+        &self,
+        query_id: &str,
+        if_none_match: Option<&str>,
+    ) -> Result<AdvisorPoll, ActualError> {
+        let url = format!("{}/v1/advisor/query/{query_id}", self.base_url);
+        let mut builder = self.authed(self.client.get(&url));
+        if let Some(etag) = if_none_match {
+            builder = builder.header(IF_NONE_MATCH, etag);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return Ok(AdvisorPoll::NotModified);
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ActualError::NotLoggedIn);
+        }
+        if !status.is_success() {
+            return Err(Self::map_error_response(status, response).await);
+        }
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        let etag = response
+            .headers()
+            .get(ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let body = response
+            .json::<AdvisorQueryStatus>()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        Ok(AdvisorPoll::Update {
+            status: body,
+            retry_after,
+            etag,
         })
     }
 
@@ -306,6 +395,7 @@ mod tests {
         Framework, FrameworkCategory, Language, LanguageStat, Project, ProjectSelection,
         RepoAnalysis, WorkspaceType,
     };
+    use crate::api::types::{AdvisorJobStatus, AdvisorSink, AdvisorSurface};
 
     /// Helper: create a minimal project with the given languages and frameworks.
     fn make_project(
@@ -1417,5 +1507,231 @@ mod tests {
         assert_eq!(request.projects.len(), 1);
         assert_eq!(request.projects[0].languages, vec!["python".to_string()]);
         assert!(request.projects[0].frameworks.is_empty());
+    }
+
+    // --- Advisor query client tests ---
+
+    fn sample_advisor_request() -> AdvisorQueryRequest {
+        AdvisorQueryRequest {
+            org_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            repo_unique_id: None,
+            query: "why no global mutable state?".to_string(),
+            surface: AdvisorSurface::cli(),
+            sink: AdvisorSink::None,
+            idempotency_key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_start_advisor_query_success_sends_bearer() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/advisor/query")
+            .match_header("authorization", "Bearer tok-123")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"query_id":"q1","workflow_id":"wf1","status":"pending"}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("tok-123");
+        let started = client
+            .start_advisor_query(&sample_advisor_request())
+            .await
+            .unwrap();
+        assert_eq!(started.query_id, "q1");
+        assert_eq!(started.workflow_id.as_deref(), Some("wf1"));
+        assert_eq!(started.status, AdvisorJobStatus::Pending);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_start_advisor_query_without_bearer_omits_header() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/advisor/query")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"query_id":"q2","status":"pending"}"#)
+            .create_async()
+            .await;
+        // No bearer → exercises the `authed` None branch; workflow_id default.
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let started = client
+            .start_advisor_query(&sample_advisor_request())
+            .await
+            .unwrap();
+        assert_eq!(started.query_id, "q2");
+        assert_eq!(started.workflow_id, None);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_start_advisor_query_unauthorized_maps_to_not_logged_in() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/advisor/query")
+            .with_status(401)
+            .with_body("unauthorized")
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("bad");
+        let err = client
+            .start_advisor_query(&sample_advisor_request())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_start_advisor_query_error_status() {
+        let mut server = mockito::Server::new_async().await;
+        let body =
+            r#"{"error":{"code":"BAD_REQUEST","message":"org_id must be a uuid","details":null}}"#;
+        let mock = server
+            .mock("POST", "/v1/advisor/query")
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client
+            .start_advisor_query(&sample_advisor_request())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiResponseError { ref code, .. } if code == "BAD_REQUEST")
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_poll_advisor_query_pending_with_retry_after() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/advisor/query/q1")
+            .match_header("authorization", "Bearer t")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_header("retry-after", "2")
+            .with_body(r#"{"query_id":"q1","status":"running","result":null,"error":null}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let poll = client.poll_advisor_query("q1", None).await.unwrap();
+        match poll {
+            AdvisorPoll::Update {
+                status,
+                retry_after,
+                etag,
+            } => {
+                assert_eq!(status.status, AdvisorJobStatus::Running);
+                assert!(!status.status.is_terminal());
+                assert_eq!(retry_after, Some(2));
+                assert_eq!(etag, None);
+                assert!(status.result.is_none());
+            }
+            other => panic!("expected Update, got {other:?}"),
+        }
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_poll_advisor_query_terminal_with_etag_and_result() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{"query_id":"q1","status":"succeeded","result":{"summary":"S","interpreter":{"summary":"IS","related_adrs":[{"id":"a1","name":"n","title":"t","policy":"p","instructions":"i","scope":"sc","relevance_reason":"r","confidence":0.9}]}},"error":null}"#;
+        let mock = server
+            .mock("GET", "/v1/advisor/query/q1")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_header("etag", "\"v1\"")
+            .with_body(body)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let poll = client.poll_advisor_query("q1", None).await.unwrap();
+        match poll {
+            AdvisorPoll::Update {
+                status,
+                retry_after,
+                etag,
+            } => {
+                assert_eq!(status.status, AdvisorJobStatus::Succeeded);
+                assert_eq!(retry_after, None);
+                assert_eq!(etag.as_deref(), Some("\"v1\""));
+                let out = status.result.expect("result present");
+                assert_eq!(out.summary, "S");
+                assert_eq!(out.interpreter.summary, "IS");
+                assert_eq!(out.interpreter.related_adrs.len(), 1);
+                assert_eq!(out.interpreter.related_adrs[0].confidence, 0.9);
+            }
+            other => panic!("expected Update, got {other:?}"),
+        }
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_poll_advisor_query_not_modified() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/advisor/query/q1")
+            .match_header("if-none-match", "\"v1\"")
+            .with_status(304)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let poll = client
+            .poll_advisor_query("q1", Some("\"v1\""))
+            .await
+            .unwrap();
+        assert_eq!(poll, AdvisorPoll::NotModified);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_poll_advisor_query_unauthorized_maps_to_not_logged_in() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/advisor/query/q1")
+            .with_status(401)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("bad");
+        let err = client.poll_advisor_query("q1", None).await.unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_poll_advisor_query_server_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/advisor/query/q1")
+            .with_status(500)
+            .with_body("boom")
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client.poll_advisor_query("q1", None).await.unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("500")));
+        mock.assert_async().await;
     }
 }
