@@ -6,11 +6,14 @@
 
 use std::time::Duration;
 
+use chrono::{Duration as ChronoDuration, Utc};
+
 use crate::api::types::{
     AdvisorJobStatus, AdvisorOutput, AdvisorPoll, AdvisorQueryRequest, AdvisorSink, AdvisorSurface,
 };
 use crate::api::{ActualApiClient, DEFAULT_API_URL};
-use crate::auth::store;
+use crate::auth::oauth;
+use crate::auth::store::{self, StoredCredentials};
 use crate::cli::args::AdvisorArgs;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
@@ -40,6 +43,23 @@ fn resolve_api_url(flag: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
 }
 
+/// If the stored access token is expired (or about to be), refresh it with the
+/// rotation primitive and re-persist. A refresh failure surfaces as
+/// `NotLoggedIn` — the user must re-run `actual login`.
+async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, ActualError> {
+    if creds.refresh_token.is_empty() {
+        return Ok(creds);
+    }
+    if creds.expires_within(Utc::now(), ChronoDuration::seconds(60)) {
+        let refreshed = oauth::refresh(&creds)
+            .await
+            .map_err(|_| ActualError::NotLoggedIn)?;
+        store::save(&refreshed)?;
+        return Ok(refreshed);
+    }
+    Ok(creds)
+}
+
 /// Terminal outcome of an advisor job.
 enum Outcome {
     Succeeded(Box<AdvisorOutput>),
@@ -52,6 +72,7 @@ async fn run(
     poll_interval: Duration,
 ) -> Result<(), ActualError> {
     let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
+    let creds = ensure_fresh(creds).await?;
     let org_id = args
         .org
         .clone()
@@ -61,7 +82,7 @@ async fn run(
 
     let request = AdvisorQueryRequest {
         org_id,
-        repo_unique_id: None, // repo auto-scoping lands in a later slice
+        repo_unique_id: args.repo.clone(),
         query: args.query.clone(),
         surface: AdvisorSurface::cli(),
         sink: AdvisorSink::None,
@@ -178,6 +199,7 @@ mod tests {
             query: "why app router?".to_string(),
             api_url: Some(api_url.to_string()),
             org: org.map(|s| s.to_string()),
+            repo: None,
         }
     }
 
@@ -460,5 +482,95 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("did not reach")));
+    }
+
+    // --- transparent refresh-on-expiry ---
+
+    #[tokio::test]
+    async fn test_ensure_fresh_no_refresh_token_returns_unchanged() {
+        let mut c = test_creds();
+        c.refresh_token = String::new();
+        let out = ensure_fresh(c.clone()).await.unwrap();
+        assert_eq!(out.access_token, c.access_token);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_not_expired_returns_unchanged() {
+        let mut c = test_creds();
+        c.expires_at = Some(Utc::now() + ChronoDuration::hours(1));
+        let out = ensure_fresh(c).await.unwrap();
+        assert_eq!(out.access_token, "tok");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_expired_refreshes_and_persists() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"new-at","token_type":"Bearer","expires_in":3600,"refresh_token":"new-rt"}"#,
+            )
+            .create_async()
+            .await;
+
+        let mut c = test_creds();
+        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1)); // expired
+        c.auth_url = Some(server.url());
+
+        let out = ensure_fresh(c).await.unwrap();
+        assert_eq!(out.access_token, "new-at");
+        // Rotated creds were re-persisted.
+        assert_eq!(store::load().unwrap().unwrap().access_token, "new-at");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_refresh_failure_is_not_logged_in() {
+        // Expired + unreachable auth server → refresh errors → NotLoggedIn.
+        let mut c = test_creds();
+        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        c.auth_url = Some("http://127.0.0.1:1".to_string());
+        let err = ensure_fresh(c).await.unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn));
+    }
+
+    // --- explicit repo scoping ---
+
+    #[tokio::test]
+    async fn test_run_with_explicit_repo_scopes_request() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let s = server
+            .mock("POST", "/v1/advisor/query")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"repo_unique_id":"33333333-3333-3333-3333-333333333333"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(START_BODY)
+            .create_async()
+            .await;
+        let _p = server
+            .mock("GET", POLL_PATH)
+            .with_body(succeeded_body(""))
+            .with_header("content-type", "application/json")
+            .create_async()
+            .await;
+
+        let mut a = args(&server.url(), None);
+        a.repo = Some("33333333-3333-3333-3333-333333333333".to_string());
+        run(&a, 5, Duration::ZERO).await.unwrap();
+        s.assert_async().await;
     }
 }
