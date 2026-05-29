@@ -57,6 +57,7 @@ glob = "0.3"
 
 # Crypto
 sha2 = "0.10"
+base64 = "0.22"
 
 # Async utilities
 futures = "0.3"
@@ -67,6 +68,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 which = "8"
 tempfile = "3"
+
+# Browser launch for OAuth login (best-effort; CLI always prints the URL too)
+open = "5"
 
 # Static analysis
 tokei = { version = "14", default-features = false }

@@ -10,12 +10,15 @@ use crate::generation::OutputFormat;
 pub mod auth;
 pub mod cache;
 pub mod config;
+pub mod login;
+pub mod logout;
 pub mod models;
 pub mod runners;
 pub mod status;
 pub mod sync;
 pub(crate) mod sync_kb_poller;
 pub(crate) mod sync_wiring;
+pub mod whoami;
 
 /// Non-hidden directory names to skip when walking the file tree for
 /// output files.
