@@ -7,6 +7,7 @@ use crate::error::ActualError;
 use crate::generation::format::{CURSOR_RULES_DIR, CURSOR_RULES_FILENAME};
 use crate::generation::OutputFormat;
 
+pub mod advisor;
 pub mod auth;
 pub mod cache;
 pub mod config;
