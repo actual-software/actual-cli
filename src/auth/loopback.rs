@@ -61,7 +61,9 @@ impl LoopbackServer {
             .map_err(|_| {
                 ActualError::ApiError(
                     "Timed out waiting for the browser redirect. \
-                     Re-run `actual login` and complete sign-in in the browser."
+                     Re-run `actual login` and complete sign-in in the browser. \
+                     If your account belongs to multiple organizations, \
+                     pass `--org <id>`."
                         .to_string(),
                 )
             })?
