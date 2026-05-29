@@ -21,8 +21,8 @@ pub use error::ActualError;
 
 // Re-export CLI types for backward compatibility with tests
 pub use cli::args::{
-    CacheAction, CacheArgs, Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs, LoginArgs,
-    ModelsArgs, RunnerChoice, StatusArgs, SyncArgs,
+    AdvisorArgs, CacheAction, CacheArgs, Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs,
+    LoginArgs, ModelsArgs, RunnerChoice, StatusArgs, SyncArgs,
 };
 
 pub fn run(cli: Cli) -> Result<(), ActualError> {
@@ -33,6 +33,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Login(args) => cli::commands::login::exec(args),
         Command::Logout => cli::commands::logout::exec(),
         Command::Whoami => cli::commands::whoami::exec(),
+        Command::Advisor(args) => cli::commands::advisor::exec(args),
         Command::Config(args) => cli::commands::config::exec(args),
         Command::Runners => cli::commands::runners::exec(),
         Command::Models(args) => cli::commands::models::exec(args.no_fetch),
@@ -109,6 +110,22 @@ mod tests {
         // Exercises the Command::Login dispatch arm; resolve_auth_url errors
         // before any network/browser work.
         let cli = Cli::parse_from(["actual", "login", "--no-browser"]);
+        assert!(run(cli).is_err());
+    }
+
+    #[test]
+    fn test_run_advisor_logged_out_returns_err() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
+        use tempfile::tempdir;
+
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        // Exercises the Command::Advisor dispatch arm (not signed in → error,
+        // before any network).
+        let cli = Cli::parse_from(["actual", "advisor", "why?"]);
         assert!(run(cli).is_err());
     }
 }

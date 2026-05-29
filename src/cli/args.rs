@@ -331,6 +331,8 @@ pub enum Command {
     Logout,
     /// Show the signed-in Actual AI account and organization
     Whoami,
+    /// Ask the Advisor an org-scoped architecture question
+    Advisor(AdvisorArgs),
     /// View or edit configuration
     Config(ConfigArgs),
     /// List all available AI backend runners
@@ -339,6 +341,24 @@ pub enum Command {
     Models(ModelsArgs),
     /// Clear local cache (analysis and tailoring results)
     Cache(CacheArgs),
+}
+
+/// Arguments for the `advisor` command
+#[derive(Parser, Debug)]
+pub struct AdvisorArgs {
+    /// The architecture question to ask the Advisor.
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+
+    /// Advisor API base URL (e.g. http://localhost:3099 for the mock).
+    /// Defaults to the production api-service.
+    #[arg(long, value_name = "URL")]
+    pub api_url: Option<String>,
+
+    /// Organization to scope the query to. Defaults to the signed-in org.
+    /// Required against the dev advisor mock, which expects a UUID org id.
+    #[arg(long, value_name = "ORG_ID")]
+    pub org: Option<String>,
 }
 
 /// Arguments for the `adr-bot` command
