@@ -93,8 +93,8 @@ pub fn detect_languages(path: &Path) -> Vec<(Language, usize)> {
     }
 
     // Sort known languages by LOC descending, then Other variants by LOC descending at the end
-    known.sort_by(|a, b| b.1.cmp(&a.1));
-    other.sort_by(|a, b| b.1.cmp(&a.1));
+    known.sort_by_key(|x| std::cmp::Reverse(x.1));
+    other.sort_by_key(|x| std::cmp::Reverse(x.1));
     known.extend(other);
     known
 }
