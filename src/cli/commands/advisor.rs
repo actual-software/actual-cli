@@ -37,9 +37,18 @@ fn build_runtime() -> Result<tokio::runtime::Runtime, ActualError> {
         .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))
 }
 
-/// Resolve the Advisor API base URL: `--api-url` wins, else the api-service.
+/// Resolve the Advisor API base URL: the `--api-url` flag wins, then the
+/// `ACTUAL_API_URL` environment variable, else the api-service default. This
+/// mirrors how `login` honors `ACTUAL_AUTH_URL`, so a single export steers both
+/// the auth and advisor halves against a local stack. An empty env var is
+/// treated as unset.
 fn resolve_api_url(flag: Option<&str>) -> String {
     flag.map(|s| s.to_string())
+        .or_else(|| {
+            std::env::var("ACTUAL_API_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
 }
 
@@ -205,11 +214,30 @@ mod tests {
 
     #[test]
     fn test_resolve_api_url() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        // The --api-url flag wins even when ACTUAL_API_URL is set.
+        let g = EnvGuard::set("ACTUAL_API_URL", "http://env:9999");
         assert_eq!(
             resolve_api_url(Some("http://localhost:3099")),
             "http://localhost:3099"
         );
+        drop(g);
+
+        // No flag → the ACTUAL_API_URL env var is used when present.
+        let g = EnvGuard::set("ACTUAL_API_URL", "http://env:9999");
+        assert_eq!(resolve_api_url(None), "http://env:9999");
+        drop(g);
+
+        // No flag, empty env var → treated as unset, falls back to the default.
+        let g = EnvGuard::set("ACTUAL_API_URL", "");
         assert_eq!(resolve_api_url(None), DEFAULT_API_URL);
+        drop(g);
+
+        // No flag, env unset → the api-service default.
+        let g = EnvGuard::remove("ACTUAL_API_URL");
+        assert_eq!(resolve_api_url(None), DEFAULT_API_URL);
+        drop(g);
     }
 
     #[test]
