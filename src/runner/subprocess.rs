@@ -308,11 +308,12 @@ async fn run_subprocess<T: DeserializeOwned>(
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
-    let child = cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let child = crate::runner::util::spawn_with_etxtbsy_retry(|| cmd.spawn())
+        .await
         .map_err(|e| io_err("Failed to spawn Claude Code", e))?;
 
     let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
@@ -458,11 +459,12 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
     cmd.env_remove("CLAUDECODE");
     cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
 
-    let mut child = cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = crate::runner::util::spawn_with_etxtbsy_retry(|| cmd.spawn())
+        .await
         .map_err(|e| io_err("Failed to spawn Claude Code", e))?;
 
     let stdout = child.stdout.take().expect("stdout is piped");

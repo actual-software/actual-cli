@@ -190,10 +190,11 @@ async fn run_cursor_subprocess(
     // on drop, preventing orphaned processes.
     cmd.kill_on_drop(true);
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let child = crate::runner::util::spawn_with_etxtbsy_retry(|| cmd.spawn())
+        .await
         .map_err(|e| io_err("Failed to spawn Cursor CLI", e))?;
 
     let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
