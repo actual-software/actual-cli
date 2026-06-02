@@ -60,8 +60,11 @@ impl OAuthConfig {
 
 /// Resolve the auth server base URL: explicit `cli_flag` wins, else the
 /// `ACTUAL_AUTH_URL` env var. There is intentionally **no** hardcoded
-/// production default yet — the prod OAuth endpoint is not finalized, and we
-/// will not bake a guessed URL into a published binary.
+/// production default yet — the production OAuth endpoint is not finalized as
+/// of 2026-06, and we will not bake a guessed URL into a published binary.
+/// Follow-up: bake the default here (a ~3-line change) once the production auth
+/// endpoint stabilizes; until then operators must pass `--api-url` or set
+/// `ACTUAL_AUTH_URL` explicitly, or login errors with a clear message.
 pub fn resolve_auth_url(cli_flag: Option<&str>) -> Result<String, ActualError> {
     if let Some(url) = cli_flag {
         return Ok(url.to_string());

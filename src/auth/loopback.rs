@@ -163,9 +163,16 @@ where
             return Ok(String::from_utf8_lossy(&buf[..pos]).into_owned());
         }
         if buf.len() > CAP {
-            break;
+            // A request line this long without a CRLF is malformed; reject it
+            // rather than lossy-parsing past the cap (matches the cap's intent).
+            return Err(ActualError::ApiError(
+                "Loopback request line exceeded 16 KiB without a CRLF; rejecting as malformed"
+                    .to_string(),
+            ));
         }
     }
+    // EOF before any CRLF: best-effort parse of the first line (a truncated but
+    // otherwise well-formed request still yields the code).
     Ok(String::from_utf8_lossy(&buf)
         .lines()
         .next()
@@ -479,15 +486,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_wait_for_code_oversized_without_crlf_hits_cap() {
-        // >16 KiB with no CRLF → the CAP break path; no valid callback → 404,
-        // then the accept loop waits and times out.
+    async fn test_wait_for_code_oversized_without_crlf_is_rejected() {
+        // >16 KiB with no CRLF → the cap branch rejects the request as
+        // malformed rather than lossy-parsing past the cap.
         let server = LoopbackServer::bind().await.unwrap();
         let port = server.port();
         let handle =
-            tokio::spawn(
-                async move { server.wait_for_code("s", Duration::from_millis(400)).await },
-            );
+            tokio::spawn(async move { server.wait_for_code("s", Duration::from_secs(5)).await });
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let big = vec![b'x'; 17 * 1024];
         stream.write_all(&big).await.unwrap();
@@ -496,8 +501,8 @@ mod tests {
         let _ = stream.read_to_end(&mut resp).await;
         let result = handle.await.unwrap();
         assert!(
-            matches!(result, Err(ActualError::ApiError(ref m)) if m.contains("Timed out")),
-            "got: {result:?}"
+            matches!(result, Err(ActualError::ApiError(ref m)) if m.contains("exceeded 16 KiB")),
+            "expected malformed-rejection error, got: {result:?}"
         );
     }
 }
