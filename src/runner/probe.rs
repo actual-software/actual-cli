@@ -66,11 +66,11 @@ pub(crate) async fn probe_claude_auth_async(
     cmd.args(["auth", "status", "--json"]);
     cmd.stdin(std::process::Stdio::null());
     cmd.kill_on_drop(true);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    let child = crate::runner::util::spawn_with_etxtbsy_retry(|| cmd.spawn())
+        .await
         .map_err(|e| ActualError::RunnerFailed {
             message: format!("failed to spawn claude: {e}"),
             stderr: String::new(),
@@ -137,11 +137,11 @@ async fn probe_claude_auth_async_no_json(
     cmd.args(["auth", "status"]);
     cmd.stdin(std::process::Stdio::null());
     cmd.kill_on_drop(true);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    let child = crate::runner::util::spawn_with_etxtbsy_retry(|| cmd.spawn())
+        .await
         .map_err(|e| ActualError::RunnerFailed {
             message: format!("failed to spawn claude: {e}"),
             stderr: String::new(),

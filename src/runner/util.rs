@@ -77,6 +77,92 @@ pub(crate) fn find_binary(
     Err(not_found())
 }
 
+/// Spawn a child process, retrying briefly on `ETXTBSY` ("text file busy").
+///
+/// On Linux/macOS a freshly written executable can transiently report `ETXTBSY`
+/// when a concurrent `fork` in another thread still holds a writable fd to it
+/// across the fork→exec window. This is common in parallel test runs (a fixture
+/// script written then immediately spawned) and possible in production when a
+/// runner binary was just installed or updated. A short, bounded retry resolves
+/// it deterministically. Callers pass the spawn as a closure, e.g.
+/// `spawn_with_etxtbsy_retry(|| cmd.spawn()).await`.
+pub(crate) async fn spawn_with_etxtbsy_retry<T, F>(mut attempt: F) -> std::io::Result<T>
+where
+    F: FnMut() -> std::io::Result<T>,
+{
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut tries: u32 = 1;
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(e) if tries < MAX_ATTEMPTS && is_text_file_busy(&e) => {
+                let backoff = std::time::Duration::from_millis(u64::from(20 * tries));
+                tokio::time::sleep(backoff).await;
+                tries += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// `true` when an I/O error is `ETXTBSY` (text file busy — errno 26 on Linux and macOS).
+fn is_text_file_busy(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(26)
+}
+
+#[cfg(test)]
+mod etxtbsy_retry_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::io::{Error, Result};
+
+    #[tokio::test]
+    async fn returns_value_on_first_success() {
+        let out: Result<u8> = spawn_with_etxtbsy_retry(|| Ok(7)).await;
+        assert_eq!(out.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn retries_on_etxtbsy_then_succeeds() {
+        let calls = Cell::new(0u32);
+        let out: Result<u8> = spawn_with_etxtbsy_retry(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 {
+                Err(Error::from_raw_os_error(26)) // ETXTBSY
+            } else {
+                Ok(42)
+            }
+        })
+        .await;
+        assert_eq!(out.unwrap(), 42);
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn non_etxtbsy_error_is_not_retried() {
+        let calls = Cell::new(0u32);
+        let out: Result<u8> = spawn_with_etxtbsy_retry(|| {
+            calls.set(calls.get() + 1);
+            Err(Error::from_raw_os_error(2)) // ENOENT
+        })
+        .await;
+        assert_eq!(out.unwrap_err().raw_os_error(), Some(2));
+        assert_eq!(calls.get(), 1, "non-ETXTBSY must not retry");
+    }
+
+    #[tokio::test]
+    async fn exhausts_retries_and_returns_last_error() {
+        let calls = Cell::new(0u32);
+        let out: Result<u8> = spawn_with_etxtbsy_retry(|| {
+            calls.set(calls.get() + 1);
+            Err(Error::from_raw_os_error(26)) // always ETXTBSY
+        })
+        .await;
+        assert_eq!(out.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(calls.get(), 5);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
