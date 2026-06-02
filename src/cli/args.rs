@@ -431,12 +431,16 @@ pub struct SyncArgs {
 #[derive(Parser, Debug)]
 pub struct LoginArgs {
     /// Organization to sign in to. Required for accounts that belong to more
-    /// than one organization; single-org accounts are auto-selected.
+    /// than one organization; single-org accounts are auto-selected. If you
+    /// belong to multiple orgs and the browser does not prompt within ~3
+    /// minutes, pass `--org` explicitly.
     #[arg(long, value_name = "ORG_ID")]
     pub org: Option<String>,
 
     /// Auth server base URL (e.g. http://localhost:4000 for the mock auth
-    /// server). Falls back to the ACTUAL_AUTH_URL environment variable.
+    /// server). Falls back to the ACTUAL_AUTH_URL environment variable. No
+    /// production default is baked in yet — until the production auth endpoint
+    /// is finalized, set one of these explicitly or login will error.
     #[arg(long, value_name = "URL")]
     pub api_url: Option<String>,
 
