@@ -1742,4 +1742,24 @@ mod tests {
         assert!(matches!(poll, AdvisorPoll::Retry { .. }));
         mock.assert_async().await;
     }
+
+    #[tokio::test]
+    async fn test_poll_advisor_query_404_is_terminal() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/advisor/query/q1")
+            .with_status(404)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"not found"}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        // A 404 (unknown query / no org access) is terminal — surfaces as an
+        // error rather than being retried.
+        let err = client.poll_advisor_query("q1", None).await.unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(_)));
+        mock.assert_async().await;
+    }
 }
