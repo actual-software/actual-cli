@@ -89,14 +89,14 @@ async fn run(
     let base_url = resolve_api_url(args.api_url.as_deref());
     let client = ActualApiClient::new(&base_url)?.with_bearer(&creds.access_token);
 
-    let request = AdvisorQueryRequest {
+    let request = AdvisorQueryRequest::new(
         org_id,
-        repo_unique_id: args.repo.clone(),
-        query: args.query.clone(),
-        surface: AdvisorSurface::cli(),
-        sink: AdvisorSink::None,
-        idempotency_key: None,
-    };
+        args.repo.clone(),
+        args.query.clone(),
+        AdvisorSurface::cli(),
+        AdvisorSink::None,
+        None,
+    );
 
     let started = client.start_advisor_query(&request).await?;
     eprintln!("{} thinking…", theme::hint("advisor"));
@@ -141,6 +141,8 @@ async fn poll_to_completion(
                 }
             },
             AdvisorPoll::NotModified => sleep_for(None, poll_interval).await,
+            // Transient infra 5xx — back off (honoring Retry-After) and re-poll.
+            AdvisorPoll::Retry { retry_after } => sleep_for(retry_after, poll_interval).await,
         }
     }
     Err(ActualError::ApiError(
@@ -510,6 +512,77 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("did not reach")));
+    }
+
+    #[tokio::test]
+    async fn test_run_sends_versioned_job_envelope() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        // The server validates the typed/versioned envelope: type + version
+        // literals and the query nested under `data`.
+        let s = server
+            .mock("POST", "/v1/advisor/query")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"type":"advisor_query","version":1,"data":{"query":"why app router?"}}"#
+                    .to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(START_BODY)
+            .create_async()
+            .await;
+        let _p = server
+            .mock("GET", POLL_PATH)
+            .with_body(succeeded_body(""))
+            .with_header("content-type", "application/json")
+            .create_async()
+            .await;
+
+        run(&args(&server.url(), None), 5, Duration::ZERO)
+            .await
+            .unwrap();
+        s.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_run_retries_on_transient_500() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let _s = server
+            .mock("POST", "/v1/advisor/query")
+            .with_body(START_BODY)
+            .with_header("content-type", "application/json")
+            .create_async()
+            .await;
+        // First poll: transient infra 500 → retried, not fatal. Second: succeeded.
+        let infra = server
+            .mock("GET", POLL_PATH)
+            .with_status(500)
+            .with_body(r#"{"error":"row load failed"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _done = server
+            .mock("GET", POLL_PATH)
+            .with_body(succeeded_body(ONE_ADR))
+            .with_header("content-type", "application/json")
+            .create_async()
+            .await;
+
+        run(&args(&server.url(), None), 5, Duration::ZERO)
+            .await
+            .unwrap();
+        infra.assert_async().await;
     }
 
     // --- transparent refresh-on-expiry ---

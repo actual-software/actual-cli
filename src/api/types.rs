@@ -211,17 +211,65 @@ pub enum AdvisorSink {
     None,
 }
 
+/// Job-envelope discriminator. The server validates `type` as the exact literal
+/// `advisor_query`, so this serializes to that string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvisorJobType {
+    AdvisorQuery,
+}
+
+/// Versioned `data` payload for an advisor-query job (server contract v1).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AdvisorQueryData {
+    pub query: String,
+}
+
+/// Fixed job-data version the server validates as the literal `1`.
+const ADVISOR_QUERY_VERSION_V1: u8 = 1;
+
 /// Request body for `POST /v1/advisor/query`.
+///
+/// The server expects a typed, versioned job envelope: `type`/`version` literals
+/// plus the query nested under `data`. Build with [`AdvisorQueryRequest::new`]
+/// so those invariants live in one place.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AdvisorQueryRequest {
     pub org_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_unique_id: Option<String>,
-    pub query: String,
+    #[serde(rename = "type")]
+    pub job_type: AdvisorJobType,
+    pub version: u8,
+    pub data: AdvisorQueryData,
     pub surface: AdvisorSurface,
     pub sink: AdvisorSink,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+}
+
+impl AdvisorQueryRequest {
+    /// Build a v1 advisor-query request. `type` and `version` are fixed by the
+    /// server's job-envelope contract; `query` is nested under `data`.
+    pub fn new(
+        org_id: String,
+        repo_unique_id: Option<String>,
+        query: String,
+        surface: AdvisorSurface,
+        sink: AdvisorSink,
+        idempotency_key: Option<String>,
+    ) -> Self {
+        Self {
+            org_id,
+            repo_unique_id,
+            job_type: AdvisorJobType::AdvisorQuery,
+            version: ADVISOR_QUERY_VERSION_V1,
+            data: AdvisorQueryData { query },
+            surface,
+            sink,
+            idempotency_key,
+        }
+    }
 }
 
 /// Lifecycle state of an advisor job.
@@ -294,6 +342,9 @@ pub struct RelatedAdr {
 pub enum AdvisorPoll {
     /// `304 Not Modified` — the terminal result is unchanged from the ETag sent.
     NotModified,
+    /// A transient `5xx` (e.g. the status row could not be loaded due to an
+    /// infrastructure error) — retry the poll rather than failing the query.
+    Retry { retry_after: Option<u64> },
     /// A status body, with the server's `Retry-After` (seconds) and `ETag` hints.
     Update {
         status: AdvisorQueryStatus,
@@ -914,15 +965,20 @@ mod tests {
 
     #[test]
     fn test_advisor_query_request_serialization() {
-        let req = AdvisorQueryRequest {
-            org_id: "11111111-1111-1111-1111-111111111111".to_string(),
-            repo_unique_id: None,
-            query: "why?".to_string(),
-            surface: AdvisorSurface::cli(),
-            sink: AdvisorSink::None,
-            idempotency_key: None,
-        };
+        let req = AdvisorQueryRequest::new(
+            "11111111-1111-1111-1111-111111111111".to_string(),
+            None,
+            "why?".to_string(),
+            AdvisorSurface::cli(),
+            AdvisorSink::None,
+            None,
+        );
         let v = serde_json::to_value(&req).unwrap();
+        // Typed/versioned job envelope: type + version literals, query under data.
+        assert_eq!(v["type"], "advisor_query");
+        assert_eq!(v["version"], 1);
+        assert_eq!(v["data"]["query"], "why?");
+        assert!(v.get("query").is_none()); // not top-level anymore
         assert_eq!(v["surface"]["kind"], "cli");
         assert_eq!(v["sink"]["type"], "none");
         assert_eq!(v["org_id"], "11111111-1111-1111-1111-111111111111");
@@ -933,14 +989,14 @@ mod tests {
 
     #[test]
     fn test_advisor_query_request_includes_optionals_when_set() {
-        let req = AdvisorQueryRequest {
-            org_id: "o".to_string(),
-            repo_unique_id: Some("22222222-2222-2222-2222-222222222222".to_string()),
-            query: "q".to_string(),
-            surface: AdvisorSurface::cli(),
-            sink: AdvisorSink::None,
-            idempotency_key: Some("idem-1".to_string()),
-        };
+        let req = AdvisorQueryRequest::new(
+            "o".to_string(),
+            Some("22222222-2222-2222-2222-222222222222".to_string()),
+            "q".to_string(),
+            AdvisorSurface::cli(),
+            AdvisorSink::None,
+            Some("idem-1".to_string()),
+        );
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["repo_unique_id"], "22222222-2222-2222-2222-222222222222");
         assert_eq!(v["idempotency_key"], "idem-1");
