@@ -126,10 +126,13 @@ impl ActualApiClient {
         if let Some(etag) = if_none_match {
             builder = builder.header(IF_NONE_MATCH, etag);
         }
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        let response = match builder.send().await {
+            Ok(r) => r,
+            // A transient network/fetch failure while polling — keep the loop
+            // alive (bounded by the caller's attempt cap) instead of aborting the
+            // query, mirroring the browser reference's keep-alive-on-fetch-error.
+            Err(_) => return Ok(AdvisorPoll::Retry { retry_after: None }),
+        };
         let status = response.status();
         if status == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(AdvisorPoll::NotModified);
@@ -1761,5 +1764,16 @@ mod tests {
         let err = client.poll_advisor_query("q1", None).await.unwrap_err();
         assert!(matches!(err, ActualError::ApiError(_)));
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_poll_advisor_query_network_error_is_retryable() {
+        // Unroutable address → the request can't complete (connection refused).
+        // A transient fetch failure mid-poll should retry, not abort the query.
+        let client = ActualApiClient::new("http://127.0.0.1:1")
+            .unwrap()
+            .with_bearer("t");
+        let poll = client.poll_advisor_query("q1", None).await.unwrap();
+        assert!(matches!(poll, AdvisorPoll::Retry { .. }));
     }
 }

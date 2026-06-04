@@ -1,8 +1,9 @@
 //! `actual advisor <query>` — ask the Advisor org-scoped architecture questions.
 //!
 //! Starts an async advisor job, polls to completion (honoring the server's
-//! `Retry-After`), and renders the answer. Uses the platform token from
-//! `actual login` as the bearer.
+//! `Retry-After` and retrying transient network/5xx errors up to a ~5-minute
+//! cap), and renders the answer. Uses the platform token from `actual login`
+//! as the bearer.
 
 use std::time::Duration;
 
@@ -18,9 +19,10 @@ use crate::cli::args::AdvisorArgs;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
 
-/// Upper bound on poll attempts before giving up (guards against a backend
-/// that never reaches a terminal state).
-const MAX_POLL_ATTEMPTS: usize = 600;
+/// Upper bound on poll attempts before giving up (guards against a backend that
+/// never reaches a terminal state). At the 2-second default interval this is
+/// ~5 minutes, matching the browser reference's wall-clock cap.
+const MAX_POLL_ATTEMPTS: usize = 150;
 /// Default delay between polls when the server provides no `Retry-After`.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
