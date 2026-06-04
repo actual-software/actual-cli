@@ -137,14 +137,21 @@ impl ActualApiClient {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(ActualError::NotLoggedIn);
         }
-        if !status.is_success() {
-            return Err(Self::map_error_response(status, response).await);
-        }
         let retry_after = response
             .headers()
             .get(RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok());
+        // A 5xx while polling is a transient infrastructure error (e.g. the
+        // status row could not be loaded) — the job is still running server-side,
+        // so retry rather than abort. A 404 (unknown query / no org access) stays
+        // terminal below.
+        if status.is_server_error() {
+            return Ok(AdvisorPoll::Retry { retry_after });
+        }
+        if !status.is_success() {
+            return Err(Self::map_error_response(status, response).await);
+        }
         let etag = response
             .headers()
             .get(ETAG)
@@ -1512,14 +1519,14 @@ mod tests {
     // --- Advisor query client tests ---
 
     fn sample_advisor_request() -> AdvisorQueryRequest {
-        AdvisorQueryRequest {
-            org_id: "11111111-1111-1111-1111-111111111111".to_string(),
-            repo_unique_id: None,
-            query: "why no global mutable state?".to_string(),
-            surface: AdvisorSurface::cli(),
-            sink: AdvisorSink::None,
-            idempotency_key: None,
-        }
+        AdvisorQueryRequest::new(
+            "11111111-1111-1111-1111-111111111111".to_string(),
+            None,
+            "why no global mutable state?".to_string(),
+            AdvisorSurface::cli(),
+            AdvisorSink::None,
+            None,
+        )
     }
 
     #[tokio::test]
@@ -1719,7 +1726,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_poll_advisor_query_server_error() {
+    async fn test_poll_advisor_query_5xx_is_retryable() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
             .mock("GET", "/v1/advisor/query/q1")
@@ -1730,8 +1737,9 @@ mod tests {
         let client = ActualApiClient::new(&server.url())
             .unwrap()
             .with_bearer("t");
-        let err = client.poll_advisor_query("q1", None).await.unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("500")));
+        // A 5xx mid-poll is a transient infra error → retry, not a fatal error.
+        let poll = client.poll_advisor_query("q1", None).await.unwrap();
+        assert!(matches!(poll, AdvisorPoll::Retry { .. }));
         mock.assert_async().await;
     }
 }
