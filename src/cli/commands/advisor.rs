@@ -5,7 +5,7 @@
 //! cap), and renders the answer. Uses the platform token from `actual login`
 //! as the bearer.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 
@@ -19,15 +19,19 @@ use crate::cli::args::AdvisorArgs;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
 
-/// Upper bound on poll attempts before giving up (guards against a backend that
-/// never reaches a terminal state). At the 2-second default interval this is
-/// ~5 minutes, matching the browser reference's wall-clock cap.
-const MAX_POLL_ATTEMPTS: usize = 150;
+/// Hard wall-clock cap on polling before giving up, matching the browser
+/// reference. A true deadline (not an attempt count) is what actually bounds
+/// total time once the per-poll `Retry-After` back-off varies.
+const HARD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Default delay between polls when the server provides no `Retry-After`.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Upper bound on a server-supplied `Retry-After`. The status handler caps its
+/// own back-off at 15s, so a larger (or misbehaving) value must not let a single
+/// poll stall the whole query.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(15);
 
 pub fn exec(args: &AdvisorArgs) -> Result<(), ActualError> {
-    build_runtime()?.block_on(run(args, MAX_POLL_ATTEMPTS, DEFAULT_POLL_INTERVAL))
+    build_runtime()?.block_on(run(args, HARD_TIMEOUT, DEFAULT_POLL_INTERVAL))
 }
 
 /// Single-threaded tokio runtime so the sync CLI dispatch path can drive the
@@ -79,7 +83,7 @@ enum Outcome {
 
 async fn run(
     args: &AdvisorArgs,
-    max_attempts: usize,
+    deadline: Duration,
     poll_interval: Duration,
 ) -> Result<(), ActualError> {
     let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
@@ -102,8 +106,7 @@ async fn run(
 
     let started = client.start_advisor_query(&request).await?;
     eprintln!("{} thinking…", theme::hint("advisor"));
-    let outcome =
-        poll_to_completion(&client, &started.query_id, max_attempts, poll_interval).await?;
+    let outcome = poll_to_completion(&client, &started.query_id, deadline, poll_interval).await?;
 
     match outcome {
         Outcome::Succeeded(output) => {
@@ -117,14 +120,17 @@ async fn run(
     }
 }
 
-/// Poll the job until it reaches a terminal state (or `max_attempts` is hit).
+/// Poll the job until it reaches a terminal state, or the wall-clock `deadline`
+/// elapses (a true time bound — an attempt count can't bound total time once the
+/// server's `Retry-After` back-off varies).
 async fn poll_to_completion(
     client: &ActualApiClient,
     query_id: &str,
-    max_attempts: usize,
+    deadline: Duration,
     poll_interval: Duration,
 ) -> Result<Outcome, ActualError> {
-    for _ in 0..max_attempts {
+    let start = Instant::now();
+    while start.elapsed() < deadline {
         match client.poll_advisor_query(query_id, None).await? {
             AdvisorPoll::Update {
                 status,
@@ -152,10 +158,18 @@ async fn poll_to_completion(
     ))
 }
 
-/// Sleep for the server's `Retry-After` seconds, or the default interval.
+/// The next-poll delay: the server's `Retry-After` seconds, or the default
+/// interval, **clamped to `MAX_RETRY_AFTER`** so a large or misbehaving
+/// `Retry-After` can't stall a single poll past the wall-clock deadline's intent.
+fn next_delay(retry_after: Option<u64>, default: Duration) -> Duration {
+    retry_after
+        .map(Duration::from_secs)
+        .unwrap_or(default)
+        .min(MAX_RETRY_AFTER)
+}
+
 async fn sleep_for(retry_after: Option<u64>, default: Duration) {
-    let delay = retry_after.map(Duration::from_secs).unwrap_or(default);
-    tokio::time::sleep(delay).await;
+    tokio::time::sleep(next_delay(retry_after, default)).await;
 }
 
 /// Render the advisor answer. **Never prints token material.**
@@ -289,9 +303,13 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        let err = run(&args("http://127.0.0.1:1", None), 5, Duration::ZERO)
-            .await
-            .unwrap_err();
+        let err = run(
+            &args("http://127.0.0.1:1", None),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ActualError::NotLoggedIn));
     }
 
@@ -320,9 +338,13 @@ mod tests {
             .await;
 
         // org omitted → uses the signed-in org from creds.
-        run(&args(&server.url(), None), 5, Duration::ZERO)
-            .await
-            .unwrap();
+        run(
+            &args(&server.url(), None),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
         s.assert_async().await;
         p.assert_async().await;
     }
@@ -350,7 +372,7 @@ mod tests {
             .await;
         run(
             &args(&server.url(), Some("00000000-0000-0000-0000-000000000000")),
-            5,
+            Duration::from_secs(60),
             Duration::ZERO,
         )
         .await
@@ -380,9 +402,13 @@ mod tests {
             .with_header("content-type", "application/json")
             .create_async()
             .await;
-        let err = run(&args(&server.url(), None), 5, Duration::ZERO)
-            .await
-            .unwrap_err();
+        let err = run(
+            &args(&server.url(), None),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("stream ended")));
     }
 
@@ -407,9 +433,13 @@ mod tests {
             .with_header("content-type", "application/json")
             .create_async()
             .await;
-        let err = run(&args(&server.url(), None), 5, Duration::ZERO)
-            .await
-            .unwrap_err();
+        let err = run(
+            &args(&server.url(), None),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("no result")));
     }
 
@@ -447,7 +477,7 @@ mod tests {
         // org provided via --org (exercises the args.org branch).
         run(
             &args(&server.url(), Some("22222222-2222-2222-2222-222222222222")),
-            5,
+            Duration::from_secs(60),
             Duration::ZERO,
         )
         .await
@@ -481,13 +511,17 @@ mod tests {
             .with_header("content-type", "application/json")
             .create_async()
             .await;
-        run(&args(&server.url(), None), 5, Duration::ZERO)
-            .await
-            .unwrap();
+        run(
+            &args(&server.url(), None),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
-    async fn test_poll_exhausts_attempts() {
+    async fn test_poll_times_out_at_deadline() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
@@ -501,7 +535,7 @@ mod tests {
             .with_header("content-type", "application/json")
             .create_async()
             .await;
-        // Always running → the loop exhausts max_attempts.
+        // Always running → the loop keeps polling until the wall-clock deadline.
         let _p = server
             .mock("GET", POLL_PATH)
             .with_status(200)
@@ -510,9 +544,14 @@ mod tests {
             .with_body(r#"{"query_id":"q1","status":"running","result":null,"error":null}"#)
             .create_async()
             .await;
-        let err = run(&args(&server.url(), None), 2, Duration::ZERO)
-            .await
-            .unwrap_err();
+        // Tiny deadline + zero interval → polls a few times, then gives up.
+        let err = run(
+            &args(&server.url(), None),
+            Duration::from_millis(10),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("did not reach")));
     }
 
@@ -545,9 +584,13 @@ mod tests {
             .create_async()
             .await;
 
-        run(&args(&server.url(), None), 5, Duration::ZERO)
-            .await
-            .unwrap();
+        run(
+            &args(&server.url(), None),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
         s.assert_async().await;
     }
 
@@ -581,10 +624,36 @@ mod tests {
             .create_async()
             .await;
 
-        run(&args(&server.url(), None), 5, Duration::ZERO)
-            .await
-            .unwrap();
+        run(
+            &args(&server.url(), None),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
         infra.assert_async().await;
+    }
+
+    #[test]
+    fn test_next_delay_clamps_retry_after() {
+        // A large (or misbehaving) server Retry-After is clamped to the ceiling.
+        assert_eq!(
+            next_delay(Some(600), Duration::from_secs(2)),
+            MAX_RETRY_AFTER
+        );
+        assert_eq!(
+            next_delay(Some(15), Duration::from_secs(2)),
+            Duration::from_secs(15)
+        );
+        // Values under the ceiling pass through; None falls back to the default.
+        assert_eq!(
+            next_delay(Some(3), Duration::from_secs(2)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            next_delay(None, Duration::from_secs(2)),
+            Duration::from_secs(2)
+        );
     }
 
     // --- transparent refresh-on-expiry ---
@@ -673,7 +742,9 @@ mod tests {
 
         let mut a = args(&server.url(), None);
         a.repo = Some("33333333-3333-3333-3333-333333333333".to_string());
-        run(&a, 5, Duration::ZERO).await.unwrap();
+        run(&a, Duration::from_secs(60), Duration::ZERO)
+            .await
+            .unwrap();
         s.assert_async().await;
     }
 }
