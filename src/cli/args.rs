@@ -463,10 +463,10 @@ pub struct LoginArgs {
     #[arg(long, value_name = "ORG_ID")]
     pub org: Option<String>,
 
-    /// Auth server base URL (e.g. http://localhost:4000 for the mock auth
-    /// server). Falls back to the ACTUAL_AUTH_URL environment variable. No
-    /// production default is baked in yet — until the production auth endpoint
-    /// is finalized, set one of these explicitly or login will error.
+    /// Auth server base URL. Defaults to the production OAuth server
+    /// (https://app.actual.ai); falls back through the ACTUAL_AUTH_URL env var.
+    /// Override for staging (https://app.staging.actual.ai) or the local mock
+    /// (http://localhost:4000).
     #[arg(long, value_name = "URL")]
     pub api_url: Option<String>,
 

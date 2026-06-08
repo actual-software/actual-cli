@@ -58,13 +58,16 @@ impl OAuthConfig {
     }
 }
 
-/// Resolve the auth server base URL: explicit `cli_flag` wins, else the
-/// `ACTUAL_AUTH_URL` env var. There is intentionally **no** hardcoded
-/// production default yet — the production OAuth endpoint is not finalized as
-/// of 2026-06, and we will not bake a guessed URL into a published binary.
-/// Follow-up: bake the default here (a ~3-line change) once the production auth
-/// endpoint stabilizes; until then operators must pass `--api-url` or set
-/// `ACTUAL_AUTH_URL` explicitly, or login errors with a clear message.
+/// Production OAuth server base URL — the canonical app origin (matches the
+/// server's `CANONICAL_APP_DOMAIN`). This is what `login`/`whoami` default to
+/// when nothing is passed; override with `--api-url` or `ACTUAL_AUTH_URL` for
+/// staging (`https://app.staging.actual.ai`) or local (`http://localhost:…`).
+pub const DEFAULT_AUTH_URL: &str = "https://app.actual.ai";
+
+/// Resolve the auth server base URL. Precedence: explicit `cli_flag` (`--api-url`)
+/// wins, then the `ACTUAL_AUTH_URL` env var, then the production default
+/// ([`DEFAULT_AUTH_URL`]). The default makes `actual login` work out of the box
+/// against prod; non-prod environments pass an override.
 pub fn resolve_auth_url(cli_flag: Option<&str>) -> Result<String, ActualError> {
     if let Some(url) = cli_flag {
         return Ok(url.to_string());
@@ -74,11 +77,7 @@ pub fn resolve_auth_url(cli_flag: Option<&str>) -> Result<String, ActualError> {
             return Ok(url);
         }
     }
-    Err(ActualError::ConfigError(
-        "No auth server URL configured. Pass --api-url \
-         (e.g. http://localhost:4000 for the mock auth server) or set ACTUAL_AUTH_URL."
-            .to_string(),
-    ))
+    Ok(DEFAULT_AUTH_URL.to_string())
 }
 
 /// `/api/oauth/token` response (authorization_code + refresh grants).
@@ -493,11 +492,13 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_auth_url_missing_errors() {
+    fn test_resolve_auth_url_defaults_to_prod() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::remove("ACTUAL_AUTH_URL");
-        let err = resolve_auth_url(None).unwrap_err();
-        assert!(matches!(err, ActualError::ConfigError(ref m) if m.contains("--api-url")));
+        // With nothing passed, login targets the production OAuth server.
+        let url = resolve_auth_url(None).unwrap();
+        assert_eq!(url, DEFAULT_AUTH_URL);
+        assert_eq!(url, "https://app.actual.ai");
     }
 
     #[test]
@@ -862,11 +863,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_auth_url_empty_env_errors() {
+    fn test_resolve_auth_url_empty_env_defaults_to_prod() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::set("ACTUAL_AUTH_URL", "");
-        let err = resolve_auth_url(None).unwrap_err();
-        assert!(matches!(err, ActualError::ConfigError(_)));
+        // An empty env var is treated as unset → falls through to the prod default.
+        let url = resolve_auth_url(None).unwrap();
+        assert_eq!(url, DEFAULT_AUTH_URL);
     }
 
     #[tokio::test]

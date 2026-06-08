@@ -61,18 +61,22 @@ mod tests {
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
     #[test]
-    fn test_exec_without_auth_url_errors_clearly() {
+    fn test_exec_rejects_non_https_url() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::remove("ACTUAL_AUTH_URL");
+        // resolve_auth_url now defaults to the prod HTTPS endpoint, so a missing
+        // URL no longer errors. A non-HTTPS, non-loopback --api-url is still
+        // rejected with a clear error before any browser/network work, so
+        // credentials are never sent in clear text.
         let args = LoginArgs {
             org: None,
-            api_url: None,
+            api_url: Some("http://example.com".to_string()),
             no_browser: true,
         };
         let err = exec(&args).unwrap_err();
         assert!(
-            matches!(err, ActualError::ConfigError(ref m) if m.contains("--api-url")),
-            "expected a clear config error, got: {err:?}"
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("HTTPS")),
+            "expected a clear HTTPS config error, got: {err:?}"
         );
     }
 
