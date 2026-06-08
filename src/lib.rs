@@ -101,15 +101,23 @@ mod tests {
     }
 
     #[test]
-    fn test_run_login_without_auth_url_returns_err() {
+    fn test_run_login_bad_url_returns_err() {
         use crate::testutil::{EnvGuard, ENV_MUTEX};
 
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::remove("ACTUAL_AUTH_URL");
 
-        // Exercises the Command::Login dispatch arm; resolve_auth_url errors
+        // Exercises the Command::Login dispatch arm. resolve_auth_url now defaults
+        // to the prod OAuth URL, so login no longer errors on a missing URL — pass
+        // a non-HTTPS, non-loopback URL, which is rejected at the HTTPS check
         // before any network/browser work.
-        let cli = Cli::parse_from(["actual", "login", "--no-browser"]);
+        let cli = Cli::parse_from([
+            "actual",
+            "login",
+            "--no-browser",
+            "--api-url",
+            "http://example.com",
+        ]);
         assert!(run(cli).is_err());
     }
 
