@@ -105,6 +105,12 @@ impl ActualApiClient {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(ActualError::NotLoggedIn);
         }
+        // A 403 from api-service means the session's org is not authorized for
+        // the request (cross-org, fail-closed). Surface it as a distinct,
+        // actionable error rather than an opaque API error.
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Err(Self::forbidden_org_error());
+        }
         if !status.is_success() {
             return Err(Self::map_error_response(status, response).await);
         }
@@ -151,6 +157,11 @@ impl ActualApiClient {
         // terminal below.
         if status.is_server_error() {
             return Ok(AdvisorPoll::Retry { retry_after });
+        }
+        // A 403 mid-poll is a terminal cross-org denial (unlike a transient
+        // 5xx), so it must not be retried — surface the actionable error.
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Err(Self::forbidden_org_error());
         }
         if !status.is_success() {
             return Err(Self::map_error_response(status, response).await);
@@ -281,6 +292,17 @@ impl ActualApiClient {
             let body = String::from_utf8_lossy(truncated);
             ActualError::ApiError(format!("HTTP {status}: {body}"))
         }
+    }
+
+    /// The default cross-organization error for a `403` from api-service. The
+    /// advisor command layer replaces this with a message naming the concrete
+    /// session and target orgs; this covers any caller that does not enrich it.
+    fn forbidden_org_error() -> ActualError {
+        ActualError::OrgMismatch(
+            "Advisor request denied: this session is not authorized for the requested \
+             organization (HTTP 403). Re-run `actual login` for the correct organization."
+                .to_string(),
+        )
     }
 }
 
@@ -1775,5 +1797,52 @@ mod tests {
             .with_bearer("t");
         let poll = client.poll_advisor_query("q1", None).await.unwrap();
         assert!(matches!(poll, AdvisorPoll::Retry { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_start_advisor_query_forbidden_maps_to_org_mismatch() {
+        let mut server = mockito::Server::new_async().await;
+        // api-service fail-closes a cross-org token with 403 on the start call.
+        let mock = server
+            .mock("POST", "/v1/advisor/query")
+            .with_status(403)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"code":"FORBIDDEN","message":"cross-org","details":null}}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client
+            .start_advisor_query(&sample_advisor_request())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::OrgMismatch(_)),
+            "expected OrgMismatch for 403, got {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_poll_advisor_query_forbidden_is_terminal_org_mismatch() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/advisor/query/q1")
+            .with_status(403)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"code":"FORBIDDEN","message":"cross-org","details":null}}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        // A 403 mid-poll is terminal (cross-org), NOT retried like a 5xx.
+        let err = client.poll_advisor_query("q1", None).await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::OrgMismatch(_)),
+            "expected OrgMismatch for 403, got {err:?}"
+        );
+        mock.assert_async().await;
     }
 }

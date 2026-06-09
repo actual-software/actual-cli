@@ -58,6 +58,44 @@ fn resolve_api_url(flag: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
 }
 
+/// If `err` is a cross-organization `403` from api-service, rebuild it with the
+/// concrete session and target org so the user gets an actionable message. All
+/// other errors pass through unchanged.
+fn enrich_org_mismatch(
+    err: ActualError,
+    session_org: &str,
+    target_org: &str,
+    explicit_org: bool,
+) -> ActualError {
+    match err {
+        ActualError::OrgMismatch(_) => {
+            ActualError::OrgMismatch(org_mismatch_message(session_org, target_org, explicit_org))
+        }
+        other => other,
+    }
+}
+
+/// Build the actionable cross-org message. When the user passed an explicit
+/// `--org` that differs from the session's org, name both and point at
+/// `actual login --org <target>`. Otherwise the 403 is a stale- or
+/// orgless-token case, so steer the user to re-login.
+fn org_mismatch_message(session_org: &str, target_org: &str, explicit_org: bool) -> String {
+    if explicit_org && target_org != session_org {
+        format!(
+            "Advisor request denied (HTTP 403): this session is scoped to organization \
+             {session_org}, but you requested organization {target_org}. Re-run \
+             `actual login --org {target_org}` to authenticate for it, or drop `--org` to \
+             query {session_org}."
+        )
+    } else {
+        format!(
+            "Advisor request denied (HTTP 403): this session (organization {session_org}) was \
+             rejected as cross-organization, or your token carries no usable organization. \
+             Re-run `actual login` (optionally with `--org <org-id>`) to refresh your session."
+        )
+    }
+}
+
 /// If the stored access token is expired (or about to be), refresh it with the
 /// rotation primitive and re-persist. A refresh failure surfaces as
 /// `NotLoggedIn` — the user must re-run `actual login`.
@@ -92,11 +130,15 @@ async fn run(
         .org
         .clone()
         .unwrap_or_else(|| creds.organization_id.clone());
+    // Captured for the cross-org 403 message: the session's own org, and
+    // whether the caller targeted a different org via an explicit `--org`.
+    let session_org = creds.organization_id.clone();
+    let explicit_org = args.org.is_some();
     let base_url = resolve_api_url(args.api_url.as_deref());
     let client = ActualApiClient::new(&base_url)?.with_bearer(&creds.access_token);
 
     let request = AdvisorQueryRequest::new(
-        org_id,
+        org_id.clone(),
         args.repo.clone(),
         args.query.clone(),
         AdvisorSurface::cli(),
@@ -104,9 +146,14 @@ async fn run(
         None,
     );
 
-    let started = client.start_advisor_query(&request).await?;
+    let started = client
+        .start_advisor_query(&request)
+        .await
+        .map_err(|e| enrich_org_mismatch(e, &session_org, &org_id, explicit_org))?;
     eprintln!("{} thinking…", theme::hint("advisor"));
-    let outcome = poll_to_completion(&client, &started.query_id, deadline, poll_interval).await?;
+    let outcome = poll_to_completion(&client, &started.query_id, deadline, poll_interval)
+        .await
+        .map_err(|e| enrich_org_mismatch(e, &session_org, &org_id, explicit_org))?;
 
     match outcome {
         Outcome::Succeeded(output) => {
@@ -746,5 +793,76 @@ mod tests {
             .await
             .unwrap();
         s.assert_async().await;
+    }
+
+    // --- cross-org 403 handling ---
+
+    #[tokio::test]
+    async fn test_run_org_mismatch_403_surfaces_actionable_error() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        // api-service rejects the cross-org token with a fail-closed 403.
+        let _s = server
+            .mock("POST", "/v1/advisor/query")
+            .with_status(403)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"code":"FORBIDDEN","message":"cross-org","details":null}}"#)
+            .create_async()
+            .await;
+
+        // Explicit --org that differs from the session org (test_creds is 1111…).
+        let target = "99999999-9999-9999-9999-999999999999";
+        let err = run(
+            &args(&server.url(), Some(target)),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            ActualError::OrgMismatch(msg) => {
+                assert!(msg.contains("403"), "expected 403 in: {msg}");
+                assert!(msg.contains(target), "expected target org in: {msg}");
+                assert!(
+                    msg.contains("11111111-1111-1111-1111-111111111111"),
+                    "expected session org in: {msg}"
+                );
+                assert!(
+                    msg.contains("actual login --org"),
+                    "expected actionable remediation in: {msg}"
+                );
+            }
+            other => panic!("expected OrgMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_org_mismatch_message_explicit_org_names_both_and_remediation() {
+        let msg = org_mismatch_message("org-A", "org-B", true);
+        assert!(msg.contains("org-A"), "expected session org in: {msg}");
+        assert!(msg.contains("org-B"), "expected target org in: {msg}");
+        assert!(
+            msg.contains("actual login --org org-B"),
+            "expected targeted remediation in: {msg}"
+        );
+        assert!(msg.contains("403"), "expected 403 in: {msg}");
+    }
+
+    #[test]
+    fn test_org_mismatch_message_no_explicit_org_steers_to_relogin() {
+        // No explicit --org → target == session; the generic re-login branch.
+        let msg = org_mismatch_message("org-A", "org-A", false);
+        assert!(msg.contains("org-A"), "expected session org in: {msg}");
+        assert!(
+            msg.contains("actual login"),
+            "expected re-login remediation in: {msg}"
+        );
+        assert!(msg.contains("403"), "expected 403 in: {msg}");
     }
 }
