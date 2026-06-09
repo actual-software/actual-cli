@@ -88,6 +88,13 @@ pub enum ActualError {
 
     #[error("Actual AI API is being updated and will be available shortly")]
     ServiceUnavailable,
+
+    /// The advisor gateway rejected the request as cross-organization (HTTP
+    /// 403): the session's OAuth token is scoped to one org and the request
+    /// targeted another. The carried message is a complete, actionable
+    /// remediation built by the advisor command layer.
+    #[error("{0}")]
+    OrgMismatch(String),
 }
 
 impl ActualError {
@@ -104,7 +111,8 @@ impl ActualError {
             | Self::ApiKeyMissing { .. }
             | Self::CodexCliModelRequiresApiKey { .. }
             | Self::NotLoggedIn
-            | Self::NoRunnerAvailable { .. } => 2,
+            | Self::NoRunnerAvailable { .. }
+            | Self::OrgMismatch(_) => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } | Self::ServiceUnavailable => 3,
             Self::IoError(_) => 5,
@@ -782,5 +790,19 @@ mod tests {
             ActualError::NotLoggedIn.to_string(),
             "Not signed in to Actual AI"
         );
+    }
+
+    #[test]
+    fn test_org_mismatch_exit_code_display_and_hint() {
+        let err = ActualError::OrgMismatch(
+            "Advisor request denied (HTTP 403): scoped to org A, requested org B.".to_string(),
+        );
+        // A 403 cross-org denial is an auth-class failure (re-login fixes it).
+        assert_eq!(err.exit_code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("403"), "expected '403' in: {msg}");
+        assert!(msg.contains("denied"), "expected 'denied' in: {msg}");
+        // The Display message is self-contained; no separate Fix hint.
+        assert_eq!(err.hint(), None);
     }
 }

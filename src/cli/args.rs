@@ -351,7 +351,8 @@ pub struct AdvisorArgs {
     pub query: String,
 
     /// Advisor API base URL (e.g. http://localhost:3099 for the mock).
-    /// Defaults to the production api-service.
+    /// Defaults to the production mcp-gateway (advisor traffic routes through
+    /// the gateway, which forwards to api-service).
     #[arg(long, value_name = "URL")]
     pub api_url: Option<String>,
 
