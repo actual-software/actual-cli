@@ -289,11 +289,6 @@ impl ActualApiClient {
         }
     }
 
-    /// The default cross-organization error for a `403` from api-service. The
-    /// advisor command layer replaces this with a `message`/`hint` pair naming
-    /// the concrete session and target orgs; this covers any caller that does
-    /// not enrich it. The remediation rides on `hint` (the "Fix:" line), not the
-    /// `message`, mirroring `NotLoggedIn`.
     fn forbidden_org_error() -> ActualError {
         ActualError::OrgMismatch {
             message: "Advisor request denied: this session is not authorized for the \
