@@ -155,11 +155,6 @@ impl ActualApiClient {
         if status.is_server_error() {
             return Ok(AdvisorPoll::Retry { retry_after });
         }
-        // A 403 mid-poll is a terminal cross-org denial (unlike a transient
-        // 5xx), so it must not be retried — surface the actionable error. Same
-        // status-only mapping, and the same "403 == cross-org today" assumption
-        // plus server-discriminator TODO documented at the `start_advisor_query`
-        // hook above.
         if status == reqwest::StatusCode::FORBIDDEN {
             return Err(Self::forbidden_org_error());
         }
