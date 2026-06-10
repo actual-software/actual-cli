@@ -108,6 +108,19 @@ impl ActualApiClient {
         // A 403 from api-service means the session's org is not authorized for
         // the request (cross-org, fail-closed). Surface it as a distinct,
         // actionable error rather than an opaque API error.
+        //
+        // ASSUMPTION: every 403 the advisor endpoints emit today is a cross-org
+        // denial — it is the only 403 producer in api-service — so we map on the
+        // status alone and intentionally do NOT inspect the body. The server's
+        // 403 body carries no stable per-cause discriminator to match on, and
+        // routing a 403 through `map_error_response` (which expects a nested
+        // `{error:{code,message}}`) would only re-bury the cross-org case as a
+        // generic API error.
+        //
+        // TODO: if api-service ever grows a non-org 403 producer, this hook must
+        // discriminate instead of assuming cross-org. That needs a server-provided
+        // signal (e.g. a stable `error.code` on the 403 body): parse it here and
+        // fall back to `map_error_response` for any non-org-mismatch code.
         if status == reqwest::StatusCode::FORBIDDEN {
             return Err(Self::forbidden_org_error());
         }
@@ -159,7 +172,10 @@ impl ActualApiClient {
             return Ok(AdvisorPoll::Retry { retry_after });
         }
         // A 403 mid-poll is a terminal cross-org denial (unlike a transient
-        // 5xx), so it must not be retried — surface the actionable error.
+        // 5xx), so it must not be retried — surface the actionable error. Same
+        // status-only mapping, and the same "403 == cross-org today" assumption
+        // plus server-discriminator TODO documented at the `start_advisor_query`
+        // hook above.
         if status == reqwest::StatusCode::FORBIDDEN {
             return Err(Self::forbidden_org_error());
         }
@@ -295,14 +311,17 @@ impl ActualApiClient {
     }
 
     /// The default cross-organization error for a `403` from api-service. The
-    /// advisor command layer replaces this with a message naming the concrete
-    /// session and target orgs; this covers any caller that does not enrich it.
+    /// advisor command layer replaces this with a `message`/`hint` pair naming
+    /// the concrete session and target orgs; this covers any caller that does
+    /// not enrich it. The remediation rides on `hint` (the "Fix:" line), not the
+    /// `message`, mirroring `NotLoggedIn`.
     fn forbidden_org_error() -> ActualError {
-        ActualError::OrgMismatch(
-            "Advisor request denied: this session is not authorized for the requested \
-             organization (HTTP 403). Re-run `actual login` for the correct organization."
+        ActualError::OrgMismatch {
+            message: "Advisor request denied: this session is not authorized for the \
+                      requested organization (HTTP 403)."
                 .to_string(),
-        )
+            hint: "actual login  (for the correct organization)".to_string(),
+        }
     }
 }
 
@@ -1818,7 +1837,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, ActualError::OrgMismatch(_)),
+            matches!(err, ActualError::OrgMismatch { .. }),
             "expected OrgMismatch for 403, got {err:?}"
         );
         mock.assert_async().await;
@@ -1840,7 +1859,7 @@ mod tests {
         // A 403 mid-poll is terminal (cross-org), NOT retried like a 5xx.
         let err = client.poll_advisor_query("q1", None).await.unwrap_err();
         assert!(
-            matches!(err, ActualError::OrgMismatch(_)),
+            matches!(err, ActualError::OrgMismatch { .. }),
             "expected OrgMismatch for 403, got {err:?}"
         );
         mock.assert_async().await;

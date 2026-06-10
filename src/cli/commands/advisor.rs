@@ -68,30 +68,42 @@ fn enrich_org_mismatch(
     explicit_org: bool,
 ) -> ActualError {
     match err {
-        ActualError::OrgMismatch(_) => {
-            ActualError::OrgMismatch(org_mismatch_message(session_org, target_org, explicit_org))
+        ActualError::OrgMismatch { .. } => {
+            let (message, hint) = org_mismatch_message(session_org, target_org, explicit_org);
+            ActualError::OrgMismatch { message, hint }
         }
         other => other,
     }
 }
 
-/// Build the actionable cross-org message. When the user passed an explicit
-/// `--org` that differs from the session's org, name both and point at
-/// `actual login --org <target>`. Otherwise the 403 is a stale- or
-/// orgless-token case, so steer the user to re-login.
-fn org_mismatch_message(session_org: &str, target_org: &str, explicit_org: bool) -> String {
+/// Build the actionable cross-org error as `(message, hint)`. The `message`
+/// states the condition (which orgs, HTTP 403) and renders as the error line;
+/// the `hint` carries the remediation and renders on the "Fix:" line, mirroring
+/// `NotLoggedIn`. When the user passed an explicit `--org` that differs from the
+/// session's org, the hint points at `actual login --org <target>`; otherwise
+/// the 403 is a stale- or orgless-token case, so it steers the user to a plain
+/// re-login.
+fn org_mismatch_message(
+    session_org: &str,
+    target_org: &str,
+    explicit_org: bool,
+) -> (String, String) {
     if explicit_org && target_org != session_org {
-        format!(
-            "Advisor request denied (HTTP 403): this session is scoped to organization \
-             {session_org}, but you requested organization {target_org}. Re-run \
-             `actual login --org {target_org}` to authenticate for it, or drop `--org` to \
-             query {session_org}."
+        (
+            format!(
+                "Advisor request denied (HTTP 403): this session is scoped to organization \
+                 {session_org}, but you requested organization {target_org}."
+            ),
+            format!("actual login --org {target_org}  (or drop --org to query {session_org})"),
         )
     } else {
-        format!(
-            "Advisor request denied (HTTP 403): this session (organization {session_org}) was \
-             rejected as cross-organization, or your token carries no usable organization. \
-             Re-run `actual login` (optionally with `--org <org-id>`) to refresh your session."
+        (
+            format!(
+                "Advisor request denied (HTTP 403): this session (organization {session_org}) \
+                 was rejected as cross-organization, or your token carries no usable \
+                 organization."
+            ),
+            "actual login  (optionally with --org <org-id>) to refresh your session".to_string(),
         )
     }
 }
@@ -826,16 +838,19 @@ mod tests {
         .unwrap_err();
 
         match err {
-            ActualError::OrgMismatch(msg) => {
-                assert!(msg.contains("403"), "expected 403 in: {msg}");
-                assert!(msg.contains(target), "expected target org in: {msg}");
+            ActualError::OrgMismatch { message, hint } => {
+                assert!(message.contains("403"), "expected 403 in: {message}");
                 assert!(
-                    msg.contains("11111111-1111-1111-1111-111111111111"),
-                    "expected session org in: {msg}"
+                    message.contains(target),
+                    "expected target org in: {message}"
                 );
                 assert!(
-                    msg.contains("actual login --org"),
-                    "expected actionable remediation in: {msg}"
+                    message.contains("11111111-1111-1111-1111-111111111111"),
+                    "expected session org in: {message}"
+                );
+                assert!(
+                    hint.contains("actual login --org"),
+                    "expected actionable remediation in hint: {hint}"
                 );
             }
             other => panic!("expected OrgMismatch, got {other:?}"),
@@ -844,25 +859,44 @@ mod tests {
 
     #[test]
     fn test_org_mismatch_message_explicit_org_names_both_and_remediation() {
-        let msg = org_mismatch_message("org-A", "org-B", true);
-        assert!(msg.contains("org-A"), "expected session org in: {msg}");
-        assert!(msg.contains("org-B"), "expected target org in: {msg}");
+        let (message, hint) = org_mismatch_message("org-A", "org-B", true);
         assert!(
-            msg.contains("actual login --org org-B"),
-            "expected targeted remediation in: {msg}"
+            message.contains("org-A"),
+            "expected session org in: {message}"
         );
-        assert!(msg.contains("403"), "expected 403 in: {msg}");
+        assert!(
+            message.contains("org-B"),
+            "expected target org in: {message}"
+        );
+        assert!(message.contains("403"), "expected 403 in: {message}");
+        // The remediation now rides on the hint (the "Fix:" line), not Display.
+        assert!(
+            hint.contains("actual login --org org-B"),
+            "expected targeted remediation in hint: {hint}"
+        );
+        assert!(
+            !message.contains("actual login"),
+            "remediation should not be in the message: {message}"
+        );
     }
 
     #[test]
     fn test_org_mismatch_message_no_explicit_org_steers_to_relogin() {
         // No explicit --org → target == session; the generic re-login branch.
-        let msg = org_mismatch_message("org-A", "org-A", false);
-        assert!(msg.contains("org-A"), "expected session org in: {msg}");
+        let (message, hint) = org_mismatch_message("org-A", "org-A", false);
         assert!(
-            msg.contains("actual login"),
-            "expected re-login remediation in: {msg}"
+            message.contains("org-A"),
+            "expected session org in: {message}"
         );
-        assert!(msg.contains("403"), "expected 403 in: {msg}");
+        assert!(message.contains("403"), "expected 403 in: {message}");
+        // Remediation rides on the hint, not Display.
+        assert!(
+            hint.contains("actual login"),
+            "expected re-login remediation in hint: {hint}"
+        );
+        assert!(
+            !message.contains("actual login"),
+            "remediation should not be in the message: {message}"
+        );
     }
 }
