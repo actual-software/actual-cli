@@ -105,22 +105,6 @@ impl ActualApiClient {
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(ActualError::NotLoggedIn);
         }
-        // A 403 from api-service means the session's org is not authorized for
-        // the request (cross-org, fail-closed). Surface it as a distinct,
-        // actionable error rather than an opaque API error.
-        //
-        // ASSUMPTION: every 403 the advisor endpoints emit today is a cross-org
-        // denial — it is the only 403 producer in api-service — so we map on the
-        // status alone and intentionally do NOT inspect the body. The server's
-        // 403 body carries no stable per-cause discriminator to match on, and
-        // routing a 403 through `map_error_response` (which expects a nested
-        // `{error:{code,message}}`) would only re-bury the cross-org case as a
-        // generic API error.
-        //
-        // TODO: if api-service ever grows a non-org 403 producer, this hook must
-        // discriminate instead of assuming cross-org. That needs a server-provided
-        // signal (e.g. a stable `error.code` on the 403 body): parse it here and
-        // fall back to `map_error_response` for any non-org-mismatch code.
         if status == reqwest::StatusCode::FORBIDDEN {
             return Err(Self::forbidden_org_error());
         }
