@@ -58,9 +58,6 @@ fn resolve_api_url(flag: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
 }
 
-/// If `err` is a cross-organization `403` from api-service, rebuild it with the
-/// concrete session and target org so the user gets an actionable message. All
-/// other errors pass through unchanged.
 fn enrich_org_mismatch(
     err: ActualError,
     session_org: &str,
@@ -76,13 +73,6 @@ fn enrich_org_mismatch(
     }
 }
 
-/// Build the actionable cross-org error as `(message, hint)`. The `message`
-/// states the condition (which orgs, HTTP 403) and renders as the error line;
-/// the `hint` carries the remediation and renders on the "Fix:" line, mirroring
-/// `NotLoggedIn`. When the user passed an explicit `--org` that differs from the
-/// session's org, the hint points at `actual login --org <target>`; otherwise
-/// the 403 is a stale- or orgless-token case, so it steers the user to a plain
-/// re-login.
 fn org_mismatch_message(
     session_org: &str,
     target_org: &str,
