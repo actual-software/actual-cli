@@ -1,16 +1,15 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderValue, ETAG, IF_NONE_MATCH, RETRY_AFTER, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
 
 use crate::analysis::signals::CanonicalIR;
 use crate::analysis::static_analyzer::registry::all_framework_names;
 use crate::analysis::types::{FrameworkCategory, Language, RepoAnalysis};
 use crate::api::types::{
-    AdvisorPoll, AdvisorQueryRequest, AdvisorQueryStarted, AdvisorQueryStatus, ApiErrorResponse,
-    CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, FrameworksResponse, HealthResponse,
-    LanguagesResponse, MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse,
-    TelemetryRequest,
+    AdvisorStreamRequest, ApiErrorResponse, CanonicalIRFacet, CanonicalIRPayload,
+    CategoriesResponse, FrameworksResponse, HealthResponse, LanguagesResponse, MatchFramework,
+    MatchOptions, MatchProject, MatchRequest, MatchResponse, TelemetryRequest,
 };
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -22,6 +21,10 @@ const USER_AGENT_VALUE: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_
 #[derive(Debug)]
 pub struct ActualApiClient {
     client: reqwest::Client,
+    /// A second client used only for the advisor SSE stream. It has no overall
+    /// request timeout (a streamed answer can take minutes); a per-read idle
+    /// timeout bounds inactivity instead.
+    stream_client: reqwest::Client,
     base_url: String,
     bearer_token: Option<String>,
 }
@@ -31,6 +34,11 @@ impl ActualApiClient {
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
     /// Default connection establishment timeout (10 seconds).
     const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Idle (between-reads) timeout for the SSE stream. There is deliberately no
+    /// overall request timeout on the stream — advisor answers can take minutes —
+    /// so this idle bound is the liveness backstop. Server heartbeat frames keep
+    /// it from firing during a long phase.
+    const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
     pub fn new(base_url: &str) -> Result<Self, ActualError> {
         Self::new_with_timeout(
@@ -61,15 +69,27 @@ impl ActualApiClient {
         default_headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
 
         let client = reqwest::Client::builder()
-            .default_headers(default_headers)
+            .default_headers(default_headers.clone())
             .https_only(!is_localhost)
             .timeout(timeout)
             .connect_timeout(connect_timeout)
             .build()
             .map_err(|e| ActualError::ApiError(format!("Failed to build HTTP client: {e}")))?;
 
+        // The streaming client shares the headers and connect bound but drops the
+        // overall request timeout, relying on the per-read idle timeout to bound
+        // inactivity so a minutes-long advisor stream is not cut off mid-answer.
+        let stream_client = reqwest::Client::builder()
+            .default_headers(default_headers)
+            .https_only(!is_localhost)
+            .connect_timeout(connect_timeout)
+            .read_timeout(Self::STREAM_IDLE_TIMEOUT)
+            .build()
+            .map_err(|e| ActualError::ApiError(format!("Failed to build streaming client: {e}")))?;
+
         Ok(Self {
             client,
+            stream_client,
             base_url: base_url.trim_end_matches('/').to_string(),
             bearer_token: None,
         })
@@ -90,14 +110,19 @@ impl ActualApiClient {
         }
     }
 
-    /// Start an asynchronous advisor query. Returns the `query_id` to poll.
-    pub async fn start_advisor_query(
+    /// Open the advisor SSE stream. POSTs the query to `/v1/advisor/query/stream`
+    /// and returns the raw streaming response for the caller to consume frame by
+    /// frame. Terminal status codes are mapped here so the caller only ever sees
+    /// a 2xx streaming response or an error: 401 → `NotLoggedIn`, 403 →
+    /// `OrgMismatch`, other non-2xx → the parsed API error.
+    pub async fn stream_advisor_query(
         &self,
-        request: &AdvisorQueryRequest,
-    ) -> Result<AdvisorQueryStarted, ActualError> {
-        let url = format!("{}/v1/advisor/query", self.base_url);
+        request: &AdvisorStreamRequest,
+    ) -> Result<reqwest::Response, ActualError> {
+        let url = format!("{}/v1/advisor/query/stream", self.base_url);
         let response = self
-            .authed(self.client.post(&url).json(request))
+            .authed(self.stream_client.post(&url).json(request))
+            .header(reqwest::header::ACCEPT, "text/event-stream")
             .send()
             .await
             .map_err(|e| ActualError::ApiError(e.to_string()))?;
@@ -111,70 +136,7 @@ impl ActualApiClient {
         if !status.is_success() {
             return Err(Self::map_error_response(status, response).await);
         }
-        response
-            .json::<AdvisorQueryStarted>()
-            .await
-            .map_err(|e| ActualError::ApiError(e.to_string()))
-    }
-
-    /// Poll an advisor query once. Pass the terminal `ETag` as `if_none_match`
-    /// to receive `304 Not Modified` once the result has settled.
-    pub async fn poll_advisor_query(
-        &self,
-        query_id: &str,
-        if_none_match: Option<&str>,
-    ) -> Result<AdvisorPoll, ActualError> {
-        let url = format!("{}/v1/advisor/query/{query_id}", self.base_url);
-        let mut builder = self.authed(self.client.get(&url));
-        if let Some(etag) = if_none_match {
-            builder = builder.header(IF_NONE_MATCH, etag);
-        }
-        let response = match builder.send().await {
-            Ok(r) => r,
-            // A transient network/fetch failure while polling — keep the loop
-            // alive (bounded by the caller's attempt cap) instead of aborting the
-            // query, mirroring the browser reference's keep-alive-on-fetch-error.
-            Err(_) => return Ok(AdvisorPoll::Retry { retry_after: None }),
-        };
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_MODIFIED {
-            return Ok(AdvisorPoll::NotModified);
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ActualError::NotLoggedIn);
-        }
-        let retry_after = response
-            .headers()
-            .get(RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok());
-        // A 5xx while polling is a transient infrastructure error (e.g. the
-        // status row could not be loaded) — the job is still running server-side,
-        // so retry rather than abort. A 404 (unknown query / no org access) stays
-        // terminal below.
-        if status.is_server_error() {
-            return Ok(AdvisorPoll::Retry { retry_after });
-        }
-        if status == reqwest::StatusCode::FORBIDDEN {
-            return Err(Self::forbidden_org_error());
-        }
-        if !status.is_success() {
-            return Err(Self::map_error_response(status, response).await);
-        }
-        let etag = response
-            .headers()
-            .get(ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let body = response
-            .json::<AdvisorQueryStatus>()
-            .await
-            .map_err(|e| ActualError::ApiError(e.to_string()))?;
-        Ok(AdvisorPoll::Update {
-            status: body,
-            retry_after,
-            etag,
-        })
+        Ok(response)
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ActualError> {
@@ -420,7 +382,7 @@ mod tests {
         Framework, FrameworkCategory, Language, LanguageStat, Project, ProjectSelection,
         RepoAnalysis, WorkspaceType,
     };
-    use crate::api::types::{AdvisorJobStatus, AdvisorSink, AdvisorSurface};
+    use crate::api::types::AdvisorStreamRequest;
 
     /// Helper: create a minimal project with the given languages and frameworks.
     fn make_project(
@@ -1534,70 +1496,78 @@ mod tests {
         assert!(request.projects[0].frameworks.is_empty());
     }
 
-    // --- Advisor query client tests ---
+    // --- Advisor stream client tests ---
 
-    fn sample_advisor_request() -> AdvisorQueryRequest {
-        AdvisorQueryRequest::new(
+    fn sample_stream_request() -> AdvisorStreamRequest {
+        AdvisorStreamRequest::new(
             "11111111-1111-1111-1111-111111111111".to_string(),
-            None,
             "why no global mutable state?".to_string(),
-            AdvisorSurface::cli(),
-            AdvisorSink::None,
             None,
         )
     }
 
     #[tokio::test]
-    async fn test_start_advisor_query_success_sends_bearer() {
+    async fn test_stream_advisor_query_success_sends_bearer_and_body() {
         let mut server = mockito::Server::new_async().await;
+        let sse = "data: {\"type\":\"phase\",\"data\":{\"phase\":\"fetching\"}}\n\n\
+                   data: {\"type\":\"final\",\"data\":{\"summary\":\"S\",\"interpreter\":{\"summary\":\"i\",\"related_adrs\":[]}}}\n\n";
         let mock = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", "/v1/advisor/query/stream")
             .match_header("authorization", "Bearer tok-123")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"orgId":"11111111-1111-1111-1111-111111111111","context":"why no global mutable state?"}"#
+                    .to_string(),
+            ))
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"query_id":"q1","workflow_id":"wf1","status":"pending"}"#)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
             .create_async()
             .await;
         let client = ActualApiClient::new(&server.url())
             .unwrap()
             .with_bearer("tok-123");
-        let started = client
-            .start_advisor_query(&sample_advisor_request())
+        let response = client
+            .stream_advisor_query(&sample_stream_request())
             .await
-            .unwrap();
-        assert_eq!(started.query_id, "q1");
-        assert_eq!(started.workflow_id.as_deref(), Some("wf1"));
-        assert_eq!(started.status, AdvisorJobStatus::Pending);
+            .expect("stream opens");
+        let body = response.text().await.unwrap();
+        assert!(body.contains("\"type\":\"final\""));
         mock.assert_async().await;
     }
 
     #[tokio::test]
-    async fn test_start_advisor_query_without_bearer_omits_header() {
+    async fn test_stream_advisor_query_forwards_repo_unique_id() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("POST", "/v1/advisor/query")
-            .match_header("authorization", mockito::Matcher::Missing)
+            .mock("POST", "/v1/advisor/query/stream")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"repo_unique_id":"33333333-3333-3333-3333-333333333333"}"#.to_string(),
+            ))
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"query_id":"q2","status":"pending"}"#)
+            .with_header("content-type", "text/event-stream")
+            .with_body("data: {\"type\":\"error\",\"error\":\"x\"}\n\n")
             .create_async()
             .await;
-        // No bearer → exercises the `authed` None branch; workflow_id default.
-        let client = ActualApiClient::new(&server.url()).unwrap();
-        let started = client
-            .start_advisor_query(&sample_advisor_request())
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let req = AdvisorStreamRequest::new(
+            "o".to_string(),
+            "q".to_string(),
+            Some("33333333-3333-3333-3333-333333333333".to_string()),
+        );
+        let _ = client
+            .stream_advisor_query(&req)
             .await
-            .unwrap();
-        assert_eq!(started.query_id, "q2");
-        assert_eq!(started.workflow_id, None);
+            .expect("stream opens");
         mock.assert_async().await;
     }
 
     #[tokio::test]
-    async fn test_start_advisor_query_unauthorized_maps_to_not_logged_in() {
+    async fn test_stream_advisor_query_unauthorized_maps_to_not_logged_in() {
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", "/v1/advisor/query/stream")
             .with_status(401)
             .with_body("unauthorized")
             .create_async()
@@ -1606,7 +1576,7 @@ mod tests {
             .unwrap()
             .with_bearer("bad");
         let err = client
-            .start_advisor_query(&sample_advisor_request())
+            .stream_advisor_query(&sample_stream_request())
             .await
             .unwrap_err();
         assert!(matches!(err, ActualError::NotLoggedIn));
@@ -1614,12 +1584,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_advisor_query_error_status() {
+    async fn test_stream_advisor_query_forbidden_maps_to_org_mismatch() {
+        let mut server = mockito::Server::new_async().await;
+        // api-service fail-closes a cross-org token with 403 before streaming.
+        let mock = server
+            .mock("POST", "/v1/advisor/query/stream")
+            .with_status(403)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":{"code":"FORBIDDEN","message":"cross-org","details":null}}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client
+            .stream_advisor_query(&sample_stream_request())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::OrgMismatch { .. }),
+            "expected OrgMismatch for 403, got {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_stream_advisor_query_error_status() {
         let mut server = mockito::Server::new_async().await;
         let body =
-            r#"{"error":{"code":"BAD_REQUEST","message":"org_id must be a uuid","details":null}}"#;
+            r#"{"error":{"code":"BAD_REQUEST","message":"orgId must be a uuid","details":null}}"#;
         let mock = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", "/v1/advisor/query/stream")
             .with_status(400)
             .with_header("content-type", "application/json")
             .with_body(body)
@@ -1629,7 +1624,7 @@ mod tests {
             .unwrap()
             .with_bearer("t");
         let err = client
-            .start_advisor_query(&sample_advisor_request())
+            .stream_advisor_query(&sample_stream_request())
             .await
             .unwrap_err();
         assert!(
@@ -1639,203 +1634,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_poll_advisor_query_pending_with_retry_after() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/v1/advisor/query/q1")
-            .match_header("authorization", "Bearer t")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_header("retry-after", "2")
-            .with_body(r#"{"query_id":"q1","status":"running","result":null,"error":null}"#)
-            .create_async()
-            .await;
-        let client = ActualApiClient::new(&server.url())
-            .unwrap()
-            .with_bearer("t");
-        let poll = client.poll_advisor_query("q1", None).await.unwrap();
-        match poll {
-            AdvisorPoll::Update {
-                status,
-                retry_after,
-                etag,
-            } => {
-                assert_eq!(status.status, AdvisorJobStatus::Running);
-                assert!(!status.status.is_terminal());
-                assert_eq!(retry_after, Some(2));
-                assert_eq!(etag, None);
-                assert!(status.result.is_none());
-            }
-            other => panic!("expected Update, got {other:?}"),
-        }
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn test_poll_advisor_query_terminal_with_etag_and_result() {
-        let mut server = mockito::Server::new_async().await;
-        let body = r#"{"query_id":"q1","status":"succeeded","result":{"summary":"S","interpreter":{"summary":"IS","related_adrs":[{"id":"a1","name":"n","title":"t","policy":"p","instructions":"i","scope":"sc","relevance_reason":"r","confidence":0.9}]}},"error":null}"#;
-        let mock = server
-            .mock("GET", "/v1/advisor/query/q1")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_header("etag", "\"v1\"")
-            .with_body(body)
-            .create_async()
-            .await;
-        let client = ActualApiClient::new(&server.url())
-            .unwrap()
-            .with_bearer("t");
-        let poll = client.poll_advisor_query("q1", None).await.unwrap();
-        match poll {
-            AdvisorPoll::Update {
-                status,
-                retry_after,
-                etag,
-            } => {
-                assert_eq!(status.status, AdvisorJobStatus::Succeeded);
-                assert_eq!(retry_after, None);
-                assert_eq!(etag.as_deref(), Some("\"v1\""));
-                let out = status.result.expect("result present");
-                assert_eq!(out.summary, "S");
-                assert_eq!(out.interpreter.summary, "IS");
-                assert_eq!(out.interpreter.related_adrs.len(), 1);
-                assert_eq!(out.interpreter.related_adrs[0].confidence, 0.9);
-            }
-            other => panic!("expected Update, got {other:?}"),
-        }
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn test_poll_advisor_query_not_modified() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/v1/advisor/query/q1")
-            .match_header("if-none-match", "\"v1\"")
-            .with_status(304)
-            .create_async()
-            .await;
-        let client = ActualApiClient::new(&server.url())
-            .unwrap()
-            .with_bearer("t");
-        let poll = client
-            .poll_advisor_query("q1", Some("\"v1\""))
-            .await
-            .unwrap();
-        assert_eq!(poll, AdvisorPoll::NotModified);
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn test_poll_advisor_query_unauthorized_maps_to_not_logged_in() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/v1/advisor/query/q1")
-            .with_status(401)
-            .create_async()
-            .await;
-        let client = ActualApiClient::new(&server.url())
-            .unwrap()
-            .with_bearer("bad");
-        let err = client.poll_advisor_query("q1", None).await.unwrap_err();
-        assert!(matches!(err, ActualError::NotLoggedIn));
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn test_poll_advisor_query_5xx_is_retryable() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/v1/advisor/query/q1")
-            .with_status(500)
-            .with_body("boom")
-            .create_async()
-            .await;
-        let client = ActualApiClient::new(&server.url())
-            .unwrap()
-            .with_bearer("t");
-        // A 5xx mid-poll is a transient infra error → retry, not a fatal error.
-        let poll = client.poll_advisor_query("q1", None).await.unwrap();
-        assert!(matches!(poll, AdvisorPoll::Retry { .. }));
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn test_poll_advisor_query_404_is_terminal() {
-        let mut server = mockito::Server::new_async().await;
-        let mock = server
-            .mock("GET", "/v1/advisor/query/q1")
-            .with_status(404)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"error":"not found"}"#)
-            .create_async()
-            .await;
-        let client = ActualApiClient::new(&server.url())
-            .unwrap()
-            .with_bearer("t");
-        // A 404 (unknown query / no org access) is terminal — surfaces as an
-        // error rather than being retried.
-        let err = client.poll_advisor_query("q1", None).await.unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(_)));
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn test_poll_advisor_query_network_error_is_retryable() {
+    async fn test_stream_advisor_query_network_error() {
         // Unroutable address → the request can't complete (connection refused).
-        // A transient fetch failure mid-poll should retry, not abort the query.
         let client = ActualApiClient::new("http://127.0.0.1:1")
             .unwrap()
             .with_bearer("t");
-        let poll = client.poll_advisor_query("q1", None).await.unwrap();
-        assert!(matches!(poll, AdvisorPoll::Retry { .. }));
-    }
-
-    #[tokio::test]
-    async fn test_start_advisor_query_forbidden_maps_to_org_mismatch() {
-        let mut server = mockito::Server::new_async().await;
-        // api-service fail-closes a cross-org token with 403 on the start call.
-        let mock = server
-            .mock("POST", "/v1/advisor/query")
-            .with_status(403)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"error":{"code":"FORBIDDEN","message":"cross-org","details":null}}"#)
-            .create_async()
-            .await;
-        let client = ActualApiClient::new(&server.url())
-            .unwrap()
-            .with_bearer("t");
         let err = client
-            .start_advisor_query(&sample_advisor_request())
+            .stream_advisor_query(&sample_stream_request())
             .await
             .unwrap_err();
-        assert!(
-            matches!(err, ActualError::OrgMismatch { .. }),
-            "expected OrgMismatch for 403, got {err:?}"
-        );
-        mock.assert_async().await;
+        assert!(matches!(err, ActualError::ApiError(_)));
     }
 
     #[tokio::test]
-    async fn test_poll_advisor_query_forbidden_is_terminal_org_mismatch() {
+    async fn test_stream_advisor_query_without_bearer_omits_auth_header() {
+        // A client with no `with_bearer` takes the `None` arm of `authed`, so the
+        // request carries no Authorization header. `Matcher::Missing` fails the
+        // mock if one is sent, so this both opens the stream and asserts the omission.
         let mut server = mockito::Server::new_async().await;
         let mock = server
-            .mock("GET", "/v1/advisor/query/q1")
-            .with_status(403)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"error":{"code":"FORBIDDEN","message":"cross-org","details":null}}"#)
+            .mock("POST", "/v1/advisor/query/stream")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(
+                "data: {\"type\":\"final\",\"data\":{\"summary\":\"S\",\"interpreter\":{\"summary\":\"i\",\"related_adrs\":[]}}}\n\n",
+            )
             .create_async()
             .await;
-        let client = ActualApiClient::new(&server.url())
-            .unwrap()
-            .with_bearer("t");
-        // A 403 mid-poll is terminal (cross-org), NOT retried like a 5xx.
-        let err = client.poll_advisor_query("q1", None).await.unwrap_err();
-        assert!(
-            matches!(err, ActualError::OrgMismatch { .. }),
-            "expected OrgMismatch for 403, got {err:?}"
-        );
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let response = client
+            .stream_advisor_query(&sample_stream_request())
+            .await
+            .expect("stream opens without a bearer token");
+        let body = response.text().await.unwrap();
+        assert!(body.contains("\"type\":\"final\""));
         mock.assert_async().await;
     }
 }

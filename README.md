@@ -120,6 +120,7 @@ you've written yourself.
 
 ```
 actual adr-bot        # analyze repo & write AI context files
+actual advisor "<q>"  # ask the Advisor an org-scoped architecture question
 actual status         # check output file state (managed markers, staleness)
 actual auth           # verify authentication
 actual config show    # view current configuration
@@ -128,6 +129,27 @@ actual config path    # print config file location
 actual runners        # list available AI backend runners
 actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
+```
+
+## Ask the Advisor
+
+`actual advisor` asks the Actual AI Advisor an org-scoped architecture
+question and streams the answer back over Server-Sent Events. Progress steps
+(fetching, interpreting, summarizing) print to stderr as the answer is
+prepared; the final answer prints to stdout, so it stays pipeable. There is
+no fixed time limit, so a longer ADR-backed question runs to completion.
+
+```bash
+actual login                                   # one-time sign-in
+actual advisor "Should new services use gRPC or REST?"
+```
+
+Scope the question to one connected repository, or emit the answer as JSON
+for scripting:
+
+```bash
+actual advisor --repo <repo-id> "..."          # scope to one repo (org-wide if omitted)
+actual advisor --json "..." | jq .summary      # machine-readable answer on stdout
 ```
 
 ## Configuration

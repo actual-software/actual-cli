@@ -365,6 +365,12 @@ pub struct AdvisorArgs {
     /// available yet — it requires the connected-repos API.
     #[arg(long, value_name = "REPO_ID")]
     pub repo: Option<String>,
+
+    /// Print the final answer as JSON on stdout instead of the human-readable
+    /// rendering. Phase progress still goes to stderr, so the JSON on stdout
+    /// stays clean and pipeable.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for the `adr-bot` command

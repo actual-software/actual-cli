@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- `actual advisor` now streams its answer over Server-Sent Events instead of polling. Phase progress (fetching, interpreting, summarizing) renders to stderr while the answer is prepared, and the final answer prints to stdout. The previous client-side five-minute cap is gone, so a longer ADR-backed question runs to completion.
+
+### Added
+- `actual advisor --json` prints the answer as JSON on stdout for scripting; phase progress stays on stderr so stdout remains clean.
+
 ## [0.1.4] - 2026-03-31
 
 ### Fixed
