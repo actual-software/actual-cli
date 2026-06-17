@@ -1,17 +1,15 @@
 //! `actual advisor <query>` — ask the Advisor org-scoped architecture questions.
 //!
-//! Starts an async advisor job, polls to completion (honoring the server's
-//! `Retry-After` and retrying transient network/5xx errors up to a ~5-minute
-//! cap), and renders the answer. Uses the platform token from `actual login`
-//! as the bearer.
-
-use std::time::{Duration, Instant};
+//! Opens an SSE stream (`POST /v1/advisor/query/stream`), renders phase progress
+//! to stderr as it arrives, and prints the final answer to stdout. Uses the
+//! platform token from `actual login` as the bearer. There is no client-side
+//! time cap, so a long ADR-backed answer runs to completion; a per-read idle
+//! timeout (kept alive by server heartbeats) is the only liveness bound.
 
 use chrono::{Duration as ChronoDuration, Utc};
+use futures_util::StreamExt;
 
-use crate::api::types::{
-    AdvisorJobStatus, AdvisorOutput, AdvisorPoll, AdvisorQueryRequest, AdvisorSink, AdvisorSurface,
-};
+use crate::api::types::{AdvisorOutput, AdvisorStreamRequest};
 use crate::api::{ActualApiClient, DEFAULT_API_URL};
 use crate::auth::oauth;
 use crate::auth::store::{self, StoredCredentials};
@@ -19,23 +17,12 @@ use crate::cli::args::AdvisorArgs;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
 
-/// Hard wall-clock cap on polling before giving up, matching the browser
-/// reference. A true deadline (not an attempt count) is what actually bounds
-/// total time once the per-poll `Retry-After` back-off varies.
-const HARD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-/// Default delay between polls when the server provides no `Retry-After`.
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
-/// Upper bound on a server-supplied `Retry-After`. The status handler caps its
-/// own back-off at 15s, so a larger (or misbehaving) value must not let a single
-/// poll stall the whole query.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(15);
-
 pub fn exec(args: &AdvisorArgs) -> Result<(), ActualError> {
-    build_runtime()?.block_on(run(args, HARD_TIMEOUT, DEFAULT_POLL_INTERVAL))
+    build_runtime()?.block_on(run(args))
 }
 
 /// Single-threaded tokio runtime so the sync CLI dispatch path can drive the
-/// async query flow (mirrors `commands::login`).
+/// async stream flow (mirrors `commands::login`).
 fn build_runtime() -> Result<tokio::runtime::Runtime, ActualError> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -115,17 +102,7 @@ async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, Act
     Ok(creds)
 }
 
-/// Terminal outcome of an advisor job.
-enum Outcome {
-    Succeeded(Box<AdvisorOutput>),
-    Failed(Option<String>),
-}
-
-async fn run(
-    args: &AdvisorArgs,
-    deadline: Duration,
-    poll_interval: Duration,
-) -> Result<(), ActualError> {
+async fn run(args: &AdvisorArgs) -> Result<(), ActualError> {
     let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
     let creds = ensure_fresh(creds).await?;
     let org_id = args
@@ -139,86 +116,166 @@ async fn run(
     let base_url = resolve_api_url(args.api_url.as_deref());
     let client = ActualApiClient::new(&base_url)?.with_bearer(&creds.access_token);
 
-    let request = AdvisorQueryRequest::new(
-        org_id.clone(),
-        args.repo.clone(),
-        args.query.clone(),
-        AdvisorSurface::cli(),
-        AdvisorSink::None,
-        None,
-    );
+    let request = AdvisorStreamRequest::new(org_id.clone(), args.query.clone(), args.repo.clone());
 
-    let started = client
-        .start_advisor_query(&request)
+    let response = client
+        .stream_advisor_query(&request)
         .await
         .map_err(|e| enrich_org_mismatch(e, &session_org, &org_id, explicit_org))?;
-    eprintln!("{} thinking…", theme::hint("advisor"));
-    let outcome = poll_to_completion(&client, &started.query_id, deadline, poll_interval)
+
+    let outcome = consume_stream(response)
         .await
         .map_err(|e| enrich_org_mismatch(e, &session_org, &org_id, explicit_org))?;
 
     match outcome {
-        Outcome::Succeeded(output) => {
-            print_answer(&output);
+        StreamOutcome::Final(data) => {
+            print_final(&data, args.json)?;
             Ok(())
         }
-        Outcome::Failed(error) => Err(ActualError::ApiError(format!(
-            "Advisor query failed: {}",
-            error.unwrap_or_else(|| "unknown error".to_string())
-        ))),
+        // The stream closed without a `final` frame and without an `error`. Per
+        // the wire contract a graceful close is completion, not a failure — there
+        // is simply no answer body to print.
+        StreamOutcome::Closed => Ok(()),
     }
 }
 
-/// Poll the job until it reaches a terminal state, or the wall-clock `deadline`
-/// elapses (a true time bound — an attempt count can't bound total time once the
-/// server's `Retry-After` back-off varies).
-async fn poll_to_completion(
-    client: &ActualApiClient,
-    query_id: &str,
-    deadline: Duration,
-    poll_interval: Duration,
-) -> Result<Outcome, ActualError> {
-    let start = Instant::now();
-    while start.elapsed() < deadline {
-        match client.poll_advisor_query(query_id, None).await? {
-            AdvisorPoll::Update {
-                status,
-                retry_after,
-                ..
-            } => match status.status {
-                AdvisorJobStatus::Succeeded => {
-                    return Ok(match status.result {
-                        Some(output) => Outcome::Succeeded(Box::new(output)),
-                        None => Outcome::Failed(Some("advisor returned no result".to_string())),
-                    });
-                }
-                AdvisorJobStatus::Failed => return Ok(Outcome::Failed(status.error)),
-                AdvisorJobStatus::Pending | AdvisorJobStatus::Running => {
-                    sleep_for(retry_after, poll_interval).await;
-                }
-            },
-            AdvisorPoll::NotModified => sleep_for(None, poll_interval).await,
-            // Transient infra 5xx — back off (honoring Retry-After) and re-poll.
-            AdvisorPoll::Retry { retry_after } => sleep_for(retry_after, poll_interval).await,
+/// Terminal outcome of consuming the advisor stream. An `error` frame and a
+/// transport failure are surfaced as `Err` by [`consume_stream`], so the only
+/// success shapes are a `final` answer or a graceful close without one.
+#[derive(Debug, PartialEq)]
+enum StreamOutcome {
+    Final(serde_json::Value),
+    Closed,
+}
+
+/// Drive the SSE response to a terminal outcome: render each `phase` frame to
+/// stderr, return the `data` of the `final` frame, and surface an `error` frame
+/// as a non-zero-exit `ApiError`. Frames split across read chunks are reassembled
+/// by [`SseDecoder`]; a graceful close without a `final` frame is completion.
+async fn consume_stream(response: reqwest::Response) -> Result<StreamOutcome, ActualError> {
+    let mut decoder = SseDecoder::default();
+    let stream = response.bytes_stream();
+    futures_util::pin_mut!(stream);
+    while let Some(chunk) = stream.next().await {
+        let bytes =
+            chunk.map_err(|e| ActualError::ApiError(format!("advisor stream read failed: {e}")))?;
+        for payload in decoder.push(bytes.as_ref()) {
+            if let Some(outcome) = handle_payload(&payload)? {
+                return Ok(outcome);
+            }
         }
     }
-    Err(ActualError::ApiError(
-        "Advisor query did not reach a result in time.".to_string(),
-    ))
+    // Stream ended. Flush a trailing event the server closed without a blank-line
+    // terminator, in case it carried the `final` frame.
+    if let Some(payload) = decoder.flush() {
+        if let Some(outcome) = handle_payload(&payload)? {
+            return Ok(outcome);
+        }
+    }
+    Ok(StreamOutcome::Closed)
 }
 
-/// The next-poll delay: the server's `Retry-After` seconds, or the default
-/// interval, **clamped to `MAX_RETRY_AFTER`** so a large or misbehaving
-/// `Retry-After` can't stall a single poll past the wall-clock deadline's intent.
-fn next_delay(retry_after: Option<u64>, default: Duration) -> Duration {
-    retry_after
-        .map(Duration::from_secs)
-        .unwrap_or(default)
-        .min(MAX_RETRY_AFTER)
+/// Interpret one decoded SSE payload. Renders phase progress to stderr as a side
+/// effect; returns `Some(outcome)` once a terminal `final` frame arrives, `Err`
+/// on an `error` frame, and `None` for frames that do not end the stream
+/// (phase, heartbeat, unrecognized type, or a non-JSON line).
+fn handle_payload(payload: &str) -> Result<Option<StreamOutcome>, ActualError> {
+    match parse_advisor_frame(payload) {
+        Some(AdvisorStreamEvent::Phase(phase)) => {
+            render_phase(&phase);
+            Ok(None)
+        }
+        Some(AdvisorStreamEvent::Final(data)) => Ok(Some(StreamOutcome::Final(data))),
+        Some(AdvisorStreamEvent::Error(message)) => Err(ActualError::ApiError(format!(
+            "Advisor query failed: {message}"
+        ))),
+        // Heartbeats, unrecognized frame types, and non-JSON lines are ignored.
+        Some(AdvisorStreamEvent::Heartbeat) | Some(AdvisorStreamEvent::Other(_)) | None => Ok(None),
+    }
 }
 
-async fn sleep_for(retry_after: Option<u64>, default: Duration) {
-    tokio::time::sleep(next_delay(retry_after, default)).await;
+/// A decoded SSE frame from the advisor stream.
+#[derive(Debug, Clone, PartialEq)]
+enum AdvisorStreamEvent {
+    /// `data.phase` progress (`fetching` | `interpreting` | `summarizing` | `done`).
+    Phase(String),
+    /// The terminal answer — the `data` payload (a serialized `AdvisorOutput`).
+    Final(serde_json::Value),
+    /// An `error` frame; its message ends the run with a non-zero exit.
+    Error(String),
+    /// A keep-alive; ignored.
+    Heartbeat,
+    /// A frame whose `type` is unrecognized; ignored.
+    Other(String),
+}
+
+/// Parse one SSE `data:` payload (the JSON after `data: `) into an event.
+/// Returns `None` when the payload is not a JSON object with a string `type`,
+/// so a stray or non-conforming line is ignored rather than fatal.
+fn parse_advisor_frame(payload: &str) -> Option<AdvisorStreamEvent> {
+    let value: serde_json::Value = serde_json::from_str(payload.trim()).ok()?;
+    let obj = value.as_object()?;
+    let kind = obj.get("type")?.as_str()?;
+    let event = match kind {
+        "phase" => {
+            let phase = obj
+                .get("data")
+                .and_then(|d| d.get("phase"))
+                .and_then(|p| p.as_str())
+                .unwrap_or("")
+                .to_string();
+            AdvisorStreamEvent::Phase(phase)
+        }
+        "final" => {
+            let data = obj.get("data").cloned().unwrap_or(serde_json::Value::Null);
+            AdvisorStreamEvent::Final(data)
+        }
+        "error" => {
+            let message = obj
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("unknown error")
+                .to_string();
+            AdvisorStreamEvent::Error(message)
+        }
+        "heartbeat" => AdvisorStreamEvent::Heartbeat,
+        other => AdvisorStreamEvent::Other(other.to_string()),
+    };
+    Some(event)
+}
+
+/// Render one phase as a single stderr line. `summarizing` is a one-shot
+/// deterministic step, so it renders as one line (not a typing animation); the
+/// `done` marker is silent because the `final` frame carries the answer.
+fn render_phase(phase: &str) {
+    let label = match phase {
+        "fetching" => "fetching ADRs…",
+        "interpreting" => "interpreting…",
+        "summarizing" => "summarizing…",
+        "" | "done" => return,
+        other => {
+            eprintln!("{} {other}…", theme::hint("advisor"));
+            return;
+        }
+    };
+    eprintln!("{} {label}", theme::hint("advisor"));
+}
+
+/// Print the final answer to stdout. With `--json`, echo the server's
+/// `AdvisorOutput` object verbatim (pretty-printed) so machine consumers get the
+/// canonical shape; otherwise render the human-readable form.
+fn print_final(data: &serde_json::Value, json: bool) -> Result<(), ActualError> {
+    if json {
+        let rendered = serde_json::to_string_pretty(data)
+            .map_err(|e| ActualError::ApiError(format!("failed to render advisor JSON: {e}")))?;
+        println!("{rendered}");
+        return Ok(());
+    }
+    let output: AdvisorOutput = serde_json::from_value(data.clone()).map_err(|e| {
+        ActualError::ApiError(format!("advisor returned an unparseable answer: {e}"))
+    })?;
+    print_answer(&output);
+    Ok(())
 }
 
 /// Render the advisor answer. **Never prints token material.**
@@ -237,6 +294,79 @@ fn print_answer(output: &AdvisorOutput) {
     }
 }
 
+/// Reassembles SSE frames from a byte stream. Bytes are buffered until a blank
+/// line (`\n\n`, or the CRLF form `\n\r\n`) terminates an event; each complete
+/// event's `data:` payload is then returned. A frame split across read chunks is
+/// held in the buffer until its terminator arrives.
+#[derive(Default)]
+struct SseDecoder {
+    buf: Vec<u8>,
+}
+
+impl SseDecoder {
+    /// Append a chunk and return the `data:` payload of every event that is now
+    /// complete. Events with no `data:` line (e.g. a comment-only keep-alive)
+    /// yield nothing.
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        while let Some(end) = Self::event_boundary(&self.buf) {
+            let block: Vec<u8> = self.buf.drain(..end).collect();
+            if let Some(payload) = Self::extract_data(&block) {
+                out.push(payload);
+            }
+        }
+        out
+    }
+
+    /// Flush a trailing event the stream closed without a blank-line terminator.
+    /// Returns its `data:` payload if it has one.
+    fn flush(&mut self) -> Option<String> {
+        if self.buf.is_empty() {
+            return None;
+        }
+        let block = std::mem::take(&mut self.buf);
+        Self::extract_data(&block)
+    }
+
+    /// Index just past the first blank-line event terminator in `buf`, if any.
+    /// Recognizes both `\n\n` (LF) and `\n\r\n` (CRLF) blank lines. The boundary
+    /// always falls on an ASCII byte, so a drained block never splits a UTF-8
+    /// codepoint.
+    fn event_boundary(buf: &[u8]) -> Option<usize> {
+        for i in 0..buf.len() {
+            if buf[i] == b'\n' {
+                if buf.get(i + 1) == Some(&b'\n') {
+                    return Some(i + 2);
+                }
+                if buf.get(i + 1) == Some(&b'\r') && buf.get(i + 2) == Some(&b'\n') {
+                    return Some(i + 3);
+                }
+            }
+        }
+        None
+    }
+
+    /// Collect the `data:` lines of one event block, strip the `data:` prefix
+    /// (and one optional leading space), and join multiple data lines with `\n`
+    /// per the SSE spec. Returns `None` when the block has no data line.
+    fn extract_data(block: &[u8]) -> Option<String> {
+        let text = String::from_utf8_lossy(block);
+        let mut data_lines = Vec::new();
+        for raw_line in text.split('\n') {
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            if let Some(rest) = line.strip_prefix("data:") {
+                data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+            }
+        }
+        if data_lines.is_empty() {
+            None
+        } else {
+            Some(data_lines.join("\n"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,8 +374,25 @@ mod tests {
     use crate::testutil::{EnvGuard, ENV_MUTEX};
     use tempfile::tempdir;
 
-    const POLL_PATH: &str = "/v1/advisor/query/q1";
-    const START_BODY: &str = r#"{"query_id":"q1","workflow_id":"wf","status":"pending"}"#;
+    const STREAM_PATH: &str = "/v1/advisor/query/stream";
+
+    const PHASE_FETCHING: &str = r#"{"type":"phase","data":{"phase":"fetching"}}"#;
+    const PHASE_INTERPRETING: &str = r#"{"type":"phase","data":{"phase":"interpreting"}}"#;
+    const PHASE_SUMMARIZING: &str = r#"{"type":"phase","data":{"phase":"summarizing"}}"#;
+    const HEARTBEAT: &str = r#"{"type":"heartbeat","data":{"timestamp":1}}"#;
+    const FINAL_NO_ADRS: &str = r#"{"type":"final","data":{"summary":"Use the App Router.","interpreter":{"summary":"i","related_adrs":[]}}}"#;
+    const ONE_ADR: &str = r#"{"id":"a1","name":"n","title":"Use the App Router","policy":"p","instructions":"i","scope":"frontend","relevance_reason":"r","confidence":0.92}"#;
+
+    fn final_with_adr() -> String {
+        format!(
+            r#"{{"type":"final","data":{{"summary":"Use the App Router.","interpreter":{{"summary":"i","related_adrs":[{ONE_ADR}]}}}}}}"#
+        )
+    }
+
+    /// Build an SSE body from a list of JSON frame payloads.
+    fn sse_body(frames: &[&str]) -> String {
+        frames.iter().map(|f| format!("data: {f}\n\n")).collect()
+    }
 
     fn test_creds() -> StoredCredentials {
         StoredCredentials {
@@ -262,20 +409,13 @@ mod tests {
         }
     }
 
-    fn succeeded_body(adrs_json: &str) -> String {
-        format!(
-            r#"{{"query_id":"q1","status":"succeeded","result":{{"summary":"Use the App Router.","interpreter":{{"summary":"i","related_adrs":[{adrs_json}]}}}},"error":null}}"#
-        )
-    }
-
-    const ONE_ADR: &str = r#"{"id":"a1","name":"n","title":"Use the App Router","policy":"p","instructions":"i","scope":"frontend","relevance_reason":"r","confidence":0.92}"#;
-
     fn args(api_url: &str, org: Option<&str>) -> AdvisorArgs {
         AdvisorArgs {
             query: "why app router?".to_string(),
             api_url: Some(api_url.to_string()),
             org: org.map(|s| s.to_string()),
             repo: None,
+            json: false,
         }
     }
 
@@ -336,6 +476,211 @@ mod tests {
         print_answer(&without);
     }
 
+    // --- SSE frame decoding (chunk reassembly) ---
+
+    #[test]
+    fn test_decoder_single_frame_one_push() {
+        let mut d = SseDecoder::default();
+        let out = d.push(b"data: {\"type\":\"heartbeat\"}\n\n");
+        assert_eq!(out, vec!["{\"type\":\"heartbeat\"}".to_string()]);
+    }
+
+    #[test]
+    fn test_decoder_multiple_frames_one_push() {
+        let mut d = SseDecoder::default();
+        let body = sse_body(&[PHASE_FETCHING, FINAL_NO_ADRS]);
+        let out = d.push(body.as_bytes());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], PHASE_FETCHING);
+        assert_eq!(out[1], FINAL_NO_ADRS);
+    }
+
+    #[test]
+    fn test_decoder_reassembles_frame_split_across_chunks() {
+        let mut d = SseDecoder::default();
+        let frame = format!("data: {FINAL_NO_ADRS}\n\n");
+        let bytes = frame.as_bytes();
+        let mid = bytes.len() / 2;
+        // First half: no complete frame yet.
+        assert!(d.push(&bytes[..mid]).is_empty());
+        // Second half completes the frame.
+        let out = d.push(&bytes[mid..]);
+        assert_eq!(out, vec![FINAL_NO_ADRS.to_string()]);
+    }
+
+    #[test]
+    fn test_decoder_reassembles_frame_split_byte_by_byte() {
+        let mut d = SseDecoder::default();
+        let frame = format!("data: {PHASE_FETCHING}\n\n");
+        let mut collected = Vec::new();
+        for b in frame.as_bytes() {
+            collected.extend(d.push(&[*b]));
+        }
+        assert_eq!(collected, vec![PHASE_FETCHING.to_string()]);
+    }
+
+    #[test]
+    fn test_decoder_handles_crlf_separators() {
+        let mut d = SseDecoder::default();
+        let out = d.push(b"data: {\"type\":\"heartbeat\"}\r\n\r\n");
+        assert_eq!(out, vec!["{\"type\":\"heartbeat\"}".to_string()]);
+    }
+
+    #[test]
+    fn test_decoder_ignores_comment_only_event() {
+        let mut d = SseDecoder::default();
+        // A comment-only keep-alive (no `data:` line) yields nothing.
+        let out = d.push(b": keep-alive\n\n");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_decoder_flush_returns_unterminated_trailing_event() {
+        let mut d = SseDecoder::default();
+        // No trailing blank line — push yields nothing, flush recovers it.
+        assert!(d.push(b"data: {\"type\":\"final\"}").is_empty());
+        assert_eq!(d.flush(), Some("{\"type\":\"final\"}".to_string()));
+        // Buffer is drained after flush.
+        assert_eq!(d.flush(), None);
+    }
+
+    #[test]
+    fn test_decoder_strips_optional_space_after_prefix() {
+        let mut d = SseDecoder::default();
+        // SSE allows `data:x` (no space) and `data: x` (one space) — both strip
+        // to `x`.
+        assert_eq!(d.push(b"data:no-space\n\n"), vec!["no-space".to_string()]);
+        assert_eq!(
+            d.push(b"data: one-space\n\n"),
+            vec!["one-space".to_string()]
+        );
+    }
+
+    // --- frame parsing ---
+
+    #[test]
+    fn test_parse_frame_phase() {
+        assert_eq!(
+            parse_advisor_frame(PHASE_FETCHING),
+            Some(AdvisorStreamEvent::Phase("fetching".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_frame_final_carries_output() {
+        let event = parse_advisor_frame(FINAL_NO_ADRS).unwrap();
+        match event {
+            AdvisorStreamEvent::Final(data) => {
+                let out: AdvisorOutput = serde_json::from_value(data).unwrap();
+                assert_eq!(out.summary, "Use the App Router.");
+                assert!(out.interpreter.related_adrs.is_empty());
+            }
+            other => panic!("expected Final, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_frame_error() {
+        let frame = r#"{"type":"error","error":"stream ended"}"#;
+        assert_eq!(
+            parse_advisor_frame(frame),
+            Some(AdvisorStreamEvent::Error("stream ended".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_frame_heartbeat() {
+        assert_eq!(
+            parse_advisor_frame(HEARTBEAT),
+            Some(AdvisorStreamEvent::Heartbeat)
+        );
+    }
+
+    #[test]
+    fn test_parse_frame_unknown_type_is_other() {
+        let frame = r#"{"type":"surprise","data":{}}"#;
+        assert_eq!(
+            parse_advisor_frame(frame),
+            Some(AdvisorStreamEvent::Other("surprise".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_frame_non_json_is_none() {
+        assert_eq!(parse_advisor_frame("not json"), None);
+        assert_eq!(parse_advisor_frame(""), None);
+        // A JSON value that is not an object, or lacks a string `type`.
+        assert_eq!(parse_advisor_frame("[1,2,3]"), None);
+        assert_eq!(parse_advisor_frame(r#"{"no":"type"}"#), None);
+    }
+
+    // --- per-frame dispatch (handle_payload) ---
+
+    #[test]
+    fn test_handle_payload_phase_is_non_terminal() {
+        assert_eq!(handle_payload(PHASE_FETCHING).unwrap(), None);
+    }
+
+    #[test]
+    fn test_handle_payload_heartbeat_is_ignored() {
+        assert_eq!(handle_payload(HEARTBEAT).unwrap(), None);
+    }
+
+    #[test]
+    fn test_handle_payload_unknown_and_garbage_are_ignored() {
+        assert_eq!(handle_payload(r#"{"type":"surprise"}"#).unwrap(), None);
+        assert_eq!(handle_payload("not json").unwrap(), None);
+    }
+
+    #[test]
+    fn test_handle_payload_final_is_terminal() {
+        match handle_payload(FINAL_NO_ADRS).unwrap() {
+            Some(StreamOutcome::Final(data)) => {
+                let out: AdvisorOutput = serde_json::from_value(data).unwrap();
+                assert_eq!(out.summary, "Use the App Router.");
+            }
+            other => panic!("expected Final outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_handle_payload_error_frame_is_error() {
+        let frame = r#"{"type":"error","error":"boom"}"#;
+        let err = handle_payload(frame).unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("boom")));
+    }
+
+    // --- print_final ---
+
+    #[test]
+    fn test_print_final_json_pretty_prints() {
+        let data = serde_json::json!({
+            "summary": "S",
+            "interpreter": {"summary": "i", "related_adrs": []}
+        });
+        // --json echoes the object verbatim; valid input never errors.
+        print_final(&data, true).unwrap();
+    }
+
+    #[test]
+    fn test_print_final_human_renders_valid_output() {
+        let data = serde_json::json!({
+            "summary": "S",
+            "interpreter": {"summary": "i", "related_adrs": []}
+        });
+        print_final(&data, false).unwrap();
+    }
+
+    #[test]
+    fn test_print_final_human_rejects_unparseable_output() {
+        // Missing `summary` → not a valid AdvisorOutput → error on the human path.
+        let data = serde_json::json!({"interpreter": {"summary": "i"}});
+        let err = print_final(&data, false).unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("unparseable")));
+    }
+
+    // --- end-to-end via a mocked stream ---
+
     #[test]
     fn test_exec_not_logged_in() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -352,18 +697,12 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        let err = run(
-            &args("http://127.0.0.1:1", None),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap_err();
+        let err = run(&args("http://127.0.0.1:1", None)).await.unwrap_err();
         assert!(matches!(err, ActualError::NotLoggedIn));
     }
 
     #[tokio::test]
-    async fn test_run_success_renders_related_adrs() {
+    async fn test_run_streams_phases_then_final() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
@@ -371,35 +710,47 @@ mod tests {
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
-        let s = server
-            .mock("POST", "/v1/advisor/query")
+        let body = sse_body(&[
+            PHASE_FETCHING,
+            PHASE_INTERPRETING,
+            PHASE_SUMMARIZING,
+            &final_with_adr(),
+        ]);
+        let m = server
+            .mock("POST", STREAM_PATH)
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(START_BODY)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
             .create_async()
             .await;
-        let p = server
-            .mock("GET", POLL_PATH)
+
+        run(&args(&server.url(), None)).await.unwrap();
+        m.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_run_ignores_interleaved_heartbeats() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let body = sse_body(&[HEARTBEAT, PHASE_FETCHING, HEARTBEAT, FINAL_NO_ADRS]);
+        let _m = server
+            .mock("POST", STREAM_PATH)
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(succeeded_body(ONE_ADR))
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
             .create_async()
             .await;
 
-        // org omitted → uses the signed-in org from creds.
-        run(
-            &args(&server.url(), None),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap();
-        s.assert_async().await;
-        p.assert_async().await;
+        run(&args(&server.url(), None)).await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_run_success_no_related_adrs() {
+    async fn test_run_json_output() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
@@ -407,134 +758,22 @@ mod tests {
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        run(
-            &args(&server.url(), Some("00000000-0000-0000-0000-000000000000")),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_run_failed_query() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        store::save(&test_creds()).unwrap();
-
-        let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(
-                r#"{"query_id":"q1","status":"failed","result":null,"error":"stream ended"}"#,
-            )
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let err = run(
-            &args(&server.url(), None),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("stream ended")));
-    }
-
-    #[tokio::test]
-    async fn test_run_succeeded_without_result_is_failure() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        store::save(&test_creds()).unwrap();
-
-        let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(r#"{"query_id":"q1","status":"succeeded","result":null,"error":null}"#)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let err = run(
-            &args(&server.url(), None),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("no result")));
-    }
-
-    #[tokio::test]
-    async fn test_run_running_then_succeeded() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        store::save(&test_creds()).unwrap();
-
-        let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        // First poll: running (Retry-After: 0 → immediate). Second: succeeded.
-        let _running = server
-            .mock("GET", POLL_PATH)
+        let body = sse_body(&[PHASE_FETCHING, FINAL_NO_ADRS]);
+        let _m = server
+            .mock("POST", STREAM_PATH)
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_header("retry-after", "0")
-            .with_body(r#"{"query_id":"q1","status":"running","result":null,"error":null}"#)
-            .expect(1)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
             .create_async()
             .await;
-        let _done = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(ONE_ADR))
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        // org provided via --org (exercises the args.org branch).
-        run(
-            &args(&server.url(), Some("22222222-2222-2222-2222-222222222222")),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap();
+
+        let mut a = args(&server.url(), None);
+        a.json = true;
+        run(&a).await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_run_not_modified_then_succeeded() {
+    async fn test_run_error_frame_is_non_zero_exit() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
@@ -542,70 +781,26 @@ mod tests {
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let _nm = server
-            .mock("GET", POLL_PATH)
-            .with_status(304)
-            .expect(1)
-            .create_async()
-            .await;
-        let _done = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        run(
-            &args(&server.url(), None),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_poll_times_out_at_deadline() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        store::save(&test_creds()).unwrap();
-
-        let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        // Always running → the loop keeps polling until the wall-clock deadline.
-        let _p = server
-            .mock("GET", POLL_PATH)
+        let body = sse_body(&[
+            PHASE_FETCHING,
+            r#"{"type":"error","error":"model unavailable"}"#,
+        ]);
+        let _m = server
+            .mock("POST", STREAM_PATH)
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_header("retry-after", "0")
-            .with_body(r#"{"query_id":"q1","status":"running","result":null,"error":null}"#)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
             .create_async()
             .await;
-        // Tiny deadline + zero interval → polls a few times, then gives up.
-        let err = run(
-            &args(&server.url(), None),
-            Duration::from_millis(10),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("did not reach")));
+
+        let err = run(&args(&server.url(), None)).await.unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("model unavailable")));
+        // ApiError is a non-zero exit.
+        assert_ne!(err.exit_code(), 0);
     }
 
     #[tokio::test]
-    async fn test_run_sends_versioned_job_envelope() {
+    async fn test_run_graceful_close_without_final_is_completion() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
@@ -613,155 +808,40 @@ mod tests {
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
-        // The server validates the typed/versioned envelope: type + version
-        // literals and the query nested under `data`.
-        let s = server
-            .mock("POST", "/v1/advisor/query")
-            .match_body(mockito::Matcher::PartialJsonString(
-                r#"{"type":"advisor_query","version":1,"data":{"query":"why app router?"}}"#
-                    .to_string(),
-            ))
+        // Phases only, then the server closes — no `final`, no `error`.
+        let body = sse_body(&[PHASE_FETCHING, PHASE_INTERPRETING]);
+        let _m = server
+            .mock("POST", STREAM_PATH)
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(START_BODY)
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
             .create_async()
             .await;
 
-        run(
-            &args(&server.url(), None),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap();
-        s.assert_async().await;
+        // Graceful close with no final frame is completion, not an error.
+        run(&args(&server.url(), None)).await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_run_retries_on_transient_500() {
+    async fn test_run_non_2xx_is_non_zero_exit() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
         store::save(&test_creds()).unwrap();
-
-        let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        // First poll: transient infra 500 → retried, not fatal. Second: succeeded.
-        let infra = server
-            .mock("GET", POLL_PATH)
-            .with_status(500)
-            .with_body(r#"{"error":"row load failed"}"#)
-            .expect(1)
-            .create_async()
-            .await;
-        let _done = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(ONE_ADR))
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-
-        run(
-            &args(&server.url(), None),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap();
-        infra.assert_async().await;
-    }
-
-    #[test]
-    fn test_next_delay_clamps_retry_after() {
-        // A large (or misbehaving) server Retry-After is clamped to the ceiling.
-        assert_eq!(
-            next_delay(Some(600), Duration::from_secs(2)),
-            MAX_RETRY_AFTER
-        );
-        assert_eq!(
-            next_delay(Some(15), Duration::from_secs(2)),
-            Duration::from_secs(15)
-        );
-        // Values under the ceiling pass through; None falls back to the default.
-        assert_eq!(
-            next_delay(Some(3), Duration::from_secs(2)),
-            Duration::from_secs(3)
-        );
-        assert_eq!(
-            next_delay(None, Duration::from_secs(2)),
-            Duration::from_secs(2)
-        );
-    }
-
-    // --- transparent refresh-on-expiry ---
-
-    #[tokio::test]
-    async fn test_ensure_fresh_no_refresh_token_returns_unchanged() {
-        let mut c = test_creds();
-        c.refresh_token = String::new();
-        let out = ensure_fresh(c.clone()).await.unwrap();
-        assert_eq!(out.access_token, c.access_token);
-    }
-
-    #[tokio::test]
-    async fn test_ensure_fresh_not_expired_returns_unchanged() {
-        let mut c = test_creds();
-        c.expires_at = Some(Utc::now() + ChronoDuration::hours(1));
-        let out = ensure_fresh(c).await.unwrap();
-        assert_eq!(out.access_token, "tok");
-    }
-
-    #[tokio::test]
-    async fn test_ensure_fresh_expired_refreshes_and_persists() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
 
         let mut server = mockito::Server::new_async().await;
         let _m = server
-            .mock("POST", "/api/oauth/token")
-            .with_status(200)
+            .mock("POST", STREAM_PATH)
+            .with_status(400)
             .with_header("content-type", "application/json")
-            .with_body(
-                r#"{"access_token":"new-at","token_type":"Bearer","expires_in":3600,"refresh_token":"new-rt"}"#,
-            )
+            .with_body(r#"{"error":{"code":"BAD_REQUEST","message":"bad","details":null}}"#)
             .create_async()
             .await;
 
-        let mut c = test_creds();
-        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1)); // expired
-        c.auth_url = Some(server.url());
-
-        let out = ensure_fresh(c).await.unwrap();
-        assert_eq!(out.access_token, "new-at");
-        // Rotated creds were re-persisted.
-        assert_eq!(store::load().unwrap().unwrap().access_token, "new-at");
+        let err = run(&args(&server.url(), None)).await.unwrap_err();
+        assert_ne!(err.exit_code(), 0);
     }
-
-    #[tokio::test]
-    async fn test_ensure_fresh_refresh_failure_is_not_logged_in() {
-        // Expired + unreachable auth server → refresh errors → NotLoggedIn.
-        let mut c = test_creds();
-        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
-        c.auth_url = Some("http://127.0.0.1:1".to_string());
-        let err = ensure_fresh(c).await.unwrap_err();
-        assert!(matches!(err, ActualError::NotLoggedIn));
-    }
-
-    // --- explicit repo scoping ---
 
     #[tokio::test]
     async fn test_run_with_explicit_repo_scopes_request() {
@@ -773,31 +853,21 @@ mod tests {
 
         let mut server = mockito::Server::new_async().await;
         let s = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", STREAM_PATH)
             .match_body(mockito::Matcher::PartialJsonString(
                 r#"{"repo_unique_id":"33333333-3333-3333-3333-333333333333"}"#.to_string(),
             ))
             .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(START_BODY)
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse_body(&[FINAL_NO_ADRS]))
             .create_async()
             .await;
 
         let mut a = args(&server.url(), None);
         a.repo = Some("33333333-3333-3333-3333-333333333333".to_string());
-        run(&a, Duration::from_secs(60), Duration::ZERO)
-            .await
-            .unwrap();
+        run(&a).await.unwrap();
         s.assert_async().await;
     }
-
-    // --- cross-org 403 handling ---
 
     #[tokio::test]
     async fn test_run_org_mismatch_403_surfaces_actionable_error() {
@@ -810,7 +880,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         // api-service rejects the cross-org token with a fail-closed 403.
         let _s = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", STREAM_PATH)
             .with_status(403)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":{"code":"FORBIDDEN","message":"cross-org","details":null}}"#)
@@ -819,13 +889,7 @@ mod tests {
 
         // Explicit --org that differs from the session org (test_creds is 1111…).
         let target = "99999999-9999-9999-9999-999999999999";
-        let err = run(
-            &args(&server.url(), Some(target)),
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap_err();
+        let err = run(&args(&server.url(), Some(target))).await.unwrap_err();
 
         match err {
             ActualError::OrgMismatch { message, hint } => {
@@ -888,5 +952,61 @@ mod tests {
             !message.contains("actual login"),
             "remediation should not be in the message: {message}"
         );
+    }
+
+    // --- transparent refresh-on-expiry ---
+
+    #[tokio::test]
+    async fn test_ensure_fresh_no_refresh_token_returns_unchanged() {
+        let mut c = test_creds();
+        c.refresh_token = String::new();
+        let out = ensure_fresh(c.clone()).await.unwrap();
+        assert_eq!(out.access_token, c.access_token);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_not_expired_returns_unchanged() {
+        let mut c = test_creds();
+        c.expires_at = Some(Utc::now() + ChronoDuration::hours(1));
+        let out = ensure_fresh(c).await.unwrap();
+        assert_eq!(out.access_token, "tok");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_expired_refreshes_and_persists() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"new-at","token_type":"Bearer","expires_in":3600,"refresh_token":"new-rt"}"#,
+            )
+            .create_async()
+            .await;
+
+        let mut c = test_creds();
+        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1)); // expired
+        c.auth_url = Some(server.url());
+
+        let out = ensure_fresh(c).await.unwrap();
+        assert_eq!(out.access_token, "new-at");
+        // Rotated creds were re-persisted.
+        assert_eq!(store::load().unwrap().unwrap().access_token, "new-at");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_fresh_refresh_failure_is_not_logged_in() {
+        // Expired + unreachable auth server → refresh errors → NotLoggedIn.
+        let mut c = test_creds();
+        c.expires_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        c.auth_url = Some("http://127.0.0.1:1".to_string());
+        let err = ensure_fresh(c).await.unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn));
     }
 }
