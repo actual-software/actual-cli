@@ -476,6 +476,17 @@ mod tests {
         print_answer(&without);
     }
 
+    #[test]
+    fn test_render_phase_silent_and_fallback_arms() {
+        // `done` and the empty phase are silent (the `final` frame carries the
+        // answer, so there is nothing to print for them); an unrecognized phase
+        // falls through to the generic one-line render. None of these panic —
+        // exercising each arm locks the rendering contract in.
+        render_phase("done");
+        render_phase("");
+        render_phase("compiling");
+    }
+
     // --- SSE frame decoding (chunk reassembly) ---
 
     #[test]
@@ -568,15 +579,19 @@ mod tests {
 
     #[test]
     fn test_parse_frame_final_carries_output() {
+        // `final` parses to a Final event carrying the verbatim `data` object.
+        // Asserting equality (rather than matching with a fallback arm) keeps the
+        // test free of an untaken branch; the asserted-equal value is then what
+        // deserializes into an AdvisorOutput.
         let event = parse_advisor_frame(FINAL_NO_ADRS).unwrap();
-        match event {
-            AdvisorStreamEvent::Final(data) => {
-                let out: AdvisorOutput = serde_json::from_value(data).unwrap();
-                assert_eq!(out.summary, "Use the App Router.");
-                assert!(out.interpreter.related_adrs.is_empty());
-            }
-            other => panic!("expected Final, got {other:?}"),
-        }
+        let expected: serde_json::Value = serde_json::from_str(
+            r#"{"summary":"Use the App Router.","interpreter":{"summary":"i","related_adrs":[]}}"#,
+        )
+        .unwrap();
+        assert_eq!(event, AdvisorStreamEvent::Final(expected.clone()));
+        let out: AdvisorOutput = serde_json::from_value(expected).unwrap();
+        assert_eq!(out.summary, "Use the App Router.");
+        assert!(out.interpreter.related_adrs.is_empty());
     }
 
     #[test]
@@ -634,13 +649,16 @@ mod tests {
 
     #[test]
     fn test_handle_payload_final_is_terminal() {
-        match handle_payload(FINAL_NO_ADRS).unwrap() {
-            Some(StreamOutcome::Final(data)) => {
-                let out: AdvisorOutput = serde_json::from_value(data).unwrap();
-                assert_eq!(out.summary, "Use the App Router.");
-            }
-            other => panic!("expected Final outcome, got {other:?}"),
-        }
+        // A `final` payload is the one terminal success outcome; assert equality
+        // rather than matching so there is no untaken arm left uncovered.
+        let outcome = handle_payload(FINAL_NO_ADRS).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(
+            r#"{"summary":"Use the App Router.","interpreter":{"summary":"i","related_adrs":[]}}"#,
+        )
+        .unwrap();
+        assert_eq!(outcome, Some(StreamOutcome::Final(expected.clone())));
+        let out: AdvisorOutput = serde_json::from_value(expected).unwrap();
+        assert_eq!(out.summary, "Use the App Router.");
     }
 
     #[test]
@@ -819,6 +837,56 @@ mod tests {
             .await;
 
         // Graceful close with no final frame is completion, not an error.
+        run(&args(&server.url(), None)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_final_recovered_via_flush_without_trailing_blank_line() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        // A blank-line-terminated phase frame (consumed via `push`) followed by a
+        // `final` frame the server closes WITHOUT the terminating blank line, so
+        // the answer is only recovered by the end-of-stream `flush`.
+        let body = format!("data: {PHASE_FETCHING}\n\ndata: {FINAL_NO_ADRS}");
+        let _m = server
+            .mock("POST", STREAM_PATH)
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        // The flush-recovered `final` frame is a successful terminal outcome.
+        run(&args(&server.url(), None)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_flush_recovers_non_terminal_frame_then_closes() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        // The stream closes right after a phase frame, with no terminating blank
+        // line: the phase is recovered by `flush` but is non-terminal, so the run
+        // ends as a graceful close (no `final`, no `error`) rather than returning
+        // a flushed answer.
+        let body = format!("data: {PHASE_FETCHING}");
+        let _m = server
+            .mock("POST", STREAM_PATH)
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(body)
+            .create_async()
+            .await;
+
         run(&args(&server.url(), None)).await.unwrap();
     }
 

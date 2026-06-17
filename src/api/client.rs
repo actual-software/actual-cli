@@ -85,9 +85,7 @@ impl ActualApiClient {
             .connect_timeout(connect_timeout)
             .read_timeout(Self::STREAM_IDLE_TIMEOUT)
             .build()
-            .map_err(|e| {
-                ActualError::ApiError(format!("Failed to build HTTP stream client: {e}"))
-            })?;
+            .map_err(|e| ActualError::ApiError(format!("Failed to build streaming client: {e}")))?;
 
         Ok(Self {
             client,
@@ -1646,5 +1644,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ActualError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_stream_advisor_query_without_bearer_omits_auth_header() {
+        // A client with no `with_bearer` takes the `None` arm of `authed`, so the
+        // request carries no Authorization header. `Matcher::Missing` fails the
+        // mock if one is sent, so this both opens the stream and asserts the omission.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/advisor/query/stream")
+            .match_header("authorization", mockito::Matcher::Missing)
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(
+                "data: {\"type\":\"final\",\"data\":{\"summary\":\"S\",\"interpreter\":{\"summary\":\"i\",\"related_adrs\":[]}}}\n\n",
+            )
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let response = client
+            .stream_advisor_query(&sample_stream_request())
+            .await
+            .expect("stream opens without a bearer token");
+        let body = response.text().await.unwrap();
+        assert!(body.contains("\"type\":\"final\""));
+        mock.assert_async().await;
     }
 }
