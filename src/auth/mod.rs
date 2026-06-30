@@ -11,7 +11,9 @@
 
 pub mod loopback;
 pub mod oauth;
+pub mod pat;
 pub mod pkce;
 pub mod store;
+pub mod token_store;
 
 pub use store::StoredCredentials;

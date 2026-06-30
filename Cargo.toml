@@ -58,6 +58,18 @@ glob = "0.3"
 # Crypto
 sha2 = "0.10"
 base64 = "0.22"
+# Scoped personal-access-token storage: OS keychain (primary) with an
+# AEAD-encrypted-file fallback for headless Linux/CI that has no Secret Service
+# daemon. `keyring` is the portable keychain abstraction; chacha20poly1305 +
+# argon2 protect the fallback file at rest.
+keyring = { version = "3", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
 
 # Async utilities
 futures = "0.3"

@@ -156,6 +156,7 @@ actual adr-bot        # analyze repo & write AI context files
 actual advisor        # ask the Advisor an architecture question
 actual status         # check output file state (managed markers, staleness)
 actual auth           # verify authentication
+actual auth create-token  # mint a scoped token for CI / agents (prototype)
 actual config show    # view current configuration
 actual config set     # set a config value
 actual config path    # print config file location
@@ -163,6 +164,10 @@ actual runners        # list available AI backend runners
 actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
 ```
+
+For non-interactive (CI / agent) authentication with scoped access tokens, see
+[Agent authentication](docs/AGENT_AUTH.md). It also covers the
+dedicated-token-per-agent and never-in-prompt rules agents must follow.
 
 ## Configuration
 

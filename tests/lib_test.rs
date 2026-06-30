@@ -146,7 +146,29 @@ fn test_cli_parse_status_defaults() {
 #[test]
 fn test_cli_parse_auth() {
     let cli = Cli::parse_from(["actual", "auth"]);
-    assert!(matches!(cli.command, Command::Auth));
+    assert!(matches!(cli.command, Command::Auth(_)));
+}
+
+#[test]
+fn test_cli_parse_auth_create_token() {
+    use actual_cli::AuthCommand;
+    let cli = Cli::parse_from([
+        "actual",
+        "auth",
+        "create-token",
+        "--name",
+        "ci-agent",
+        "--scopes",
+        "adr.read,advisor.read",
+    ]);
+    let Command::Auth(auth) = cli.command else {
+        unreachable!()
+    };
+    let Some(AuthCommand::CreateToken(args)) = auth.command else {
+        unreachable!()
+    };
+    assert_eq!(args.name, "ci-agent");
+    assert_eq!(args.scopes, vec!["adr.read", "advisor.read"]);
 }
 
 #[test]
