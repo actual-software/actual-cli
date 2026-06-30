@@ -323,8 +323,8 @@ pub enum Command {
     AdrBot(SyncArgs),
     /// Check output file state
     Status(StatusArgs),
-    /// Check Claude Code authentication status
-    Auth,
+    /// Check the coding-agent runner's auth, or mint a scoped access token
+    Auth(AuthArgs),
     /// Sign in to your Actual AI account via browser OAuth
     Login(LoginArgs),
     /// Sign out of your Actual AI account and clear local credentials
@@ -473,6 +473,45 @@ pub struct LoginArgs {
     /// Print the sign-in URL instead of opening a browser (useful over SSH).
     #[arg(long)]
     pub no_browser: bool,
+}
+
+/// Arguments for the `auth` command group.
+///
+/// With no subcommand, `actual auth` keeps its original behavior — a check of
+/// the underlying coding-agent runner (e.g. `claude auth status`). The
+/// `create-token` subcommand mints a scoped Actual AI platform token.
+#[derive(Parser, Debug)]
+pub struct AuthArgs {
+    #[command(subcommand)]
+    pub command: Option<AuthCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AuthCommand {
+    /// Mint a scoped personal access token for non-interactive (CI / agent) use
+    CreateToken(CreateTokenArgs),
+}
+
+/// Arguments for `auth create-token`.
+#[derive(Parser, Debug)]
+pub struct CreateTokenArgs {
+    /// Label identifying this token and the agent that will use it.
+    ///
+    /// Mint a DEDICATED token per agent (do not share the human's interactive
+    /// login session) so every action is attributable and the credential can be
+    /// revoked on its own.
+    #[arg(long, value_name = "NAME")]
+    pub name: String,
+
+    /// Scopes to grant, comma- or space-separated
+    /// (e.g. `--scopes adr.read,advisor.read`).
+    #[arg(long, value_name = "SCOPE", value_delimiter = ',', required = true, num_args = 1..)]
+    pub scopes: Vec<String>,
+
+    /// Issuance API base URL. Defaults to the api-service; falls back through
+    /// the `ACTUAL_API_URL` env var. Point at a local mock for testing.
+    #[arg(long, value_name = "URL")]
+    pub api_url: Option<String>,
 }
 
 /// Arguments for the `status` command

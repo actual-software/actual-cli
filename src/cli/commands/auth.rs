@@ -1,12 +1,21 @@
 use std::path::Path;
 
+use crate::cli::args::{AuthArgs, AuthCommand};
 use crate::cli::ui::theme;
 use crate::error::ActualError;
 use crate::runner::auth::ClaudeAuthStatus;
 use crate::runner::binary::find_claude_binary;
 
-pub fn exec() -> Result<(), ActualError> {
-    run_auth()
+/// Dispatch the `auth` command group. With no subcommand, `actual auth` checks
+/// the underlying coding-agent runner (the original behavior). `create-token`
+/// mints a scoped Actual AI platform token.
+pub fn exec(args: &AuthArgs) -> Result<(), ActualError> {
+    match &args.command {
+        None => run_auth(),
+        Some(AuthCommand::CreateToken(create_args)) => {
+            crate::cli::commands::create_token::exec(create_args)
+        }
+    }
 }
 
 fn run_auth() -> Result<(), ActualError> {
@@ -561,7 +570,7 @@ mod tests {
     fn test_exec_binary_not_found() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
-        let code = handle_result(exec());
+        let code = handle_result(exec(&AuthArgs { command: None }));
         assert_eq!(code, 2);
     }
 
@@ -576,7 +585,7 @@ mod tests {
             0,
         );
         let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
-        let code = handle_result(exec());
+        let code = handle_result(exec(&AuthArgs { command: None }));
         assert_eq!(code, 0);
     }
 
@@ -587,7 +596,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = create_fake_binary(dir.path(), r#"{"loggedIn": false}"#, 0);
         let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
-        let code = handle_result(exec());
+        let code = handle_result(exec(&AuthArgs { command: None }));
         assert_eq!(code, 2);
     }
 
@@ -643,7 +652,7 @@ mod tests {
         // File exists but is NOT executable — find_claude_binary rejects it
         // with ClaudeNotFound (exit code 2) before reaching the subprocess.
         let _guard = EnvGuard::set("CLAUDE_BINARY", not_executable.to_str().unwrap());
-        let code = handle_result(exec());
+        let code = handle_result(exec(&AuthArgs { command: None }));
         assert_eq!(code, 2);
     }
 
