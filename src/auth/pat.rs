@@ -13,9 +13,9 @@
 //! against the documented contract and is trivially repointed once the server
 //! ships:
 //!
-//! - `POST <base>/api/auth/tokens`
+//! - `POST <base>/api/oauth/tokens`
 //! - `Authorization: Bearer <session access token>`
-//! - request body: `{ "name": "<label>", "scopes": ["adr.read", …] }`
+//! - request body: `{ "name": "<label>", "scopes": ["adr:query", …] }`
 //! - response body: `{ "token": "actl_pat_…", "id": …, "name": …, "scopes":
 //!   […], "created_at": …, "expires_at": … }` — the raw `token` is returned
 //!   exactly once.
@@ -34,7 +34,7 @@ use crate::error::ActualError;
 pub const PAT_PREFIX: &str = "actl_pat_";
 
 /// Path of the authenticated issuance endpoint, appended to the resolved base.
-pub const ISSUANCE_PATH: &str = "/api/auth/tokens";
+pub const ISSUANCE_PATH: &str = "/api/oauth/tokens";
 
 /// Request body for token issuance.
 #[derive(Debug, Serialize)]
@@ -163,7 +163,7 @@ mod tests {
     use super::*;
 
     fn scopes() -> Vec<String> {
-        vec!["adr.read".to_string(), "advisor.read".to_string()]
+        vec!["adr:query".to_string(), "adr:review".to_string()]
     }
 
     #[tokio::test]
@@ -173,12 +173,12 @@ mod tests {
             .mock("POST", ISSUANCE_PATH)
             .match_header("authorization", "Bearer session-token-abc")
             .match_body(mockito::Matcher::PartialJsonString(
-                r#"{"name":"ci-agent","scopes":["adr.read","advisor.read"]}"#.to_string(),
+                r#"{"name":"ci-agent","scopes":["adr:query","adr:review"]}"#.to_string(),
             ))
             .with_status(201)
             .with_header("content-type", "application/json")
             .with_body(
-                r#"{"token":"actl_pat_abc123","id":"tok_1","name":"ci-agent","scopes":["adr.read","advisor.read"],"created_at":"2026-06-30T00:00:00Z"}"#,
+                r#"{"token":"actl_pat_abc123","id":"tok_1","name":"ci-agent","scopes":["adr:query","adr:review"],"created_at":"2026-06-30T00:00:00Z"}"#,
             )
             .create_async()
             .await;
@@ -189,7 +189,7 @@ mod tests {
         assert_eq!(issued.token, "actl_pat_abc123");
         assert_eq!(issued.id.as_deref(), Some("tok_1"));
         assert_eq!(issued.name.as_deref(), Some("ci-agent"));
-        assert_eq!(issued.scopes, vec!["adr.read", "advisor.read"]);
+        assert_eq!(issued.scopes, vec!["adr:query", "adr:review"]);
         mock.assert_async().await;
     }
 

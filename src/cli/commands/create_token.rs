@@ -182,7 +182,7 @@ mod tests {
 
         let args = CreateTokenArgs {
             name: "agent".to_string(),
-            scopes: vec!["adr.read".to_string()],
+            scopes: vec!["adr:query".to_string()],
             api_url: Some("http://127.0.0.1:1".to_string()),
         };
         // Not signed in → NotLoggedIn before any network work.
@@ -210,13 +210,13 @@ mod tests {
             .match_header("authorization", "Bearer session-token")
             .with_status(201)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"token":"actl_pat_minted","id":"tok_9","scopes":["adr.read"]}"#)
+            .with_body(r#"{"token":"actl_pat_minted","id":"tok_9","scopes":["adr:query"]}"#)
             .create_async()
             .await;
 
         let args = CreateTokenArgs {
             name: "agent-z".to_string(),
-            scopes: vec!["adr.read".to_string()],
+            scopes: vec!["adr:query".to_string()],
             api_url: Some(server.url()),
         };
         run(&args).await.unwrap();
@@ -229,13 +229,78 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_ensure_fresh_refreshes_expired_token() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempfile::tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"refreshed","token_type":"Bearer","expires_in":3600,"refresh_token":"rotated"}"#,
+            )
+            .create_async()
+            .await;
+
+        // An expired access token plus a refresh token and a reachable auth server
+        // takes the refresh-and-re-persist branch.
+        let mut creds = sample_creds();
+        creds.auth_url = Some(server.url());
+        creds.expires_at = Some(Utc::now() - ChronoDuration::hours(1));
+        let out = ensure_fresh(creds).await.unwrap();
+        assert_eq!(out.access_token, "refreshed");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_run_prints_requested_scopes_and_expiry() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempfile::tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _g3 = EnvGuard::set("ACTUAL_TOKEN_STORE", "file");
+        let _g4 = EnvGuard::set("ACTUAL_TOKEN_PASSPHRASE", "test-passphrase");
+        let _g5 = EnvGuard::remove("ACTUAL_TOKEN");
+
+        store::save(&sample_creds()).unwrap();
+
+        // The server omits scopes (so the printed scopes fall back to the request)
+        // and includes an expiry (so the expiry line is printed).
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", pat::ISSUANCE_PATH)
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"token":"actl_pat_exp","expires_at":"2030-01-01T00:00:00Z"}"#)
+            .create_async()
+            .await;
+
+        let args = CreateTokenArgs {
+            name: "exp-agent".to_string(),
+            scopes: vec!["adr:query".to_string()],
+            api_url: Some(server.url()),
+        };
+        run(&args).await.unwrap();
+        mock.assert_async().await;
+
+        assert_eq!(
+            token_store::retrieve("exp-agent").unwrap().as_deref(),
+            Some("actl_pat_exp")
+        );
+    }
+
     fn sample_creds() -> StoredCredentials {
         StoredCredentials {
             access_token: "session-token".to_string(),
             refresh_token: "refresh".to_string(),
             token_type: "Bearer".to_string(),
             expires_at: None,
-            scope: Some("adr.read".to_string()),
+            scope: Some("adr:query".to_string()),
             organization_id: "org-1".to_string(),
             member_id: "member-1".to_string(),
             email: None,

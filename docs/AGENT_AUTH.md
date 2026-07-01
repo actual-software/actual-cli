@@ -15,10 +15,10 @@ headless callers authenticate without one.
 
 ```console
 $ actual login                       # once, interactively, in a browser
-$ actual auth create-token --name ci-deploy --scopes adr.read,advisor.read
+$ actual auth create-token --name ci-deploy --scopes adr:query,adr:review
 ✔ Created scoped access token "ci-deploy"
   Token id:    tok_9f3c
-  Scopes:      adr.read advisor.read
+  Scopes:      adr:query adr:review
   Stored in:   OS keychain
 
 Your token is shown once below. Copy it now:
@@ -107,7 +107,7 @@ flowchart TD
 ```
 
 The primary store is the OS keychain (macOS Keychain, Windows Credential
-Manager, or the Linux Secret Service), reached through the portable
+Manager, or the Linux kernel keyutils keyring), reached through the portable
 [`keyring`](https://crates.io/crates/keyring) crate.
 
 Where no keychain is available, an **encrypted-file fallback** keeps the token at
@@ -125,27 +125,43 @@ anything weaker, so a token is never stored in a form softer than the keychain.
 ## Headless-storage finding
 
 The question this prototype set out to answer: does the keychain library degrade
-gracefully on a headless Linux box or CI runner that has no Secret Service
-daemon?
+gracefully on a headless Linux box or CI runner with no desktop keyring?
 
-The answer is no, and that is the expected, correct behavior. The `keyring`
-crate's Secret Service backend talks to a D-Bus daemon; with no daemon running,
-a store or read returns an error rather than silently dropping the secret or
-inventing a weaker store. Silent degradation is the more dangerous outcome,
-because it leaves a token written somewhere unprotected. An explicit error is
-what you want.
+The first cut used the `keyring` crate's **Secret Service** backend
+(`sync-secret-service`), and the finding was sharper than expected. Secret
+Service does not fail gracefully at runtime here; it fails at **build time**.
+That backend links the system `libdbus` through `pkg-config`, so a host without
+`libdbus-1-dev` cannot compile the CLI at all. On stock Linux CI runners every
+job went red on `The system library dbus-1 required by crate libdbus-sys was not
+found`, across build, lint, test, and coverage alike. A missing runtime daemon
+is recoverable. A binary that never builds is not.
 
-The CLI turns that error into a deliberate fallback. In the default `auto` mode,
-a keychain failure routes to the encrypted-file store **when a passphrase is
-configured**, and otherwise fails with a message pointing at `ACTUAL_TOKEN` or
-`ACTUAL_TOKEN_PASSPHRASE`. The practical guidance that follows:
+The fix is to pick a Linux backend with no build-time system dependency. This
+CLI now uses `linux-native`, the kernel **keyutils** keyring, reached through raw
+syscalls: no `libdbus`, no `pkg-config`, no D-Bus daemon. It compiles on any
+Linux, including a bare CI container, and it stores secrets headless without a
+desktop session. macOS and Windows keep their native keychains (`apple-native`,
+`windows-native`), which never had the problem.
 
-- **Interactive desktop** (macOS, Windows, Linux with a keyring daemon): the OS
-  keychain is used with no extra configuration.
-- **CI**: prefer `ACTUAL_TOKEN` from the platform's secret store. No on-disk
-  storage is involved at all.
-- **Headless Linux that must persist a token**: set `ACTUAL_TOKEN_PASSPHRASE`
-  to enable the encrypted-file fallback.
+Runtime degradation is still handled explicitly. In the default `auto` mode a
+keychain error routes to the encrypted-file store **when a passphrase is
+configured**, and otherwise fails loudly with a message pointing at
+`ACTUAL_TOKEN` or `ACTUAL_TOKEN_PASSPHRASE`. The CLI never invents a weaker store
+behind your back. Silent degradation would leave a token written somewhere
+unprotected, and that is the outcome worth avoiding.
+
+One property of keyutils is worth knowing. Kernel keyrings are scoped to a
+session or the persistent per-user keyring, so a secret there is less durable
+across reboots than a Secret Service entry on a desktop. For durable
+non-interactive use that does not matter, because the recommended paths avoid the
+OS keychain entirely:
+
+- **CI**: pass `ACTUAL_TOKEN` from the platform's secret store. Nothing is
+  written to disk.
+- **Headless Linux that must persist a token**: set `ACTUAL_TOKEN_PASSPHRASE` to
+  enable the encrypted-file fallback, which survives reboots at `0600`.
+- **Interactive desktop** (macOS, Windows, Linux with keyutils): the OS keychain
+  is used with no extra configuration.
 
 ### Prototype limitations
 
@@ -157,7 +173,7 @@ configured**, and otherwise fails with a message pointing at `ACTUAL_TOKEN` or
 
 ## Endpoint
 
-`create-token` calls `POST <base>/api/auth/tokens` with the login session token
+`create-token` calls `POST <base>/api/oauth/tokens` with the login session token
 as the bearer, and reads back the minted `actl_pat_…`. The base URL is resolved
 from `--api-url`, then the `ACTUAL_API_URL` environment variable, then the
 api-service default, so a local mock or a future production path needs no code

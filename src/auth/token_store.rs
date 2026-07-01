@@ -10,12 +10,12 @@
 //! ## Backends
 //!
 //! - **`Keyring`** — the OS keychain (macOS Keychain, Windows Credential
-//!   Manager, Linux Secret Service) via the portable [`keyring`] crate. This is
+//!   Manager, Linux kernel keyutils) via the portable [`keyring`] crate. This is
 //!   the primary store on a desktop / interactive box.
 //! - **`EncryptedFile`** — an XChaCha20-Poly1305 AEAD file under the config
 //!   directory, with the key derived by Argon2id from a passphrase read from
 //!   `ACTUAL_TOKEN_PASSPHRASE`. This is the fallback for headless Linux / CI
-//!   that has no Secret Service daemon, where the keychain is unavailable.
+//!   where the OS keychain is unavailable.
 //!
 //! ## Backend selection (`ACTUAL_TOKEN_STORE`)
 //!
@@ -80,7 +80,7 @@ fn token_error(msg: impl std::fmt::Display) -> ActualError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     /// The OS keychain (macOS Keychain, Windows Credential Manager, Linux
-    /// Secret Service).
+    /// kernel keyutils).
     Keyring,
     /// The Argon2id + XChaCha20-Poly1305 encrypted fallback file.
     EncryptedFile,
@@ -174,7 +174,7 @@ fn token_file(name: &str) -> Result<PathBuf, ActualError> {
 /// Store `token` under `name`, returning which backend held it.
 ///
 /// In `auto` mode the OS keychain is tried first; if it is unavailable (the
-/// headless-Linux / no-Secret-Service case) the encrypted file is used instead,
+/// headless-Linux / no-OS-keychain case) the encrypted file is used instead,
 /// provided `ACTUAL_TOKEN_PASSPHRASE` is set. The raw token is never written in
 /// plaintext under any path.
 pub fn store(name: &str, token: &str) -> Result<Backend, ActualError> {
@@ -677,5 +677,359 @@ mod tests {
         assert_ne!(a.ciphertext, b.ciphertext);
         assert_ne!(a.nonce, b.nonce);
         assert_ne!(a.salt, b.salt);
+    }
+
+    // ── Injectable in-memory keychain ─────────────────────────────────────────
+    //
+    // The real OS keychain cannot run deterministically under CI, so these tests
+    // install a persistent in-memory credential store through keyring's public
+    // `set_default_credential_builder` seam. It is keyed by (service, user) so a
+    // store → retrieve → delete round-trips across the separate `keyring::Entry`
+    // instances the backend creates, and it can be flipped to fail on demand to
+    // drive the error and fallback arms. Every keyring-touching test below holds
+    // `ENV_MUTEX` and calls `install_test_keyring()` first, so the process-global
+    // builder and the shared maps never race with a sibling test.
+    use keyring::credential::{Credential, CredentialApi, CredentialBuilderApi};
+    use std::any::Any;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static TEST_KEYRING: Mutex<Option<HashMap<(String, String), Vec<u8>>>> = Mutex::new(None);
+    static TEST_KEYRING_FAIL: Mutex<bool> = Mutex::new(false);
+
+    fn install_test_keyring() {
+        *TEST_KEYRING.lock().unwrap() = Some(HashMap::new());
+        *TEST_KEYRING_FAIL.lock().unwrap() = false;
+        keyring::set_default_credential_builder(Box::new(TestKeyringBuilder));
+    }
+
+    /// Make every subsequent keychain op fail, simulating an unavailable keychain.
+    fn fail_test_keyring() {
+        *TEST_KEYRING_FAIL.lock().unwrap() = true;
+    }
+
+    struct TestKeyringBuilder;
+    impl CredentialBuilderApi for TestKeyringBuilder {
+        fn build(
+            &self,
+            _target: Option<&str>,
+            service: &str,
+            user: &str,
+        ) -> keyring::Result<Box<Credential>> {
+            Ok(Box::new(TestCredential {
+                service: service.to_string(),
+                user: user.to_string(),
+            }))
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct TestCredential {
+        service: String,
+        user: String,
+    }
+    impl TestCredential {
+        fn key(&self) -> (String, String) {
+            (self.service.clone(), self.user.clone())
+        }
+    }
+    impl CredentialApi for TestCredential {
+        fn set_secret(&self, secret: &[u8]) -> keyring::Result<()> {
+            if *TEST_KEYRING_FAIL.lock().unwrap() {
+                return Err(keyring::Error::Invalid("test".into(), "unavailable".into()));
+            }
+            TEST_KEYRING
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .insert(self.key(), secret.to_vec());
+            Ok(())
+        }
+        fn get_secret(&self) -> keyring::Result<Vec<u8>> {
+            if *TEST_KEYRING_FAIL.lock().unwrap() {
+                return Err(keyring::Error::Invalid("test".into(), "unavailable".into()));
+            }
+            match TEST_KEYRING
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .get(&self.key())
+            {
+                Some(v) => Ok(v.clone()),
+                None => Err(keyring::Error::NoEntry),
+            }
+        }
+        fn delete_credential(&self) -> keyring::Result<()> {
+            if *TEST_KEYRING_FAIL.lock().unwrap() {
+                return Err(keyring::Error::Invalid("test".into(), "unavailable".into()));
+            }
+            match TEST_KEYRING
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .remove(&self.key())
+            {
+                Some(_) => Ok(()),
+                None => Err(keyring::Error::NoEntry),
+            }
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    #[test]
+    fn test_keyring_backend_roundtrip() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "keyring");
+
+        let backend = store("kr-agent", "actl_pat_kr").unwrap();
+        assert_eq!(backend, Backend::Keyring);
+        assert_eq!(
+            retrieve("kr-agent").unwrap().as_deref(),
+            Some("actl_pat_kr")
+        );
+        delete("kr-agent").unwrap();
+        assert_eq!(retrieve("kr-agent").unwrap(), None);
+    }
+
+    #[test]
+    fn test_keyring_read_error_surfaces() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "keyring");
+        fail_test_keyring();
+        let err = retrieve("kr-agent").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("keychain read failed")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_keyring_delete_error_surfaces() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "keyring");
+        fail_test_keyring();
+        let err = delete("kr-agent").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("keychain delete failed")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_auto_uses_keyring_when_available() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "auto");
+
+        // Keyring is available → the secret lands there, reads back, and a delete
+        // clears it (after which retrieve falls through to the empty file).
+        let backend = store("auto-ok", "actl_pat_auto").unwrap();
+        assert_eq!(backend, Backend::Keyring);
+        assert_eq!(
+            retrieve("auto-ok").unwrap().as_deref(),
+            Some("actl_pat_auto")
+        );
+        delete("auto-ok").unwrap();
+        assert_eq!(retrieve("auto-ok").unwrap(), None);
+    }
+
+    #[test]
+    fn test_auto_falls_back_to_file_when_keyring_unavailable() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let tmp = tempdir().unwrap();
+        let _g_cfg_file = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g_cfg = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "auto");
+        let _g_pass = EnvGuard::set(PASSPHRASE_ENV, "pw");
+        fail_test_keyring();
+
+        // Keyring write fails → encrypted-file fallback (passphrase configured).
+        let backend = store("auto-fb", "actl_pat_fb").unwrap();
+        assert_eq!(backend, Backend::EncryptedFile);
+        // Read + delete also route past the failing keychain to the file.
+        assert_eq!(retrieve("auto-fb").unwrap().as_deref(), Some("actl_pat_fb"));
+        delete("auto-fb").unwrap();
+        assert_eq!(retrieve("auto-fb").unwrap(), None);
+    }
+
+    #[test]
+    fn test_auto_errors_when_keyring_unavailable_and_no_passphrase() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let tmp = tempdir().unwrap();
+        let _g_cfg_file = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g_cfg = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "auto");
+        let _g_pass = EnvGuard::remove(PASSPHRASE_ENV);
+        fail_test_keyring();
+
+        let err = store("auto-none", "actl_pat_x").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("keychain is unavailable")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_decrypt_rejects_bad_nonce_length() {
+        // A blob whose nonce decodes to the wrong length is rejected pre-decrypt.
+        // "AAAA" is valid base64 for three zero bytes — a 3-byte nonce, not 24.
+        let mut blob = encrypt_token("n", "actl_pat_v", b"pw").unwrap();
+        blob.nonce = "AAAA".to_string();
+        let err = decrypt_token("n", &blob, b"pw").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("nonce")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_decrypt_rejects_short_salt() {
+        // A valid nonce but a too-short salt (three bytes) is rejected pre-decrypt.
+        let mut blob = encrypt_token("n", "actl_pat_v", b"pw").unwrap();
+        blob.salt = "AAAA".to_string();
+        let err = decrypt_token("n", &blob, b"pw").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("salt")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_file_get_read_error_when_path_is_dir() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (tmp, _g0, _g1, _g2, _g3) = file_backend_env("pw");
+        // Put a directory where the token file should be so read() fails with a
+        // non-NotFound error.
+        std::fs::create_dir_all(tmp.path().join(TOKEN_SUBDIR).join("dirtok.token.json")).unwrap();
+        let err = retrieve("dirtok").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("failed to read token file")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_file_get_rejects_oversize_file() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (tmp, _g0, _g1, _g2, _g3) = file_backend_env("pw");
+        let dir = tmp.path().join(TOKEN_SUBDIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("big.token.json"),
+            vec![b'x'; MAX_TOKEN_FILE_SIZE as usize + 1],
+        )
+        .unwrap();
+        let err = retrieve("big").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("too large")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_file_get_requires_passphrase_to_read() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _g_cfg_file = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g_cfg = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "file");
+        // Write the file with a passphrase, then read it back with none set.
+        let g_pass = EnvGuard::set(PASSPHRASE_ENV, "pw");
+        store("passless", "actl_pat_v").unwrap();
+        drop(g_pass);
+        let _g_nopass = EnvGuard::remove(PASSPHRASE_ENV);
+        let err = retrieve("passless").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains(PASSPHRASE_ENV)),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_file_delete_missing_is_ok() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, _g0, _g1, _g2, _g3) = file_backend_env("pw");
+        // Deleting a token that was never stored is a no-op success.
+        delete("never-stored").unwrap();
+    }
+
+    #[test]
+    fn test_file_delete_error_when_path_is_dir() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (tmp, _g0, _g1, _g2, _g3) = file_backend_env("pw");
+        // A directory at the token-file path makes remove_file fail non-NotFound.
+        std::fs::create_dir_all(tmp.path().join(TOKEN_SUBDIR).join("dirdel.token.json")).unwrap();
+        let err = delete("dirdel").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("failed to remove token file")),
+            "got: {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_store_error_when_dir_cannot_be_created() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (tmp, _g0, _g1, _g2, _g3) = file_backend_env("pw");
+        // A plain file where the tokens directory belongs makes create_dir_all fail.
+        std::fs::write(tmp.path().join(TOKEN_SUBDIR), "x").unwrap();
+        let err = store("blocked", "actl_pat_v").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("failed to create token directory")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_keyring_delete_missing_is_ok() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "keyring");
+        // Deleting a credential that was never stored is a no-op success (the
+        // keychain reports NoEntry, which the backend maps to Ok).
+        delete("ghost").unwrap();
+    }
+
+    #[test]
+    fn test_injected_keychain_as_any_hooks() {
+        // The keyring credential traits require `as_any`; exercise both so the
+        // injectable in-memory keychain is itself fully covered.
+        assert!(TestKeyringBuilder
+            .as_any()
+            .downcast_ref::<TestKeyringBuilder>()
+            .is_some());
+        let cred = TestCredential {
+            service: "s".to_string(),
+            user: "u".to_string(),
+        };
+        assert!(cred.as_any().downcast_ref::<TestCredential>().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_secure_parentless_path_errors() {
+        // A path whose parent is None (the filesystem root) skips the mkdir step;
+        // the open then fails, covering the no-parent branch of write_secure.
+        let err = write_secure(Path::new("/"), "x").unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(_)), "got: {err:?}");
     }
 }
