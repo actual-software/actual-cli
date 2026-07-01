@@ -504,7 +504,7 @@ pub struct CreateTokenArgs {
     pub name: String,
 
     /// Scopes to grant, comma- or space-separated
-    /// (e.g. `--scopes adr.read,advisor.read`).
+    /// (e.g. `--scopes adr:query,adr:review`).
     #[arg(long, value_name = "SCOPE", value_delimiter = ',', required = true, num_args = 1..)]
     pub scopes: Vec<String>,
 

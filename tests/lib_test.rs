@@ -159,7 +159,7 @@ fn test_cli_parse_auth_create_token() {
         "--name",
         "ci-agent",
         "--scopes",
-        "adr.read,advisor.read",
+        "adr:query,adr:review",
     ]);
     let Command::Auth(auth) = cli.command else {
         unreachable!()
@@ -168,7 +168,7 @@ fn test_cli_parse_auth_create_token() {
         unreachable!()
     };
     assert_eq!(args.name, "ci-agent");
-    assert_eq!(args.scopes, vec!["adr.read", "advisor.read"]);
+    assert_eq!(args.scopes, vec!["adr:query", "adr:review"]);
 }
 
 #[test]
