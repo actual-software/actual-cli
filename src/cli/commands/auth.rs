@@ -574,6 +574,28 @@ mod tests {
         assert_eq!(code, 2);
     }
 
+    #[test]
+    fn test_exec_dispatches_create_token() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // Route `auth create-token` through the dispatch arm. With no stored
+        // login session it reaches create_token::exec and returns NotLoggedIn,
+        // which is enough to exercise the CreateToken branch of `exec`.
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempfile::tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let args = AuthArgs {
+            command: Some(AuthCommand::CreateToken(
+                crate::cli::args::CreateTokenArgs {
+                    name: "dispatch-agent".to_string(),
+                    scopes: vec!["adr:query".to_string()],
+                    api_url: Some("http://127.0.0.1:1".to_string()),
+                },
+            )),
+        };
+        let err = exec(&args).unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn), "got: {err:?}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_exec_success() {
