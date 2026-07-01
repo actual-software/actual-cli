@@ -473,6 +473,13 @@ pub struct LoginArgs {
     /// Print the sign-in URL instead of opening a browser (useful over SSH).
     #[arg(long)]
     pub no_browser: bool,
+
+    /// Use the browserless device-authorization flow (RFC 8628): print a short
+    /// code + URL to approve on any device, then poll for the session. Intended
+    /// for remote/SSH/CI shells with no local browser. `--org` is ignored in
+    /// this mode (the org is selected on the approval page).
+    #[arg(long)]
+    pub device: bool,
 }
 
 /// Arguments for the `status` command
