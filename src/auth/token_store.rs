@@ -299,10 +299,17 @@ struct EncryptedBlob {
     ciphertext: String,
 }
 
-fn fill_random(buf: &mut [u8]) -> Result<(), ActualError> {
-    let mut rng = OsRng;
-    rng.try_fill_bytes(buf)
-        .map_err(|e| token_error(format!("failed to gather randomness: {e}")))
+/// Gather `N` cryptographically-random bytes from the OS RNG and return them.
+///
+/// Returning the freshly filled array (rather than filling a caller-owned zero
+/// buffer in place) keeps the random value off any `[0u8; N]` binding, so the
+/// salt and nonce that flow into the KDF and cipher are never a constant.
+fn random_bytes<const N: usize>() -> Result<[u8; N], ActualError> {
+    let mut buf = [0u8; N];
+    OsRng
+        .try_fill_bytes(&mut buf)
+        .map_err(|e| token_error(format!("failed to gather randomness: {e}")))?;
+    Ok(buf)
 }
 
 fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<[u8; ARGON2_KEY_LEN], ActualError> {
@@ -314,14 +321,12 @@ fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<[u8; ARGON2_KEY_LEN], Ac
 }
 
 fn encrypt_token(name: &str, token: &str, passphrase: &[u8]) -> Result<EncryptedBlob, ActualError> {
-    let mut salt = [0u8; SALT_LEN];
-    fill_random(&mut salt)?;
+    let salt: [u8; SALT_LEN] = random_bytes()?;
     let key = derive_key(passphrase, &salt)?;
     let cipher = XChaCha20Poly1305::new_from_slice(&key)
         .map_err(|e| token_error(format!("cipher init failed: {e}")))?;
 
-    let mut nonce_bytes = [0u8; XNONCE_LEN];
-    fill_random(&mut nonce_bytes)?;
+    let nonce_bytes: [u8; XNONCE_LEN] = random_bytes()?;
     let nonce = XNonce::from_slice(&nonce_bytes);
 
     // Bind the credential name as associated data so a file cannot be silently
