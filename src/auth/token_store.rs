@@ -207,6 +207,53 @@ pub fn store(name: &str, token: &str) -> Result<Backend, ActualError> {
     }
 }
 
+/// Verify — **without** minting or writing anything — that a storage backend is
+/// available to hold a freshly-minted PAT. Call this *before* the token is
+/// minted so the predictable headless-Linux / no-keychain / no-passphrase case
+/// fails cleanly instead of stranding an orphaned, unrevocable live token.
+///
+/// A pass here is necessary but not sufficient: a later [`store`] can still fail
+/// for reasons a non-writing probe cannot see (a full disk, a keychain lock
+/// race). Callers must therefore still handle a [`store`] error by surfacing the
+/// minted token for manual capture and revocation — this only removes the
+/// *predictable* orphan, not every possible one.
+pub fn precheck(name: &str) -> Result<(), ActualError> {
+    validate_name(name)?;
+    match selected_mode()? {
+        Mode::Keyring => {
+            if keyring_available(name) {
+                Ok(())
+            } else {
+                Err(token_error(format!(
+                    "the OS keychain is unavailable and {STORE_BACKEND_ENV}=keyring forces it. \
+                     Use {STORE_BACKEND_ENV}=file with {PASSPHRASE_ENV} set, or provide a token \
+                     via {ACTUAL_TOKEN_ENV}, for non-interactive use."
+                )))
+            }
+        }
+        Mode::File => {
+            if passphrase().is_some() {
+                Ok(())
+            } else {
+                Err(token_error(format!(
+                    "{PASSPHRASE_ENV} must be set to use the encrypted-file token store."
+                )))
+            }
+        }
+        Mode::Auto => {
+            if keyring_available(name) || passphrase().is_some() {
+                Ok(())
+            } else {
+                Err(token_error(format!(
+                    "the OS keychain is unavailable and no encrypted-file fallback is configured. \
+                     Set {PASSPHRASE_ENV} to enable the encrypted-file fallback, or provide a \
+                     token via {ACTUAL_TOKEN_ENV}, for non-interactive use."
+                )))
+            }
+        }
+    }
+}
+
 /// Read the token stored under `name` from the keychain / file (not the
 /// environment). Returns `None` when no credential is stored.
 pub fn retrieve(name: &str) -> Result<Option<String>, ActualError> {
@@ -258,6 +305,18 @@ pub fn resolve(name: &str) -> Result<Option<String>, ActualError> {
 fn keyring_entry(name: &str) -> Result<keyring::Entry, ActualError> {
     keyring::Entry::new(KEYRING_SERVICE, name)
         .map_err(|e| token_error(format!("keychain entry init failed: {e}")))
+}
+
+/// Best-effort, non-mutating probe: can the OS keychain be reached for this
+/// service right now? A missing entry (`NoEntry`) counts as *available* — the
+/// store is reachable, just empty. Any other error (no keychain backend at all,
+/// e.g. headless Linux) counts as unavailable. Writes nothing, so it is safe to
+/// call before minting.
+fn keyring_available(name: &str) -> bool {
+    let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, name) else {
+        return false;
+    };
+    matches!(entry.get_password(), Ok(_) | Err(keyring::Error::NoEntry))
 }
 
 fn keyring_set(name: &str, token: &str) -> Result<(), ActualError> {
@@ -486,6 +545,34 @@ mod tests {
         let g_store = EnvGuard::set(STORE_BACKEND_ENV, "file");
         let g_pass = EnvGuard::set(PASSPHRASE_ENV, passphrase);
         (tmp, g_cfg_file, g_cfg, g_store, g_pass)
+    }
+
+    #[test]
+    fn test_precheck_file_mode_refuses_without_passphrase() {
+        // The pre-mint gate for the target env: a headless / `file` backend with
+        // no passphrase configured must be refused BEFORE any token is minted,
+        // so no orphaned, unrevocable token is ever created.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempdir().unwrap();
+        let _g_cfg_file = EnvGuard::remove("ACTUAL_CONFIG");
+        let _g_cfg = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "file");
+        let _g_pass = EnvGuard::remove(PASSPHRASE_ENV);
+
+        assert!(
+            precheck("agent").is_err(),
+            "file backend with no passphrase must fail the pre-mint precheck"
+        );
+    }
+
+    #[test]
+    fn test_precheck_file_mode_passes_with_passphrase() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, _g0, _g1, _g2, _g3) = file_backend_env("a-strong-passphrase");
+        assert!(
+            precheck("agent").is_ok(),
+            "file backend with a passphrase should pass the pre-mint precheck"
+        );
     }
 
     #[test]
