@@ -29,8 +29,13 @@ const DEFAULT_CLIENT_ID: &str = "actual-cli";
 const DEFAULT_SCOPES: &str = "openid profile offline_access adr:query adr:review";
 
 /// Default scopes for the browserless device-authorization grant. Colon-form
-/// resource scopes only — the device grant still returns a refresh token
-/// without an explicit `offline_access`. Overridable via `ACTUAL_OAUTH_SCOPES`.
+/// resource scopes only, dropping `offline_access`.
+///
+/// UNVERIFIED: whether the server returns a refresh token for the device grant
+/// without an explicit `offline_access` has not yet been confirmed against the
+/// live endpoint, and the refresh path depends on it. If the server does not
+/// return one, add `offline_access` here (or via `ACTUAL_OAUTH_SCOPES`).
+/// Overridable via `ACTUAL_OAUTH_SCOPES`.
 const DEFAULT_DEVICE_SCOPES: &str = "adr:query adr:review mcp:invoke";
 
 /// URN grant type for the OAuth 2.0 device-authorization grant (RFC 8628 §3.4).
