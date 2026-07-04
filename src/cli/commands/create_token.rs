@@ -16,6 +16,8 @@
 //!   environment variable — never in an agent's prompt/conversation context,
 //!   shell history, or logs.
 
+use std::io::{self, Write};
+
 use chrono::{Duration as ChronoDuration, Utc};
 
 use crate::api::DEFAULT_API_URL;
@@ -70,33 +72,73 @@ async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, Act
 }
 
 async fn run(args: &CreateTokenArgs) -> Result<(), ActualError> {
+    let stdout = io::stdout();
+    let stderr = io::stderr();
+    run_inner(&mut stdout.lock(), &mut stderr.lock(), args).await
+}
+
+/// The mint-and-store flow, with the secret going to `out` and all chrome to
+/// `err`. Split out from [`run`] so tests can inject buffers and assert the
+/// exact bytes each stream carries — the stdout=secret / stderr=chrome split is
+/// a load-bearing security contract.
+async fn run_inner(
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    args: &CreateTokenArgs,
+) -> Result<(), ActualError> {
     let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
+
+    // Refuse BEFORE any network work or minting when there is provably no place
+    // to keep the result — the predictable headless-Linux / no-passphrase case,
+    // which is exactly the target env. Without this, every failed attempt would
+    // mint a live token the user can neither capture nor revoke.
+    token_store::precheck(&args.name)?;
+
     let creds = ensure_fresh(creds).await?;
 
     let base_url = resolve_api_url(args.api_url.as_deref());
     let issued = pat::issue(&base_url, &creds.access_token, &args.name, &args.scopes).await?;
 
-    // Persist behind the keychain / encrypted-file fallback *before* printing,
-    // so a storage failure surfaces rather than leaving the user believing a
-    // token they only saw on screen is safely kept.
-    let backend = token_store::store(&args.name, &issued.token)?;
+    // The token is now live server-side. A store failure here is a *post-mint*
+    // failure the precheck could not foresee (a full disk, a keychain lock
+    // race). We MUST still surface the token + id so the user can capture and
+    // revoke it, then propagate the error — letting `?` swallow it would strand
+    // a live, unrevocable secret the user never saw.
+    let backend = match token_store::store(&args.name, &issued.token) {
+        Ok(backend) => backend,
+        Err(store_err) => {
+            // Best-effort surface; if even stdout is broken there is nothing
+            // more we can do, so ignore the write error and return the store
+            // failure that actually explains what went wrong.
+            let _ = print_unstored_token(out, err, args, &issued, &store_err);
+            return Err(store_err);
+        }
+    };
 
-    print_result(args, &issued, backend);
-    Ok(())
+    print_result(out, err, args, &issued, backend)
+        .map_err(|e| ActualError::InternalError(format!("failed to write token output: {e}")))
 }
 
-/// Print the mint result. The raw token goes to **stdout** on its own line (so
+/// Print the mint result. The raw token goes to `out` on its own line (so
 /// `TOKEN=$(actual auth create-token …)` captures just the secret); all chrome
-/// and guidance go to **stderr**. The token is printed once here and never
-/// logged.
-fn print_result(args: &CreateTokenArgs, issued: &pat::IssuedToken, backend: token_store::Backend) {
-    eprintln!(
+/// and guidance go to `err`. The token is printed once here and never logged.
+/// In production `out` is stdout and `err` is stderr; tests pass buffers to
+/// assert the stdout=secret / stderr=chrome split.
+fn print_result(
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    args: &CreateTokenArgs,
+    issued: &pat::IssuedToken,
+    backend: token_store::Backend,
+) -> io::Result<()> {
+    writeln!(
+        err,
         "{} Created scoped access token {}",
         theme::success(&theme::SUCCESS),
         theme::success(format!("\"{}\"", args.name))
-    );
+    )?;
     if let Some(id) = &issued.id {
-        eprintln!("  {:<12} {}", "Token id:", id);
+        writeln!(err, "  {:<12} {}", "Token id:", id)?;
     }
     // Prefer the scopes the server granted; fall back to what was requested.
     let scopes = if issued.scopes.is_empty() {
@@ -104,24 +146,104 @@ fn print_result(args: &CreateTokenArgs, issued: &pat::IssuedToken, backend: toke
     } else {
         issued.scopes.join(" ")
     };
-    eprintln!("  {:<12} {}", "Scopes:", scopes);
+    writeln!(err, "  {:<12} {}", "Scopes:", scopes)?;
     if let Some(exp) = &issued.expires_at {
-        eprintln!("  {:<12} {}", "Expires:", exp);
+        writeln!(err, "  {:<12} {}", "Expires:", exp)?;
     }
-    eprintln!("  {:<12} {}", "Stored in:", backend.label());
-    eprintln!();
-    eprintln!("Your token is shown once below. Copy it now:");
-    eprintln!();
+    writeln!(err, "  {:<12} {}", "Stored in:", backend.label())?;
+    writeln!(err)?;
+    writeln!(err, "Your token is shown once below. Copy it now:")?;
+    writeln!(err)?;
 
     // The single place the raw secret is emitted: stdout, alone, for capture.
-    println!("{}", issued.token);
+    writeln!(out, "{}", issued.token)?;
 
-    eprintln!();
-    eprintln!("{}", theme::hint("Keep this secret safe:"));
-    eprintln!("  • Use a DEDICATED token per agent so actions are attributable and");
-    eprintln!("    individually revocable; never reuse your interactive login session.");
-    eprintln!("  • NEVER paste it into a prompt, commit it, or echo it to logs/history.");
-    eprintln!("  • For CI / non-interactive use, pass it via the ACTUAL_TOKEN env var.");
+    writeln!(err)?;
+    writeln!(err, "{}", theme::hint("Keep this secret safe:"))?;
+    writeln!(
+        err,
+        "  • Use a DEDICATED token per agent so actions are attributable and"
+    )?;
+    writeln!(
+        err,
+        "    individually revocable; never reuse your interactive login session."
+    )?;
+    writeln!(
+        err,
+        "  • NEVER paste it into a prompt, commit it, or echo it to logs/history."
+    )?;
+    writeln!(
+        err,
+        "  • For CI / non-interactive use, pass it via the ACTUAL_TOKEN env var."
+    )?;
+    Ok(())
+}
+
+/// Surface a token that was minted but could **not** be stored, so the user can
+/// still capture and revoke it. Preserves the same capture contract as the
+/// success path — the raw token on `out` (stdout) alone, everything else on
+/// `err` (stderr) — so a store failure after a successful server-side mint can
+/// never strand a live, unrevocable secret the user never saw.
+fn print_unstored_token(
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    args: &CreateTokenArgs,
+    issued: &pat::IssuedToken,
+    store_err: &ActualError,
+) -> io::Result<()> {
+    writeln!(
+        err,
+        "{} Minted token {} but could not store it: {}",
+        theme::error(&theme::ERROR),
+        theme::error(format!("\"{}\"", args.name)),
+        store_err
+    )?;
+    match &issued.id {
+        Some(id) => {
+            writeln!(err, "  {:<12} {}", "Token id:", id)?;
+            writeln!(err)?;
+            writeln!(
+                err,
+                "This token is LIVE on the server. Copy it below to use it now, or revoke it by the id above."
+            )?;
+        }
+        None => {
+            writeln!(err)?;
+            writeln!(
+                err,
+                "This token is LIVE on the server but no id was returned, so it cannot be revoked by id — capture it below, or rotate the credential if you cannot."
+            )?;
+        }
+    }
+    writeln!(err)?;
+    writeln!(err, "Your token is shown once below. Copy it now:")?;
+    writeln!(err)?;
+
+    // Same capture contract as the success path: the raw secret on stdout, alone.
+    writeln!(out, "{}", issued.token)?;
+
+    writeln!(err)?;
+    writeln!(
+        err,
+        "{}",
+        theme::warning("Storage failed — the token was NOT saved locally.")
+    )?;
+    writeln!(
+        err,
+        "  • Capture the token above now; it will not be shown again."
+    )?;
+    writeln!(
+        err,
+        "  • If you cannot capture it, revoke it by the id above so it is not left orphaned."
+    )?;
+    writeln!(
+        err,
+        "  • Fix the store ({}=file with {} set, or pass {} directly) and re-run.",
+        token_store::STORE_BACKEND_ENV,
+        token_store::PASSPHRASE_ENV,
+        token_store::ACTUAL_TOKEN_ENV
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -292,6 +414,142 @@ mod tests {
             token_store::retrieve("exp-agent").unwrap().as_deref(),
             Some("actl_pat_exp")
         );
+    }
+
+    #[test]
+    fn test_print_result_stdout_carries_only_the_token() {
+        // The stdout=secret / stderr=chrome split is a load-bearing security
+        // contract: `TOKEN=$(actual auth create-token …)` must capture ONLY the
+        // token. Assert stdout is exactly the token + newline, and the chrome
+        // went to stderr instead (never the secret).
+        let issued = sample_issued("actl_pat_only");
+        let args = sample_args("agent-x");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        print_result(
+            &mut out,
+            &mut err,
+            &args,
+            &issued,
+            token_store::Backend::EncryptedFile,
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "actl_pat_only\n");
+        let err_s = String::from_utf8(err).unwrap();
+        assert!(
+            err_s.contains("Created scoped access token"),
+            "chrome must go to stderr: {err_s}"
+        );
+        assert!(
+            !err_s.contains("actl_pat_only"),
+            "the secret must never leak to stderr: {err_s}"
+        );
+    }
+
+    #[test]
+    fn test_print_unstored_token_surfaces_token_and_id_on_failure() {
+        // On a post-mint store failure the token must STILL reach stdout (alone)
+        // and the id + a revoke hint must reach stderr, so the user can capture
+        // and revoke rather than be left with an orphaned, unrevocable token.
+        let issued = sample_issued("actl_pat_orphan");
+        let args = sample_args("agent-x");
+        let store_err = ActualError::ConfigError("keychain unavailable".to_string());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        print_unstored_token(&mut out, &mut err, &args, &issued, &store_err).unwrap();
+
+        // Capture contract preserved even on failure: stdout carries ONLY the token.
+        assert_eq!(String::from_utf8(out).unwrap(), "actl_pat_orphan\n");
+        let err_s = String::from_utf8(err).unwrap();
+        assert!(
+            err_s.contains("could not store it"),
+            "stderr should explain the failure: {err_s}"
+        );
+        assert!(
+            err_s.contains("tok_42"),
+            "stderr should carry the token id for revocation: {err_s}"
+        );
+        assert!(
+            err_s.contains("LIVE on the server"),
+            "stderr should warn the token is live: {err_s}"
+        );
+        assert!(
+            !err_s.contains("actl_pat_orphan"),
+            "the secret must never leak to stderr: {err_s}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_store_failure_after_mint_surfaces_token_and_errors() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempfile::tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        // File backend + passphrase set → the precheck PASSES, so we exercise
+        // the *post-mint* failure path rather than the pre-mint refusal.
+        let _g3 = EnvGuard::set("ACTUAL_TOKEN_STORE", "file");
+        let _g4 = EnvGuard::set("ACTUAL_TOKEN_PASSPHRASE", "test-passphrase");
+        let _g5 = EnvGuard::remove("ACTUAL_TOKEN");
+
+        // Occupy the token subdirectory path with a regular FILE so the store's
+        // directory creation fails — a store failure that only surfaces AFTER
+        // the server-side mint has already succeeded.
+        std::fs::write(tmp.path().join("tokens"), b"not a directory").unwrap();
+
+        // Seed a logged-in session (writes credentials.json in tmp, unaffected
+        // by the tokens-file above).
+        store::save(&sample_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", pat::ISSUANCE_PATH)
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"token":"actl_pat_stranded","id":"tok_77","scopes":["adr:query"]}"#)
+            .create_async()
+            .await;
+
+        let args = CreateTokenArgs {
+            name: "agent-fail".to_string(),
+            scopes: vec!["adr:query".to_string()],
+            api_url: Some(server.url()),
+        };
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let result = run_inner(&mut out, &mut err, &args).await;
+        mock.assert_async().await;
+
+        // The store failed, so the command surfaces the error...
+        assert!(result.is_err(), "a post-mint store failure must propagate");
+        // ...but the minted token was STILL emitted to stdout, alone, so the
+        // user can capture and revoke it instead of orphaning a live token.
+        assert_eq!(String::from_utf8(out).unwrap(), "actl_pat_stranded\n");
+        let err_s = String::from_utf8(err).unwrap();
+        assert!(
+            err_s.contains("tok_77"),
+            "the id needed to revoke the stranded token must be surfaced: {err_s}"
+        );
+    }
+
+    fn sample_issued(token: &str) -> pat::IssuedToken {
+        pat::IssuedToken {
+            token: token.to_string(),
+            id: Some("tok_42".to_string()),
+            name: Some("agent-x".to_string()),
+            scopes: vec!["adr:query".to_string()],
+            created_at: None,
+            expires_at: None,
+        }
+    }
+
+    fn sample_args(name: &str) -> CreateTokenArgs {
+        CreateTokenArgs {
+            name: name.to_string(),
+            scopes: vec!["adr:query".to_string()],
+            api_url: None,
+        }
     }
 
     fn sample_creds() -> StoredCredentials {
