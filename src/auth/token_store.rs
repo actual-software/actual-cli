@@ -576,6 +576,100 @@ mod tests {
     }
 
     #[test]
+    fn test_precheck_keyring_mode_passes_when_keychain_available() {
+        // `keyring` mode with a reachable keychain passes the non-writing probe.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "keyring");
+        assert!(
+            precheck("kr-agent").is_ok(),
+            "keyring mode with an available keychain should pass the precheck"
+        );
+    }
+
+    #[test]
+    fn test_precheck_keyring_mode_refuses_when_keychain_unavailable() {
+        // `keyring` mode with no reachable keychain (the headless case) must be
+        // refused BEFORE minting: the forced backend cannot hold the token.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        fail_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "keyring");
+        let err = precheck("kr-agent").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("keychain is unavailable")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_precheck_keyring_mode_refuses_when_entry_init_fails() {
+        // The entry-init-failure leg of `keyring_available`: when the keychain
+        // backend cannot even construct an entry, the probe reports unavailable
+        // and the forced-keyring precheck refuses.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        fail_test_keyring_build();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "keyring");
+        let err = precheck("kr-agent").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("keychain is unavailable")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_precheck_auto_mode_passes_when_keychain_available() {
+        // `auto` with a reachable keychain passes on the keychain leg alone,
+        // with no passphrase configured.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "auto");
+        let _g_pass = EnvGuard::remove(PASSPHRASE_ENV);
+        assert!(
+            precheck("auto-agent").is_ok(),
+            "auto mode should pass on the keychain leg when it is available"
+        );
+    }
+
+    #[test]
+    fn test_precheck_auto_mode_passes_on_passphrase_when_keychain_unavailable() {
+        // `auto` with no keychain but a configured passphrase passes on the
+        // encrypted-file fallback leg.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        fail_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "auto");
+        let _g_pass = EnvGuard::set(PASSPHRASE_ENV, "pw");
+        assert!(
+            precheck("auto-agent").is_ok(),
+            "auto mode should pass on the encrypted-file fallback when a passphrase is set"
+        );
+    }
+
+    #[test]
+    fn test_precheck_auto_mode_refuses_without_keychain_or_passphrase() {
+        // `auto` with neither a keychain nor a passphrase is the predictable
+        // headless orphan case — refused before any token is minted.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        install_test_keyring();
+        fail_test_keyring();
+        let _g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
+        let _g_store = EnvGuard::set(STORE_BACKEND_ENV, "auto");
+        let _g_pass = EnvGuard::remove(PASSPHRASE_ENV);
+        let err = precheck("auto-agent").unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("keychain is unavailable")),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
     fn test_file_roundtrip_store_retrieve_delete() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let g_env = EnvGuard::remove(ACTUAL_TOKEN_ENV);
@@ -788,16 +882,25 @@ mod tests {
 
     static TEST_KEYRING: Mutex<Option<HashMap<(String, String), Vec<u8>>>> = Mutex::new(None);
     static TEST_KEYRING_FAIL: Mutex<bool> = Mutex::new(false);
+    static TEST_KEYRING_FAIL_BUILD: Mutex<bool> = Mutex::new(false);
 
     fn install_test_keyring() {
         *TEST_KEYRING.lock().unwrap() = Some(HashMap::new());
         *TEST_KEYRING_FAIL.lock().unwrap() = false;
+        *TEST_KEYRING_FAIL_BUILD.lock().unwrap() = false;
         keyring::set_default_credential_builder(Box::new(TestKeyringBuilder));
     }
 
     /// Make every subsequent keychain op fail, simulating an unavailable keychain.
     fn fail_test_keyring() {
         *TEST_KEYRING_FAIL.lock().unwrap() = true;
+    }
+
+    /// Make `keyring::Entry::new` itself fail, simulating a platform with no
+    /// credential-store backend at all (so `keyring_available`'s entry-init
+    /// failure leg is reachable without OS-level trickery).
+    fn fail_test_keyring_build() {
+        *TEST_KEYRING_FAIL_BUILD.lock().unwrap() = true;
     }
 
     struct TestKeyringBuilder;
@@ -808,6 +911,12 @@ mod tests {
             service: &str,
             user: &str,
         ) -> keyring::Result<Box<Credential>> {
+            if *TEST_KEYRING_FAIL_BUILD.lock().unwrap() {
+                return Err(keyring::Error::Invalid(
+                    "test".into(),
+                    "no credential backend".into(),
+                ));
+            }
             Ok(Box::new(TestCredential {
                 service: service.to_string(),
                 user: user.to_string(),
