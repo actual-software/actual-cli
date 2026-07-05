@@ -533,6 +533,122 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_print_unstored_token_without_id_warns_no_revoke_by_id() {
+        // When the mint response carries no id, the store-failure surface must
+        // still emit the token (alone, on stdout) and warn that it cannot be
+        // revoked by id — the no-id arm of print_unstored_token.
+        let mut issued = sample_issued("actl_pat_noid");
+        issued.id = None;
+        let args = sample_args("agent-x");
+        let store_err = ActualError::ConfigError("keychain unavailable".to_string());
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        print_unstored_token(&mut out, &mut err, &args, &issued, &store_err).unwrap();
+
+        assert_eq!(String::from_utf8(out).unwrap(), "actl_pat_noid\n");
+        let err_s = String::from_utf8(err).unwrap();
+        assert!(
+            err_s.contains("no id was returned"),
+            "stderr should explain the token cannot be revoked by id: {err_s}"
+        );
+        assert!(
+            !err_s.contains("actl_pat_noid"),
+            "the secret must never leak to stderr: {err_s}"
+        );
+    }
+
+    /// A `Write` that succeeds `remaining` times and then fails. Sweeping
+    /// `remaining` drives the error-propagation (`?`) path of each `writeln!` at
+    /// every position, so a broken output stream is guaranteed to surface as an
+    /// error rather than a false success.
+    struct FailAfter {
+        remaining: usize,
+        tripped: bool,
+    }
+    impl std::io::Write for FailAfter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.remaining == 0 {
+                self.tripped = true;
+                return Err(std::io::Error::other("simulated write failure"));
+            }
+            self.remaining -= 1;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_print_result_propagates_stderr_write_failure() {
+        // print_result returns io::Result so a failed terminal write surfaces as
+        // an error instead of a false success. Sweep the failure point across
+        // the whole chrome sequence so every stderr writeln's `?` is exercised.
+        for n in 0..50 {
+            let issued = sample_issued("actl_pat_x");
+            let args = sample_args("agent-x");
+            let mut out: Vec<u8> = Vec::new();
+            let mut err = FailAfter {
+                remaining: n,
+                tripped: false,
+            };
+            let r = print_result(
+                &mut out,
+                &mut err,
+                &args,
+                &issued,
+                token_store::Backend::EncryptedFile,
+            );
+            if err.tripped {
+                assert!(
+                    r.is_err(),
+                    "a stderr write failure (after {n}) must propagate"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_print_unstored_token_propagates_stderr_write_failure() {
+        // Same error-propagation contract for the store-failure surface, swept
+        // across both the has-id and no-id chrome so every writeln `?` (in both
+        // branches) is exercised.
+        for with_id in [true, false] {
+            for n in 0..50 {
+                let mut issued = sample_issued("actl_pat_x");
+                if !with_id {
+                    issued.id = None;
+                }
+                let args = sample_args("agent-x");
+                let store_err = ActualError::ConfigError("store down".to_string());
+                let mut out: Vec<u8> = Vec::new();
+                let mut err = FailAfter {
+                    remaining: n,
+                    tripped: false,
+                };
+                let r = print_unstored_token(&mut out, &mut err, &args, &issued, &store_err);
+                if err.tripped {
+                    assert!(
+                        r.is_err(),
+                        "a stderr write failure (id={with_id}, after {n}) must propagate"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_fail_after_flush_is_infallible() {
+        // FailAfter only fails writes, never flushes; exercise flush so the test
+        // writer is itself fully covered under the per-file 100% gate.
+        let mut w = FailAfter {
+            remaining: 3,
+            tripped: false,
+        };
+        assert!(std::io::Write::flush(&mut w).is_ok());
+    }
+
     fn sample_issued(token: &str) -> pat::IssuedToken {
         pat::IssuedToken {
             token: token.to_string(),
