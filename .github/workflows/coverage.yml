@@ -72,6 +72,7 @@ jobs:
             --test integration_sync_modes \
             --test integration_tailor \
             --test lib_test \
+            --test mint_token_cli \
             --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' \
             --lcov --output-path lcov.info 2>&1 | tee coverage-output.txt
           COV_EXIT=${PIPESTATUS[0]}

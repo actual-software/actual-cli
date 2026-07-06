@@ -802,4 +802,129 @@ mod tests {
             other => panic!("expected ApiError, got {other:?}"),
         }
     }
+
+    #[test]
+    fn as_str_maps_both_algorithms() {
+        assert_eq!(AssertionAlgorithm::Rs256.as_str(), "RS256");
+        assert_eq!(AssertionAlgorithm::Es256.as_str(), "ES256");
+    }
+
+    #[test]
+    fn infer_from_pem_rejects_non_utf8() {
+        // Invalid UTF-8 bytes cannot be a PEM; the error is clean, not a panic.
+        let err = AssertionAlgorithm::infer_from_pem(&[0xff, 0xfe, 0xfd]).unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(ref m) if m.contains("UTF-8")));
+    }
+
+    #[test]
+    fn infer_from_pem_recognizes_pkcs1_rsa_header() {
+        // infer_from_pem only inspects the header substring, so a bare marker is
+        // enough to exercise it — and it keeps a private-key-shaped literal (which
+        // secret scanners flag) out of the source. A PKCS#1 header names RSA.
+        let pem = b"test fixture header BEGIN RSA PRIVATE KEY";
+        assert_eq!(
+            AssertionAlgorithm::infer_from_pem(pem).unwrap(),
+            AssertionAlgorithm::Rs256
+        );
+    }
+
+    #[test]
+    fn infer_from_pem_recognizes_sec1_ec_header() {
+        // A SEC1 header names EC directly (bare marker; see the RSA test).
+        let pem = b"test fixture header BEGIN EC PRIVATE KEY";
+        assert_eq!(
+            AssertionAlgorithm::infer_from_pem(pem).unwrap(),
+            AssertionAlgorithm::Es256
+        );
+    }
+
+    #[test]
+    fn infer_from_pem_pkcs8_with_unparseable_body_errors() {
+        // A PKCS#8 header ("BEGIN PRIVATE KEY", no algorithm named) whose body
+        // parses as neither RSA nor EC falls through to a clean error asking for
+        // an explicit --alg (bare marker; see the RSA test).
+        let pem = b"test fixture header BEGIN PRIVATE KEY with an unparseable body";
+        let err = AssertionAlgorithm::infer_from_pem(pem).unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(ref m) if m.contains("--alg")));
+    }
+
+    #[test]
+    fn is_uuid_rejects_wrong_char_at_dash_position() {
+        // 36 chars, correct everywhere except position 8 holds '0' where the
+        // 8-4-4-4-12 layout requires a dash.
+        assert!(!is_uuid("3f8a1c2e04b5d-4e6f-8a9b-0c1d2e3f4a5b"));
+    }
+
+    #[test]
+    fn is_uuid_rejects_non_hex_digit() {
+        // 36 chars with valid dashes/version/variant, but 'z' at position 0 is
+        // not a hex digit.
+        assert!(!is_uuid("zf8a1c2e-4b5d-4e6f-8a9b-0c1d2e3f4a5b"));
+    }
+
+    #[test]
+    fn empty_audience_is_rejected_before_signing() {
+        let (priv_pem, _pub) = ec_keypair();
+        let mut p = params(AssertionAlgorithm::Es256);
+        p.audience = "   ";
+        let err = build_and_sign_assertion(&p, &priv_pem, 1_700_000_000).unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(ref m) if m.contains("audience")));
+    }
+
+    #[tokio::test]
+    async fn mint_token_surfaces_error_body_without_oauth_error_field() {
+        // A failure body that is not OAuth error JSON (here JSON with no `error`
+        // field) falls through to the truncated-body fallback — still a clean
+        // ApiError carrying the status, no panic and no secret material.
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(503)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"detail":"upstream unavailable"}"#)
+            .create_async()
+            .await;
+
+        let http = crate::auth::oauth::build_http_client(&server.url()).unwrap();
+        let err = mint_token(&http, &server.url(), "some.assertion", None)
+            .await
+            .unwrap_err();
+        match err {
+            ActualError::ApiError(msg) => {
+                assert!(msg.contains("503"), "surfaces the status: {msg}");
+                assert!(
+                    msg.contains("upstream unavailable"),
+                    "surfaces the body: {msg}"
+                );
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mint_token_surfaces_non_json_error_body() {
+        // A non-JSON failure body makes the OAuth-error parse fail, so the outer
+        // guard is skipped and the truncated-text fallback runs — still a clean
+        // ApiError carrying the status.
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(502)
+            .with_header("content-type", "text/plain")
+            .with_body("upstream is down")
+            .create_async()
+            .await;
+
+        let http = crate::auth::oauth::build_http_client(&server.url()).unwrap();
+        let err = mint_token(&http, &server.url(), "some.assertion", None)
+            .await
+            .unwrap_err();
+        match err {
+            ActualError::ApiError(msg) => {
+                assert!(msg.contains("502"), "surfaces the status: {msg}");
+                assert!(msg.contains("upstream is down"), "surfaces the body: {msg}");
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
 }
