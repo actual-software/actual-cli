@@ -42,11 +42,7 @@ pub fn exec(args: &MintTokenArgs) -> Result<(), ActualError> {
     let audience = resolve_audience(args.aud.as_deref(), &base_url);
     let scope = resolve_scope(&args.scopes);
 
-    let lifetime = if args.assertion_ttl_seconds == 0 {
-        DEFAULT_ASSERTION_LIFETIME_SECONDS
-    } else {
-        args.assertion_ttl_seconds
-    };
+    let lifetime = resolve_lifetime(args.assertion_ttl_seconds);
 
     let assertion = jwt_bearer::build_and_sign_assertion(
         &AssertionParams {
@@ -162,14 +158,33 @@ fn resolve_scope(scopes: &[String]) -> Option<String> {
     }
 }
 
-/// Current time in seconds since the Unix epoch.
-fn now_unix() -> Result<u64, ActualError> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+/// Resolve the assertion lifetime: `0` (the "unset" sentinel from the default)
+/// falls back to [`DEFAULT_ASSERTION_LIFETIME_SECONDS`]; any other value is used
+/// as given (`build_and_sign_assertion` clamps it to the server cap).
+fn resolve_lifetime(ttl_seconds: u64) -> u64 {
+    if ttl_seconds == 0 {
+        DEFAULT_ASSERTION_LIFETIME_SECONDS
+    } else {
+        ttl_seconds
+    }
+}
+
+/// Convert a `SystemTime` to whole seconds since the Unix epoch, erroring
+/// cleanly if the instant precedes the epoch. Split out from [`now_unix`] so the
+/// (otherwise unreachable) pre-epoch branch is unit-testable with an injected
+/// time, mirroring how [`jwt_bearer::build_and_sign_assertion`] takes `now` as a
+/// parameter for testability.
+fn unix_seconds(time: std::time::SystemTime) -> Result<u64, ActualError> {
+    time.duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .map_err(|e| {
             ActualError::InternalError(format!("system clock is before the Unix epoch: {e}"))
         })
+}
+
+/// Current time in seconds since the Unix epoch.
+fn now_unix() -> Result<u64, ActualError> {
+    unix_seconds(std::time::SystemTime::now())
 }
 
 /// Build a single-threaded tokio runtime so the sync CLI dispatch path can drive
@@ -199,6 +214,14 @@ mod tests {
         );
         // Whitespace-only collapses to None.
         assert_eq!(resolve_scope(&["   ".to_string()]), None);
+    }
+
+    #[test]
+    fn resolve_lifetime_uses_default_only_for_zero() {
+        // 0 is the "unset" sentinel → default; every other value passes through.
+        assert_eq!(resolve_lifetime(0), DEFAULT_ASSERTION_LIFETIME_SECONDS);
+        assert_eq!(resolve_lifetime(1), 1);
+        assert_eq!(resolve_lifetime(300), 300);
     }
 
     #[test]
@@ -267,5 +290,23 @@ mod tests {
     fn now_unix_is_after_2020() {
         // 2020-01-01T00:00:00Z
         assert!(now_unix().unwrap() > 1_577_836_800);
+    }
+
+    #[test]
+    fn unix_seconds_converts_epoch_and_later() {
+        assert_eq!(unix_seconds(std::time::UNIX_EPOCH).unwrap(), 0);
+        assert!(unix_seconds(std::time::SystemTime::now()).unwrap() > 1_577_836_800);
+    }
+
+    #[test]
+    fn unix_seconds_errors_before_epoch() {
+        // A time one second before the epoch surfaces a clean InternalError
+        // rather than panicking — the pre-epoch branch is otherwise unreachable
+        // with the real clock.
+        let before = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
+        let err = unix_seconds(before).unwrap_err();
+        assert!(
+            matches!(err, ActualError::InternalError(ref m) if m.contains("before the Unix epoch"))
+        );
     }
 }
