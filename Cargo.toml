@@ -80,6 +80,9 @@ keyring = { version = "3", default-features = false, features = [
 chacha20poly1305 = "0.10"
 argon2 = "0.5"
 
+# JWS signing for the headless RFC 7523 jwt-bearer client (RS256 / ES256)
+jsonwebtoken = "9"
+
 # Async utilities
 futures = "0.3"
 futures-util = "0.3"
@@ -133,3 +136,8 @@ mockito = "1"
 tokio = { version = "1", features = ["test-util"] }
 tracing-test = "0.2"
 tui-test = { path = "crates/tui-test" }
+# Ephemeral keypair generation for the jwt-bearer client tests — generated at
+# runtime so no private-key material is committed to this public repo.
+rsa = { version = "0.9", features = ["pem"] }
+p256 = { version = "0.13", features = ["pem", "pkcs8"] }
+rand = "0.8"
