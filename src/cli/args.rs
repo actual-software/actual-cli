@@ -333,6 +333,8 @@ pub enum Command {
     Whoami,
     /// Ask the Advisor an org-scoped architecture question
     Advisor(AdvisorArgs),
+    /// Mint an access token headlessly via the RFC 7523 jwt-bearer grant
+    MintToken(MintTokenArgs),
     /// View or edit configuration
     Config(ConfigArgs),
     /// List all available AI backend runners
@@ -365,6 +367,61 @@ pub struct AdvisorArgs {
     /// available yet — it requires the connected-repos API.
     #[arg(long, value_name = "REPO_ID")]
     pub repo: Option<String>,
+}
+
+/// Arguments for the `mint-token` command — the fully-headless RFC 7523
+/// jwt-bearer client. Every input comes from a flag, an environment variable,
+/// or a file: no browser, no prompt. The private key is read from a file
+/// (`--key` / `ACTUAL_SERVICE_ACCOUNT_KEY_FILE`) or, preferably, from the
+/// `ACTUAL_SERVICE_ACCOUNT_KEY` environment variable so it never lands on argv.
+#[derive(Parser, Debug)]
+pub struct MintTokenArgs {
+    /// Service-account id (a UUID). Becomes the assertion `iss`/`sub`.
+    #[arg(long, value_name = "UUID", env = "ACTUAL_SERVICE_ACCOUNT_ID")]
+    pub service_account_id: String,
+
+    /// Registered key id, placed in the assertion header so the server picks
+    /// the matching public key.
+    #[arg(long, value_name = "KID", env = "ACTUAL_SERVICE_ACCOUNT_KID")]
+    pub kid: String,
+
+    /// Path to the service-account PRIVATE key in PEM (RSA for RS256, EC P-256
+    /// for ES256). Alternatively set `ACTUAL_SERVICE_ACCOUNT_KEY` to the PEM
+    /// contents directly — preferred with a secret manager, and it keeps the
+    /// key off argv.
+    #[arg(long, value_name = "PATH", env = "ACTUAL_SERVICE_ACCOUNT_KEY_FILE")]
+    pub key: Option<std::path::PathBuf>,
+
+    /// Signing algorithm (`rs256` or `es256`). Inferred from the key when
+    /// omitted. `HS*`/`none` are refused.
+    #[arg(long, value_name = "ALG")]
+    pub alg: Option<String>,
+
+    /// OAuth issuer base URL; the token endpoint is `<issuer>/api/oauth/token`.
+    /// Defaults to the production server, falling back through
+    /// `ACTUAL_AUTH_URL`. Override for staging or a local server.
+    #[arg(long, value_name = "URL")]
+    pub issuer: Option<String>,
+
+    /// Assertion audience. Defaults to the resolved issuer origin, which the
+    /// server accepts alongside `<issuer>/api/oauth/token`.
+    #[arg(long, value_name = "URL")]
+    pub aud: Option<String>,
+
+    /// Requested scope (repeatable), a subset of the principal's grant (e.g.
+    /// `adr:query`, `adr:review`). When omitted the server mints the
+    /// principal's full whitelist.
+    #[arg(long = "scope", value_name = "SCOPE")]
+    pub scopes: Vec<String>,
+
+    /// Assertion lifetime in seconds (clamped to 1..=300). Default 60.
+    #[arg(long, value_name = "SECONDS", default_value_t = 60)]
+    pub assertion_ttl_seconds: u64,
+
+    /// Print the full token response as one line of JSON instead of just the
+    /// raw access token.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for the `adr-bot` command

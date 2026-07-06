@@ -13,6 +13,7 @@ pub mod cache;
 pub mod config;
 pub mod login;
 pub mod logout;
+pub mod mint_token;
 pub mod models;
 pub mod runners;
 pub mod status;

@@ -34,6 +34,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Logout => cli::commands::logout::exec(),
         Command::Whoami => cli::commands::whoami::exec(),
         Command::Advisor(args) => cli::commands::advisor::exec(args),
+        Command::MintToken(args) => cli::commands::mint_token::exec(args),
         Command::Config(args) => cli::commands::config::exec(args),
         Command::Runners => cli::commands::runners::exec(),
         Command::Models(args) => cli::commands::models::exec(args.no_fetch),
