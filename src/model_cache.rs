@@ -153,8 +153,7 @@ pub(crate) async fn fetch_openai_models_async(
 ) -> Result<Vec<String>, crate::error::ActualError> {
     use crate::error::ActualError;
 
-    let is_local =
-        base_url.starts_with("http://localhost") || base_url.starts_with("http://127.0.0.1");
+    let is_local = crate::net::is_loopback_http_url(base_url);
 
     let client = reqwest::Client::builder()
         .timeout(timeout)
@@ -245,8 +244,7 @@ pub(crate) async fn fetch_anthropic_models_async(
 ) -> Result<Vec<String>, crate::error::ActualError> {
     use crate::error::ActualError;
 
-    let is_local =
-        base_url.starts_with("http://localhost") || base_url.starts_with("http://127.0.0.1");
+    let is_local = crate::net::is_loopback_http_url(base_url);
 
     let client = reqwest::Client::builder()
         .timeout(timeout)

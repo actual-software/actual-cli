@@ -11,12 +11,10 @@
 //! server (the mock at `http://localhost:4000` during dev). It must be
 //! supplied explicitly — see [`resolve_auth_url`].
 
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::Deserialize;
-use url::Host;
 
 use crate::auth::loopback::LoopbackServer;
 use crate::auth::pkce::{self, PkcePair};
@@ -140,50 +138,11 @@ pub fn build_authorize_url(
     Ok(url.to_string())
 }
 
-/// Return `true` only when `base_url` is a genuine clear-text `http` loopback
-/// endpoint for which it is safe to relax the HTTPS-only transport guard.
-///
-/// The earlier implementation matched with `str::starts_with` on the raw URL,
-/// which a non-loopback attacker host could satisfy: `http://localhost.evil.com`,
-/// `http://127.0.0.1.evil.com`, and the userinfo trick `http://127.0.0.1@evil.com`
-/// (the connection's real host is `evil.com`) all matched, which disabled
-/// `https_only` and let credentials leave over clear-text HTTP. Parse the URL
-/// and inspect the *actual* host instead, so only true loopback endpoints
-/// qualify:
-///
-/// - the scheme must be `http` — an `https` URL never needs the guard relaxed;
-/// - the URL must carry no userinfo, rejecting the `user@host` smuggle;
-/// - the host must be exactly `localhost`, `127.0.0.1`, or `::1`.
-fn is_loopback_http_url(base_url: &str) -> bool {
-    let url = match url::Url::parse(base_url) {
-        Ok(u) => u,
-        Err(_) => return false,
-    };
-    // Only clear-text http gets the guard relaxed; https is already safe.
-    if url.scheme() != "http" {
-        return false;
-    }
-    // Any userinfo means the host after `@` is the real destination — reject so
-    // `http://127.0.0.1@evil.com` cannot masquerade as loopback.
-    if !url.username().is_empty() || url.password().is_some() {
-        return false;
-    }
-    // Compare the parsed host, not the raw string. `Ipv4Addr::LOCALHOST` /
-    // `Ipv6Addr::LOCALHOST` are exactly `127.0.0.1` / `::1` (not the wider
-    // loopback ranges), matching the intended dev endpoints precisely.
-    match url.host() {
-        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-        Some(Host::Ipv4(addr)) => addr == Ipv4Addr::LOCALHOST,
-        Some(Host::Ipv6(addr)) => addr == Ipv6Addr::LOCALHOST,
-        None => false,
-    }
-}
-
 /// Build an HTTP client for the auth server. Enforces HTTPS for non-loopback
 /// URLs so tokens are never sent in clear text (loopback `http://` is allowed
-/// for the local mock — see [`is_loopback_http_url`]).
+/// for the local mock — see [`crate::net::is_loopback_http_url`]).
 fn build_http_client(base_url: &str) -> Result<reqwest::Client, ActualError> {
-    let is_loopback = is_loopback_http_url(base_url);
+    let is_loopback = crate::net::is_loopback_http_url(base_url);
     if !base_url.starts_with("https://") && !is_loopback {
         return Err(ActualError::ConfigError(
             "Auth server URL must use HTTPS (got a non-HTTPS, non-loopback URL). \
@@ -478,41 +437,9 @@ mod tests {
         }
     }
 
-    // --- Transport guard: loopback detection must be an exact host match, not
-    // a raw-string prefix, so it cannot be bypassed to send credentials in
-    // clear text to an attacker-controlled host. ---
-
-    #[test]
-    fn test_is_loopback_accepts_genuine_loopback() {
-        assert!(is_loopback_http_url("http://localhost:4000"));
-        assert!(is_loopback_http_url("http://localhost")); // no port
-        assert!(is_loopback_http_url("http://127.0.0.1:4000"));
-        assert!(is_loopback_http_url("http://[::1]:4000"));
-        assert!(is_loopback_http_url("http://LOCALHOST:4000")); // host is case-insensitive
-    }
-
-    #[test]
-    fn test_is_loopback_rejects_lookalike_hosts() {
-        // A host that merely *starts with* the loopback literal but resolves to
-        // the attacker's domain must NOT be treated as loopback.
-        assert!(!is_loopback_http_url("http://localhost.evil.com"));
-        assert!(!is_loopback_http_url("http://127.0.0.1.evil.com"));
-        // The userinfo trick: the connection's real host is evil.com.
-        assert!(!is_loopback_http_url("http://127.0.0.1@evil.com"));
-        assert!(!is_loopback_http_url("http://localhost@evil.com"));
-        // Plain non-loopback host.
-        assert!(!is_loopback_http_url("http://evil.com"));
-    }
-
-    #[test]
-    fn test_is_loopback_rejects_https_userinfo_and_garbage() {
-        // https never needs the guard relaxed (stays https_only).
-        assert!(!is_loopback_http_url("https://localhost:4000"));
-        // Even a genuine loopback host is rejected when it carries userinfo.
-        assert!(!is_loopback_http_url("http://user:pass@127.0.0.1:4000"));
-        // Non-URL input is not loopback.
-        assert!(!is_loopback_http_url("not a url"));
-    }
+    // --- Transport guard: the auth client must refuse to relax HTTPS for any
+    // non-loopback host. The exact-host predicate itself is unit-tested in
+    // `crate::net`; these cover this client's use of it. ---
 
     #[test]
     fn test_build_http_client_rejects_bypass_urls() {
@@ -1023,10 +950,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_login_with_authorize_url_error() {
-        // base_url passes the loopback HTTP-client guard (localhost) but fails
-        // URL parsing (invalid port) → exercises the build_authorize_url `?`
+        // base_url passes the HTTP-client guard (an `https://` URL is accepted
+        // by scheme prefix, without a full parse) but fails `build_authorize_url`'s
+        // URL parse (invalid port 99999) → exercises the build_authorize_url `?`
         // error path inside login_with.
-        let cfg = test_cfg("http://127.0.0.1:99999");
+        let cfg = test_cfg("https://127.0.0.1:99999");
         let server = LoopbackServer::bind().await.unwrap();
         let opener = |_: &str| {};
         let err = login_with(

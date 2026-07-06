@@ -81,9 +81,7 @@ impl AnthropicApiRunner {
         base_url: String,
         max_tokens: u32,
     ) -> Result<Self, ActualError> {
-        let is_localhost = base_url.starts_with("http://localhost")
-            || base_url.starts_with("http://127.0.0.1")
-            || base_url.starts_with("http://[::1]");
+        let is_localhost = crate::net::is_loopback_http_url(&base_url);
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .https_only(!is_localhost)

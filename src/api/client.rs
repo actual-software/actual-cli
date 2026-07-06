@@ -45,10 +45,10 @@ impl ActualApiClient {
         timeout: Duration,
         connect_timeout: Duration,
     ) -> Result<Self, ActualError> {
-        // Enforce HTTPS for all non-loopback URLs to protect credentials in transit.
-        let is_localhost = base_url.starts_with("http://localhost")
-            || base_url.starts_with("http://127.0.0.1")
-            || base_url.starts_with("http://[::1]");
+        // Enforce HTTPS for all non-loopback URLs to protect credentials in
+        // transit — see `crate::net::is_loopback_http_url` for why the loopback
+        // check must be an exact host match, not a raw string prefix.
+        let is_localhost = crate::net::is_loopback_http_url(base_url);
         if !base_url.starts_with("https://") && !is_localhost {
             return Err(ActualError::ConfigError(
                 "API URL must use HTTPS (got a non-HTTPS URL). \
