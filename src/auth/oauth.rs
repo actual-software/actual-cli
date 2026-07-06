@@ -179,8 +179,9 @@ pub fn build_authorize_url(
 /// URLs so tokens are never sent in clear text (loopback `http://` is allowed
 /// for the local mock — see [`crate::net::is_loopback_http_url`]).
 ///
-/// Shared with [`crate::auth::pat`], whose token-issuance call carries the same
-/// "never send a bearer over clear-text http" requirement.
+/// Shared by the browser-login flow, the headless jwt-bearer client
+/// ([`crate::auth::jwt_bearer`]), and [`crate::auth::pat`] — each carries the
+/// same "never send a bearer over clear-text http" requirement.
 pub(crate) fn build_http_client(base_url: &str) -> Result<reqwest::Client, ActualError> {
     let is_loopback = crate::net::is_loopback_http_url(base_url);
     if !base_url.starts_with("https://") && !is_loopback {
