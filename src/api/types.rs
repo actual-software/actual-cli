@@ -335,6 +335,13 @@ pub struct RelatedAdr {
     pub scope: String,
     pub relevance_reason: String,
     pub confidence: f64,
+    /// Fully-formed, environment-aware deep link back to this ADR in the
+    /// Decisions UI. The server assembles it, so it is used verbatim and never
+    /// reconstructed here. Nullable on the wire (an interpreter-layer result
+    /// can carry `null` before the link is populated) and absent from older
+    /// servers, so both cases deserialize to `None`.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Outcome of a single poll of `GET /v1/advisor/query/:id`.
@@ -1019,7 +1026,8 @@ mod tests {
                     "related_adrs": [{
                         "id": "a1", "name": "n1", "title": "t1", "policy": "p1",
                         "instructions": "i1", "scope": "s1", "relevance_reason": "r1",
-                        "confidence": 0.75
+                        "confidence": 0.75,
+                        "url": "https://app.example.com/decisions/r1?tab=active&decision=abc1234"
                     }]
                 }
             },
@@ -1031,5 +1039,33 @@ mod tests {
         assert_eq!(out.summary, "top-level summary");
         assert_eq!(out.interpreter.related_adrs.len(), 1);
         assert_eq!(out.interpreter.related_adrs[0].confidence, 0.75);
+        // The server's deep link is captured verbatim.
+        assert_eq!(
+            out.interpreter.related_adrs[0].url.as_deref(),
+            Some("https://app.example.com/decisions/r1?tab=active&decision=abc1234")
+        );
+    }
+
+    #[test]
+    fn test_related_adr_url_absent_or_null_is_none() {
+        // `url` absent (older server) and `url: null` (interpreter-layer result
+        // before the link is populated) both deserialize to None.
+        let json = r#"{
+            "summary": "s",
+            "interpreter": {
+                "summary": "i",
+                "related_adrs": [
+                    { "id": "a1", "name": "n1", "title": "t1", "policy": "p1",
+                      "instructions": "i1", "scope": "s1", "relevance_reason": "r1",
+                      "confidence": 0.5 },
+                    { "id": "a2", "name": "n2", "title": "t2", "policy": "p2",
+                      "instructions": "i2", "scope": "s2", "relevance_reason": "r2",
+                      "confidence": 0.6, "url": null }
+                ]
+            }
+        }"#;
+        let out: AdvisorOutput = serde_json::from_str(json).unwrap();
+        assert_eq!(out.interpreter.related_adrs[0].url, None);
+        assert_eq!(out.interpreter.related_adrs[1].url, None);
     }
 }

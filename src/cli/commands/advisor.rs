@@ -233,6 +233,11 @@ fn print_answer(output: &AdvisorOutput) {
                 adr.scope,
                 adr.confidence * 100.0
             );
+            // Render the server-provided deep link (used verbatim) on its own
+            // line; skip a null or empty url so the ADR still prints cleanly.
+            if let Some(url) = adr.url.as_deref().filter(|u| !u.is_empty()) {
+                println!("    {url}");
+            }
         }
     }
 }
@@ -309,20 +314,30 @@ mod tests {
 
     #[test]
     fn test_print_answer_with_and_without_adrs() {
+        let adr = |url: Option<&str>| crate::api::types::RelatedAdr {
+            id: "a".to_string(),
+            name: "n".to_string(),
+            title: "T".to_string(),
+            policy: "p".to_string(),
+            instructions: "i".to_string(),
+            scope: "s".to_string(),
+            relevance_reason: "r".to_string(),
+            confidence: 0.5,
+            url: url.map(|u| u.to_string()),
+        };
+        // Cover all three url arms: a populated link renders, while a null or
+        // an empty link is skipped without breaking the ADR line.
         let with = AdvisorOutput {
             summary: "S".to_string(),
             interpreter: crate::api::types::AdvisorInterpreter {
                 summary: "i".to_string(),
-                related_adrs: vec![crate::api::types::RelatedAdr {
-                    id: "a".to_string(),
-                    name: "n".to_string(),
-                    title: "T".to_string(),
-                    policy: "p".to_string(),
-                    instructions: "i".to_string(),
-                    scope: "s".to_string(),
-                    relevance_reason: "r".to_string(),
-                    confidence: 0.5,
-                }],
+                related_adrs: vec![
+                    adr(Some(
+                        "https://app.example.com/decisions/r1?tab=active&decision=abc1234",
+                    )),
+                    adr(None),
+                    adr(Some("")),
+                ],
             },
         };
         print_answer(&with);
