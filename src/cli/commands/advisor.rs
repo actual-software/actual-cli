@@ -5,6 +5,7 @@
 //! cap), and renders the answer. Uses the platform token from `actual login`
 //! as the bearer.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
@@ -32,9 +33,22 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// own back-off at 15s, so a larger (or misbehaving) value must not let a single
 /// poll stall the whole query.
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(15);
+/// Wall-clock cap on the `git remote get-url origin` lookup used for repo
+/// auto-detection, mirroring the repo-key helper's bound so a wedged git can't
+/// stall the command.
+const GIT_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn exec(args: &AdvisorArgs) -> Result<(), ActualError> {
-    build_runtime()?.block_on(run(args, HARD_TIMEOUT, DEFAULT_POLL_INTERVAL))
+    // The working directory drives git-remote auto-detection when `--repo` is
+    // omitted. Resolving it here (rather than inside `run`) keeps `run` testable
+    // with an explicit directory.
+    let repo_dir = std::env::current_dir().ok();
+    build_runtime()?.block_on(run(
+        args,
+        repo_dir.as_deref(),
+        HARD_TIMEOUT,
+        DEFAULT_POLL_INTERVAL,
+    ))
 }
 
 /// Single-threaded tokio runtime so the sync CLI dispatch path can drive the
@@ -137,6 +151,147 @@ fn ambiguous_message(value: &str, matches: &[&ConnectedRepository]) -> String {
     msg
 }
 
+/// A git remote parsed into the repository's owner and name — the
+/// `actual-software` / `actual-cli` of `git@github.com:actual-software/actual-cli.git`.
+#[derive(Debug, PartialEq, Eq)]
+struct RepoRemote {
+    owner: String,
+    name: String,
+}
+
+impl RepoRemote {
+    /// The `owner/name` form used in user-facing messages.
+    fn slug(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+}
+
+/// Parse a git remote URL into its owner and repository name, covering the
+/// common remote forms: SSH (`git@github.com:owner/name.git`), HTTPS
+/// (`https://github.com/owner/name(.git)`), and the `ssh://` URL variant. The
+/// last two path segments are taken as owner and name, so a scheme, an optional
+/// `user@`, and a `host:port` prefix are all tolerated. Returns `None` when the
+/// URL does not yield an owner/name pair.
+fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
+    let trimmed = url.trim().trim_end_matches('/');
+    let without_git = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    // Split on both the path separator and the scp-style host separator, dropping
+    // empty segments (the `//` after a scheme, a leading separator).
+    let segments: Vec<&str> = without_git
+        .split(['/', ':'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    if segments.len() < 2 {
+        return None;
+    }
+    Some(RepoRemote {
+        owner: segments[segments.len() - 2].to_string(),
+        name: segments[segments.len() - 1].to_string(),
+    })
+}
+
+/// Match a parsed origin remote against the org's connected repos. Prefers an
+/// exact `owner`+`name` match (case-insensitive, as GitHub owners and repo names
+/// are); when none match exactly, falls back to a name-only match so a fork whose
+/// owner differs still resolves to its connected upstream. Returns every
+/// candidate — the caller scopes on exactly one and falls back to org level on
+/// zero or several.
+fn match_remote_to_repos<'a>(
+    remote: &RepoRemote,
+    repos: &'a [ConnectedRepository],
+) -> Vec<&'a ConnectedRepository> {
+    let exact: Vec<&ConnectedRepository> = repos
+        .iter()
+        .filter(|r| {
+            r.external_owner.eq_ignore_ascii_case(&remote.owner)
+                && r.name.eq_ignore_ascii_case(&remote.name)
+        })
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    repos
+        .iter()
+        .filter(|r| r.name.eq_ignore_ascii_case(&remote.name))
+        .collect()
+}
+
+/// The first 8 characters of a repo id, for a compact user-facing display.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// Read the `origin` remote URL of the git repo containing `dir`, or `None` when
+/// there is no repo, no `origin` remote, git is unavailable, or the lookup times
+/// out. Best-effort: every failure collapses to `None` so auto-detection can fall
+/// back to an org-level query. Mirrors the sync pipeline's `git remote get-url`
+/// invocation (piped output, `kill_on_drop`, bounded by a timeout).
+async fn origin_remote_url(dir: &Path) -> Option<String> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["remote", "get-url", "origin"]);
+    cmd.current_dir(dir);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(true);
+    let child = cmd.spawn().ok()?;
+    match tokio::time::timeout(GIT_REMOTE_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(output)) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            (!stdout.is_empty()).then_some(stdout)
+        }
+        _ => None,
+    }
+}
+
+/// Best-effort auto-detection of the connected repo for the working tree at
+/// `dir`. Resolves the `origin` remote, matches it against the org's connected
+/// repositories, and returns the `repo_unique_id` when exactly one matches
+/// (printing the scoped repo to stderr). Returns `None` — an org-level query —
+/// when there is no remote, nothing matches, the match is ambiguous, or the
+/// lookup fails; a short note on stderr explains the fallback where it helps.
+async fn auto_detect_repo(dir: &Path, client: &ActualApiClient, org_id: &str) -> Option<String> {
+    let url = origin_remote_url(dir).await?;
+    let remote = parse_git_remote_url(&url)?;
+    let repos = match client.list_connected_repos(org_id).await {
+        Ok(repos) => repos,
+        // A speculative lookup failure (auth, network) must not fail the command;
+        // the org-level query below surfaces any real error with better guidance.
+        Err(_) => return None,
+    };
+    match match_remote_to_repos(&remote, &repos).as_slice() {
+        [single] => {
+            eprintln!(
+                "{} scoped to {} ({})",
+                theme::hint("advisor"),
+                qualified_name(single),
+                short_id(&single.repo_unique_id)
+            );
+            Some(single.repo_unique_id.clone())
+        }
+        [] => {
+            eprintln!(
+                "{} {} is not a connected repository; querying at org level",
+                theme::hint("advisor"),
+                remote.slug()
+            );
+            None
+        }
+        many => {
+            eprintln!(
+                "{} origin remote {} matches multiple connected repositories; \
+                 pass --repo owner/name to scope one. Querying at org level.",
+                theme::hint("advisor"),
+                remote.slug()
+            );
+            for repo in many {
+                eprintln!("    • {}", qualified_name(repo));
+            }
+            None
+        }
+    }
+}
+
 fn enrich_org_mismatch(
     err: ActualError,
     session_org: &str,
@@ -202,6 +357,7 @@ enum Outcome {
 
 async fn run(
     args: &AdvisorArgs,
+    repo_dir: Option<&Path>,
     deadline: Duration,
     poll_interval: Duration,
 ) -> Result<(), ActualError> {
@@ -220,14 +376,19 @@ async fn run(
 
     // Resolve --repo to a repo id: a UUID is used as-is; any other value is a
     // repository name resolved via the connected-repos API. A 403 during that
-    // lookup gets the same cross-org guidance as the query itself.
+    // lookup gets the same cross-org guidance as the query itself. When --repo is
+    // omitted, auto-detect the repo from the working tree's origin remote
+    // (best-effort — an unresolved detection falls back to an org-level query).
     let repo_unique_id = match args.repo.as_deref() {
         Some(value) => Some(
             resolve_repo(value, &client, &org_id)
                 .await
                 .map_err(|e| enrich_org_mismatch(e, &session_org, &org_id, explicit_org))?,
         ),
-        None => None,
+        None => match repo_dir {
+            Some(dir) => auto_detect_repo(dir, &client, &org_id).await,
+            None => None,
+        },
     };
 
     let request = AdvisorQueryRequest::new(
@@ -448,6 +609,7 @@ mod tests {
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        // exec() itself resolves the working directory before running.
         let err = exec(&args("http://127.0.0.1:1", None)).unwrap_err();
         assert!(matches!(err, ActualError::NotLoggedIn));
     }
@@ -460,6 +622,7 @@ mod tests {
         let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
         let err = run(
             &args("http://127.0.0.1:1", None),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -495,6 +658,7 @@ mod tests {
         // org omitted → uses the signed-in org from creds.
         run(
             &args(&server.url(), None),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -527,6 +691,7 @@ mod tests {
             .await;
         run(
             &args(&server.url(), Some("00000000-0000-0000-0000-000000000000")),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -559,6 +724,7 @@ mod tests {
             .await;
         let err = run(
             &args(&server.url(), None),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -590,6 +756,7 @@ mod tests {
             .await;
         let err = run(
             &args(&server.url(), None),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -632,6 +799,7 @@ mod tests {
         // org provided via --org (exercises the args.org branch).
         run(
             &args(&server.url(), Some("22222222-2222-2222-2222-222222222222")),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -668,6 +836,7 @@ mod tests {
             .await;
         run(
             &args(&server.url(), None),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -702,6 +871,7 @@ mod tests {
         // Tiny deadline + zero interval → polls a few times, then gives up.
         let err = run(
             &args(&server.url(), None),
+            None,
             Duration::from_millis(10),
             Duration::ZERO,
         )
@@ -741,6 +911,7 @@ mod tests {
 
         run(
             &args(&server.url(), None),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -781,6 +952,7 @@ mod tests {
 
         run(
             &args(&server.url(), None),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -897,7 +1069,7 @@ mod tests {
 
         let mut a = args(&server.url(), None);
         a.repo = Some("33333333-3333-3333-3333-333333333333".to_string());
-        run(&a, Duration::from_secs(60), Duration::ZERO)
+        run(&a, None, Duration::from_secs(60), Duration::ZERO)
             .await
             .unwrap();
         s.assert_async().await;
@@ -927,6 +1099,7 @@ mod tests {
         let target = "99999999-9999-9999-9999-999999999999";
         let err = run(
             &args(&server.url(), Some(target)),
+            None,
             Duration::from_secs(60),
             Duration::ZERO,
         )
@@ -1158,7 +1331,7 @@ mod tests {
 
         let mut a = args(&server.url(), None);
         a.repo = Some("actual-cli".to_string());
-        run(&a, Duration::from_secs(60), Duration::ZERO)
+        run(&a, None, Duration::from_secs(60), Duration::ZERO)
             .await
             .unwrap();
         repos.assert_async().await;
@@ -1185,12 +1358,363 @@ mod tests {
 
         let mut a = args(&server.url(), None);
         a.repo = Some("ghost".to_string());
-        let err = run(&a, Duration::from_secs(60), Duration::ZERO)
+        let err = run(&a, None, Duration::from_secs(60), Duration::ZERO)
             .await
             .unwrap_err();
         assert!(
             matches!(err, ActualError::RepoNotFound(ref m) if m.contains("ghost")),
             "got: {err:?}"
         );
+    }
+
+    // --- git-remote auto-detection ---
+
+    /// Run a git command in `cwd`, asserting it succeeds. Used to build the
+    /// throwaway repos the detection tests read `origin` from.
+    fn run_git(cwd: &Path, git_args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(git_args)
+            .current_dir(cwd)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git is available in the test environment");
+        assert!(status.success(), "git {git_args:?} failed");
+    }
+
+    /// A throwaway git repo whose `origin` remote is `url`. No commit is needed —
+    /// `git remote get-url origin` works right after `git remote add`.
+    fn git_repo_with_remote(url: &str) -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        run_git(dir.path(), &["init", "-q"]);
+        run_git(dir.path(), &["remote", "add", "origin", url]);
+        dir
+    }
+
+    #[test]
+    fn test_parse_git_remote_url_forms() {
+        let expect = |o: &str, n: &str| {
+            Some(RepoRemote {
+                owner: o.to_string(),
+                name: n.to_string(),
+            })
+        };
+        // SSH scp-like, with and without the .git suffix.
+        assert_eq!(
+            parse_git_remote_url("git@github.com:actual-software/actual-cli.git"),
+            expect("actual-software", "actual-cli")
+        );
+        assert_eq!(
+            parse_git_remote_url("git@github.com:actual-software/actual-cli"),
+            expect("actual-software", "actual-cli")
+        );
+        // HTTPS, with .git / without / with a trailing slash.
+        assert_eq!(
+            parse_git_remote_url("https://github.com/actual-software/actual-cli.git"),
+            expect("actual-software", "actual-cli")
+        );
+        assert_eq!(
+            parse_git_remote_url("https://github.com/actual-software/actual-cli"),
+            expect("actual-software", "actual-cli")
+        );
+        assert_eq!(
+            parse_git_remote_url("https://github.com/actual-software/actual-cli/"),
+            expect("actual-software", "actual-cli")
+        );
+        // ssh:// URL form carrying a port segment.
+        assert_eq!(
+            parse_git_remote_url("ssh://git@github.com:22/actual-software/actual-cli.git"),
+            expect("actual-software", "actual-cli")
+        );
+        // Surrounding whitespace is trimmed.
+        assert_eq!(
+            parse_git_remote_url("  git@github.com:actual-software/actual-cli.git\n"),
+            expect("actual-software", "actual-cli")
+        );
+    }
+
+    #[test]
+    fn test_parse_git_remote_url_rejects_unparseable() {
+        assert!(parse_git_remote_url("").is_none());
+        assert!(parse_git_remote_url("garbage").is_none());
+        assert!(parse_git_remote_url("/").is_none());
+    }
+
+    #[test]
+    fn test_repo_remote_debug_eq_and_slug() {
+        let a = RepoRemote {
+            owner: "o".to_string(),
+            name: "n".to_string(),
+        };
+        // eq false paths: name differs, then owner differs.
+        assert_ne!(
+            a,
+            RepoRemote {
+                owner: "o".to_string(),
+                name: "other".to_string()
+            }
+        );
+        assert_ne!(
+            a,
+            RepoRemote {
+                owner: "x".to_string(),
+                name: "n".to_string()
+            }
+        );
+        // eq true path.
+        assert_eq!(
+            a,
+            RepoRemote {
+                owner: "o".to_string(),
+                name: "n".to_string()
+            }
+        );
+        // Debug + slug.
+        assert!(format!("{a:?}").contains('o'));
+        assert_eq!(a.slug(), "o/n");
+    }
+
+    #[test]
+    fn test_short_id_takes_first_eight_chars() {
+        assert_eq!(short_id("33333333-3333-3333-3333-333333333333"), "33333333");
+        // A value shorter than 8 chars is returned whole.
+        assert_eq!(short_id("abc"), "abc");
+    }
+
+    #[test]
+    fn test_match_remote_exact_owner_and_name() {
+        let remote = RepoRemote {
+            owner: "actual-software".to_string(),
+            name: "actual-cli".to_string(),
+        };
+        let repos = vec![
+            repo("actual-software", "actual-cli", "id-cli"),
+            repo("other", "web", "id-web"),
+        ];
+        let m = match_remote_to_repos(&remote, &repos);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].repo_unique_id, "id-cli");
+    }
+
+    #[test]
+    fn test_match_remote_is_case_insensitive() {
+        let remote = RepoRemote {
+            owner: "Actual-Software".to_string(),
+            name: "Actual-CLI".to_string(),
+        };
+        let repos = vec![repo("actual-software", "actual-cli", "id-cli")];
+        let m = match_remote_to_repos(&remote, &repos);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].repo_unique_id, "id-cli");
+    }
+
+    #[test]
+    fn test_match_remote_name_only_fallback_for_fork() {
+        // A fork's owner differs, but the unique name resolves to the upstream.
+        let remote = RepoRemote {
+            owner: "my-fork".to_string(),
+            name: "actual-cli".to_string(),
+        };
+        let repos = vec![
+            repo("actual-software", "actual-cli", "id-cli"),
+            repo("other", "web", "id-web"),
+        ];
+        let m = match_remote_to_repos(&remote, &repos);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].repo_unique_id, "id-cli");
+    }
+
+    #[test]
+    fn test_match_remote_empty_when_nothing_matches() {
+        let remote = RepoRemote {
+            owner: "who".to_string(),
+            name: "unknown".to_string(),
+        };
+        let repos = vec![repo("actual-software", "actual-cli", "id-cli")];
+        assert!(match_remote_to_repos(&remote, &repos).is_empty());
+    }
+
+    #[test]
+    fn test_match_remote_many_when_name_shared_across_owners() {
+        // The fork owner matches neither; the shared name is ambiguous.
+        let remote = RepoRemote {
+            owner: "my-fork".to_string(),
+            name: "cli".to_string(),
+        };
+        let repos = vec![
+            repo("actual-software", "cli", "id-a"),
+            repo("other-org", "cli", "id-b"),
+        ];
+        let m = match_remote_to_repos(&remote, &repos);
+        assert_eq!(m.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_origin_remote_url_reads_configured_remote() {
+        let dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
+        assert_eq!(
+            origin_remote_url(dir.path()).await.as_deref(),
+            Some("git@github.com:actual-software/actual-cli.git")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_origin_remote_url_none_outside_repo() {
+        // A plain temp dir is not a git repo → git exits non-zero → None.
+        let dir = tempdir().unwrap();
+        assert!(origin_remote_url(dir.path()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auto_detect_repo_scopes_on_single_match() {
+        let dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"repositories":[{"repo_unique_id":"33333333-3333-3333-3333-333333333333","name":"actual-cli","external_owner":"actual-software","url":"https://github.com/actual-software/actual-cli"}]}"#,
+            )
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let id = auto_detect_repo(dir.path(), &client, "org").await;
+        assert_eq!(id.as_deref(), Some("33333333-3333-3333-3333-333333333333"));
+        m.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_auto_detect_repo_org_fallback_when_no_match() {
+        let dir = git_repo_with_remote("git@github.com:someone/unconnected.git");
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"repositories":[{"repo_unique_id":"33333333-3333-3333-3333-333333333333","name":"actual-cli","external_owner":"actual-software","url":"u"}]}"#,
+            )
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        assert!(auto_detect_repo(dir.path(), &client, "org").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auto_detect_repo_org_fallback_when_ambiguous() {
+        let dir = git_repo_with_remote("git@github.com:my-fork/cli.git");
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"repositories":[{"repo_unique_id":"a","name":"cli","external_owner":"actual-software","url":"u1"},{"repo_unique_id":"b","name":"cli","external_owner":"other-org","url":"u2"}]}"#,
+            )
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        assert!(auto_detect_repo(dir.path(), &client, "org").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auto_detect_repo_org_fallback_on_api_error() {
+        let dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(500)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"boom","message":"kaboom"}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        assert!(auto_detect_repo(dir.path(), &client, "org").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auto_detect_repo_no_remote_short_circuits() {
+        // No git repo → no remote → the connected-repos API is never called, so an
+        // unreachable client still yields None (proves the short-circuit).
+        let dir = tempdir().unwrap();
+        let client = ActualApiClient::new("http://127.0.0.1:1")
+            .unwrap()
+            .with_bearer("t");
+        assert!(auto_detect_repo(dir.path(), &client, "org").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auto_detect_repo_unparseable_remote_short_circuits() {
+        // An origin that yields no owner/name → the API is never called.
+        let dir = git_repo_with_remote("garbage");
+        let client = ActualApiClient::new("http://127.0.0.1:1")
+            .unwrap()
+            .with_bearer("t");
+        assert!(auto_detect_repo(dir.path(), &client, "org").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_auto_detects_repo_and_scopes_request() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let repo_dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
+
+        let mut server = mockito::Server::new_async().await;
+        let repos = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"repositories":[{"repo_unique_id":"33333333-3333-3333-3333-333333333333","name":"actual-cli","external_owner":"actual-software","url":"https://github.com/actual-software/actual-cli"}]}"#,
+            )
+            .create_async()
+            .await;
+        // The advisor request must carry the auto-detected repo id.
+        let start = server
+            .mock("POST", "/v1/advisor/query")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"repo_unique_id":"33333333-3333-3333-3333-333333333333"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(START_BODY)
+            .create_async()
+            .await;
+        let _poll = server
+            .mock("GET", POLL_PATH)
+            .with_body(succeeded_body(""))
+            .with_header("content-type", "application/json")
+            .create_async()
+            .await;
+
+        // --repo omitted → auto-detected from the git repo's origin remote.
+        run(
+            &args(&server.url(), None),
+            Some(repo_dir.path()),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        repos.assert_async().await;
+        start.assert_async().await;
     }
 }
