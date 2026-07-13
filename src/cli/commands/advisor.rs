@@ -21,7 +21,10 @@ use crate::auth::oauth;
 use crate::auth::store::{self, StoredCredentials};
 use crate::cli::args::AdvisorArgs;
 use crate::cli::ui::theme;
+use crate::config::sticky;
+use crate::config::types::StickyScope;
 use crate::error::ActualError;
+use sha2::{Digest, Sha256};
 
 /// Hard wall-clock cap on polling before giving up, matching the browser
 /// reference. A true deadline (not an attempt count) is what actually bounds
@@ -40,8 +43,8 @@ const GIT_REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn exec(args: &AdvisorArgs) -> Result<(), ActualError> {
     // The working directory drives git-remote auto-detection when `--repo` is
-    // omitted. Resolving it here (rather than inside `run`) keeps `run` testable
-    // with an explicit directory.
+    // omitted, and keys the remembered scope. Resolving it here (rather than
+    // inside `run`) keeps `run` testable with an explicit directory.
     let repo_dir = std::env::current_dir().ok();
     build_runtime()?.block_on(run(
         args,
@@ -75,20 +78,40 @@ fn resolve_api_url(flag: Option<&str>) -> String {
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
 }
 
-/// Resolve a `--repo` value to a `repo_unique_id`. A value that parses as a UUID
+/// A `--repo` value resolved to an id, plus the repo's `owner/name` when it is
+/// known. A UUID passed directly resolves without a name lookup, so its
+/// `qualified_name` is `None`.
+struct ResolvedRepo {
+    repo_unique_id: String,
+    qualified_name: Option<String>,
+}
+
+/// Resolve a `--repo` value to a [`ResolvedRepo`]. A value that parses as a UUID
 /// is already an id and is returned as-is (no lookup, backward compatible); any
 /// other value is treated as a repository name and resolved against the org's
-/// connected repositories via `GET /v1/connected-repos`.
+/// connected repositories via `GET /v1/connected-repos`, which also yields the
+/// repo's `owner/name` for display and for the remembered scope.
 async fn resolve_repo(
     value: &str,
     client: &ActualApiClient,
     org_id: &str,
-) -> Result<String, ActualError> {
+) -> Result<ResolvedRepo, ActualError> {
     if Uuid::parse_str(value).is_ok() {
-        return Ok(value.to_string());
+        return Ok(ResolvedRepo {
+            repo_unique_id: value.to_string(),
+            qualified_name: None,
+        });
     }
     let repos = client.list_connected_repos(org_id).await?;
-    resolve_repo_name(value, &repos)
+    let repo_unique_id = resolve_repo_name(value, &repos)?;
+    let qualified_name = repos
+        .iter()
+        .find(|r| r.repo_unique_id == repo_unique_id)
+        .map(qualified_name);
+    Ok(ResolvedRepo {
+        repo_unique_id,
+        qualified_name,
+    })
 }
 
 /// Match a repository name against the org's connected repos. A bare `name`
@@ -219,6 +242,15 @@ fn match_remote_to_repos<'a>(
 /// The first 8 characters of a repo id, for a compact user-facing display.
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+/// Render a repo scope for a user-facing line: `owner/name (shortid)` when the
+/// name is known, else `repo shortid` (a scope pinned by bare UUID has no name).
+fn format_repo_scope(qualified_name: Option<&str>, id: &str) -> String {
+    match qualified_name {
+        Some(name) => format!("{} ({})", name, short_id(id)),
+        None => format!("repo {}", short_id(id)),
+    }
 }
 
 /// Read the `origin` remote URL of the git repo containing `dir`, or `None` when
@@ -355,6 +387,157 @@ enum Outcome {
     Failed(Option<String>),
 }
 
+/// Compute the per-repo key that indexes the remembered scope, or `None` when
+/// there is no working directory. The key is `sha256(origin_url)`, falling back
+/// to `sha256(path)` when the tree has no `origin` remote — byte-for-byte the
+/// same scheme as `sync::cache::compute_repo_key`, so a repo has one stable key
+/// across every per-repo config feature.
+async fn sticky_key(repo_dir: Option<&Path>) -> Option<String> {
+    let dir = repo_dir?;
+    let input = origin_remote_url(dir)
+        .await
+        .unwrap_or_else(|| dir.to_string_lossy().to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+/// Auto-detect the repo from the working tree's origin remote when a directory
+/// is known, else run at org level. Best-effort: an unresolved detection (no
+/// repo, no match, ambiguous, or an API error) falls back to `None`.
+async fn autodetect(
+    repo_dir: Option<&Path>,
+    client: &ActualApiClient,
+    org_id: &str,
+) -> Option<String> {
+    match repo_dir {
+        Some(dir) => auto_detect_repo(dir, client, org_id).await,
+        None => None,
+    }
+}
+
+/// Announce and apply a remembered scope. A repo pin scopes the query to that
+/// repo; an org-level pin runs the query org-wide.
+fn apply_remembered(scope: &StickyScope) -> Option<String> {
+    match &scope.repo_unique_id {
+        Some(id) => {
+            eprintln!(
+                "{} using remembered scope {}",
+                theme::hint("advisor"),
+                format_repo_scope(scope.qualified_name.as_deref(), id)
+            );
+            Some(id.clone())
+        }
+        None => {
+            eprintln!(
+                "{} using remembered org-level scope",
+                theme::hint("advisor")
+            );
+            None
+        }
+    }
+}
+
+/// Load the config, apply `mutate`, and save it back (best-effort persistence of
+/// a scope change).
+fn update_config(mutate: impl FnOnce(&mut crate::config::Config)) -> Result<(), ActualError> {
+    let mut config = crate::config::paths::load()?;
+    mutate(&mut config);
+    crate::config::paths::save(&config)
+}
+
+/// Decide the repo id to scope the query on, applying and persisting any scope
+/// change requested via `--repo`. Precedence: an explicit `--repo` value (a repo
+/// or a reserved keyword) > an explicit `--org` (a one-shot org-level query) > a
+/// scope remembered for this repo > git-remote auto-detection > an org-level
+/// fallback. `None` means an org-level query.
+async fn determine_scope(
+    args: &AdvisorArgs,
+    repo_key: Option<&str>,
+    repo_dir: Option<&Path>,
+    client: &ActualApiClient,
+    org_id: &str,
+    session_org: &str,
+    explicit_org: bool,
+) -> Result<Option<String>, ActualError> {
+    match args.repo.as_deref() {
+        // Reserved keyword: pin the scope to org level (opt out of repo scoping).
+        Some("none") => {
+            if let Some(key) = repo_key {
+                update_config(|c| sticky::set_scope(c, key, StickyScope::org_level()))?;
+            }
+            eprintln!("{} scope pinned to org level", theme::hint("advisor"));
+            Ok(None)
+        }
+        // Reserved keyword: forget any pin and re-auto-detect for this call.
+        Some("auto") => {
+            if let Some(key) = repo_key {
+                update_config(|c| sticky::clear_scope(c, key))?;
+            }
+            eprintln!("{} scope reset to auto-detect", theme::hint("advisor"));
+            Ok(autodetect(repo_dir, client, org_id).await)
+        }
+        // Explicit repo by name or id: resolve, announce, and remember it. A 403
+        // during a name lookup gets the same cross-org guidance as the query.
+        Some(value) => {
+            let resolved = resolve_repo(value, client, org_id)
+                .await
+                .map_err(|e| enrich_org_mismatch(e, session_org, org_id, explicit_org))?;
+            if let Some(key) = repo_key {
+                let scope =
+                    StickyScope::repo(&resolved.repo_unique_id, resolved.qualified_name.clone());
+                update_config(|c| sticky::set_scope(c, key, scope))?;
+            }
+            eprintln!(
+                "{} scoped to {}",
+                theme::hint("advisor"),
+                format_repo_scope(resolved.qualified_name.as_deref(), &resolved.repo_unique_id)
+            );
+            Ok(Some(resolved.repo_unique_id))
+        }
+        None => {
+            // An explicit --org is a one-shot org-level override; it does not
+            // change a remembered pin.
+            if explicit_org {
+                eprintln!("{} querying at org level", theme::hint("advisor"));
+                return Ok(None);
+            }
+            // A remembered pin wins over auto-detection.
+            if let Some(key) = repo_key {
+                if let Some(scope) = sticky::get_scope(&crate::config::paths::load()?, key) {
+                    return Ok(apply_remembered(&scope));
+                }
+            }
+            // Nothing pinned: auto-detect (best-effort), with an org fallback.
+            Ok(autodetect(repo_dir, client, org_id).await)
+        }
+    }
+}
+
+/// Print the remembered advisor scope for this repo, or explain the default
+/// (auto-detect) behavior when nothing is pinned. Reads local config only — no
+/// token refresh, no API call.
+fn show_scope(repo_key: Option<&str>) -> Result<(), ActualError> {
+    let scope = match repo_key {
+        Some(key) => sticky::get_scope(&crate::config::paths::load()?, key),
+        None => None,
+    };
+    match scope {
+        Some(s) => match &s.repo_unique_id {
+            Some(id) => println!(
+                "Active advisor scope: {} (pinned)",
+                format_repo_scope(s.qualified_name.as_deref(), id)
+            ),
+            None => println!("Active advisor scope: org level (pinned)"),
+        },
+        None => println!(
+            "Active advisor scope: not pinned — auto-detected from the git remote, \
+             or org level if no connected repo matches"
+        ),
+    }
+    Ok(())
+}
+
 async fn run(
     args: &AdvisorArgs,
     repo_dir: Option<&Path>,
@@ -362,6 +545,19 @@ async fn run(
     poll_interval: Duration,
 ) -> Result<(), ActualError> {
     let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
+
+    // Key the remembered scope by the working tree's origin remote (falling back
+    // to its path). This is the same SHA-256-of-origin-URL that `rejected_adrs`
+    // keys on (see `sync::cache::compute_repo_key`), computed here via the async
+    // remote lookup so it stays inside this runtime.
+    let repo_key = sticky_key(repo_dir).await;
+
+    // `--show-scope` inspects the remembered scope from local config and exits
+    // without contacting the API (no token refresh, no query).
+    if args.show_scope {
+        return show_scope(repo_key.as_deref());
+    }
+
     let creds = ensure_fresh(creds).await?;
     let org_id = args
         .org
@@ -374,27 +570,29 @@ async fn run(
     let base_url = resolve_api_url(args.api_url.as_deref());
     let client = ActualApiClient::new(&base_url)?.with_bearer(&creds.access_token);
 
-    // Resolve --repo to a repo id: a UUID is used as-is; any other value is a
-    // repository name resolved via the connected-repos API. A 403 during that
-    // lookup gets the same cross-org guidance as the query itself. When --repo is
-    // omitted, auto-detect the repo from the working tree's origin remote
-    // (best-effort — an unresolved detection falls back to an org-level query).
-    let repo_unique_id = match args.repo.as_deref() {
-        Some(value) => Some(
-            resolve_repo(value, &client, &org_id)
-                .await
-                .map_err(|e| enrich_org_mismatch(e, &session_org, &org_id, explicit_org))?,
-        ),
-        None => match repo_dir {
-            Some(dir) => auto_detect_repo(dir, &client, &org_id).await,
-            None => None,
-        },
+    let repo_unique_id = determine_scope(
+        args,
+        repo_key.as_deref(),
+        repo_dir,
+        &client,
+        &org_id,
+        &session_org,
+        explicit_org,
+    )
+    .await?;
+
+    // A scope-management-only invocation (a `--repo` value with no question) has
+    // applied and announced the new scope; there is nothing to query. Clap
+    // guarantees a question is present unless `--show-scope`/`--repo` was given.
+    let query = match args.query.as_deref() {
+        Some(q) => q,
+        None => return Ok(()),
     };
 
     let request = AdvisorQueryRequest::new(
         org_id.clone(),
         repo_unique_id,
-        args.query.clone(),
+        query.to_string(),
         AdvisorSurface::cli(),
         AdvisorSink::None,
         None,
@@ -529,10 +727,11 @@ mod tests {
 
     fn args(api_url: &str, org: Option<&str>) -> AdvisorArgs {
         AdvisorArgs {
-            query: "why app router?".to_string(),
+            query: Some("why app router?".to_string()),
             api_url: Some(api_url.to_string()),
             org: org.map(|s| s.to_string()),
             repo: None,
+            show_scope: false,
         }
     }
 
@@ -1267,7 +1466,10 @@ mod tests {
             .unwrap()
             .with_bearer("t");
         let id = "33333333-3333-3333-3333-333333333333";
-        assert_eq!(resolve_repo(id, &client, "org").await.unwrap(), id);
+        let resolved = resolve_repo(id, &client, "org").await.unwrap();
+        assert_eq!(resolved.repo_unique_id, id);
+        // A bare UUID resolves without a name lookup.
+        assert!(resolved.qualified_name.is_none());
     }
 
     #[tokio::test]
@@ -1286,8 +1488,16 @@ mod tests {
         let client = ActualApiClient::new(&server.url())
             .unwrap()
             .with_bearer("t");
-        let id = resolve_repo("actual-cli", &client, "org").await.unwrap();
-        assert_eq!(id, "33333333-3333-3333-3333-333333333333");
+        let resolved = resolve_repo("actual-cli", &client, "org").await.unwrap();
+        assert_eq!(
+            resolved.repo_unique_id,
+            "33333333-3333-3333-3333-333333333333"
+        );
+        // The name lookup also yields the repo's owner/name for display + pinning.
+        assert_eq!(
+            resolved.qualified_name.as_deref(),
+            Some("actual-software/actual-cli")
+        );
         m.assert_async().await;
     }
 
@@ -1716,5 +1926,352 @@ mod tests {
         .unwrap();
         repos.assert_async().await;
         start.assert_async().await;
+    }
+
+    // ---- sticky repo scope ----
+
+    #[test]
+    fn test_format_repo_scope_with_and_without_name() {
+        assert_eq!(
+            format_repo_scope(Some("actual-software/actual-cli"), "abcdef1234567890"),
+            "actual-software/actual-cli (abcdef12)"
+        );
+        assert_eq!(format_repo_scope(None, "abcdef1234567890"), "repo abcdef12");
+    }
+
+    #[test]
+    fn test_apply_remembered_repo_and_org() {
+        let repo = apply_remembered(&StickyScope::repo("id-123456789", Some("o/r".to_string())));
+        assert_eq!(repo.as_deref(), Some("id-123456789"));
+        assert!(apply_remembered(&StickyScope::org_level()).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sticky_key_none_dir_is_none() {
+        assert!(sticky_key(None).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sticky_key_hashes_origin_remote_deterministically() {
+        let repo_dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
+        let key = sticky_key(Some(repo_dir.path())).await.unwrap();
+        assert_eq!(key.len(), 64, "sha256 hex is 64 chars");
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+        // Same remote → same key.
+        assert_eq!(key, sticky_key(Some(repo_dir.path())).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_sticky_key_no_remote_falls_back_to_path() {
+        // A dir with no git repo has no origin remote, so the key hashes the path.
+        let dir = tempdir().unwrap();
+        let key = sticky_key(Some(dir.path())).await.unwrap();
+        assert_eq!(key.len(), 64);
+    }
+
+    fn scope_client() -> ActualApiClient {
+        // An unreachable client for scope paths that never touch the network.
+        ActualApiClient::new("http://127.0.0.1:1")
+            .unwrap()
+            .with_bearer("t")
+    }
+
+    #[tokio::test]
+    async fn test_determine_scope_repo_none_pins_org_level() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut a = args("http://127.0.0.1:1", None);
+        a.query = None;
+        a.repo = Some("none".to_string());
+        let scope = determine_scope(&a, Some("key1"), None, &scope_client(), "org", "org", false)
+            .await
+            .unwrap();
+        assert!(scope.is_none());
+
+        let cfg = crate::config::paths::load().unwrap();
+        assert_eq!(
+            sticky::get_scope(&cfg, "key1"),
+            Some(StickyScope::org_level())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_determine_scope_repo_auto_clears_pin_and_autodetects() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut cfg = crate::config::paths::load().unwrap();
+        sticky::set_scope(&mut cfg, "key1", StickyScope::repo("old-id", None));
+        crate::config::paths::save(&cfg).unwrap();
+
+        let mut a = args("http://127.0.0.1:1", None);
+        a.query = None;
+        a.repo = Some("auto".to_string());
+        // repo_dir None → autodetect yields None; the pin is forgotten.
+        let scope = determine_scope(&a, Some("key1"), None, &scope_client(), "org", "org", false)
+            .await
+            .unwrap();
+        assert!(scope.is_none());
+
+        let cfg = crate::config::paths::load().unwrap();
+        assert!(sticky::get_scope(&cfg, "key1").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_determine_scope_repo_auto_without_repo_key() {
+        // No repo key (no working dir): nothing to forget, still auto-detects
+        // (with repo_dir None → org-level). Covers the `auto` arm's no-key path.
+        let mut a = args("http://127.0.0.1:1", None);
+        a.query = None;
+        a.repo = Some("auto".to_string());
+        let scope = determine_scope(&a, None, None, &scope_client(), "org", "org", false)
+            .await
+            .unwrap();
+        assert!(scope.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_determine_scope_explicit_repo_persists_pin() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"repositories":[{"repo_unique_id":"33333333-3333-3333-3333-333333333333","name":"actual-cli","external_owner":"actual-software","url":"https://github.com/actual-software/actual-cli"}]}"#,
+            )
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+
+        let mut a = args(&server.url(), None);
+        a.query = None;
+        a.repo = Some("actual-cli".to_string());
+        let scope = determine_scope(&a, Some("key1"), None, &client, "org", "org", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            scope.as_deref(),
+            Some("33333333-3333-3333-3333-333333333333")
+        );
+        m.assert_async().await;
+
+        let cfg = crate::config::paths::load().unwrap();
+        let pinned = sticky::get_scope(&cfg, "key1").unwrap();
+        assert_eq!(
+            pinned.repo_unique_id.as_deref(),
+            Some("33333333-3333-3333-3333-333333333333")
+        );
+        assert_eq!(
+            pinned.qualified_name.as_deref(),
+            Some("actual-software/actual-cli")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_determine_scope_explicit_org_overrides_pin() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        // A repo pin exists, but an explicit --org runs org-level for this call.
+        let mut cfg = crate::config::paths::load().unwrap();
+        sticky::set_scope(&mut cfg, "key1", StickyScope::repo("pinned-id", None));
+        crate::config::paths::save(&cfg).unwrap();
+
+        let a = args("http://127.0.0.1:1", Some("some-org"));
+        let scope = determine_scope(
+            &a,
+            Some("key1"),
+            None,
+            &scope_client(),
+            "some-org",
+            "sess",
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            scope.is_none(),
+            "explicit --org wins over the remembered pin"
+        );
+        // The pin is untouched by a one-shot --org.
+        let cfg = crate::config::paths::load().unwrap();
+        assert!(sticky::get_scope(&cfg, "key1").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_determine_scope_uses_remembered_repo_pin() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut cfg = crate::config::paths::load().unwrap();
+        sticky::set_scope(
+            &mut cfg,
+            "key1",
+            StickyScope::repo("pinned-id", Some("o/r".to_string())),
+        );
+        crate::config::paths::save(&cfg).unwrap();
+
+        // No --repo, no --org: the remembered pin is reused (client never called).
+        let a = args("http://127.0.0.1:1", None);
+        let scope = determine_scope(&a, Some("key1"), None, &scope_client(), "org", "org", false)
+            .await
+            .unwrap();
+        assert_eq!(scope.as_deref(), Some("pinned-id"));
+    }
+
+    #[tokio::test]
+    async fn test_determine_scope_uses_remembered_org_pin() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut cfg = crate::config::paths::load().unwrap();
+        sticky::set_scope(&mut cfg, "key1", StickyScope::org_level());
+        crate::config::paths::save(&cfg).unwrap();
+
+        let a = args("http://127.0.0.1:1", None);
+        let scope = determine_scope(&a, Some("key1"), None, &scope_client(), "org", "org", false)
+            .await
+            .unwrap();
+        assert!(scope.is_none());
+    }
+
+    #[test]
+    fn test_show_scope_no_key_reports_not_pinned() {
+        // No repo key (e.g. no working directory) → no pin to read.
+        show_scope(None).unwrap();
+    }
+
+    #[test]
+    fn test_show_scope_not_pinned() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        show_scope(Some("unpinned-key")).unwrap();
+    }
+
+    #[test]
+    fn test_show_scope_pinned_repo_and_org() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        let mut cfg = crate::config::paths::load().unwrap();
+        sticky::set_scope(
+            &mut cfg,
+            "repo-key",
+            StickyScope::repo("id123456789", Some("o/r".to_string())),
+        );
+        sticky::set_scope(&mut cfg, "org-key", StickyScope::org_level());
+        crate::config::paths::save(&cfg).unwrap();
+
+        show_scope(Some("repo-key")).unwrap();
+        show_scope(Some("org-key")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_reuses_remembered_scope_without_repo_flag() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let repo_dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
+        // Pin the scope under this repo's key, then bare-query from the same dir.
+        let key = sticky_key(Some(repo_dir.path())).await.unwrap();
+        let mut cfg = crate::config::paths::load().unwrap();
+        sticky::set_scope(
+            &mut cfg,
+            &key,
+            StickyScope::repo(
+                "77777777-7777-7777-7777-777777777777",
+                Some("actual-software/actual-cli".to_string()),
+            ),
+        );
+        crate::config::paths::save(&cfg).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let start = server
+            .mock("POST", "/v1/advisor/query")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"repo_unique_id":"77777777-7777-7777-7777-777777777777"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(START_BODY)
+            .create_async()
+            .await;
+        let _poll = server
+            .mock("GET", POLL_PATH)
+            .with_body(succeeded_body(""))
+            .with_header("content-type", "application/json")
+            .create_async()
+            .await;
+
+        run(
+            &args(&server.url(), None),
+            Some(repo_dir.path()),
+            Duration::from_secs(60),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        start.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_run_show_scope_exits_without_query() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut a = args("http://127.0.0.1:1", None);
+        a.query = None;
+        a.show_scope = true;
+        // No server: --show-scope reads local config and returns before any query.
+        run(&a, None, Duration::from_secs(60), Duration::ZERO)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_repo_management_only_exits_without_query() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut a = args("http://127.0.0.1:1", None);
+        a.query = None;
+        a.repo = Some("none".to_string());
+        // A --repo change with no question applies the scope and returns; no query.
+        run(&a, None, Duration::from_secs(60), Duration::ZERO)
+            .await
+            .unwrap();
     }
 }
