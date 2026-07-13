@@ -360,10 +360,13 @@ pub struct AdvisorArgs {
     #[arg(long, value_name = "ORG_ID")]
     pub org: Option<String>,
 
-    /// Scope the query to a specific connected repository (UUID). When omitted,
-    /// the query runs at org level. Auto-detection from the git remote is not
-    /// available yet — it requires the connected-repos API.
-    #[arg(long, value_name = "REPO_ID")]
+    /// Scope the query to a specific connected repository, given either as its
+    /// name (e.g. `actual-cli`, or `owner/actual-cli` to disambiguate a name
+    /// shared across owners) or as its UUID. A name is resolved to a repo id via
+    /// the connected-repos API; an unrecognized name fails with the list of
+    /// repositories you can choose from. When omitted, the query runs at org
+    /// level.
+    #[arg(long, value_name = "REPO")]
     pub repo: Option<String>,
 }
 

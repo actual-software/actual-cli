@@ -97,6 +97,14 @@ pub enum ActualError {
     /// rebuilds both with the concrete session and target orgs.
     #[error("{message}")]
     OrgMismatch { message: String, hint: String },
+
+    /// The `--repo <value>` argument named a repository that could not be
+    /// resolved to a connected repo — nothing matched, a short name was shared
+    /// across owners, or the organization has no connected repositories. The
+    /// message carries the full explanation, including the list of repositories
+    /// the caller can choose from; the fix rides on the `hint()` line.
+    #[error("{0}")]
+    RepoNotFound(String),
 }
 
 impl ActualError {
@@ -114,7 +122,8 @@ impl ActualError {
             | Self::CodexCliModelRequiresApiKey { .. }
             | Self::NotLoggedIn
             | Self::NoRunnerAvailable { .. }
-            | Self::OrgMismatch { .. } => 2,
+            | Self::OrgMismatch { .. }
+            | Self::RepoNotFound(_) => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } | Self::ServiceUnavailable => 3,
             Self::IoError(_) => 5,
@@ -168,6 +177,9 @@ impl ActualError {
             // target org), so it is carried on the variant rather than matched
             // to a static string like `NotLoggedIn`.
             Self::OrgMismatch { hint, .. } => Some(Cow::Owned(hint.clone())),
+            Self::RepoNotFound(_) => Some(Cow::Borrowed(
+                "Pass one of the connected repository names to --repo (or omit --repo to query the whole organization)",
+            )),
             _ => None,
         }
     }
@@ -820,6 +832,30 @@ mod tests {
         assert!(
             hint.contains("actual login --org B"),
             "expected remediation in hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_repo_not_found_exit_code_display_and_hint() {
+        let err = ActualError::RepoNotFound(
+            "No connected repository matches 'foo'. Connected repositories:\n  • acme/bar"
+                .to_string(),
+        );
+        // A bad --repo value is a re-invoke-and-fix class failure, like NotLoggedIn.
+        assert_eq!(err.exit_code(), 2);
+        // The message passes through Display verbatim (it carries the repo list).
+        let msg = err.to_string();
+        assert!(msg.contains("No connected repository"), "got: {msg}");
+        assert!(msg.contains("acme/bar"), "expected repo list in: {msg}");
+        // Remediation rides on the Fix/hint line, not Display.
+        let hint = err.hint().expect("expected a Fix hint for RepoNotFound");
+        assert!(
+            hint.contains("--repo"),
+            "expected --repo guidance in hint: {hint}"
+        );
+        assert!(
+            !msg.contains("Pass one of"),
+            "remediation should not be in Display: {msg}"
         );
     }
 }

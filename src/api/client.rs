@@ -8,7 +8,8 @@ use crate::analysis::static_analyzer::registry::all_framework_names;
 use crate::analysis::types::{FrameworkCategory, Language, RepoAnalysis};
 use crate::api::types::{
     AdvisorPoll, AdvisorQueryRequest, AdvisorQueryStarted, AdvisorQueryStatus, ApiErrorResponse,
-    CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, FrameworksResponse, HealthResponse,
+    CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, ConnectedReposErrorBody,
+    ConnectedRepository, FrameworksResponse, GetConnectedReposResponse, HealthResponse,
     LanguagesResponse, MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse,
     TelemetryRequest,
 };
@@ -175,6 +176,53 @@ impl ActualApiClient {
             retry_after,
             etag,
         })
+    }
+
+    /// List the repositories connected to `org_id` (`GET /v1/connected-repos`).
+    /// Lets a caller resolve a repository name to its `repo_unique_id`. The
+    /// bearer token's own organization must match `org_id`; the server hides
+    /// other organizations behind a 404 rather than revealing their existence.
+    pub async fn list_connected_repos(
+        &self,
+        org_id: &str,
+    ) -> Result<Vec<ConnectedRepository>, ActualError> {
+        let url = format!("{}/v1/connected-repos", self.base_url);
+        let response = self
+            .authed(self.client.get(&url).query(&[("org_id", org_id)]))
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ActualError::NotLoggedIn);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Err(Self::forbidden_org_error());
+        }
+        if !status.is_success() {
+            return Err(Self::map_connected_repos_error(status, response).await);
+        }
+        response
+            .json::<GetConnectedReposResponse>()
+            .await
+            .map(|body| body.repositories)
+            .map_err(|e| ActualError::ApiError(e.to_string()))
+    }
+
+    /// Map a non-success connected-repos response to an error. This endpoint
+    /// returns a flat `{error, message}` body (unlike the advisor routes' nested
+    /// `{error:{code,message}}`), so surface its `message` directly, falling back
+    /// to the status line when the body is absent, empty, or unparseable.
+    async fn map_connected_repos_error(
+        status: reqwest::StatusCode,
+        response: reqwest::Response,
+    ) -> ActualError {
+        match response.json::<ConnectedReposErrorBody>().await {
+            Ok(body) if !body.message.is_empty() => {
+                ActualError::ApiError(format!("HTTP {status}: {}", body.message))
+            }
+            _ => ActualError::ApiError(format!("HTTP {status}")),
+        }
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ActualError> {
@@ -1837,5 +1885,214 @@ mod tests {
             "expected OrgMismatch for 403, got {err:?}"
         );
         mock.assert_async().await;
+    }
+
+    // --- Connected-repos client tests ---
+
+    const CONNECTED_REPOS_BODY: &str = r#"{
+        "repositories": [
+            {
+                "repo_unique_id": "33333333-3333-3333-3333-333333333333",
+                "name": "actual-cli",
+                "external_owner": "actual-software",
+                "url": "https://github.com/actual-software/actual-cli"
+            },
+            {
+                "repo_unique_id": "44444444-4444-4444-4444-444444444444",
+                "name": "web-app",
+                "external_owner": "actual-software",
+                "url": "https://github.com/actual-software/web-app"
+            }
+        ]
+    }"#;
+
+    #[tokio::test]
+    async fn test_list_connected_repos_success_sends_bearer_and_org_id() {
+        let mut server = mockito::Server::new_async().await;
+        let org = "11111111-1111-1111-1111-111111111111";
+        let mock = server
+            .mock("GET", "/v1/connected-repos")
+            .match_header("authorization", "Bearer tok-123")
+            .match_query(mockito::Matcher::UrlEncoded("org_id".into(), org.into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(CONNECTED_REPOS_BODY)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("tok-123");
+        let repos = client.list_connected_repos(org).await.unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].name, "actual-cli");
+        assert_eq!(
+            repos[0].repo_unique_id,
+            "33333333-3333-3333-3333-333333333333"
+        );
+        assert_eq!(repos[0].external_owner, "actual-software");
+        assert_eq!(repos[1].name, "web-app");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_connected_repos_empty_list() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"repositories":[]}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let repos = client
+            .list_connected_repos("11111111-1111-1111-1111-111111111111")
+            .await
+            .unwrap();
+        assert!(repos.is_empty());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_connected_repos_unauthorized_maps_to_not_logged_in() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(401)
+            .with_body(r#"{"error":"unauthorized","message":"authentication required"}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("bad");
+        let err = client.list_connected_repos("org").await.unwrap_err();
+        assert!(matches!(err, ActualError::NotLoggedIn));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_connected_repos_forbidden_maps_to_org_mismatch() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(403)
+            .with_body(r#"{"error":"forbidden","message":"cross-org"}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client.list_connected_repos("org").await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::OrgMismatch { .. }),
+            "expected OrgMismatch for 403, got {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_connected_repos_not_found_surfaces_flat_message() {
+        let mut server = mockito::Server::new_async().await;
+        // The connected-repos endpoint returns a flat {error, message} body; the
+        // human-readable message is surfaced (map_connected_repos_error message arm).
+        let mock = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(404)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"error":"not_found","message":"organization not found or not accessible"}"#,
+            )
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client.list_connected_repos("org").await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("404") && m.contains("organization not found")),
+            "got: {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_connected_repos_empty_message_falls_back_to_status() {
+        let mut server = mockito::Server::new_async().await;
+        // A parseable body with a blank message → the guard is false, so the
+        // status-only fallback arm is taken.
+        let mock = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"bad_request","message":""}"#)
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client.list_connected_repos("org").await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("400")),
+            "got: {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_connected_repos_unparseable_error_body_falls_back_to_status() {
+        let mut server = mockito::Server::new_async().await;
+        // A non-JSON error body → the parse fails and the status-only fallback
+        // arm is taken (map_connected_repos_error catch-all).
+        let mock = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body("boom")
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client.list_connected_repos("org").await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("500")),
+            "got: {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_connected_repos_success_unparseable_body_is_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not valid json")
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let err = client.list_connected_repos("org").await.unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(_)), "got: {err:?}");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_list_connected_repos_network_error() {
+        let client = ActualApiClient::new("http://127.0.0.1:1")
+            .unwrap()
+            .with_bearer("t");
+        let err = client.list_connected_repos("org").await.unwrap_err();
+        assert!(matches!(err, ActualError::ApiError(_)));
     }
 }
