@@ -364,8 +364,9 @@ pub struct AdvisorArgs {
     /// name (e.g. `actual-cli`, or `owner/actual-cli` to disambiguate a name
     /// shared across owners) or as its UUID. A name is resolved to a repo id via
     /// the connected-repos API; an unrecognized name fails with the list of
-    /// repositories you can choose from. When omitted, the query runs at org
-    /// level.
+    /// repositories you can choose from. When omitted, the repository is
+    /// auto-detected from the working tree's `origin` remote; if nothing matches
+    /// (or the match is ambiguous), the query runs at the organization level.
     #[arg(long, value_name = "REPO")]
     pub repo: Option<String>,
 }
