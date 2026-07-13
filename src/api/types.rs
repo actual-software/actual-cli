@@ -172,6 +172,38 @@ pub struct HealthResponse {
     pub version: String,
 }
 
+// --- Connected-repos types (GET /v1/connected-repos) ---
+
+/// One repository connected to an organization. Fields are snake_case to match
+/// the other CLI-facing (advisor) response bodies. Lets a client map a
+/// repository `name` (or `external_owner`/`name`) to its `repo_unique_id`.
+/// Extra server fields are ignored.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ConnectedRepository {
+    pub repo_unique_id: String,
+    pub name: String,
+    pub external_owner: String,
+    pub url: String,
+}
+
+/// Response body for `GET /v1/connected-repos`. `repositories` defaults to empty
+/// when the org has none connected.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct GetConnectedReposResponse {
+    #[serde(default)]
+    pub repositories: Vec<ConnectedRepository>,
+}
+
+/// Flat error body returned by `GET /v1/connected-repos` (`{error, message}`),
+/// distinct from the advisor routes' nested [`ApiErrorResponse`]. Only the
+/// human-readable `message` is consumed (the sibling `error` code is ignored);
+/// it defaults to empty so a partial or unexpected body still deserializes.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ConnectedReposErrorBody {
+    #[serde(default)]
+    pub message: String,
+}
+
 // --- Telemetry types (POST /counter/record) ---
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1067,5 +1099,49 @@ mod tests {
         let out: AdvisorOutput = serde_json::from_str(json).unwrap();
         assert_eq!(out.interpreter.related_adrs[0].url, None);
         assert_eq!(out.interpreter.related_adrs[1].url, None);
+    }
+
+    #[test]
+    fn test_connected_repos_response_deserializes_all_fields() {
+        let json = r#"{
+            "repositories": [
+                {
+                    "repo_unique_id": "33333333-3333-3333-3333-333333333333",
+                    "name": "actual-cli",
+                    "external_owner": "actual-software",
+                    "url": "https://github.com/actual-software/actual-cli"
+                }
+            ]
+        }"#;
+        let resp: GetConnectedReposResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.repositories.len(), 1);
+        let repo = &resp.repositories[0];
+        assert_eq!(repo.repo_unique_id, "33333333-3333-3333-3333-333333333333");
+        assert_eq!(repo.name, "actual-cli");
+        assert_eq!(repo.external_owner, "actual-software");
+        assert_eq!(repo.url, "https://github.com/actual-software/actual-cli");
+    }
+
+    #[test]
+    fn test_connected_repos_response_missing_repositories_defaults_empty() {
+        // A body without `repositories` deserializes to an empty list (the
+        // `#[serde(default)]` path), not an error.
+        let resp: GetConnectedReposResponse = serde_json::from_str("{}").unwrap();
+        assert!(resp.repositories.is_empty());
+    }
+
+    #[test]
+    fn test_connected_repos_error_body_reads_message() {
+        let body: ConnectedReposErrorBody =
+            serde_json::from_str(r#"{"error":"not_found","message":"organization not found"}"#)
+                .unwrap();
+        assert_eq!(body.message, "organization not found");
+    }
+
+    #[test]
+    fn test_connected_repos_error_body_missing_message_defaults_empty() {
+        // Absent `message` (and an ignored, unknown `error` code) defaults to "".
+        let body: ConnectedReposErrorBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(body.message, "");
     }
 }

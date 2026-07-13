@@ -9,8 +9,11 @@ use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 
+use uuid::Uuid;
+
 use crate::api::types::{
     AdvisorJobStatus, AdvisorOutput, AdvisorPoll, AdvisorQueryRequest, AdvisorSink, AdvisorSurface,
+    ConnectedRepository,
 };
 use crate::api::{ActualApiClient, DEFAULT_API_URL};
 use crate::auth::oauth;
@@ -56,6 +59,77 @@ fn resolve_api_url(flag: Option<&str>) -> String {
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| DEFAULT_API_URL.to_string())
+}
+
+/// Resolve a `--repo` value to a `repo_unique_id`. A value that parses as a UUID
+/// is already an id and is returned as-is (no lookup, backward compatible); any
+/// other value is treated as a repository name and resolved against the org's
+/// connected repositories via `GET /v1/connected-repos`.
+async fn resolve_repo(
+    value: &str,
+    client: &ActualApiClient,
+    org_id: &str,
+) -> Result<String, ActualError> {
+    if Uuid::parse_str(value).is_ok() {
+        return Ok(value.to_string());
+    }
+    let repos = client.list_connected_repos(org_id).await?;
+    resolve_repo_name(value, &repos)
+}
+
+/// Match a repository name against the org's connected repos. A bare `name`
+/// matches the `name` field; an `owner/name` form additionally constrains the
+/// owner, disambiguating a name shared across owners. Zero matches — or a bare
+/// name shared across owners — is a `RepoNotFound` error whose message lists the
+/// choices.
+fn resolve_repo_name(value: &str, repos: &[ConnectedRepository]) -> Result<String, ActualError> {
+    let matches: Vec<&ConnectedRepository> = match value.split_once('/') {
+        Some((owner, name)) => repos
+            .iter()
+            .filter(|r| r.external_owner == owner && r.name == name)
+            .collect(),
+        None => repos.iter().filter(|r| r.name == value).collect(),
+    };
+    match matches.as_slice() {
+        [single] => Ok(single.repo_unique_id.clone()),
+        [] => Err(ActualError::RepoNotFound(not_found_message(value, repos))),
+        multiple => Err(ActualError::RepoNotFound(ambiguous_message(
+            value, multiple,
+        ))),
+    }
+}
+
+/// A connected repo rendered as `owner/name` for user-facing lists.
+fn qualified_name(repo: &ConnectedRepository) -> String {
+    format!("{}/{}", repo.external_owner, repo.name)
+}
+
+/// Build the "no match" error message, listing every connected repository (or
+/// noting when the organization has none connected).
+fn not_found_message(value: &str, repos: &[ConnectedRepository]) -> String {
+    if repos.is_empty() {
+        return format!(
+            "No repository named '{value}': this organization has no connected repositories."
+        );
+    }
+    let mut msg = format!("No connected repository matches '{value}'. Connected repositories:");
+    for repo in repos {
+        msg.push_str("\n  • ");
+        msg.push_str(&qualified_name(repo));
+    }
+    msg
+}
+
+/// Build the "ambiguous bare name" error message, listing the owner-qualified
+/// candidates so the caller can pick one.
+fn ambiguous_message(value: &str, matches: &[&ConnectedRepository]) -> String {
+    let mut msg =
+        format!("'{value}' matches multiple connected repositories; qualify it as owner/name:");
+    for repo in matches {
+        msg.push_str("\n  • ");
+        msg.push_str(&qualified_name(repo));
+    }
+    msg
 }
 
 fn enrich_org_mismatch(
@@ -139,9 +213,21 @@ async fn run(
     let base_url = resolve_api_url(args.api_url.as_deref());
     let client = ActualApiClient::new(&base_url)?.with_bearer(&creds.access_token);
 
+    // Resolve --repo to a repo id: a UUID is used as-is; any other value is a
+    // repository name resolved via the connected-repos API. A 403 during that
+    // lookup gets the same cross-org guidance as the query itself.
+    let repo_unique_id = match args.repo.as_deref() {
+        Some(value) => Some(
+            resolve_repo(value, &client, &org_id)
+                .await
+                .map_err(|e| enrich_org_mismatch(e, &session_org, &org_id, explicit_org))?,
+        ),
+        None => None,
+    };
+
     let request = AdvisorQueryRequest::new(
         org_id.clone(),
-        args.repo.clone(),
+        repo_unique_id,
         args.query.clone(),
         AdvisorSurface::cli(),
         AdvisorSink::None,
@@ -902,6 +988,191 @@ mod tests {
         assert!(
             !message.contains("actual login"),
             "remediation should not be in the message: {message}"
+        );
+    }
+
+    // --- --repo name resolution ---
+
+    fn repo(owner: &str, name: &str, id: &str) -> ConnectedRepository {
+        ConnectedRepository {
+            repo_unique_id: id.to_string(),
+            name: name.to_string(),
+            external_owner: owner.to_string(),
+            url: format!("https://github.com/{owner}/{name}"),
+        }
+    }
+
+    #[test]
+    fn test_qualified_name_is_owner_slash_name() {
+        assert_eq!(
+            qualified_name(&repo("actual-software", "actual-cli", "id")),
+            "actual-software/actual-cli"
+        );
+    }
+
+    #[test]
+    fn test_resolve_repo_name_by_bare_name() {
+        let repos = vec![
+            repo("actual-software", "actual-cli", "id-cli"),
+            repo("actual-software", "web-app", "id-web"),
+        ];
+        assert_eq!(resolve_repo_name("actual-cli", &repos).unwrap(), "id-cli");
+    }
+
+    #[test]
+    fn test_resolve_repo_name_by_owner_slash_name() {
+        // Two repos share the short name; the owner-qualified form disambiguates.
+        let repos = vec![
+            repo("actual-software", "cli", "id-a"),
+            repo("other-org", "cli", "id-b"),
+        ];
+        assert_eq!(resolve_repo_name("other-org/cli", &repos).unwrap(), "id-b");
+    }
+
+    #[test]
+    fn test_resolve_repo_name_not_found_lists_connected_repos() {
+        let repos = vec![
+            repo("actual-software", "actual-cli", "id-cli"),
+            repo("actual-software", "web-app", "id-web"),
+        ];
+        let err = resolve_repo_name("nope", &repos).unwrap_err();
+        assert!(matches!(err, ActualError::RepoNotFound(_)), "got: {err:?}");
+        // RepoNotFound Displays as its message ({0}); assert on that.
+        let msg = err.to_string();
+        assert!(msg.contains("nope"), "got: {msg}");
+        assert!(msg.contains("actual-software/actual-cli"), "got: {msg}");
+        assert!(msg.contains("actual-software/web-app"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_resolve_repo_name_ambiguous_bare_name() {
+        // A bare name shared across owners is ambiguous and asks for owner/name.
+        let repos = vec![
+            repo("actual-software", "cli", "id-a"),
+            repo("other-org", "cli", "id-b"),
+        ];
+        let err = resolve_repo_name("cli", &repos).unwrap_err();
+        assert!(matches!(err, ActualError::RepoNotFound(_)), "got: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("multiple"), "got: {msg}");
+        assert!(msg.contains("actual-software/cli"), "got: {msg}");
+        assert!(msg.contains("other-org/cli"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_not_found_message_when_org_has_no_connected_repos() {
+        let msg = not_found_message("anything", &[]);
+        assert!(msg.contains("anything"), "got: {msg}");
+        assert!(
+            msg.contains("no connected repositories"),
+            "expected empty-org phrasing in: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_repo_uuid_passes_through_without_lookup() {
+        // A UUID short-circuits: the unreachable client is never called.
+        let client = ActualApiClient::new("http://127.0.0.1:1")
+            .unwrap()
+            .with_bearer("t");
+        let id = "33333333-3333-3333-3333-333333333333";
+        assert_eq!(resolve_repo(id, &client, "org").await.unwrap(), id);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_repo_by_name_calls_connected_repos_api() {
+        let mut server = mockito::Server::new_async().await;
+        let m = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"repositories":[{"repo_unique_id":"33333333-3333-3333-3333-333333333333","name":"actual-cli","external_owner":"actual-software","url":"https://github.com/actual-software/actual-cli"}]}"#,
+            )
+            .create_async()
+            .await;
+        let client = ActualApiClient::new(&server.url())
+            .unwrap()
+            .with_bearer("t");
+        let id = resolve_repo("actual-cli", &client, "org").await.unwrap();
+        assert_eq!(id, "33333333-3333-3333-3333-333333333333");
+        m.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_run_with_repo_name_resolves_and_scopes_request() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        // Name → id lookup happens first.
+        let repos = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"repositories":[{"repo_unique_id":"33333333-3333-3333-3333-333333333333","name":"actual-cli","external_owner":"actual-software","url":"https://github.com/actual-software/actual-cli"}]}"#,
+            )
+            .create_async()
+            .await;
+        // The advisor request then carries the resolved repo id.
+        let start = server
+            .mock("POST", "/v1/advisor/query")
+            .match_body(mockito::Matcher::PartialJsonString(
+                r#"{"repo_unique_id":"33333333-3333-3333-3333-333333333333"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(START_BODY)
+            .create_async()
+            .await;
+        let _poll = server
+            .mock("GET", POLL_PATH)
+            .with_body(succeeded_body(""))
+            .with_header("content-type", "application/json")
+            .create_async()
+            .await;
+
+        let mut a = args(&server.url(), None);
+        a.repo = Some("actual-cli".to_string());
+        run(&a, Duration::from_secs(60), Duration::ZERO)
+            .await
+            .unwrap();
+        repos.assert_async().await;
+        start.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_run_with_unknown_repo_name_errors_before_query() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
+        let tmp = tempdir().unwrap();
+        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+        store::save(&test_creds()).unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let _repos = server
+            .mock("GET", "/v1/connected-repos")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"repositories":[]}"#)
+            .create_async()
+            .await;
+
+        let mut a = args(&server.url(), None);
+        a.repo = Some("ghost".to_string());
+        let err = run(&a, Duration::from_secs(60), Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::RepoNotFound(ref m) if m.contains("ghost")),
+            "got: {err:?}"
         );
     }
 }
