@@ -118,6 +118,11 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected_adrs: Option<HashMap<String, Vec<String>>>,
 
+    /// Remembered `actual advisor` repo scope per repo (keyed by SHA-256 of
+    /// origin URL, the same key `rejected_adrs` uses). See [`crate::config::sticky`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticky_repo_scope: Option<HashMap<String, StickyScope>>,
+
     /// Cached repo analysis (keyed to HEAD commit hash).
     #[serde(
         default,
@@ -181,6 +186,7 @@ impl Default for Config {
             output_format: None,
             telemetry: None,
             rejected_adrs: None,
+            sticky_repo_scope: None,
             cached_analysis: None,
             cached_tailoring: None,
             runner: None,
@@ -189,6 +195,41 @@ impl Default for Config {
             cursor_api_key: None,
             max_turns: None,
             max_tokens: None,
+        }
+    }
+}
+
+/// A repository scope remembered for the `actual advisor` command, stored per
+/// repo in [`Config::sticky_repo_scope`].
+///
+/// A stored entry with `repo_unique_id` set pins the advisor to that repo; an
+/// entry with `repo_unique_id` `None` records an explicit org-level pin (the
+/// user opted out of repo scoping). No entry at all means "not pinned" — the
+/// advisor auto-detects from the git remote.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StickyScope {
+    /// The pinned repo's unique id. `None` records an explicit org-level pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_unique_id: Option<String>,
+    /// The pinned repo's `owner/name`, kept for display. Unused for an org pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualified_name: Option<String>,
+}
+
+impl StickyScope {
+    /// A pin to a specific connected repository.
+    pub fn repo(repo_unique_id: impl Into<String>, qualified_name: Option<String>) -> Self {
+        Self {
+            repo_unique_id: Some(repo_unique_id.into()),
+            qualified_name,
+        }
+    }
+
+    /// An explicit org-level pin (opt out of repo scoping).
+    pub fn org_level() -> Self {
+        Self {
+            repo_unique_id: None,
+            qualified_name: None,
         }
     }
 }
@@ -314,6 +355,7 @@ mod tests {
                 enabled: Some(false),
             }),
             rejected_adrs: Some(rejected),
+            sticky_repo_scope: None,
             cached_analysis: None,
             cached_tailoring: None,
             output_format: None,

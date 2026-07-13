@@ -346,9 +346,11 @@ pub enum Command {
 /// Arguments for the `advisor` command
 #[derive(Parser, Debug)]
 pub struct AdvisorArgs {
-    /// The architecture question to ask the Advisor.
-    #[arg(value_name = "QUERY")]
-    pub query: String,
+    /// The architecture question to ask the Advisor. Optional when a scope
+    /// command is used on its own: `--show-scope`, or a `--repo` value with no
+    /// question (which just changes the remembered scope).
+    #[arg(value_name = "QUERY", required_unless_present_any = ["show_scope", "repo"])]
+    pub query: Option<String>,
 
     /// Advisor API base URL (e.g. http://localhost:3099 for the mock).
     /// Defaults to the production api-service.
@@ -357,6 +359,9 @@ pub struct AdvisorArgs {
 
     /// Organization to scope the query to. Defaults to the signed-in org.
     /// Required against the dev advisor mock, which expects a UUID org id.
+    /// Passing `--org` without `--repo` runs this query at the organization
+    /// level (an explicit opt-out of repo scoping) without changing the
+    /// remembered scope.
     #[arg(long, value_name = "ORG_ID")]
     pub org: Option<String>,
 
@@ -367,8 +372,20 @@ pub struct AdvisorArgs {
     /// repositories you can choose from. When omitted, the repository is
     /// auto-detected from the working tree's `origin` remote; if nothing matches
     /// (or the match is ambiguous), the query runs at the organization level.
+    ///
+    /// The chosen scope is remembered per repository for later `actual advisor`
+    /// calls from the same working tree (see `--show-scope`). Two values are
+    /// reserved keywords: `none` pins the scope to the organization level (opt
+    /// out of repo scoping), and `auto` forgets the pin and reverts to
+    /// git-remote auto-detection. To scope to a repository literally named
+    /// `none` or `auto`, pass its UUID or `owner/name` form.
     #[arg(long, value_name = "REPO")]
     pub repo: Option<String>,
+
+    /// Print the remembered advisor scope for the current repository and exit,
+    /// without asking a question.
+    #[arg(long)]
+    pub show_scope: bool,
 }
 
 /// Arguments for the `adr-bot` command
@@ -1390,5 +1407,57 @@ mod parse_tests {
         // Exercises the `_ => false` arm of no_fetch_from_command
         let cli = Cli::try_parse_from(["actual", "status"]).unwrap();
         assert!(!no_fetch_from_command(cli.command));
+    }
+
+    /// Parse `argv` and return the advisor args, or `None` when parsing fails or
+    /// the command is not `advisor`.
+    fn advisor_args_from(argv: &[&str]) -> Option<AdvisorArgs> {
+        match Cli::try_parse_from(argv).ok()?.command {
+            Command::Advisor(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_advisor_query_and_flags_parse() {
+        let a = advisor_args_from(&[
+            "actual",
+            "advisor",
+            "why the app router?",
+            "--repo",
+            "myrepo",
+        ])
+        .expect("advisor with a question should parse");
+        assert_eq!(a.query.as_deref(), Some("why the app router?"));
+        assert_eq!(a.repo.as_deref(), Some("myrepo"));
+        assert!(!a.show_scope);
+    }
+
+    #[test]
+    fn test_advisor_show_scope_makes_query_optional() {
+        let a = advisor_args_from(&["actual", "advisor", "--show-scope"])
+            .expect("--show-scope needs no question");
+        assert!(a.query.is_none());
+        assert!(a.show_scope);
+    }
+
+    #[test]
+    fn test_advisor_repo_change_makes_query_optional() {
+        let a = advisor_args_from(&["actual", "advisor", "--repo", "none"])
+            .expect("a --repo change needs no question");
+        assert!(a.query.is_none());
+        assert_eq!(a.repo.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn test_advisor_requires_question_or_scope_flag() {
+        // Neither a question nor a scope flag → clap rejects the invocation.
+        assert!(advisor_args_from(&["actual", "advisor"]).is_none());
+    }
+
+    #[test]
+    fn test_advisor_args_from_non_advisor_command_is_none() {
+        // Covers the helper's non-advisor fallback arm.
+        assert!(advisor_args_from(&["actual", "status"]).is_none());
     }
 }
