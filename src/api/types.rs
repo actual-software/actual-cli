@@ -183,6 +183,7 @@ pub struct ConnectedRepository {
     pub repo_unique_id: String,
     pub name: String,
     pub external_owner: String,
+    #[serde(default)]
     pub url: String,
 }
 
@@ -1120,6 +1121,26 @@ mod tests {
         assert_eq!(repo.name, "actual-cli");
         assert_eq!(repo.external_owner, "actual-software");
         assert_eq!(repo.url, "https://github.com/actual-software/actual-cli");
+    }
+
+    #[test]
+    fn test_connected_repository_missing_url_defaults_empty() {
+        // `url` is never read by name resolution, so a server body that omits
+        // (or renames) it must still deserialize rather than fail the whole
+        // response — the `#[serde(default)]` path.
+        let json = r#"{
+            "repositories": [
+                {
+                    "repo_unique_id": "33333333-3333-3333-3333-333333333333",
+                    "name": "actual-cli",
+                    "external_owner": "actual-software"
+                }
+            ]
+        }"#;
+        let resp: GetConnectedReposResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.repositories.len(), 1);
+        assert_eq!(resp.repositories[0].name, "actual-cli");
+        assert_eq!(resp.repositories[0].url, "");
     }
 
     #[test]
