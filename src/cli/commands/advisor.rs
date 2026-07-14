@@ -86,9 +86,14 @@ fn resolve_repo_name(value: &str, repos: &[ConnectedRepository]) -> Result<Strin
     let matches: Vec<&ConnectedRepository> = match value.split_once('/') {
         Some((owner, name)) => repos
             .iter()
-            .filter(|r| r.external_owner == owner && r.name == name)
+            .filter(|r| {
+                r.external_owner.eq_ignore_ascii_case(owner) && r.name.eq_ignore_ascii_case(name)
+            })
             .collect(),
-        None => repos.iter().filter(|r| r.name == value).collect(),
+        None => repos
+            .iter()
+            .filter(|r| r.name.eq_ignore_ascii_case(value))
+            .collect(),
     };
     match matches.as_slice() {
         [single] => Ok(single.repo_unique_id.clone()),
@@ -1027,6 +1032,19 @@ mod tests {
             repo("other-org", "cli", "id-b"),
         ];
         assert_eq!(resolve_repo_name("other-org/cli", &repos).unwrap(), "id-b");
+    }
+
+    #[test]
+    fn test_resolve_repo_name_is_case_insensitive() {
+        // GitHub owner/repo names are case-insensitive in practice; a
+        // differently-cased --repo value still resolves, in both the bare-name
+        // and owner-qualified forms.
+        let repos = vec![repo("actual-software", "actual-cli", "id-cli")];
+        assert_eq!(resolve_repo_name("ACTUAL-CLI", &repos).unwrap(), "id-cli");
+        assert_eq!(
+            resolve_repo_name("Actual-Software/Actual-CLI", &repos).unwrap(),
+            "id-cli"
+        );
     }
 
     #[test]
