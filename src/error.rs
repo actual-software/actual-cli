@@ -178,7 +178,7 @@ impl ActualError {
             // to a static string like `NotLoggedIn`.
             Self::OrgMismatch { hint, .. } => Some(Cow::Owned(hint.clone())),
             Self::RepoNotFound(_) => Some(Cow::Borrowed(
-                "Pass one of the connected repository names to --repo (or omit --repo to query the whole organization)",
+                "Pass a connected repository name to --repo, or omit --repo to query the whole organization",
             )),
             _ => None,
         }
@@ -854,7 +854,7 @@ mod tests {
             "expected --repo guidance in hint: {hint}"
         );
         assert!(
-            !msg.contains("Pass one of"),
+            !msg.contains("Pass a connected"),
             "remediation should not be in Display: {msg}"
         );
     }
