@@ -55,6 +55,7 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "tui-test",
+ "url",
  "uuid",
  "which",
  "zip",

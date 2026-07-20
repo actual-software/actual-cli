@@ -140,12 +140,10 @@ pub fn build_authorize_url(
 
 /// Build an HTTP client for the auth server. Enforces HTTPS for non-loopback
 /// URLs so tokens are never sent in clear text (loopback `http://` is allowed
-/// for the local mock).
+/// for the local mock — see [`crate::net::is_loopback_http_url`]).
 fn build_http_client(base_url: &str) -> Result<reqwest::Client, ActualError> {
-    let is_localhost = base_url.starts_with("http://localhost")
-        || base_url.starts_with("http://127.0.0.1")
-        || base_url.starts_with("http://[::1]");
-    if !base_url.starts_with("https://") && !is_localhost {
+    let is_loopback = crate::net::is_loopback_http_url(base_url);
+    if !base_url.starts_with("https://") && !is_loopback {
         return Err(ActualError::ConfigError(
             "Auth server URL must use HTTPS (got a non-HTTPS, non-loopback URL). \
              Use https:// to protect your credentials."
@@ -154,7 +152,7 @@ fn build_http_client(base_url: &str) -> Result<reqwest::Client, ActualError> {
     }
     reqwest::Client::builder()
         .user_agent(USER_AGENT_VALUE)
-        .https_only(!is_localhost)
+        .https_only(!is_loopback)
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
         .build()
@@ -437,6 +435,37 @@ mod tests {
             client_id: "actual-cli".to_string(),
             scopes: "openid profile offline_access".to_string(),
         }
+    }
+
+    // --- Transport guard: the auth client must refuse to relax HTTPS for any
+    // non-loopback host. The exact-host predicate itself is unit-tested in
+    // `crate::net`; these cover this client's use of it. ---
+
+    #[test]
+    fn test_build_http_client_rejects_bypass_urls() {
+        // Each bypass URL must be refused outright — the HTTPS guard stays on,
+        // so no clear-text client is ever built for a non-loopback host.
+        for url in [
+            "http://localhost.evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://127.0.0.1@evil.com",
+            "http://evil.com",
+        ] {
+            let err = build_http_client(url).unwrap_err();
+            assert!(
+                matches!(err, ActualError::ConfigError(ref m) if m.contains("HTTPS")),
+                "expected HTTPS-guard rejection for {url}, got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_http_client_allows_loopback_and_https() {
+        // Genuine loopback dev endpoints and any https URL still build fine.
+        assert!(build_http_client("http://localhost:4000").is_ok());
+        assert!(build_http_client("http://127.0.0.1:4000").is_ok());
+        assert!(build_http_client("http://[::1]:4000").is_ok());
+        assert!(build_http_client("https://app.actual.ai").is_ok());
     }
 
     #[test]
@@ -921,10 +950,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_login_with_authorize_url_error() {
-        // base_url passes the loopback HTTP-client guard (localhost) but fails
-        // URL parsing (invalid port) → exercises the build_authorize_url `?`
+        // base_url passes the HTTP-client guard (an `https://` URL is accepted
+        // by scheme prefix, without a full parse) but fails `build_authorize_url`'s
+        // URL parse (invalid port 99999) → exercises the build_authorize_url `?`
         // error path inside login_with.
-        let cfg = test_cfg("http://127.0.0.1:99999");
+        let cfg = test_cfg("https://127.0.0.1:99999");
         let server = LoopbackServer::bind().await.unwrap();
         let opener = |_: &str| {};
         let err = login_with(

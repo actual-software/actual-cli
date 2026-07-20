@@ -25,6 +25,9 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+# URL parsing (reqwest's own dependency) — used to match loopback hosts exactly
+# rather than by string prefix, so the HTTPS transport guard cannot be bypassed.
+url = "2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
