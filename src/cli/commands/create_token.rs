@@ -180,10 +180,12 @@ fn print_result(
 }
 
 /// Surface a token that was minted but could **not** be stored, so the user can
-/// still capture and revoke it. Preserves the same capture contract as the
-/// success path — the raw token on `out` (stdout) alone, everything else on
-/// `err` (stderr) — so a store failure after a successful server-side mint can
-/// never strand a live, unrevocable secret the user never saw.
+/// still capture and revoke it. The raw token is written to `out` (stdout),
+/// alone, as the **very first** output — before any human-facing chrome — while
+/// the guidance on `err` (stderr) is strictly best-effort. A store failure after
+/// a successful server-side mint leaves the token live but unpersisted, so stdout
+/// is its only copy; emitting it first means a broken or closed stderr can never
+/// return early and strand a live, unrevocable secret the user never saw.
 fn print_unstored_token(
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -191,58 +193,62 @@ fn print_unstored_token(
     issued: &pat::IssuedToken,
     store_err: &ActualError,
 ) -> io::Result<()> {
-    writeln!(
+    // The token is the one irrecoverable artifact here: it is LIVE server-side
+    // but was NOT persisted locally, so this stdout line is the only copy the
+    // user will ever see. Emit it FIRST — before any fallible stderr chrome — so
+    // a broken or closed stderr can never return early and strand the secret.
+    // Same capture contract as the success path: the raw secret on stdout, alone.
+    writeln!(out, "{}", issued.token)?;
+
+    // Everything below is human-facing guidance on stderr and is strictly
+    // best-effort: a stderr write failure must never discard or precede the
+    // token already written above, so these results are deliberately ignored
+    // rather than propagated with `?`.
+    let _ = writeln!(
         err,
         "{} Minted token {} but could not store it: {}",
         theme::error(&theme::ERROR),
         theme::error(format!("\"{}\"", args.name)),
         store_err
-    )?;
+    );
     match &issued.id {
         Some(id) => {
-            writeln!(err, "  {:<12} {}", "Token id:", id)?;
-            writeln!(err)?;
-            writeln!(
+            let _ = writeln!(err, "  {:<12} {}", "Token id:", id);
+            let _ = writeln!(err);
+            let _ = writeln!(
                 err,
-                "This token is LIVE on the server. Copy it below to use it now, or revoke it by the id above."
-            )?;
+                "This token is LIVE on the server. Copy the token printed on stdout to use it now, or revoke it by the id above."
+            );
         }
         None => {
-            writeln!(err)?;
-            writeln!(
+            let _ = writeln!(err);
+            let _ = writeln!(
                 err,
-                "This token is LIVE on the server but no id was returned, so it cannot be revoked by id — capture it below, or rotate the credential if you cannot."
-            )?;
+                "This token is LIVE on the server but no id was returned, so it cannot be revoked by id — capture the token printed on stdout, or rotate the credential if you cannot."
+            );
         }
     }
-    writeln!(err)?;
-    writeln!(err, "Your token is shown once below. Copy it now:")?;
-    writeln!(err)?;
-
-    // Same capture contract as the success path: the raw secret on stdout, alone.
-    writeln!(out, "{}", issued.token)?;
-
-    writeln!(err)?;
-    writeln!(
+    let _ = writeln!(err);
+    let _ = writeln!(
         err,
         "{}",
         theme::warning("Storage failed — the token was NOT saved locally.")
-    )?;
-    writeln!(
+    );
+    let _ = writeln!(
         err,
-        "  • Capture the token above now; it will not be shown again."
-    )?;
-    writeln!(
+        "  • Capture the token now (printed on stdout above); it will not be shown again."
+    );
+    let _ = writeln!(
         err,
         "  • If you cannot capture it, revoke it by the id above so it is not left orphaned."
-    )?;
-    writeln!(
+    );
+    let _ = writeln!(
         err,
         "  • Fix the store ({}=file with {} set, or pass {} directly) and re-run.",
         token_store::STORE_BACKEND_ENV,
         token_store::PASSPHRASE_ENV,
         token_store::ACTUAL_TOKEN_ENV
-    )?;
+    );
     Ok(())
 }
 
@@ -610,31 +616,41 @@ mod tests {
     }
 
     #[test]
-    fn test_print_unstored_token_propagates_stderr_write_failure() {
-        // Same error-propagation contract for the store-failure surface, swept
-        // across both the has-id and no-id chrome so every writeln `?` (in both
-        // branches) is exercised.
+    fn test_print_unstored_token_emits_token_despite_stderr_failure() {
+        // The minted-but-unstored token is the one irrecoverable artifact on this
+        // path — LIVE server-side but not persisted, so stdout is its only copy.
+        // A broken or closed stderr must never prevent or discard that stdout
+        // write. Fail stderr on its very first write (so no chrome can be emitted
+        // at all) and confirm the token still lands on stdout, alone, in both the
+        // has-id and no-id arms.
         for with_id in [true, false] {
-            for n in 0..50 {
-                let mut issued = sample_issued("actl_pat_x");
-                if !with_id {
-                    issued.id = None;
-                }
-                let args = sample_args("agent-x");
-                let store_err = ActualError::ConfigError("store down".to_string());
-                let mut out: Vec<u8> = Vec::new();
-                let mut err = FailAfter {
-                    remaining: n,
-                    tripped: false,
-                };
-                let r = print_unstored_token(&mut out, &mut err, &args, &issued, &store_err);
-                if err.tripped {
-                    assert!(
-                        r.is_err(),
-                        "a stderr write failure (id={with_id}, after {n}) must propagate"
-                    );
-                }
+            let mut issued = sample_issued("actl_pat_x");
+            if !with_id {
+                issued.id = None;
             }
+            let args = sample_args("agent-x");
+            let store_err = ActualError::ConfigError("store down".to_string());
+            let mut out: Vec<u8> = Vec::new();
+            let mut err = FailAfter {
+                remaining: 0,
+                tripped: false,
+            };
+            let r = print_unstored_token(&mut out, &mut err, &args, &issued, &store_err);
+            // stdout is writable, so the call succeeds and the token reaches it
+            // even though every stderr write failed.
+            assert!(
+                r.is_ok(),
+                "a failing stderr must not fail the token write (id={with_id})"
+            );
+            assert!(
+                err.tripped,
+                "the failing-stderr path must actually be exercised (id={with_id})"
+            );
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                "actl_pat_x\n",
+                "the token must reach stdout, alone, even when stderr is broken (id={with_id})"
+            );
         }
     }
 
