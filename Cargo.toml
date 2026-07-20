@@ -58,6 +58,24 @@ glob = "0.3"
 # Crypto
 sha2 = "0.10"
 base64 = "0.22"
+# Scoped personal-access-token storage: OS keychain (primary) with an
+# AEAD-encrypted-file fallback for headless Linux/CI where no OS keychain is
+# available. `keyring` is the portable keychain abstraction; chacha20poly1305 +
+# argon2 protect the fallback file at rest.
+#
+# The Linux backend is `linux-native` (kernel keyutils), NOT `sync-secret-service`.
+# The Secret Service backend links the system `libdbus` at build time through
+# pkg-config, so it fails to *compile* on a headless / CI Linux host that lacks
+# `libdbus-1-dev` — a harder failure than a runtime missing-daemon error. keyutils
+# is pure syscalls: no build-time system dependency, no D-Bus daemon, so it builds
+# everywhere and works headless. See docs/AGENT_AUTH.md for the finding.
+keyring = { version = "3", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+    "linux-native",
+] }
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
 
 # Async utilities
 futures = "0.3"

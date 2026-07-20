@@ -21,15 +21,16 @@ pub use error::ActualError;
 
 // Re-export CLI types for backward compatibility with tests
 pub use cli::args::{
-    AdvisorArgs, CacheAction, CacheArgs, Cli, Command, ConfigAction, ConfigArgs, ConfigSetArgs,
-    LoginArgs, ModelsArgs, RunnerChoice, StatusArgs, SyncArgs,
+    AdvisorArgs, AuthArgs, AuthCommand, CacheAction, CacheArgs, Cli, Command, ConfigAction,
+    ConfigArgs, ConfigSetArgs, CreateTokenArgs, LoginArgs, ModelsArgs, RunnerChoice, StatusArgs,
+    SyncArgs,
 };
 
 pub fn run(cli: Cli) -> Result<(), ActualError> {
     match &cli.command {
         Command::AdrBot(args) => cli::commands::sync::exec(args),
         Command::Status(args) => cli::commands::status::exec(args),
-        Command::Auth => cli::commands::auth::exec(),
+        Command::Auth(args) => cli::commands::auth::exec(args),
         Command::Login(args) => cli::commands::login::exec(args),
         Command::Logout => cli::commands::logout::exec(),
         Command::Whoami => cli::commands::whoami::exec(),
