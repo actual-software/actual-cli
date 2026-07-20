@@ -34,10 +34,8 @@ const DEFAULT_SCOPES: &str = "openid profile offline_access adr:query adr:review
 /// Verified against the OAuth server's device-code grant: an approved device
 /// login mints a full session (access + refresh) regardless of the requested
 /// scopes, so it receives a refresh token without `offline_access` and refreshes
-/// the same way the browser session does. `offline_access` is also not an
-/// accepted device scope — the server enforces a colon-form resource-scope
-/// allow-set for the device grant and silently drops anything outside it, so
-/// requesting `offline_access` here would be a no-op rather than a fix.
+/// the same way the browser session does. `offline_access` is therefore
+/// unnecessary here — the refresh token is issued regardless of scope.
 /// Overridable via `ACTUAL_OAUTH_SCOPES`.
 const DEFAULT_DEVICE_SCOPES: &str = "adr:query adr:review mcp:invoke";
 
