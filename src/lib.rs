@@ -34,6 +34,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Logout => cli::commands::logout::exec(),
         Command::Whoami => cli::commands::whoami::exec(),
         Command::Advisor(args) => cli::commands::advisor::exec(args),
+        Command::MintToken(args) => cli::commands::mint_token::exec(args),
         Command::Config(args) => cli::commands::config::exec(args),
         Command::Runners => cli::commands::runners::exec(),
         Command::Models(args) => cli::commands::models::exec(args.no_fetch),
@@ -134,6 +135,33 @@ mod tests {
         // Exercises the Command::Advisor dispatch arm (not signed in → error,
         // before any network).
         let cli = Cli::parse_from(["actual", "advisor", "why?"]);
+        assert!(run(cli).is_err());
+    }
+
+    #[test]
+    fn test_run_mint_token_missing_key_returns_err() {
+        // Exercises the Command::MintToken dispatch arm in-process. The
+        // subprocess end-to-end tests (tests/mint_token_cli.rs) cannot cover
+        // this arm: the binary exits via process::exit, which drops the
+        // coverage profile before it is written. Here an explicit HTTPS issuer
+        // and a --key path that does not exist make exec() fail cleanly at key
+        // load — before any HTTP client is built or any request is sent — so
+        // the arm is covered hermetically and deterministically, with no
+        // network and no dependence on ambient environment variables (the
+        // explicit --key wins over ACTUAL_SERVICE_ACCOUNT_KEY_FILE, and the
+        // Some(path) read short-circuits before ACTUAL_SERVICE_ACCOUNT_KEY).
+        let cli = Cli::parse_from([
+            "actual",
+            "mint-token",
+            "--service-account-id",
+            "00000000-0000-0000-0000-000000000000",
+            "--kid",
+            "test-kid",
+            "--issuer",
+            "https://issuer.example.test",
+            "--key",
+            "/no/such/mint-token-key.pem",
+        ]);
         assert!(run(cli).is_err());
     }
 }

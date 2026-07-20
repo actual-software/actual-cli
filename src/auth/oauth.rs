@@ -140,8 +140,9 @@ pub fn build_authorize_url(
 
 /// Build an HTTP client for the auth server. Enforces HTTPS for non-loopback
 /// URLs so tokens are never sent in clear text (loopback `http://` is allowed
-/// for the local mock).
-fn build_http_client(base_url: &str) -> Result<reqwest::Client, ActualError> {
+/// for the local mock). Shared by the browser-login flow and the headless
+/// jwt-bearer client ([`crate::auth::jwt_bearer`]).
+pub(crate) fn build_http_client(base_url: &str) -> Result<reqwest::Client, ActualError> {
     let is_localhost = base_url.starts_with("http://localhost")
         || base_url.starts_with("http://127.0.0.1")
         || base_url.starts_with("http://[::1]");
