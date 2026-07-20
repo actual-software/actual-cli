@@ -494,6 +494,15 @@ pub struct LoginArgs {
     /// Print the sign-in URL instead of opening a browser (useful over SSH).
     #[arg(long)]
     pub no_browser: bool,
+
+    /// Use the browserless device-authorization flow (RFC 8628): print a short
+    /// code + URL for a person to approve on any device, then poll for the
+    /// session. For a human signing in from a remote or SSH shell with no local
+    /// browser — a person must approve the code, so this is not an unattended
+    /// path (CI has no approver; use `auth create-token` there instead). `--org`
+    /// is ignored in this mode (the org is selected on the approval page).
+    #[arg(long)]
+    pub device: bool,
 }
 
 /// Arguments for the `status` command

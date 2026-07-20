@@ -28,6 +28,27 @@ const DEFAULT_CLIENT_ID: &str = "actual-cli";
 /// refresh token. Overridable via `ACTUAL_OAUTH_SCOPES`.
 const DEFAULT_SCOPES: &str = "openid profile offline_access adr:query adr:review";
 
+/// Default scopes for the browserless device-authorization grant. Colon-form
+/// resource scopes only; `offline_access` is intentionally omitted.
+///
+/// Verified against the OAuth server's device-code grant: an approved device
+/// login mints a full session (access + refresh) regardless of the requested
+/// scopes, so it receives a refresh token without `offline_access` and refreshes
+/// the same way the browser session does. `offline_access` is therefore
+/// unnecessary here — the refresh token is issued regardless of scope.
+/// Overridable via `ACTUAL_OAUTH_SCOPES`.
+const DEFAULT_DEVICE_SCOPES: &str = "adr:query adr:review mcp:invoke";
+
+/// URN grant type for the OAuth 2.0 device-authorization grant (RFC 8628 §3.4).
+const DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
+
+/// Poll interval (seconds) used when the authorization response omits
+/// `interval` (RFC 8628 §3.2 recommends a 5-second default).
+const DEFAULT_DEVICE_INTERVAL_SECS: i64 = 5;
+
+/// Seconds added to the poll interval on a `slow_down` response (RFC 8628 §3.5).
+const DEVICE_SLOW_DOWN_INCREMENT_SECS: i64 = 5;
+
 /// How long to wait for the user to complete sign-in in the browser.
 pub const DEFAULT_LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -50,6 +71,22 @@ impl OAuthConfig {
             .unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
         let scopes =
             std::env::var("ACTUAL_OAUTH_SCOPES").unwrap_or_else(|_| DEFAULT_SCOPES.to_string());
+        Self {
+            base_url,
+            client_id,
+            scopes,
+        }
+    }
+
+    /// Build a config for the browserless device-authorization grant. Same
+    /// client-id resolution as [`OAuthConfig::new`], but defaults to the
+    /// colon-form device scopes ([`DEFAULT_DEVICE_SCOPES`]).
+    pub fn new_device(base_url: impl Into<String>) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_string();
+        let client_id = std::env::var("ACTUAL_OAUTH_CLIENT_ID")
+            .unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
+        let scopes = std::env::var("ACTUAL_OAUTH_SCOPES")
+            .unwrap_or_else(|_| DEFAULT_DEVICE_SCOPES.to_string());
         Self {
             base_url,
             client_id,
@@ -424,6 +461,186 @@ pub async fn revoke(creds: &StoredCredentials) -> Result<(), ActualError> {
         return Err(auth_error("Revocation failed", response).await);
     }
     Ok(())
+}
+
+// ── Device-authorization grant (RFC 8628) ───────────────────────────────────
+//
+// The browserless flow for `actual login --device`: request a device + user
+// code, show the user where to approve, then poll the token endpoint until the
+// grant is approved, denied, or the code expires. Reuses the same HTTP client
+// guard, `/whoami` identity lookup, and credential mapping as the browser flow.
+
+/// `/api/oauth/device_authorization` success response (RFC 8628 §3.2).
+#[derive(Debug, Deserialize)]
+pub struct DeviceCodeResponse {
+    /// Opaque code the client polls the token endpoint with.
+    pub device_code: String,
+    /// Short, human-enterable code shown to the user.
+    pub user_code: String,
+    /// Where the user goes to approve the request.
+    pub verification_uri: String,
+    /// Convenience URL with the user code pre-filled (optional per the RFC).
+    #[serde(default)]
+    pub verification_uri_complete: Option<String>,
+    /// Minimum seconds the server wants between polls (optional; default 5).
+    #[serde(default)]
+    pub interval: Option<i64>,
+    /// Lifetime of the device code, in seconds.
+    pub expires_in: i64,
+}
+
+/// The result of a single poll of the token endpoint (RFC 8628 §3.4–3.5).
+#[derive(Debug)]
+enum DevicePollOutcome {
+    /// Approved — carries the issued session tokens.
+    Approved(TokenResponse),
+    /// Not yet approved; keep polling at the current interval.
+    Pending,
+    /// The server asked us to poll less frequently.
+    SlowDown,
+    /// The user declined the request in the browser.
+    Denied,
+    /// The device code expired before it was approved.
+    Expired,
+}
+
+/// OAuth error body the token endpoint returns for a not-yet-complete or
+/// failed device grant (RFC 8628 §3.5 reuses the OAuth `error` field).
+#[derive(Debug, Deserialize)]
+struct DeviceTokenErrorBody {
+    error: String,
+}
+
+/// Request a device + user code to start the browserless flow (RFC 8628 §3.1).
+async fn request_device_code(
+    http: &reqwest::Client,
+    base_url: &str,
+    client_id: &str,
+    scopes: &str,
+) -> Result<DeviceCodeResponse, ActualError> {
+    let url = format!("{base_url}/api/oauth/device_authorization");
+    let form = [("client_id", client_id), ("scope", scopes)];
+    let response = http
+        .post(&url)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| ActualError::ApiError(format!("Device code request failed: {e}")))?;
+    if !response.status().is_success() {
+        return Err(auth_error("Device authorization failed", response).await);
+    }
+    response.json::<DeviceCodeResponse>().await.map_err(|e| {
+        ActualError::ApiError(format!(
+            "Failed to parse device authorization response: {e}"
+        ))
+    })
+}
+
+/// Poll the token endpoint once with the device grant. `authorization_pending`
+/// and `slow_down` come back as an HTTP 4xx carrying an OAuth `error` body, so
+/// a non-success status is not necessarily fatal — the error code decides.
+async fn poll_device_token(
+    http: &reqwest::Client,
+    base_url: &str,
+    client_id: &str,
+    device_code: &str,
+) -> Result<DevicePollOutcome, ActualError> {
+    let url = format!("{base_url}/api/oauth/token");
+    let form = [
+        ("grant_type", DEVICE_GRANT_TYPE),
+        ("device_code", device_code),
+        ("client_id", client_id),
+    ];
+    let response = http
+        .post(&url)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| ActualError::ApiError(format!("Device token poll failed: {e}")))?;
+    let status = response.status();
+    if status.is_success() {
+        let token = response
+            .json::<TokenResponse>()
+            .await
+            .map_err(|e| ActualError::ApiError(format!("Failed to parse token response: {e}")))?;
+        return Ok(DevicePollOutcome::Approved(token));
+    }
+    // Non-2xx: the RFC 8628 §3.5 status codes arrive as a JSON `error`. Anything
+    // we don't recognize (or a body without an `error`) is a hard failure.
+    let body = response.text().await.unwrap_or_default();
+    let code = serde_json::from_str::<DeviceTokenErrorBody>(&body)
+        .map(|b| b.error)
+        .unwrap_or_default();
+    match code.as_str() {
+        "authorization_pending" => Ok(DevicePollOutcome::Pending),
+        "slow_down" => Ok(DevicePollOutcome::SlowDown),
+        "access_denied" => Ok(DevicePollOutcome::Denied),
+        "expired_token" => Ok(DevicePollOutcome::Expired),
+        _ => {
+            let truncated: String = body.chars().take(2048).collect();
+            Err(ActualError::ApiError(format!(
+                "Device token poll failed (HTTP {status}): {truncated}"
+            )))
+        }
+    }
+}
+
+/// Message shown (and returned as an error) when the device code is no longer
+/// usable — whether the server said `expired_token` or our own poll budget ran
+/// out. Names the command so the user can retry directly.
+fn device_expired_error() -> ActualError {
+    ActualError::ApiError(
+        "The device code expired before it was approved. Run `actual login --device` again."
+            .to_string(),
+    )
+}
+
+/// Drive the full device-authorization flow and return credentials to persist.
+///
+/// Requests a code, hands it to `on_prompt` for display, then polls the token
+/// endpoint — sleeping the server-requested interval between polls and backing
+/// off on `slow_down` — until the grant is approved, denied, or expires.
+pub async fn device_login(
+    cfg: &OAuthConfig,
+    on_prompt: &dyn Fn(&DeviceCodeResponse),
+) -> Result<StoredCredentials, ActualError> {
+    let http = build_http_client(&cfg.base_url)?;
+    let device = request_device_code(&http, &cfg.base_url, &cfg.client_id, &cfg.scopes).await?;
+    on_prompt(&device);
+
+    let mut interval = device.interval.unwrap_or(DEFAULT_DEVICE_INTERVAL_SECS);
+    if interval < 1 {
+        interval = 1;
+    }
+    // Client-side budget so we stop polling once the code can no longer be
+    // approved; the server's `expired_token` is still the authoritative signal.
+    let mut remaining = device.expires_in;
+
+    let token = loop {
+        if remaining <= 0 {
+            return Err(device_expired_error());
+        }
+        tokio::time::sleep(Duration::from_secs(interval as u64)).await;
+        remaining -= interval;
+        match poll_device_token(&http, &cfg.base_url, &cfg.client_id, &device.device_code).await? {
+            DevicePollOutcome::Approved(token) => break token,
+            DevicePollOutcome::Pending => {}
+            DevicePollOutcome::SlowDown => interval += DEVICE_SLOW_DOWN_INCREMENT_SECS,
+            DevicePollOutcome::Denied => {
+                return Err(ActualError::ApiError(
+                    "The sign-in request was denied in the browser.".to_string(),
+                ));
+            }
+            DevicePollOutcome::Expired => return Err(device_expired_error()),
+        }
+    };
+
+    let who = fetch_identity(&http, &cfg.base_url, &token.access_token).await?;
+    let mut creds = credentials_from(token, who);
+    // Remember which auth server issued this session so refresh/logout can reach
+    // the same endpoint without the user re-specifying it.
+    creds.auth_url = Some(cfg.base_url.clone());
+    Ok(creds)
 }
 
 #[cfg(test)]
@@ -940,5 +1157,423 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, ActualError::ConfigError(_)), "got: {err:?}");
+    }
+
+    // ── Device-authorization grant (RFC 8628) ──────────────────────────────
+
+    const DEVICE_AUTH_OK: &str = r#"{"device_code":"dev-code-abc","user_code":"WXYZ-1234","verification_uri":"https://auth.example/device","verification_uri_complete":"https://auth.example/device?user_code=WXYZ-1234","interval":0,"expires_in":300}"#;
+    const DEVICE_TOKEN_OK: &str = r#"{"access_token":"at-device","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-device","scope":"adr:query adr:review mcp:invoke"}"#;
+    const DEVICE_WHOAMI_OK: &str = r#"{"sub":"u-dev","email":"dev@example.com","organization_id":"org-dev","member_id":"m-dev","scope":"adr:query"}"#;
+
+    #[test]
+    fn test_new_device_uses_colon_scopes_and_default_client() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _c = EnvGuard::remove("ACTUAL_OAUTH_CLIENT_ID");
+        let _s = EnvGuard::remove("ACTUAL_OAUTH_SCOPES");
+        let cfg = OAuthConfig::new_device("https://auth.example/");
+        assert_eq!(cfg.base_url, "https://auth.example"); // trailing slash trimmed
+        assert_eq!(cfg.client_id, "actual-cli");
+        assert_eq!(cfg.scopes, "adr:query adr:review mcp:invoke");
+    }
+
+    #[test]
+    fn test_new_device_honors_scope_and_client_overrides() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _c = EnvGuard::set("ACTUAL_OAUTH_CLIENT_ID", "custom-client");
+        let _s = EnvGuard::set("ACTUAL_OAUTH_SCOPES", "adr:query");
+        let cfg = OAuthConfig::new_device("http://localhost:4000");
+        assert_eq!(cfg.client_id, "custom-client");
+        assert_eq!(cfg.scopes, "adr:query");
+    }
+
+    #[tokio::test]
+    async fn test_request_device_code_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/device_authorization")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("client_id".into(), "actual-cli".into()),
+                mockito::Matcher::UrlEncoded(
+                    "scope".into(),
+                    "adr:query adr:review mcp:invoke".into(),
+                ),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(DEVICE_AUTH_OK)
+            .create_async()
+            .await;
+
+        let http = build_http_client(&server.url()).unwrap();
+        let device = request_device_code(
+            &http,
+            &server.url(),
+            "actual-cli",
+            "adr:query adr:review mcp:invoke",
+        )
+        .await
+        .unwrap();
+        assert_eq!(device.device_code, "dev-code-abc");
+        assert_eq!(device.user_code, "WXYZ-1234");
+        assert_eq!(device.verification_uri, "https://auth.example/device");
+        assert_eq!(
+            device.verification_uri_complete.as_deref(),
+            Some("https://auth.example/device?user_code=WXYZ-1234")
+        );
+        assert_eq!(device.interval, Some(0));
+        assert_eq!(device.expires_in, 300);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_request_device_code_minimal_optional_fields_default() {
+        let mut server = mockito::Server::new_async().await;
+        // Omit verification_uri_complete + interval → both default via serde.
+        let mock = server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"device_code":"d","user_code":"U","verification_uri":"https://auth.example/device","expires_in":120}"#,
+            )
+            .create_async()
+            .await;
+        let http = build_http_client(&server.url()).unwrap();
+        let device = request_device_code(&http, &server.url(), "actual-cli", "adr:query")
+            .await
+            .unwrap();
+        assert_eq!(device.verification_uri_complete, None);
+        assert_eq!(device.interval, None);
+        assert_eq!(device.expires_in, 120);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_request_device_code_error_status() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(400)
+            .with_body(r#"{"error":"invalid_client"}"#)
+            .create_async()
+            .await;
+        let http = build_http_client(&server.url()).unwrap();
+        let err = request_device_code(&http, &server.url(), "bad", "adr:query")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("invalid_client")),
+            "got: {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_request_device_code_bad_json() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(200)
+            .with_body("not json")
+            .create_async()
+            .await;
+        let http = build_http_client(&server.url()).unwrap();
+        let err = request_device_code(&http, &server.url(), "actual-cli", "adr:query")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("parse device authorization")),
+            "got: {err:?}"
+        );
+        mock.assert_async().await;
+    }
+
+    /// Mock the token endpoint with a device-grant body + status, then poll once.
+    async fn poll_once_with(status: usize, body: &str) -> Result<DevicePollOutcome, ActualError> {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/oauth/token")
+            .match_body(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "grant_type".into(),
+                    "urn:ietf:params:oauth:grant-type:device_code".into(),
+                ),
+                mockito::Matcher::UrlEncoded("device_code".into(), "dev-code-abc".into()),
+            ]))
+            .with_status(status)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+        let http = build_http_client(&server.url()).unwrap();
+        poll_device_token(&http, &server.url(), "actual-cli", "dev-code-abc").await
+    }
+
+    #[tokio::test]
+    async fn test_poll_device_token_approved() {
+        let outcome = poll_once_with(200, DEVICE_TOKEN_OK).await.unwrap();
+        match outcome {
+            DevicePollOutcome::Approved(token) => {
+                assert_eq!(token.access_token, "at-device");
+                assert_eq!(token.refresh_token.as_deref(), Some("rt-device"));
+            }
+            other => panic!("expected Approved, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_poll_device_token_pending() {
+        let outcome = poll_once_with(400, r#"{"error":"authorization_pending"}"#)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, DevicePollOutcome::Pending));
+    }
+
+    #[tokio::test]
+    async fn test_poll_device_token_slow_down() {
+        let outcome = poll_once_with(400, r#"{"error":"slow_down"}"#)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, DevicePollOutcome::SlowDown));
+    }
+
+    #[tokio::test]
+    async fn test_poll_device_token_denied() {
+        let outcome = poll_once_with(400, r#"{"error":"access_denied"}"#)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, DevicePollOutcome::Denied));
+    }
+
+    #[tokio::test]
+    async fn test_poll_device_token_expired() {
+        let outcome = poll_once_with(400, r#"{"error":"expired_token"}"#)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, DevicePollOutcome::Expired));
+    }
+
+    #[tokio::test]
+    async fn test_poll_device_token_unknown_error_is_hard_failure() {
+        let err = poll_once_with(400, r#"{"error":"invalid_client"}"#)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("invalid_client")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_poll_device_token_non_json_body_is_hard_failure() {
+        let err = poll_once_with(500, "upstream boom").await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("boom")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_poll_device_token_success_bad_json() {
+        let err = poll_once_with(200, "not json").await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("parse token")),
+            "got: {err:?}"
+        );
+    }
+
+    /// Build a device `OAuthConfig` pointing at a mock server url.
+    fn device_cfg(base_url: &str) -> OAuthConfig {
+        OAuthConfig {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            client_id: "actual-cli".to_string(),
+            scopes: "adr:query adr:review mcp:invoke".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_device_login_success_first_poll() {
+        let mut server = mockito::Server::new_async().await;
+        let auth = server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(DEVICE_AUTH_OK)
+            .create_async()
+            .await;
+        let tok = server
+            .mock("POST", "/api/oauth/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(DEVICE_TOKEN_OK)
+            .create_async()
+            .await;
+        let who = server
+            .mock("GET", "/whoami")
+            .match_header("authorization", "Bearer at-device")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(DEVICE_WHOAMI_OK)
+            .create_async()
+            .await;
+
+        let cfg = device_cfg(&server.url());
+        let prompted = std::sync::atomic::AtomicUsize::new(0);
+        let on_prompt = |d: &DeviceCodeResponse| {
+            assert_eq!(d.user_code, "WXYZ-1234");
+            prompted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        };
+        let creds = device_login(&cfg, &on_prompt).await.unwrap();
+
+        assert_eq!(creds.access_token, "at-device");
+        assert_eq!(creds.refresh_token, "rt-device");
+        assert_eq!(creds.organization_id, "org-dev");
+        assert_eq!(creds.member_id, "m-dev");
+        assert_eq!(creds.auth_url.as_deref(), Some(cfg.base_url.as_str()));
+        assert_eq!(prompted.load(std::sync::atomic::Ordering::SeqCst), 1);
+        auth.assert_async().await;
+        tok.assert_async().await;
+        who.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_device_login_pending_until_client_expiry() {
+        // expires_in:1 with a floored 1s interval → one poll (Pending), then the
+        // client-side budget is exhausted and we surface the expiry error.
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"device_code":"dev-code-abc","user_code":"U","verification_uri":"https://auth.example/d","interval":0,"expires_in":1}"#,
+            )
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/api/oauth/token")
+            .with_status(400)
+            .with_body(r#"{"error":"authorization_pending"}"#)
+            .create_async()
+            .await;
+
+        let cfg = device_cfg(&server.url());
+        let noop = |_: &DeviceCodeResponse| {};
+        let err = device_login(&cfg, &noop).await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("expired")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_device_login_slow_down_backs_off() {
+        // slow_down bumps the interval; expires_in:1 exhausts the budget on the
+        // next loop, so the arm executes without a long real sleep.
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"device_code":"dev-code-abc","user_code":"U","verification_uri":"https://auth.example/d","interval":0,"expires_in":1}"#,
+            )
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/api/oauth/token")
+            .with_status(400)
+            .with_body(r#"{"error":"slow_down"}"#)
+            .create_async()
+            .await;
+
+        let cfg = device_cfg(&server.url());
+        let noop = |_: &DeviceCodeResponse| {};
+        let err = device_login(&cfg, &noop).await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("expired")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_device_login_denied() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(DEVICE_AUTH_OK)
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/api/oauth/token")
+            .with_status(400)
+            .with_body(r#"{"error":"access_denied"}"#)
+            .create_async()
+            .await;
+
+        let cfg = device_cfg(&server.url());
+        let noop = |_: &DeviceCodeResponse| {};
+        let err = device_login(&cfg, &noop).await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("denied")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_device_login_server_expired_token() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(DEVICE_AUTH_OK) // expires_in:300, so the server code drives it
+            .create_async()
+            .await;
+        server
+            .mock("POST", "/api/oauth/token")
+            .with_status(400)
+            .with_body(r#"{"error":"expired_token"}"#)
+            .create_async()
+            .await;
+
+        let cfg = device_cfg(&server.url());
+        let noop = |_: &DeviceCodeResponse| {};
+        let err = device_login(&cfg, &noop).await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("expired")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_device_login_rejects_non_https_base() {
+        let cfg = device_cfg("http://example.com");
+        let noop = |_: &DeviceCodeResponse| {};
+        let err = device_login(&cfg, &noop).await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ConfigError(ref m) if m.contains("HTTPS")),
+            "got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_device_login_device_authorization_failure_propagates() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/api/oauth/device_authorization")
+            .with_status(400)
+            .with_body(r#"{"error":"invalid_scope"}"#)
+            .create_async()
+            .await;
+        let cfg = device_cfg(&server.url());
+        let noop = |_: &DeviceCodeResponse| {};
+        let err = device_login(&cfg, &noop).await.unwrap_err();
+        assert!(
+            matches!(err, ActualError::ApiError(ref m) if m.contains("invalid_scope")),
+            "got: {err:?}"
+        );
     }
 }
