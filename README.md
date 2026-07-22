@@ -116,10 +116,44 @@ you've written yourself.
 | Agents | `--output-format agents-md` | `AGENTS.md` |
 | Cursor Rules | `--output-format cursor-rules` | `.cursor/rules/actual-policies.mdc` |
 
+## Ask the Advisor
+
+Beyond generating context files, `actual` can answer architecture questions
+directly. `actual advisor` sends your question to the Advisor and prints a
+tailored answer, plus any related ADRs, in the terminal.
+
+The Advisor works against your Actual AI organization, so sign in first:
+
+```bash
+actual login
+actual advisor "Should new services talk over gRPC or REST?"
+```
+
+By default the answer is scoped to the repository you're standing in:
+`actual` reads the working tree's `origin` remote and, if a connected
+repository matches, scopes the question to it. If nothing matches, the
+question runs at the organization level.
+
+Set the scope explicitly with `--repo`:
+
+```bash
+actual advisor --repo actual-cli "..."       # scope to a repo by name
+actual advisor --repo owner/actual-cli "..." # disambiguate a shared name
+actual advisor --repo none "..."             # ask at the organization level
+actual advisor --show-scope                  # print the active scope and exit
+```
+
+The scope you choose is remembered per repository for later calls from the
+same working tree; `--repo auto` forgets the pin and returns to
+auto-detection. See
+[Getting Started](docs/GETTING_STARTED.md#ask-the-advisor) for the full flag
+reference.
+
 ## Commands
 
 ```
 actual adr-bot        # analyze repo & write AI context files
+actual advisor        # ask the Advisor an architecture question
 actual status         # check output file state (managed markers, staleness)
 actual auth           # verify authentication
 actual config show    # view current configuration
