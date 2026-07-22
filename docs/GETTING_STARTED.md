@@ -111,10 +111,59 @@ By default, `actual adr-bot` writes to `CLAUDE.md`. Content is wrapped in manage
 | `--show-errors` | Stream runner subprocess stderr in real time |
 | `--api-url <URL>` | Override ADR bank API endpoint |
 
+## Ask the Advisor
+
+`actual advisor` asks the Advisor an architecture question about your organization's codebase and prints the answer, along with any related ADRs, to your terminal. Unlike `adr-bot`, this command talks to your Actual AI account rather than a local AI runner, so sign in first with `actual login`.
+
+```bash
+actual login
+actual advisor "When should we introduce a message queue?"
+```
+
+The command starts an Advisor job and polls until the answer is ready (up to a few minutes), writing progress to stderr and the final answer to stdout.
+
+### Scoping the question to a repository
+
+By default the question is scoped to the repository you're standing in. `actual` reads the working tree's `origin` remote and, if one of your organization's connected repositories matches, scopes the answer to that repo. If nothing matches (or you aren't inside a git repo), the question runs at the organization level.
+
+Override the scope with `--repo`, which accepts a repository **name**, an `owner/name` form (to disambiguate a name shared across owners), or a repo **UUID**:
+
+```bash
+actual advisor --repo actual-cli "..."        # by name
+actual advisor --repo owner/actual-cli "..."  # by owner/name
+actual advisor --repo 3f2a1c9e-... "..."      # by UUID
+```
+
+Two values are reserved keywords rather than repository names:
+
+| Value | Effect |
+|-------|--------|
+| `--repo none` | Pin the scope to the organization level (opt out of repo scoping) |
+| `--repo auto` | Forget any pin and return to git-remote auto-detection |
+
+The scope you choose is **remembered per repository** (keyed by the working tree's `origin` remote) and reused on later `actual advisor` calls from the same tree, so you don't have to repeat `--repo` each time. Inspect the active scope without asking a question:
+
+```bash
+actual advisor --show-scope
+```
+
+To scope to a repository literally named `none` or `auto`, pass its `owner/name` form or UUID instead of the bare keyword.
+
+### Advisor flags
+
+| Flag | What it does |
+|------|-------------|
+| `<QUERY>` | The architecture question to ask. Optional when the command is used only to change or show scope (`--show-scope`, or a bare `--repo` value with no question) |
+| `--repo <REPO>` | Scope to a connected repository by name, `owner/name`, or UUID; `none` pins org level, `auto` resets to auto-detection. Omit to auto-detect from the `origin` remote |
+| `--show-scope` | Print the remembered scope for the current repository and exit (reads local config only, no query) |
+| `--org <ORG_ID>` | Organization to scope to (defaults to your signed-in org). Passing `--org` without `--repo` runs a one-shot organization-level query without changing the remembered scope |
+| `--api-url <URL>` | Advisor API base URL (defaults to production; also settable via the `ACTUAL_API_URL` environment variable) |
+
 ## Commands
 
 ```bash
 actual adr-bot        # analyze repo & write AI context files
+actual advisor        # ask the Advisor an org-scoped architecture question
 actual status         # check output file state (managed markers, staleness)
 actual auth           # verify the configured AI runner is authenticated
 actual config show    # view current configuration
