@@ -1801,7 +1801,7 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
-                r#"{"repositories":[{"repo_unique_id":"a","name":"cli","external_owner":"actual-software","url":"u1"},{"repo_unique_id":"b","name":"cli","external_owner":"other-org","url":"u2"}]}"#,
+                r#"{"repositories":[{"repo_unique_id":"a","name":"cli","external_owner":"my-fork","url":"u1"},{"repo_unique_id":"b","name":"cli","external_owner":"my-fork","url":"u2"}]}"#,
             )
             .create_async()
             .await;
