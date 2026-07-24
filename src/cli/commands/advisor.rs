@@ -1728,28 +1728,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_origin_remote_url_reads_configured_remote() {
-        let dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
-        assert_eq!(
-            crate::git::origin_remote_url(dir.path(), GIT_REMOTE_TIMEOUT)
-                .await
-                .as_deref(),
-            Some("git@github.com:actual-software/actual-cli.git")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_origin_remote_url_none_outside_repo() {
-        // A plain temp dir is not a git repo → git exits non-zero → None.
-        let dir = tempdir().unwrap();
-        assert!(
-            crate::git::origin_remote_url(dir.path(), GIT_REMOTE_TIMEOUT)
-                .await
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
     async fn test_auto_detect_repo_scopes_on_single_match() {
         let dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
         let mut server = mockito::Server::new_async().await;

@@ -25,3 +25,45 @@ pub(crate) async fn origin_remote_url(dir: &Path, timeout: Duration) -> Option<S
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn reads_configured_origin() {
+        let dir = tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:actual-software/actual-cli.git",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            origin_remote_url(dir.path(), Duration::from_secs(5))
+                .await
+                .as_deref(),
+            Some("git@github.com:actual-software/actual-cli.git")
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_none_outside_repository() {
+        let dir = tempdir().unwrap();
+        assert!(origin_remote_url(dir.path(), Duration::from_secs(5))
+            .await
+            .is_none());
+    }
+}
