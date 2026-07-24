@@ -6,6 +6,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod generation;
+mod git;
 pub mod model_cache;
 pub mod runner;
 pub mod tailoring;
