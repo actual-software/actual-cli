@@ -445,6 +445,19 @@ mod tests {
     }
 
     #[test]
+    fn test_get_git_branch_returns_none_for_detached_head() {
+        let dir = tempdir().unwrap();
+        let head = create_git_repo(dir.path());
+        std::process::Command::new("git")
+            .args(["checkout", "--detach", &head])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        assert_eq!(get_git_branch(dir.path()), None);
+    }
+
+    #[test]
     fn test_get_git_branch_returns_none_for_nonexistent_path() {
         let result = get_git_branch(Path::new("/nonexistent/path/that/does/not/exist"));
         assert_eq!(result, None);

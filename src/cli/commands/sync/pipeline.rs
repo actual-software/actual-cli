@@ -791,29 +791,10 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             .build()
             .ok()
             .and_then(|rt| {
-                rt.block_on(async {
-                    let mut cmd = tokio::process::Command::new("git");
-                    cmd.args(["remote", "get-url", "origin"]);
-                    cmd.current_dir(root_dir);
-                    cmd.stdin(std::process::Stdio::null());
-                    cmd.kill_on_drop(true);
-                    let child = cmd
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped())
-                        .spawn()
-                        .ok()?;
-                    let out = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        child.wait_with_output(),
-                    )
-                    .await
-                    .ok()?
-                    .ok()?;
-                    out.status
-                        .success()
-                        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-                        .filter(|s| !s.is_empty())
-                })
+                rt.block_on(crate::git::origin_remote_url(
+                    root_dir,
+                    std::time::Duration::from_secs(5),
+                ))
             })
             .unwrap_or_default();
 
