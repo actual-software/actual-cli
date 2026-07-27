@@ -56,6 +56,10 @@ fn walk_dir(current: &Path, out: &mut Vec<(PathBuf, TreeSitterLanguage)>) {
         return;
     };
     for entry in entries.flatten() {
+        // Symlinks are skipped to avoid infinite recursion from symlink cycles.
+        if matches!(entry.file_type(), Ok(ft) if ft.is_symlink()) {
+            continue;
+        }
         let path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
@@ -594,6 +598,21 @@ mod tests {
         let files = collect_source_files(dir.path());
         // Only the real file should be present; the broken symlink is skipped.
         assert_eq!(files.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_source_files_skips_symlink_cycle() {
+        // A symlink pointing back to an ancestor directory would cause
+        // infinite recursion (and a stack-overflow abort) if followed.
+        use std::os::unix::fs::symlink;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("real.rs"), "fn foo() {}").unwrap();
+        symlink(dir.path(), dir.path().join("cycle")).unwrap();
+
+        let files = collect_source_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.to_string_lossy().contains("real.rs"));
     }
 
     #[tokio::test]
