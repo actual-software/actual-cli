@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 
 use super::markers;
@@ -168,8 +168,16 @@ pub fn write_files(
                 };
             }
 
-            // Write file
-            if let Err(e) = std::fs::write(&full_path, &result) {
+            // Write atomically: write to a temp file in the same directory,
+            // then rename it into place. A plain fs::write truncates the
+            // target before writing, so a crash mid-write (SIGKILL, disk
+            // full) would leave the file truncated — and any hand-written
+            // prose outside the managed markers is unrecoverable, since this
+            // tool never authored it.
+            if let Err(e) = tempfile::NamedTempFile::new_in(parent).and_then(|mut tmp| {
+                tmp.write_all(result.as_bytes())?;
+                tmp.persist(&full_path).map_err(|e| e.error)
+            }) {
                 return WriteResult {
                     path: file.path.clone(),
                     action: WriteAction::Failed,
@@ -723,40 +731,41 @@ mod tests {
         );
     }
 
-    // ── 4eo.4: fs::write failure returns Failed ──
+    // ── 4eo.4: atomic rename replaces a read-only target ──
 
     #[test]
     #[cfg(unix)]
-    fn test_write_to_readonly_file_returns_failed() {
+    fn test_write_to_readonly_file_replaces_via_atomic_rename() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let target = dir.path().join("CLAUDE.md");
 
-        // Create the file and make it read-only.
+        // Create the file and make it read-only. Atomic writes go through a
+        // temp file + rename, and rename(2) only requires write permission
+        // on the containing directory, not the target file's own permission
+        // bits (the same reason `mv` or an editor's atomic-save can replace
+        // a read-only file) — so this must succeed, not fail.
         std::fs::write(&target, "existing content").expect("failed to write initial file");
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444))
             .expect("failed to set permissions");
 
-        let files = vec![make_file("CLAUDE.md", "new content", "test", &[])];
+        let files = vec![make_file("CLAUDE.md", "new content", "test", &["adr-1"])];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
-
-        // Restore permissions for cleanup
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
-            .expect("failed to restore permissions");
 
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].action,
-            WriteAction::Failed,
-            "expected Failed when fs::write fails on read-only file"
+            WriteAction::Updated,
+            "expected Updated: atomic rename replaces a read-only target"
         );
-        assert_eq!(results[0].version, 0, "expected version 0 on failure");
-        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(results[0].error.is_none(), "expected no error");
+
+        let written = std::fs::read_to_string(&target).expect("failed to read written file");
         assert!(
-            err_msg.contains("Failed to write file"),
-            "expected 'Failed to write file' in error, got: {err_msg}"
+            written.contains("new content"),
+            "expected new content, got: {written}"
         );
     }
 
