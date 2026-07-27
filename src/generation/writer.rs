@@ -168,6 +168,24 @@ pub fn write_files(
                 };
             }
 
+            // Refuse a target the user has made read-only. rename(2) needs
+            // write permission only on the containing directory, so an atomic
+            // write would happily replace a protected file — something the
+            // fs::write this replaced could not do. Probe for writability to
+            // preserve that behaviour. Opening without truncate leaves the
+            // file untouched, and this reproduces fs::write's own decision,
+            // so ACLs and non-owner cases resolve identically.
+            if full_path.exists() {
+                if let Err(e) = std::fs::OpenOptions::new().write(true).open(&full_path) {
+                    return WriteResult {
+                        path: file.path.clone(),
+                        action: WriteAction::Failed,
+                        version: 0,
+                        error: Some(format!("Failed to write file: {e}")),
+                    };
+                }
+            }
+
             // Write atomically: write to a temp file in the same directory,
             // then rename it into place. A plain fs::write truncates the
             // target before writing, so a crash mid-write (SIGKILL, disk
@@ -731,21 +749,21 @@ mod tests {
         );
     }
 
-    // ── 4eo.4: atomic rename replaces a read-only target ──
+    // ── 4eo.4: a read-only target is refused, not silently replaced ──
 
     #[test]
     #[cfg(unix)]
-    fn test_write_to_readonly_file_replaces_via_atomic_rename() {
+    fn test_write_to_readonly_file_returns_failed() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let target = dir.path().join("CLAUDE.md");
 
-        // Create the file and make it read-only. Atomic writes go through a
-        // temp file + rename, and rename(2) only requires write permission
-        // on the containing directory, not the target file's own permission
-        // bits (the same reason `mv` or an editor's atomic-save can replace
-        // a read-only file) — so this must succeed, not fail.
+        // rename(2) only requires write permission on the containing directory,
+        // so an unguarded atomic write would replace this file even though the
+        // user deliberately made it read-only. write_files probes the target
+        // for writability first and refuses, matching the behaviour of the
+        // fs::write it replaced.
         std::fs::write(&target, "existing content").expect("failed to write initial file");
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444))
             .expect("failed to set permissions");
@@ -757,15 +775,15 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].action,
-            WriteAction::Updated,
-            "expected Updated: atomic rename replaces a read-only target"
+            WriteAction::Failed,
+            "expected Failed: a read-only target must not be silently replaced"
         );
-        assert!(results[0].error.is_none(), "expected no error");
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
 
-        let written = std::fs::read_to_string(&target).expect("failed to read written file");
-        assert!(
-            written.contains("new content"),
-            "expected new content, got: {written}"
+        let written = std::fs::read_to_string(&target).expect("failed to read file");
+        assert_eq!(
+            written, "existing content",
+            "a read-only target must be left byte-for-byte untouched"
         );
     }
 
