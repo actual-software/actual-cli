@@ -769,6 +769,44 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn test_write_fails_when_temp_file_cannot_be_created() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let subdir = dir.path().join("locked");
+        std::fs::create_dir(&subdir).expect("failed to create subdir");
+
+        // Make the directory read-only. create_dir_all is a no-op (already
+        // exists) and canonicalize only needs read+execute, but
+        // NamedTempFile::new_in requires write permission to create the
+        // temp file — so the atomic write itself must fail here.
+        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o555))
+            .expect("failed to set permissions");
+
+        let files = vec![make_file("locked/CLAUDE.md", "content", "test", &["adr-1"])];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        // Restore permissions so TempDir can clean up.
+        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o755))
+            .expect("failed to restore permissions");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed when the temp file can't be created in a read-only directory"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+        let err_msg = results[0].error.as_ref().expect("expected error message");
+        assert!(
+            err_msg.contains("Failed to write file"),
+            "expected 'Failed to write file' in error, got: {err_msg}"
+        );
+    }
+
     // ── 4eo.3: Unreadable existing files return Failed, not Created ──
 
     #[test]
