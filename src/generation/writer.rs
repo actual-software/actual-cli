@@ -789,10 +789,6 @@ mod tests {
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
 
-        // Restore permissions so TempDir can clean up.
-        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o755))
-            .expect("failed to restore permissions");
-
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].action,
