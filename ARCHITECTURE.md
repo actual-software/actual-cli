@@ -177,17 +177,37 @@ visual diffing).
 
 ```mermaid
 flowchart TD
-    A["Environment\npipeline.rs::run_sync_with_probe\nload config, resolve API URL, detect git HEAD,\nensure_semgrep_core(), optional runner probe"]
-    B["Analysis\nrun_analysis_cached -> orchestrate::run_static_analysis\nCACHED: key = git HEAD + config hash"]
-    C["Confirm/Select\nauto_select_for_project -> confirm_or_change_loop\nuser: Accept / Change / Reject"]
-    D["Signals\nrun_signals_analysis -> CanonicalIR\nNOT CACHED: full tree-sitter + semgrep rescan every run"]
-    E["Fetch\nbuild_match_request -> POST /adrs/match\nwith_retry, 3 attempts, plus 503 ladder 10s/30s/60s"]
-    F["Split ADRs\npartition_adrs:\nV1 schema -> LLM tailoring\nV2 schema -> deterministic render, bypasses LLM"]
-    G["Tailor V1\ntailor_all_projects -> per-project batches ->\ninvoke_tailoring -> TailoringRunner::run_tailoring\nCACHED: key = ADR content hash + model + existing output"]
-    H["Post-process\nwrite_v2_raw_files, inject_v2_governance,\napply_content_budget, filter_minor_changes"]
-    I["Write\nconfirm_and_write -> diff preview -> user picks files ->\nwrite_files -> merge::merge_content"]
+    subgraph P1["Environment"]
+        A["run_sync_with_probe\nconfig, git HEAD, runner probe"]
+    end
 
-    A --> B --> C --> D --> E --> F --> G --> H --> I
+    subgraph P2["Analysis"]
+        B["run_analysis_cached\n(cached)"]
+        C["Confirm/Select\nAccept / Change / Reject"]
+    end
+
+    subgraph P3["Fetch"]
+        D["run_signals_analysis\n(not cached)"]
+        E["POST /adrs/match\nretry + 503 backoff"]
+    end
+
+    subgraph P4["Tailor"]
+        F{"partition_adrs\nV1 vs V2?"}
+        G["tailor_all_projects\n(cached)"]
+        G2["Deterministic V2 render\nno LLM"]
+    end
+
+    subgraph P5["Write"]
+        H["Post-process\nbudget, minor-change filter"]
+        I["confirm_and_write\nmerge_content"]
+    end
+
+    A --> B --> C --> D --> E --> F
+    F -->|V1| G
+    F -->|V2| G2
+    G --> H
+    G2 --> H
+    H --> I
 ```
 
 Notes:
