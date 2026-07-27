@@ -65,11 +65,11 @@ async fn check_auth_async(
     // When the timeout future is dropped, the Child is dropped. With
     // kill_on_drop(true) tokio sends SIGKILL, preventing orphaned processes.
     cmd.kill_on_drop(true);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    let child = crate::runner::util::spawn_with_etxtbsy_retry(|| cmd.spawn())
+        .await
         .map_err(|e| ActualError::RunnerFailed {
             message: format!("failed to spawn claude: {e}"),
             stderr: String::new(),
@@ -133,11 +133,11 @@ async fn check_auth_async_no_json(
     cmd.args(["auth", "status"]);
     cmd.stdin(std::process::Stdio::null());
     cmd.kill_on_drop(true);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    let child = crate::runner::util::spawn_with_etxtbsy_retry(|| cmd.spawn())
+        .await
         .map_err(|e| ActualError::RunnerFailed {
             message: format!("failed to spawn claude: {e}"),
             stderr: String::new(),
@@ -550,11 +550,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let script = create_fake_binary(dir.path(), "not json", 0);
         let result = run_auth_with_binary(&script);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ActualError::RunnerOutputParse(_)
-        ));
+        assert!(
+            matches!(result, Err(ActualError::RunnerOutputParse(_))),
+            "expected RunnerOutputParse from invalid JSON, got: {result:?}"
+        );
     }
 
     #[test]
