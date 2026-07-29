@@ -52,3 +52,9 @@ benches/*_results*.json
 # Session recordings
 *.cast
 
+# Coding-agent review-findings dirs. Automated review tooling writes these at
+# the repo root of a working tree. They hold internal run identifiers and raw
+# review commentary, so a broad `git add -A` must never sweep them into a PR.
+.architect/
+.reviewer/
+
