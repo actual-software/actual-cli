@@ -53,6 +53,28 @@ fn wait_io_error(e: std::io::Error) -> ActualError {
     }
 }
 
+/// Spawn the configured `claude` command, retrying briefly on `ETXTBSY`.
+///
+/// A freshly written executable can transiently report `ETXTBSY` ("text file
+/// busy") when another thread still holds a writable fd to it across the
+/// fork→exec window. That happens in parallel test runs, where a fixture script
+/// is written and immediately spawned, and in production right after the real
+/// `claude` binary is installed or updated. Routing through
+/// [`spawn_with_etxtbsy_retry`] makes the exec deterministic; the runner spawn
+/// paths already do the same.
+///
+/// [`spawn_with_etxtbsy_retry`]: crate::runner::util::spawn_with_etxtbsy_retry
+async fn spawn_auth_child(
+    cmd: &mut tokio::process::Command,
+) -> Result<tokio::process::Child, ActualError> {
+    crate::runner::util::spawn_with_etxtbsy_retry(|| cmd.spawn())
+        .await
+        .map_err(|e| ActualError::RunnerFailed {
+            message: format!("failed to spawn claude: {e}"),
+            stderr: String::new(),
+        })
+}
+
 /// Build a single-threaded tokio runtime.
 fn build_tokio_runtime() -> Result<tokio::runtime::Runtime, ActualError> {
     tokio::runtime::Builder::new_current_thread()
@@ -74,15 +96,10 @@ async fn check_auth_async(
     // When the timeout future is dropped, the Child is dropped. With
     // kill_on_drop(true) tokio sends SIGKILL, preventing orphaned processes.
     cmd.kill_on_drop(true);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| ActualError::RunnerFailed {
-            message: format!("failed to spawn claude: {e}"),
-            stderr: String::new(),
-        })?;
+    let child = spawn_auth_child(&mut cmd).await?;
 
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
@@ -142,15 +159,10 @@ async fn check_auth_async_no_json(
     cmd.args(["auth", "status"]);
     cmd.stdin(std::process::Stdio::null());
     cmd.kill_on_drop(true);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| ActualError::RunnerFailed {
-            message: format!("failed to spawn claude: {e}"),
-            stderr: String::new(),
-        })?;
+    let child = spawn_auth_child(&mut cmd).await?;
 
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
