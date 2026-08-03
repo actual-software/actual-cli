@@ -15,6 +15,7 @@ pub mod create_token;
 pub mod login;
 pub mod logout;
 pub mod models;
+pub mod repo_onboard;
 pub mod runners;
 pub mod status;
 pub mod sync;

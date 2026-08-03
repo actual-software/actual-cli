@@ -341,6 +341,40 @@ pub enum Command {
     Models(ModelsArgs),
     /// Clear local cache (analysis and tailoring results)
     Cache(CacheArgs),
+    /// Manage repositories
+    Repo(RepoArgs),
+}
+
+/// Arguments for the `repo` command
+#[derive(Parser, Debug)]
+pub struct RepoArgs {
+    #[command(subcommand)]
+    pub command: RepoCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RepoCommand {
+    /// Onboard a public repository for architecture analysis
+    Onboard(RepoOnboardArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct RepoOnboardArgs {
+    /// The public HTTPS URL of the repository to onboard
+    #[arg(value_name = "URL")]
+    pub url: String,
+
+    /// Use the device code flow instead of opening a browser
+    #[arg(long)]
+    pub device: bool,
+
+    /// Override the API service URL
+    #[arg(long)]
+    pub api_url: Option<String>,
+
+    /// Override the auth server URL
+    #[arg(long, env = "ACTUAL_AUTH_URL")]
+    pub auth_url: Option<String>,
 }
 
 /// Arguments for the `advisor` command

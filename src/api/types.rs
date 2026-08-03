@@ -205,6 +205,19 @@ pub struct ConnectedReposErrorBody {
     pub message: String,
 }
 
+// --- Public repo onboarding types (POST /repos/onboard-public) ---
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OnboardPublicRepoRequest {
+    pub git_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct OnboardPublicRepoResponse {
+    pub repository_id: String,
+    pub status: String,
+}
+
 // --- Telemetry types (POST /counter/record) ---
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

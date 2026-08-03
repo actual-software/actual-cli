@@ -11,7 +11,7 @@ use crate::api::types::{
     CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, ConnectedReposErrorBody,
     ConnectedRepository, FrameworksResponse, GetConnectedReposResponse, HealthResponse,
     LanguagesResponse, MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse,
-    TelemetryRequest,
+    OnboardPublicRepoRequest, OnboardPublicRepoResponse, TelemetryRequest,
 };
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -206,6 +206,36 @@ impl ActualApiClient {
             .json::<GetConnectedReposResponse>()
             .await
             .map(|body| body.repositories)
+            .map_err(|e| ActualError::ApiError(e.to_string()))
+    }
+
+    pub async fn onboard_public_repo(
+        &self,
+        git_url: &str,
+    ) -> Result<OnboardPublicRepoResponse, ActualError> {
+        let url = format!("{}/repos/onboard-public", self.base_url);
+        let body = OnboardPublicRepoRequest {
+            git_url: git_url.to_string(),
+        };
+        let response = self
+            .authed(self.client.post(&url).json(&body))
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ActualError::NotLoggedIn);
+        }
+        if !status.is_success() {
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| format!("HTTP {status}"));
+            return Err(ActualError::ApiError(format!("HTTP {status}: {text}")));
+        }
+        response
+            .json::<OnboardPublicRepoResponse>()
+            .await
             .map_err(|e| ActualError::ApiError(e.to_string()))
     }
 
