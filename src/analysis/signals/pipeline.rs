@@ -56,20 +56,27 @@ fn walk_dir(current: &Path, out: &mut Vec<(PathBuf, TreeSitterLanguage)>) {
         return;
     };
     for entry in entries.flatten() {
-        // Symlinks are skipped to avoid infinite recursion from symlink cycles.
-        if matches!(entry.file_type(), Ok(ft) if ft.is_symlink()) {
+        // Symlinks are skipped to avoid re-walking the tree through a cycle.
+        // Following them is bounded only by ELOOP (40 levels), so a directory
+        // containing two links back to an ancestor explodes combinatorially.
+        // An entry whose type can't be read is skipped rather than falling
+        // through to is_dir(), which would follow the symlink after all.
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if ft.is_symlink() {
             continue;
         }
         let path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        if path.is_dir() {
+        if ft.is_dir() {
             if EXCLUDED_DIRS.contains(&name_str.as_ref()) {
                 continue;
             }
             walk_dir(&path, out);
-        } else if path.is_file() {
+        } else if ft.is_file() {
             // Skip large files
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             if size > MAX_FILE_BYTES {
