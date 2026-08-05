@@ -1,10 +1,34 @@
 use std::io::{ErrorKind, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::markers;
 use super::merge;
 use crate::generation::OutputFormat;
 use crate::tailoring::types::FileOutput;
+
+/// Removes the temp file if it is still armed when dropped — i.e. the rename
+/// never happened because an earlier step returned.
+///
+/// This is what `tempfile::NamedTempFile` provides, but we create the temp file
+/// by hand so that it inherits the process umask (see [`write_files`]); a
+/// `NamedTempFile` is always `0o600`, which would silently tighten the mode of
+/// every generated file.
+struct TempFileGuard(Option<PathBuf>);
+
+impl TempFileGuard {
+    /// Give up ownership after a successful rename, so the file survives.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
 
 /// The action taken for a single file write.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,12 +63,18 @@ pub struct WriteResult {
 /// 3. Compute next version via `markers::next_version(existing)`
 /// 4. Merge via `merge::merge_content(existing, sections, version, is_root, root_header)`
 /// 5. Create parent directories with `std::fs::create_dir_all`
-/// 6. Write the file with `std::fs::write`
+/// 6. Write the file atomically (temp file in the same directory, then rename)
 /// 7. Collect `WriteResult`
 ///
 /// The `format` parameter controls what header is prepended to new root-level files.
 ///
 /// Individual file failures do NOT abort the batch — errors are collected per file.
+///
+/// The atomic write is deliberately kept indistinguishable from the `fs::write`
+/// it replaced, in every respect other than crash-safety: `rename(2)` replaces
+/// the target *inode*, so without care it would silently change the file's mode
+/// and replace a symlinked target with a regular file. See the comments at each
+/// step below.
 pub fn write_files(
     root_dir: &Path,
     files: &[FileOutput],
@@ -168,6 +198,30 @@ pub fn write_files(
                 };
             }
 
+            // Resolve a symlinked target. fs::write followed the link and wrote
+            // through to the real file; renaming onto `full_path` would instead
+            // replace the link itself, silently breaking a deliberate setup
+            // (`CLAUDE.md -> AGENTS.md` is a common one) and leaving the real
+            // file stale. Write through to the resolved path — but only while it
+            // stays inside the root, since a link pointing outside would
+            // otherwise escape the guards above.
+            let write_target = match full_path.canonicalize() {
+                Ok(resolved) => {
+                    if !resolved.starts_with(&canonical_root) {
+                        return WriteResult {
+                            path: file.path.clone(),
+                            action: WriteAction::Failed,
+                            version: 0,
+                            error: Some("path escapes root directory".to_string()),
+                        };
+                    }
+                    resolved
+                }
+                // Nothing to resolve — the target does not exist yet.
+                Err(_) => full_path.clone(),
+            };
+            let write_parent = write_target.parent().unwrap_or(parent);
+
             // Refuse a target the user has made read-only. rename(2) needs
             // write permission only on the containing directory, so an atomic
             // write would happily replace a protected file — something the
@@ -175,8 +229,8 @@ pub fn write_files(
             // preserve that behaviour. Opening without truncate leaves the
             // file untouched, and this reproduces fs::write's own decision,
             // so ACLs and non-owner cases resolve identically.
-            if full_path.exists() {
-                if let Err(e) = std::fs::OpenOptions::new().write(true).open(&full_path) {
+            if write_target.exists() {
+                if let Err(e) = std::fs::OpenOptions::new().write(true).open(&write_target) {
                     return WriteResult {
                         path: file.path.clone(),
                         action: WriteAction::Failed,
@@ -192,16 +246,64 @@ pub fn write_files(
             // full) would leave the file truncated — and any hand-written
             // prose outside the managed markers is unrecoverable, since this
             // tool never authored it.
-            if let Err(e) = tempfile::NamedTempFile::new_in(parent).and_then(|mut tmp| {
-                tmp.write_all(result.as_bytes())?;
-                tmp.persist(&full_path).map_err(|e| e.error)
-            }) {
+            //
+            // The temp file is created with `create_new` rather than via
+            // `NamedTempFile`, which forces `0o600`: a plain create applies the
+            // process umask, exactly as fs::write's own create did, so a new
+            // file lands with the mode it always had. The name is prefixed so a
+            // temp file orphaned by a crash is identifiable as ours.
+            let tmp_path = write_parent.join(format!(".actual-tmp-{}", uuid::Uuid::new_v4()));
+            let mut tmp_guard = TempFileGuard(Some(tmp_path.clone()));
+
+            let write_result = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+                .and_then(|mut tmp| {
+                    tmp.write_all(result.as_bytes())?;
+                    // rename is atomic but not durable: without this, a power
+                    // loss can land the rename while the data is still only in
+                    // the page cache, leaving an empty file.
+                    tmp.sync_all()
+                });
+            if let Err(e) = write_result {
                 return WriteResult {
                     path: file.path.clone(),
                     action: WriteAction::Failed,
                     version: 0,
                     error: Some(format!("Failed to write file: {e}")),
                 };
+            }
+
+            // Carry over the target's mode. rename(2) replaces the inode, so
+            // the temp file's permissions become the file's permissions —
+            // an existing file would otherwise silently lose its mode.
+            #[cfg(unix)]
+            if let Ok(meta) = std::fs::metadata(&write_target) {
+                if let Err(e) = std::fs::set_permissions(&tmp_path, meta.permissions()) {
+                    return WriteResult {
+                        path: file.path.clone(),
+                        action: WriteAction::Failed,
+                        version: 0,
+                        error: Some(format!("Failed to write file: {e}")),
+                    };
+                }
+            }
+
+            if let Err(e) = std::fs::rename(&tmp_path, &write_target) {
+                return WriteResult {
+                    path: file.path.clone(),
+                    action: WriteAction::Failed,
+                    version: 0,
+                    error: Some(format!("Failed to write file: {e}")),
+                };
+            }
+            tmp_guard.disarm();
+
+            // Make the rename itself durable. Best-effort: a filesystem that
+            // rejects directory fsync must not fail an otherwise good write.
+            if let Ok(dir) = std::fs::File::open(write_parent) {
+                let _ = dir.sync_all();
             }
 
             WriteResult {
@@ -916,6 +1018,145 @@ mod tests {
         assert!(
             !err_msg.contains("failed to verify output path"),
             "real path escape should not say 'failed to verify output path', got: {err_msg}"
+        );
+    }
+
+    // ── atomic-write behaviour must stay indistinguishable from fs::write ──
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_preserves_existing_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let target = dir.path().join("CLAUDE.md");
+        std::fs::write(&target, "existing").expect("failed to write initial file");
+
+        // A non-default mode, so a hardcoded 0o644 would not pass either.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640))
+            .expect("failed to set permissions");
+
+        let files = vec![make_file("CLAUDE.md", "new content", "test", &["adr-1"])];
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        assert_eq!(results[0].action, WriteAction::Updated);
+        let mode = std::fs::metadata(&target)
+            .expect("failed to stat target")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            mode, 0o640,
+            "rename(2) replaces the inode — the target's mode must be carried over, got {mode:o}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_new_file_uses_umask_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+        // Baseline: what a plain create in this directory yields under the
+        // current umask. Comparing against this keeps the test umask-agnostic.
+        let probe = dir.path().join("probe");
+        std::fs::write(&probe, "x").expect("failed to write probe");
+        let expected = std::fs::metadata(&probe)
+            .expect("failed to stat probe")
+            .permissions()
+            .mode()
+            & 0o7777;
+
+        let files = vec![make_file("CLAUDE.md", "content", "test", &["adr-1"])];
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        assert_eq!(results[0].action, WriteAction::Created);
+        let mode = std::fs::metadata(dir.path().join("CLAUDE.md"))
+            .expect("failed to stat target")
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(
+            mode, expected,
+            "a new file must land with the same mode fs::write gave it ({expected:o}), got {mode:o}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_follows_symlinked_target() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let real = dir.path().join("AGENTS.md");
+        std::fs::write(&real, "hand-written prose\n").expect("failed to write real file");
+        std::os::unix::fs::symlink(&real, dir.path().join("CLAUDE.md"))
+            .expect("failed to create symlink");
+
+        let files = vec![make_file("CLAUDE.md", "new content", "test", &["adr-1"])];
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        assert_eq!(results[0].action, WriteAction::Updated);
+        assert!(
+            std::fs::symlink_metadata(dir.path().join("CLAUDE.md"))
+                .expect("failed to lstat link")
+                .file_type()
+                .is_symlink(),
+            "the symlink must survive — renaming onto it would replace the user's setup"
+        );
+        assert!(
+            std::fs::read_to_string(&real)
+                .expect("failed to read real file")
+                .contains("new content"),
+            "content must be written through the link to the real file"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_refuses_symlink_escaping_root() {
+        let root = tempfile::tempdir().expect("failed to create temp dir");
+        let outside = tempfile::tempdir().expect("failed to create outside dir");
+        let escape_target = outside.path().join("elsewhere.md");
+        std::fs::write(&escape_target, "outside the root").expect("failed to write outside file");
+        std::os::unix::fs::symlink(&escape_target, root.path().join("CLAUDE.md"))
+            .expect("failed to create symlink");
+
+        let files = vec![make_file("CLAUDE.md", "new content", "test", &["adr-1"])];
+        let results = write_files(root.path(), &files, &OutputFormat::ClaudeMd);
+
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "a link pointing outside the root must not be written through"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&escape_target).expect("failed to read outside file"),
+            "outside the root",
+            "the file outside the root must be untouched"
+        );
+    }
+
+    #[test]
+    fn test_failed_write_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+
+        // A directory where the target path already exists as a directory:
+        // read_to_string fails, so the write bails before renaming.
+        std::fs::create_dir(dir.path().join("CLAUDE.md")).expect("failed to create dir");
+
+        let files = vec![make_file("CLAUDE.md", "content", "test", &["adr-1"])];
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+        assert_eq!(results[0].action, WriteAction::Failed);
+
+        let strays: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("failed to read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".actual-tmp-"))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "a failed write must not leave a temp file behind, found: {strays:?}"
         );
     }
 }
