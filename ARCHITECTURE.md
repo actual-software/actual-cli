@@ -32,9 +32,11 @@ cargo test --workspace --features integration
 Coverage: CI enforces 100% per-file line coverage via
 `.github/workflows/coverage.yml`. Don't run `cargo llvm-cov --workspace` as a
 substitute, it pulls in `crates/tui-test`'s own PTY tests and `tests/tui_e2e.rs`
-(which hangs under instrumentation) and skips the file exclusions CI relies
-on. Use the exact invocation in that workflow file (`--lib` plus 9 named
-`--test` binaries plus an `--ignore-filename-regex` exclusion list).
+(which hangs under instrumentation). Use the exact invocation in that workflow
+file (`--lib` plus 9 named `--test` binaries plus an `--ignore-filename-regex`
+exclusion list) — and if you copy an `--ignore-filename-regex` from anywhere
+else, diff it against `coverage.yml` first, since a stale copy will report
+false failures on files CI excludes.
 
 - Entry chain: `src/main.rs` → `src/lib.rs::run` → matches `Command`
   (`src/cli/args.rs`) → one `exec()` per subcommand in `src/cli/commands/`.
@@ -299,7 +301,7 @@ pub trait TerminalIO: Send + Sync {
 
     // No default impl. A new TerminalIO must implement both of these.
     fn select_files(&self, prompt: &str, items: &[String], defaults: &[bool]) -> Result<Option<Vec<usize>>, ActualError>;
-    fn select_one(&self, prompt: &str, items: &[String], default: usize) -> Result<usize, ActualError>;
+    fn select_one(&self, prompt: &str, items: &[String], default: Option<usize>) -> Result<usize, ActualError>;
 }
 ```
 `RealTerminal` (prod, blocks on stdin, excluded from coverage) vs
@@ -352,24 +354,26 @@ over it.
 
 ## 9. Known Pitfalls / Constraints
 
-- `sync/pipeline.rs` is the largest file in the repo. About 81% of it
-  (roughly 5,960 of 7,367 lines) is its own `#[cfg(test)] mod tests` block;
-  the production code has around 15 top-level functions, but
-  `run_sync_with_probe` alone spans most of the phase-driving logic. Changes
-  here are higher-risk and need proportionally more tests to satisfy the
-  coverage gate.
+- `sync/pipeline.rs` is the largest file in the repo, and roughly 80% of it is
+  its own `#[cfg(test)] mod tests` block. The production half has on the order
+  of 15 top-level functions, but `run_sync_with_probe` alone spans most of the
+  phase-driving logic. Changes here are higher-risk and need proportionally
+  more tests to satisfy the coverage gate.
 - The coverage gate lists integration test binaries by name in
   `.github/workflows/coverage.yml`. A new file under `tests/` doesn't count
   toward coverage until added to that `--test` list. `tui_e2e` is deliberately
   excluded (hangs under coverage instrumentation); `cli/commands/login.rs` is
-  excluded from the coverage ignore-filename-regex for a different reason,
-  its real browser OAuth + loopback listener can't run in CI.
+  excluded from coverage *via* that same `--ignore-filename-regex`, for a
+  different reason: its real browser OAuth + loopback listener can't run in CI.
 - ADR `29aaf503` (`.claude/rules/`) requires a `benches/` directory that does
   not exist. Its own verify command (`test -d benches`) fails today. Don't
   treat that rule's accept criteria as ground truth without checking the repo.
 - `tests/common/mod.rs` duplicates `src/testutil.rs` (both provide an
-  `ENV_MUTEX`/`EnvGuard` pair independently) instead of sharing one
-  implementation. Both exist; don't add a third.
+  `ENV_MUTEX`/`EnvGuard` pair independently). The duplication is forced, not an
+  oversight: `src/lib.rs` declares `testutil` under `#[cfg(test)]` and
+  `pub(crate)`, so integration-test binaries — a separate crate, compiled
+  without `cfg(test)` — cannot reach `actual_cli::testutil` at all. Don't try to
+  merge them, and don't add a third.
 - The `integration` Cargo feature gates exactly one test, which is also
   `#[ignore]`d. CI always passes `--features integration` by convention, but
   the flag itself does little.
@@ -399,6 +403,8 @@ over it.
 - [README.md](README.md): what the tool does, install, output formats
 - [CONTRIBUTING.md](CONTRIBUTING.md): PR workflow, CI checks, coding standards
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md): full flag/config/env reference
+- [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md): build, run, and the
+  local verification checklist (fmt/clippy/test/coverage)
 - [docs/adr/](docs/adr/): the ADRs governing this repo itself. This project
   dogfoods its own tool; `.claude/rules/`, `.cursor/rules/`, and the project's
   `CLAUDE.md`/`AGENTS.md` files are generated from these
