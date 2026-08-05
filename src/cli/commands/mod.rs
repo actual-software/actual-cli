@@ -77,10 +77,19 @@ fn walk_for_output_files(dir: &Path, filename: &str, results: &mut Vec<PathBuf>)
     };
 
     for entry in entries.flatten() {
+        // Symlinks are skipped to avoid re-walking the tree through a cycle.
+        // Following them is bounded only by ELOOP, so a directory containing
+        // two links back to an ancestor explodes combinatorially.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             // Skip all hidden directories and known non-project directories
             if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
                 continue;
@@ -112,10 +121,18 @@ fn walk_for_cursor_rules(dir: &Path, results: &mut Vec<PathBuf>) {
     };
 
     for entry in entries.flatten() {
+        // Symlinks are skipped to avoid re-walking the tree through a cycle
+        // (see walk_for_output_files).
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             // Skip hidden directories (including .cursor itself — we already
             // probed .cursor/rules above) and known non-project directories.
             if name_str.starts_with('.') || SKIP_DIRS.contains(&name_str.as_ref()) {
@@ -389,5 +406,44 @@ mod tests {
         std::fs::write(cursor_rules.join("actual-policies.mdc"), "Cursor rules").unwrap();
         let files = find_output_files(dir.path(), &OutputFormat::ClaudeMd);
         assert_eq!(files.len(), 0);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_find_output_files_skips_symlink_cycle() {
+        // A link back to an ancestor is bounded only by ELOOP, so following it
+        // returns the same file ~40 times over — under distinct paths, so no
+        // dedup downstream would collapse them.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        std::fs::write(dir.path().join("CLAUDE.md"), "x").expect("failed to write file");
+        std::fs::create_dir(dir.path().join("sub")).expect("failed to create subdir");
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("sub/loop"))
+            .expect("failed to create symlink");
+
+        let files = find_output_files(dir.path(), &OutputFormat::ClaudeMd);
+        assert_eq!(
+            files.len(),
+            1,
+            "expected the single real CLAUDE.md, got {files:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_find_cursor_rules_skips_symlink_cycle() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let rules_dir = dir.path().join(CURSOR_RULES_DIR);
+        std::fs::create_dir_all(&rules_dir).expect("failed to create rules dir");
+        std::fs::write(rules_dir.join(CURSOR_RULES_FILENAME), "x").expect("failed to write file");
+        std::fs::create_dir(dir.path().join("sub")).expect("failed to create subdir");
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("sub/loop"))
+            .expect("failed to create symlink");
+
+        let files = find_output_files(dir.path(), &OutputFormat::CursorRules);
+        assert_eq!(
+            files.len(),
+            1,
+            "expected the single real rules file, got {files:?}"
+        );
     }
 }
