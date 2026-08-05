@@ -42,11 +42,14 @@ pub struct ConcurrentTailoringConfig<'a> {
 }
 
 impl<'a> ConcurrentTailoringConfig<'a> {
-    /// Construct a new [`ConcurrentTailoringConfig`], validating that `batch_size` is non-zero.
+    /// Construct a new [`ConcurrentTailoringConfig`], validating that both
+    /// `batch_size` and `concurrency` are non-zero.
     ///
     /// # Errors
     ///
-    /// Returns [`ActualError::ConfigError`] if `batch_size` is `0`.
+    /// Returns [`ActualError::ConfigError`] if `batch_size` is `0`, or if
+    /// `concurrency` is `0` — the latter would build a `Semaphore` that never
+    /// grants a permit, hanging every project until its timeout expires.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         concurrency: usize,
