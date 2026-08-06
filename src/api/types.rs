@@ -406,6 +406,42 @@ pub enum AdvisorPoll {
     },
 }
 
+// --- Observer intervention types (POST /v1/advisor/interventions) ---
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InterventionEvent {
+    pub hook_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    pub session_id: String,
+    pub sequence_no: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InterventionRequest {
+    pub org_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_unique_id: Option<String>,
+    pub session_id: String,
+    pub events: Vec<InterventionEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InterventionResponse {
+    pub intervention_id: String,
+    pub session_id: String,
+    pub disposition: String,
+    pub summary: String,
+    #[serde(default)]
+    pub guidance: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub evidence: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub hook_output: serde_json::Value,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

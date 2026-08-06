@@ -10,8 +10,9 @@ use crate::api::types::{
     AdvisorPoll, AdvisorQueryRequest, AdvisorQueryStarted, AdvisorQueryStatus, ApiErrorResponse,
     CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, ConnectedReposErrorBody,
     ConnectedRepository, FrameworksResponse, GetConnectedReposResponse, HealthResponse,
-    LanguagesResponse, MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse,
-    OnboardPublicRepoRequest, OnboardPublicRepoResponse, TelemetryRequest,
+    InterventionRequest, InterventionResponse, LanguagesResponse, MatchFramework, MatchOptions,
+    MatchProject, MatchRequest, MatchResponse, OnboardPublicRepoRequest,
+    OnboardPublicRepoResponse, TelemetryRequest,
 };
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -235,6 +236,35 @@ impl ActualApiClient {
         }
         response
             .json::<OnboardPublicRepoResponse>()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))
+    }
+
+    /// Post observer events for intervention evaluation at an evaluation boundary.
+    /// Uses a shorter timeout (10s) since this is in the hook critical path.
+    pub async fn post_intervention(
+        &self,
+        request: &InterventionRequest,
+    ) -> Result<InterventionResponse, ActualError> {
+        let url = format!("{}/v1/advisor/interventions", self.base_url);
+        let response = self
+            .authed(self.client.post(&url).json(request))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ActualError::NotLoggedIn);
+        }
+        if status == reqwest::StatusCode::FORBIDDEN {
+            return Err(Self::forbidden_org_error());
+        }
+        if !status.is_success() {
+            return Err(Self::map_error_response(status, response).await);
+        }
+        response
+            .json::<InterventionResponse>()
             .await
             .map_err(|e| ActualError::ApiError(e.to_string()))
     }

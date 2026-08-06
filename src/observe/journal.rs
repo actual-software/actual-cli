@@ -76,6 +76,24 @@ impl SessionJournal {
         Ok(())
     }
 
+    /// Read back all events for a session as a list of JSON values.
+    /// Returns an empty vec if the session file does not exist.
+    pub fn read_session(&self, session_id: &str) -> Result<Vec<serde_json::Value>, ActualError> {
+        let path = self.session_path(session_id);
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            ActualError::ConfigError(format!("failed to read journal {}: {e}", path.display()))
+        })?;
+        let events: Vec<serde_json::Value> = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        Ok(events)
+    }
+
     fn session_path(&self, session_id: &str) -> PathBuf {
         let safe_id: String = session_id
             .chars()
@@ -167,6 +185,80 @@ mod tests {
             0o600,
             "journal file should have 0600 permissions"
         );
+    }
+
+    #[test]
+    fn test_read_session_returns_empty_for_missing_session() {
+        let dir = tempdir().unwrap();
+        let journal = SessionJournal::with_dir(dir.path().to_path_buf());
+
+        let events = journal.read_session("nonexistent").unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_read_session_returns_appended_events() {
+        let dir = tempdir().unwrap();
+        let journal = SessionJournal::with_dir(dir.path().to_path_buf());
+        let payload1 = serde_json::json!({"event": "first"});
+        let payload2 = serde_json::json!({"event": "second"});
+
+        journal.append("s1", &payload1, &test_code()).unwrap();
+        journal.append("s1", &payload2, &test_code()).unwrap();
+
+        let events = journal.read_session("s1").unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["event"], "first");
+        assert_eq!(events[1]["event"], "second");
+        // Verify aewo_code was injected
+        assert_eq!(
+            events[0]["aewo_code"].as_str(),
+            Some("actual.event.session.started")
+        );
+    }
+
+    #[test]
+    fn test_read_session_skips_empty_lines() {
+        let dir = tempdir().unwrap();
+        let journal = SessionJournal::with_dir(dir.path().to_path_buf());
+        let payload = serde_json::json!({"event": "one"});
+
+        journal.append("s1", &payload, &test_code()).unwrap();
+
+        // Manually append a blank line to the file
+        let path = dir.path().join("s1.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        use std::io::Write;
+        writeln!(file, "").unwrap();
+        writeln!(file, "  ").unwrap();
+
+        let events = journal.read_session("s1").unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn test_read_session_skips_invalid_json_lines() {
+        let dir = tempdir().unwrap();
+        let journal = SessionJournal::with_dir(dir.path().to_path_buf());
+        let payload = serde_json::json!({"event": "valid"});
+
+        journal.append("s1", &payload, &test_code()).unwrap();
+
+        // Manually append invalid JSON
+        let path = dir.path().join("s1.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        use std::io::Write;
+        writeln!(file, "not valid json").unwrap();
+
+        let events = journal.read_session("s1").unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], "valid");
     }
 
     #[test]
