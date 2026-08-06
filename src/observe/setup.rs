@@ -1,17 +1,9 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::ActualError;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct HookEntry {
-    r#type: String,
-    command: String,
-}
 
 const HOOK_COMMANDS: &[(&str, &str)] = &[
     ("SessionStart", "actual observe session-start"),
@@ -55,14 +47,27 @@ pub fn install_hooks(settings_path: &Path) -> Result<(), ActualError> {
             ActualError::ConfigError(format!("hooks.{hook_name} is not an array"))
         })?;
 
-        let already_present = arr.iter().any(|entry| {
-            entry.get("command").and_then(|c| c.as_str()) == Some(command)
+        let already_present = arr.iter().any(|matcher_group| {
+            matcher_group
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|hooks| {
+                    hooks.iter().any(|hook| {
+                        hook.get("command").and_then(|c| c.as_str()) == Some(command)
+                    })
+                })
+                .unwrap_or(false)
         });
 
         if !already_present {
             arr.push(serde_json::json!({
-                "type": "command",
-                "command": command,
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": command,
+                    }
+                ]
             }));
         }
     }
@@ -111,12 +116,16 @@ mod tests {
 
         assert_eq!(hooks.len(), 8);
         assert_eq!(
-            hooks["SessionStart"][0]["command"].as_str().unwrap(),
+            hooks["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap(),
             "actual observe session-start"
         );
         assert_eq!(
-            hooks["PreToolUse"][0]["command"].as_str().unwrap(),
+            hooks["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap(),
             "actual observe pre-tool"
+        );
+        assert_eq!(
+            hooks["SessionStart"][0]["matcher"].as_str().unwrap(),
+            ""
         );
     }
 
@@ -128,7 +137,7 @@ mod tests {
         let existing = serde_json::json!({
             "hooks": {
                 "SessionStart": [
-                    {"type": "command", "command": "beads observe start"}
+                    {"matcher": "", "hooks": [{"type": "command", "command": "beads observe start"}]}
                 ]
             }
         });
@@ -141,11 +150,11 @@ mod tests {
 
         assert_eq!(session_start.len(), 2);
         assert_eq!(
-            session_start[0]["command"].as_str().unwrap(),
+            session_start[0]["hooks"][0]["command"].as_str().unwrap(),
             "beads observe start"
         );
         assert_eq!(
-            session_start[1]["command"].as_str().unwrap(),
+            session_start[1]["hooks"][0]["command"].as_str().unwrap(),
             "actual observe session-start"
         );
     }
@@ -236,8 +245,12 @@ mod tests {
 
         for (_, entries) in hooks {
             let arr = entries.as_array().unwrap();
-            for entry in arr {
-                assert_eq!(entry["type"].as_str().unwrap(), "command");
+            for matcher_group in arr {
+                assert!(matcher_group.get("matcher").is_some());
+                let inner_hooks = matcher_group["hooks"].as_array().unwrap();
+                for hook in inner_hooks {
+                    assert_eq!(hook["type"].as_str().unwrap(), "command");
+                }
             }
         }
     }
