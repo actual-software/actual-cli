@@ -88,8 +88,17 @@ impl SessionJournal {
         })?;
         let events: Vec<serde_json::Value> = content
             .lines()
-            .filter(|line| !line.trim().is_empty())
-            .filter_map(|line| serde_json::from_str(line).ok())
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .filter_map(|(idx, line)| {
+                match serde_json::from_str(line) {
+                    Ok(val) => Some(val),
+                    Err(e) => {
+                        eprintln!("advisor: journal line {} corrupt, skipping: {e}", idx + 1);
+                        None
+                    }
+                }
+            })
             .collect();
         Ok(events)
     }
