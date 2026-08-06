@@ -8,6 +8,7 @@ pub mod error;
 pub mod generation;
 pub mod model_cache;
 pub mod net;
+pub mod observe;
 pub mod runner;
 pub mod tailoring;
 #[cfg(feature = "telemetry")]
@@ -23,8 +24,8 @@ pub use error::ActualError;
 // Re-export CLI types for backward compatibility with tests
 pub use cli::args::{
     AdvisorArgs, AuthArgs, AuthCommand, CacheAction, CacheArgs, Cli, Command, ConfigAction,
-    ConfigArgs, ConfigSetArgs, CreateTokenArgs, LoginArgs, ModelsArgs, RepoArgs, RepoCommand,
-    RepoOnboardArgs, RunnerChoice, StatusArgs, SyncArgs,
+    ConfigArgs, ConfigSetArgs, CreateTokenArgs, LoginArgs, ModelsArgs, ObserveArgs, ObserveCommand,
+    RepoArgs, RepoCommand, RepoOnboardArgs, RunnerChoice, StatusArgs, SyncArgs,
 };
 
 pub fn run(cli: Cli) -> Result<(), ActualError> {
@@ -45,6 +46,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
                 cli::commands::repo_onboard::exec(onboard_args)
             }
         },
+        Command::Observe(args) => cli::commands::observe::exec(args),
     }
 }
 

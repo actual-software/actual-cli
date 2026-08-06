@@ -343,6 +343,8 @@ pub enum Command {
     Cache(CacheArgs),
     /// Manage repositories
     Repo(RepoArgs),
+    /// Observer: capture coding agent events via Claude Code hooks
+    Observe(ObserveArgs),
 }
 
 /// Arguments for the `repo` command
@@ -375,6 +377,54 @@ pub struct RepoOnboardArgs {
     /// Override the auth server URL
     #[arg(long, env = "ACTUAL_AUTH_URL")]
     pub auth_url: Option<String>,
+}
+
+/// Arguments for the `observe` command
+#[derive(Parser, Debug)]
+pub struct ObserveArgs {
+    #[command(subcommand)]
+    pub command: ObserveCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ObserveCommand {
+    /// Handle SessionStart hook event
+    SessionStart,
+    /// Handle UserPromptSubmit hook event
+    Prompt,
+    /// Handle PreToolUse hook event
+    PreTool,
+    /// Handle PostToolUse hook event
+    PostTool,
+    /// Handle PostToolUseFailure hook event
+    PostToolFailure,
+    /// Handle Stop hook event
+    Stop,
+    /// Handle SessionEnd hook event
+    SessionEnd,
+    /// Handle PreCompact hook event (re-inject context)
+    PreCompact,
+    /// Install observer hooks into .claude/settings.json
+    Setup,
+    /// Check observer status (auth, hooks, API reachability)
+    Status,
+}
+
+impl ObserveCommand {
+    pub fn hook_name(&self) -> &'static str {
+        match self {
+            Self::SessionStart => "session-start",
+            Self::Prompt => "prompt",
+            Self::PreTool => "pre-tool",
+            Self::PostTool => "post-tool",
+            Self::PostToolFailure => "post-tool-failure",
+            Self::Stop => "stop",
+            Self::SessionEnd => "session-end",
+            Self::PreCompact => "pre-compact",
+            Self::Setup => "setup",
+            Self::Status => "status",
+        }
+    }
 }
 
 /// Arguments for the `advisor` command
