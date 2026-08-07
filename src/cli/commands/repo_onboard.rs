@@ -35,13 +35,26 @@ pub fn exec(args: &RepoOnboardArgs) -> Result<(), ActualError> {
     rt.block_on(exec_async(args))
 }
 
+fn normalize_to_https(url: &str) -> String {
+    let trimmed = url.trim();
+    if let Some(path) = trimmed.strip_prefix("git@github.com:") {
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        return format!("https://github.com/{path}");
+    }
+    if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
+        let path = rest.strip_suffix(".git").unwrap_or(rest);
+        return format!("https://github.com/{path}");
+    }
+    trimmed.strip_suffix(".git").unwrap_or(trimmed).to_string()
+}
+
 async fn exec_async(args: &RepoOnboardArgs) -> Result<(), ActualError> {
-    let git_url = &args.url;
+    let git_url = normalize_to_https(&args.url);
 
     // Try existing ephemeral credentials first
     if let Some(creds) = ephemeral::load()? {
         if !creds.is_expired(Utc::now()) {
-            return call_onboard_api(args, &creds, git_url).await;
+            return call_onboard_api(args, &creds, &git_url).await;
         }
         ephemeral::clear()?;
     }
@@ -56,7 +69,7 @@ async fn exec_async(args: &RepoOnboardArgs) -> Result<(), ActualError> {
     ephemeral::save(&creds)?;
     pending::clear()?;
 
-    call_onboard_api(args, &creds, git_url).await
+    call_onboard_api(args, &creds, &git_url).await
 }
 
 async fn authenticate(args: &RepoOnboardArgs) -> Result<EphemeralCredentials, ActualError> {
@@ -107,6 +120,46 @@ async fn call_onboard_api(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_ssh_to_https() {
+        assert_eq!(
+            normalize_to_https("git@github.com:actual-software/example_demo_repo.git"),
+            "https://github.com/actual-software/example_demo_repo"
+        );
+    }
+
+    #[test]
+    fn normalize_ssh_no_dot_git() {
+        assert_eq!(
+            normalize_to_https("git@github.com:acme/widgets"),
+            "https://github.com/acme/widgets"
+        );
+    }
+
+    #[test]
+    fn normalize_ssh_protocol_url() {
+        assert_eq!(
+            normalize_to_https("ssh://git@github.com/acme/widgets.git"),
+            "https://github.com/acme/widgets"
+        );
+    }
+
+    #[test]
+    fn normalize_https_passthrough() {
+        assert_eq!(
+            normalize_to_https("https://github.com/acme/widgets"),
+            "https://github.com/acme/widgets"
+        );
+    }
+
+    #[test]
+    fn normalize_https_strips_dot_git() {
+        assert_eq!(
+            normalize_to_https("https://github.com/acme/widgets.git"),
+            "https://github.com/acme/widgets"
+        );
+    }
 
     #[test]
     fn resolve_auth_url_uses_default() {
