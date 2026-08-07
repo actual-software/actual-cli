@@ -158,7 +158,18 @@ pub fn build_authorize_url(
     state: &str,
     organization_id: Option<&str>,
 ) -> Result<String, ActualError> {
-    let mut url = reqwest::Url::parse(&format!("{}/authorize", cfg.base_url))
+    build_authorize_url_with_path(cfg, "/authorize", redirect_uri, code_challenge, state, organization_id)
+}
+
+fn build_authorize_url_with_path(
+    cfg: &OAuthConfig,
+    path: &str,
+    redirect_uri: &str,
+    code_challenge: &str,
+    state: &str,
+    organization_id: Option<&str>,
+) -> Result<String, ActualError> {
+    let mut url = reqwest::Url::parse(&format!("{}{}", cfg.base_url, path))
         .map_err(|e| ActualError::ConfigError(format!("Invalid auth server URL: {e}")))?;
     {
         let mut q = url.query_pairs_mut();
@@ -301,6 +312,36 @@ pub async fn login(
     let server = LoopbackServer::bind().await?;
     login_with(
         cfg,
+        "/authorize",
+        organization_id,
+        open_browser,
+        opener,
+        timeout,
+        pkce_pair,
+        state,
+        server,
+    )
+    .await
+}
+
+/// Run the browser OAuth login via `/authorize/cli` (magic link form).
+///
+/// Same as [`login`] but opens the CLI-native auth page which supports
+/// email magic links with resend/recovery, instead of the standard login
+/// page with GitHub/Google SSO.
+pub async fn login_cli(
+    cfg: &OAuthConfig,
+    organization_id: Option<String>,
+    open_browser: bool,
+    opener: &dyn Fn(&str),
+    timeout: Duration,
+) -> Result<StoredCredentials, ActualError> {
+    let pkce_pair = PkcePair::generate();
+    let state = pkce::generate_state();
+    let server = LoopbackServer::bind().await?;
+    login_with(
+        cfg,
+        "/authorize/cli",
         organization_id,
         open_browser,
         opener,
@@ -320,6 +361,7 @@ pub async fn login(
 #[allow(clippy::too_many_arguments)]
 async fn login_with(
     cfg: &OAuthConfig,
+    authorize_path: &str,
     organization_id: Option<String>,
     open_browser: bool,
     opener: &dyn Fn(&str),
@@ -331,8 +373,9 @@ async fn login_with(
     let http = build_http_client(&cfg.base_url)?;
     let redirect_uri = server.redirect_uri();
 
-    let auth_url = build_authorize_url(
+    let auth_url = build_authorize_url_with_path(
         cfg,
+        authorize_path,
         &redirect_uri,
         &pkce_pair.challenge,
         &state,
@@ -347,7 +390,9 @@ async fn login_with(
         opener(&auth_url);
     }
 
-    let redirect = server.wait_for_code(&state, timeout).await?;
+    let redirect = server
+        .wait_for_code_with_app_url(&state, timeout, Some(&cfg.base_url))
+        .await?;
     let token = exchange_code(
         &http,
         &cfg.base_url,
@@ -419,12 +464,15 @@ pub async fn login_ephemeral(
     let auth_url_str = url.to_string();
     println!("Opening your browser to connect your Actual AI account…");
     println!("If it doesn't open, visit this URL:\n\n  {auth_url_str}\n");
+    println!("Lost the link? Run: actual login --cli\n");
 
     if let Err(e) = open::that(&auth_url_str) {
         eprintln!("Could not open browser: {e}");
     }
 
-    let redirect = server.wait_for_code(&state, timeout).await?;
+    let redirect = server
+        .wait_for_code_with_app_url(&state, timeout, Some(&cfg.base_url))
+        .await?;
     let token = exchange_code(
         &http,
         &cfg.base_url,
@@ -1176,6 +1224,7 @@ mod tests {
         let opener = |_: &str| {};
         let creds = login_with(
             &cfg,
+            "/authorize",
             Some("org-1".to_string()),
             true,
             &opener,
@@ -1277,6 +1326,7 @@ mod tests {
         let opener = |_: &str| {};
         let err = login_with(
             &cfg,
+            "/authorize",
             None,
             false,
             &opener,

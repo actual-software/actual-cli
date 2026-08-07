@@ -329,6 +329,8 @@ pub enum Command {
     Login(LoginArgs),
     /// Sign out of your Actual AI account and clear local credentials
     Logout,
+    /// Clear all local state (credentials, sessions, journals) for a clean test
+    Reset,
     /// Show the signed-in Actual AI account and organization
     Whoami,
     /// Ask the Advisor an org-scoped architecture question
@@ -587,6 +589,13 @@ pub struct LoginArgs {
     /// is ignored in this mode (the org is selected on the approval page).
     #[arg(long)]
     pub device: bool,
+
+    /// Use the CLI-native magic link flow instead of the standard login page.
+    /// Opens the /authorize/cli page which allows signing up or signing in via
+    /// email magic link with built-in recovery (resend link, try different email).
+    /// Use this when GitHub/Google SSO is not available or you prefer email auth.
+    #[arg(long = "cli")]
+    pub cli_flow: bool,
 }
 
 /// Arguments for the `auth` command group.

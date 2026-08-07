@@ -17,6 +17,7 @@ pub mod logout;
 pub mod models;
 pub mod observe;
 pub mod repo_onboard;
+pub mod reset;
 pub mod runners;
 pub mod status;
 pub mod sync;

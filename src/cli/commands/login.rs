@@ -15,9 +15,33 @@ pub fn exec(args: &LoginArgs) -> Result<(), ActualError> {
     if args.device {
         return exec_device(base_url);
     }
+    if args.cli_flow {
+        return exec_cli_flow(base_url, args);
+    }
     let cfg = OAuthConfig::new(base_url);
 
     let creds = build_runtime()?.block_on(oauth::login(
+        &cfg,
+        args.org.clone(),
+        !args.no_browser,
+        &|url| {
+            let _ = open::that(url);
+        },
+        DEFAULT_LOGIN_TIMEOUT,
+    ))?;
+
+    store::save(&creds)?;
+    print_success(&creds);
+    Ok(())
+}
+
+/// CLI-native magic link flow (`actual login --cli`).
+/// Opens `/authorize/cli` which renders an inline magic link form with
+/// resend/recovery options, instead of the standard login page.
+fn exec_cli_flow(base_url: String, args: &LoginArgs) -> Result<(), ActualError> {
+    let cfg = OAuthConfig::new(base_url);
+
+    let creds = build_runtime()?.block_on(oauth::login_cli(
         &cfg,
         args.org.clone(),
         !args.no_browser,
@@ -112,6 +136,7 @@ mod tests {
             api_url: Some("http://example.com".to_string()),
             no_browser: true,
             device: false,
+            cli_flow: false,
         };
         let err = exec(&args).unwrap_err();
         assert!(
@@ -131,6 +156,7 @@ mod tests {
             api_url: Some("http://example.com".to_string()),
             no_browser: true,
             device: true,
+            cli_flow: false,
         };
         let err = exec(&args).unwrap_err();
         assert!(
