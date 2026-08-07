@@ -8,6 +8,9 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::Utc;
+
+use crate::auth::store;
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::cli::ui::theme;
@@ -126,9 +129,71 @@ fn check_python_venv(root: &Path) -> Check {
     Check::pass("Python venv", "exists")
 }
 
+fn check_auth() -> Vec<Check> {
+    let creds = match store::load() {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return vec![Check::fail(
+                "Login",
+                "not logged in",
+                "actual login",
+            )];
+        }
+        Err(_) => {
+            return vec![Check::fail(
+                "Login",
+                "credentials file corrupted",
+                "actual logout && actual login",
+            )];
+        }
+    };
+
+    let mut checks = Vec::new();
+
+    let now = Utc::now();
+    if creds.is_expired(now) {
+        checks.push(Check::fail(
+            "Login",
+            "access token expired",
+            "actual login",
+        ));
+    } else {
+        let identity = creds
+            .email
+            .as_deref()
+            .unwrap_or(&creds.member_id);
+        let org_short = if creds.organization_id.len() > 8 {
+            &creds.organization_id[..8]
+        } else {
+            &creds.organization_id
+        };
+        checks.push(Check::pass(
+            "Login",
+            format!("{identity} (org {org_short}…)"),
+        ));
+    }
+
+    if let Some(scope) = &creds.scope {
+        if !scope.contains("openid") {
+            checks.push(Check::fail(
+                "Permissions",
+                format!("limited scope: {scope}"),
+                "actual logout && actual login",
+            ));
+        } else {
+            checks.push(Check::pass("Permissions", format!("scope: {scope}")));
+        }
+    }
+
+    checks
+}
+
 pub fn exec() -> Result<(), ActualError> {
     let width = term_size::terminal_width();
     let root = find_project_root();
+
+    // ── Auth ──
+    let auth_checks = check_auth();
 
     // ── Services ──
     let services = vec![
@@ -168,15 +233,27 @@ pub fn exec() -> Result<(), ActualError> {
     ];
 
     // ── Render ──
-    let all_checks: Vec<&[Check]> = vec![&services, &env_checks, &project_checks, &env_var_checks];
+    let all_checks: Vec<&[Check]> = vec![&auth_checks, &services, &env_checks, &project_checks, &env_var_checks];
     let total: usize = all_checks.iter().map(|s| s.len()).sum();
     let failed: Vec<&Check> = all_checks.iter().flat_map(|s| s.iter()).filter(|c| !c.passed).collect();
 
     // Summary panel
     let mut panel = Panel::titled("Actual Doctor");
 
+    // Auth
+    panel = panel.line("").line(&format!("  {} Authentication", theme::DIAMOND));
+    for c in &auth_checks {
+        let icon = if c.passed { theme::SUCCESS.to_string() } else { theme::ERROR.to_string() };
+        let styled_detail = if c.passed {
+            format!("{}", theme::success(&c.detail))
+        } else {
+            format!("{}", theme::error(&c.detail))
+        };
+        panel = panel.kv(&format!("  {icon} {}", c.name), &styled_detail);
+    }
+
     // Services
-    panel = panel.line("").line(&format!("  {} Services", theme::DIAMOND));
+    panel = panel.separator().line(&format!("  {} Services", theme::DIAMOND));
     for c in &services {
         let icon = if c.passed { theme::SUCCESS.to_string() } else { theme::ERROR.to_string() };
         let styled_detail = if c.passed {
