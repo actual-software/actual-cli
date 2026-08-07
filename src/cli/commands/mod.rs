@@ -12,6 +12,7 @@ pub mod auth;
 pub mod cache;
 pub mod config;
 pub mod create_token;
+pub mod doctor;
 pub mod login;
 pub mod logout;
 pub mod models;

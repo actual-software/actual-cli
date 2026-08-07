@@ -347,6 +347,8 @@ pub enum Command {
     Repo(RepoArgs),
     /// Observer: capture coding agent events via Claude Code hooks
     Observe(ObserveArgs),
+    /// Diagnose local dev environment health and suggest fixes
+    Doctor,
 }
 
 /// Arguments for the `repo` command

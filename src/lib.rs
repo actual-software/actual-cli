@@ -48,6 +48,7 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
             }
         },
         Command::Observe(args) => cli::commands::observe::exec(args),
+        Command::Doctor => cli::commands::doctor::exec(),
     }
 }
 
