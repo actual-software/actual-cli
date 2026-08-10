@@ -185,14 +185,25 @@ fn mint_token_rejects_non_https_issuer() {
         .stderr(predicate::str::contains("HTTPS"));
 }
 
-/// A SEC1 EC key is refused, and — the part that matters — the conversion
-/// command survives all the way to the user's terminal.
+/// A SEC1 EC key is refused, and the conversion command survives all the way to
+/// the user's terminal.
 ///
-/// The unit tests pin the error's message and hint. This one pins the surface a
-/// user actually reads, which is a separate question: the error panel truncates
-/// every row to the terminal width, so guidance that fits in a string can still
-/// be invisible in practice. Both entry points are covered, because inference
-/// (no `--alg`) and the explicit `--alg es256` loader are different code paths.
+/// What this pins is delivery, not detection. The unit tests pin the error's
+/// message and hint as strings; the error panel then truncates every row to the
+/// terminal width, so guidance that fits in a string can still be invisible in
+/// practice. Its injection axis is the shared emitter: move the `openssl` line
+/// off `sec1_ec_key_error`'s hint and into its message, and the row truncates
+/// mid-command and this test goes red.
+///
+/// It is not the regression control for the inference fix, and it cannot be.
+/// Two guards enforce one property here. `infer_from_pem` and the `EncodingKey`
+/// loader both answer a SEC1 key with the same `sec1_ec_key_error()`, so
+/// restoring the original defect in `infer_from_pem` (returning `Es256` on the
+/// header match) leaves the loader emitting identical stderr, and both
+/// iterations below stay green. The control for that defect is the unit test
+/// `infer_from_pem_rejects_a_genuine_sec1_ec_key`, which drives inference
+/// directly and does go red. Both entry points run here for coverage of the
+/// surface a user reads, which is a weaker claim than telling them apart.
 #[test]
 fn mint_token_refuses_a_sec1_ec_key_and_shows_the_conversion_command() {
     let key_pem = ec_private_key_sec1_pem();
