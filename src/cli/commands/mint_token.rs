@@ -158,9 +158,12 @@ fn resolve_scope(scopes: &[String]) -> Option<String> {
     }
 }
 
-/// Resolve the assertion lifetime: `0` (the "unset" sentinel from the default)
-/// falls back to [`DEFAULT_ASSERTION_LIFETIME_SECONDS`]; any other value is used
-/// as given (`build_and_sign_assertion` clamps it to the server cap).
+/// Resolve the assertion lifetime. The flag carries clap's own
+/// `default_value_t = 60`, so an omitted flag arrives here as `60`, never as
+/// `0` — the only way to reach the `0` arm is to pass
+/// `--assertion-ttl-seconds 0` explicitly, which is read as "give me the
+/// default" rather than clamped up to `1`. Any other value is used as given
+/// (`build_and_sign_assertion` clamps it to the server cap).
 fn resolve_lifetime(ttl_seconds: u64) -> u64 {
     if ttl_seconds == 0 {
         DEFAULT_ASSERTION_LIFETIME_SECONDS
@@ -218,7 +221,8 @@ mod tests {
 
     #[test]
     fn resolve_lifetime_uses_default_only_for_zero() {
-        // 0 is the "unset" sentinel → default; every other value passes through.
+        // An explicit 0 is read as "give me the default"; clap's own default of
+        // 60 never reaches here as 0. Every other value passes through.
         assert_eq!(resolve_lifetime(0), DEFAULT_ASSERTION_LIFETIME_SECONDS);
         assert_eq!(resolve_lifetime(1), 1);
         assert_eq!(resolve_lifetime(300), 300);
