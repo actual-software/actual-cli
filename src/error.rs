@@ -105,6 +105,19 @@ pub enum ActualError {
     /// the caller can choose from; the fix rides on the `hint()` line.
     #[error("{0}")]
     RepoNotFound(String),
+
+    /// A private key was supplied in SEC1 form (`BEGIN EC PRIVATE KEY`), which
+    /// the assertion signer cannot load — it reads PKCS#1 and PKCS#8 only.
+    ///
+    /// The split between `message` and `hint` is load-bearing rather than
+    /// stylistic. The error panel truncates every row to the terminal width, so
+    /// a conversion command baked into `Display` is the first thing the user
+    /// loses — and the conversion command is the whole remedy. Carrying it on
+    /// the "Fix:" line the way [`Self::OrgMismatch`] does keeps it visible.
+    /// A plain `ConfigError` would also point the user at `config.yaml`, which
+    /// is the wrong place to look for a key passed by flag or environment.
+    #[error("{message}")]
+    Sec1KeyUnsupported { message: String, hint: String },
 }
 
 impl ActualError {
@@ -180,6 +193,9 @@ impl ActualError {
             Self::RepoNotFound(_) => Some(Cow::Borrowed(
                 "Pass a connected repository name to --repo, or omit --repo to query the whole organization",
             )),
+            // Carried on the variant rather than matched to a static string,
+            // for the panel-truncation reason documented on it.
+            Self::Sec1KeyUnsupported { hint, .. } => Some(Cow::Owned(hint.clone())),
             _ => None,
         }
     }
@@ -856,6 +872,30 @@ mod tests {
         assert!(
             !msg.contains("Pass a connected"),
             "remediation should not be in Display: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sec1_key_unsupported_exit_code_display_and_hint() {
+        let err = ActualError::Sec1KeyUnsupported {
+            message: "SEC1 EC private key ('BEGIN EC PRIVATE KEY'); PKCS#8 is required".to_string(),
+            hint: "openssl pkcs8 -topk8 -nocrypt -in <key.pem> -out <key.pk8.pem>".to_string(),
+        };
+        // A malformed key is a generic failure, not a re-auth or setup class:
+        // exit 1, the same code a ConfigError carried before this variant.
+        assert_eq!(err.exit_code(), 1);
+        let msg = err.to_string();
+        assert!(msg.contains("SEC1"), "got: {msg}");
+        assert!(msg.contains("PKCS#8"), "got: {msg}");
+        // The conversion command rides on the Fix/hint line, not Display —
+        // Display is what the error panel truncates.
+        let hint = err
+            .hint()
+            .expect("expected a Fix hint for Sec1KeyUnsupported");
+        assert!(hint.contains("openssl pkcs8 -topk8"), "got: {hint}");
+        assert!(
+            !msg.contains("openssl"),
+            "the command belongs on the hint, not in Display: {msg}"
         );
     }
 }
