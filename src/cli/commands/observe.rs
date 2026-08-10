@@ -1,8 +1,11 @@
 use std::io::{self, Read};
 
+use chrono::{Duration as ChronoDuration, Utc};
+
 use crate::api::client::{ActualApiClient, DEFAULT_API_URL};
 use crate::api::types::{InterventionEvent, InterventionRequest};
-use crate::auth::store;
+use crate::auth::{oauth, store};
+use crate::auth::store::StoredCredentials;
 use crate::cli::args::{ObserveArgs, ObserveCommand};
 use crate::error::ActualError;
 use crate::observe::boundary::is_evaluation_boundary;
@@ -106,6 +109,12 @@ fn try_evaluate_at_boundary(
         return Ok(serde_json::json!({}));
     }
 
+    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+        ActualError::ConfigError(format!("failed to create runtime: {e}"))
+    })?;
+
+    let creds = rt.block_on(ensure_fresh(creds))?;
+
     let events: Vec<InterventionEvent> = journal_events
         .iter()
         .enumerate()
@@ -132,10 +141,6 @@ fn try_evaluate_at_boundary(
         events,
     };
 
-    let rt = tokio::runtime::Runtime::new().map_err(|e| {
-        ActualError::ConfigError(format!("failed to create runtime: {e}"))
-    })?;
-
     let response = rt.block_on(async {
         let client = ActualApiClient::new(&api_url)?
             .with_bearer(&creds.access_token);
@@ -143,4 +148,18 @@ fn try_evaluate_at_boundary(
     })?;
 
     Ok(response.hook_output)
+}
+
+async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, ActualError> {
+    if !creds.expires_within(Utc::now(), ChronoDuration::seconds(60)) {
+        return Ok(creds);
+    }
+    if creds.refresh_token.is_empty() {
+        return Err(ActualError::NotLoggedIn);
+    }
+    let refreshed = oauth::refresh(&creds)
+        .await
+        .map_err(|_| ActualError::NotLoggedIn)?;
+    store::save(&refreshed)?;
+    Ok(refreshed)
 }
