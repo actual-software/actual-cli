@@ -67,7 +67,7 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
     let journal = SessionJournal::new()?;
     journal.append(session_id, &raw_payload, &aewo_code)?;
 
-    if is_evaluation_boundary(hook_type, tool_name) {
+    if is_evaluation_boundary(hook_type, tool_name, &raw_payload) {
         let hook_output = evaluate_at_boundary(session_id, &journal);
         println!("{}", serde_json::to_string(&hook_output).unwrap_or_else(|_| "{}".to_string()));
     } else {

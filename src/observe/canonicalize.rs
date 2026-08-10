@@ -62,6 +62,20 @@ pub fn canonicalize(hook_type: HookType, tool_name: Option<&str>) -> AewoCode {
             assignment_method: "deterministic-mapping",
             mapping_rule: "claude-code.PreToolUse.Bash",
         },
+        (HookType::PreToolUse, Some("Agent")) => AewoCode {
+            event_code: "actual.event.agent.delegated",
+            tool_class: Some("orchestration"),
+            artifact_type: Some("agent-task"),
+            assignment_method: "deterministic-mapping",
+            mapping_rule: "claude-code.PreToolUse.Agent",
+        },
+        (HookType::PostToolUse, Some("Agent")) => AewoCode {
+            event_code: "actual.event.agent.returned",
+            tool_class: Some("orchestration"),
+            artifact_type: Some("agent-result"),
+            assignment_method: "deterministic-mapping",
+            mapping_rule: "claude-code.PostToolUse.Agent",
+        },
         (HookType::PostToolUse, Some("Edit")) => AewoCode {
             event_code: "actual.event.file.modified",
             tool_class: Some("editor"),
@@ -167,6 +181,22 @@ mod tests {
     fn test_grep_maps_to_grep_executed() {
         let code = canonicalize(HookType::PreToolUse, Some("Grep"));
         assert_eq!(code.event_code, "actual.event.grep.executed");
+    }
+
+    #[test]
+    fn test_agent_pre_tool_maps_to_agent_delegated() {
+        let code = canonicalize(HookType::PreToolUse, Some("Agent"));
+        assert_eq!(code.event_code, "actual.event.agent.delegated");
+        assert_eq!(code.tool_class, Some("orchestration"));
+        assert_eq!(code.artifact_type, Some("agent-task"));
+    }
+
+    #[test]
+    fn test_agent_post_tool_maps_to_agent_returned() {
+        let code = canonicalize(HookType::PostToolUse, Some("Agent"));
+        assert_eq!(code.event_code, "actual.event.agent.returned");
+        assert_eq!(code.tool_class, Some("orchestration"));
+        assert_eq!(code.artifact_type, Some("agent-result"));
     }
 
     #[test]
