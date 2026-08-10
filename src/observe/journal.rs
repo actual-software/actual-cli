@@ -103,12 +103,73 @@ impl SessionJournal {
         Ok(events)
     }
 
+    /// Read events starting from a line offset (0-based). Returns events and the
+    /// new cursor (total non-empty lines seen so far).
+    pub fn read_session_from(
+        &self,
+        session_id: &str,
+        from_line: usize,
+    ) -> Result<(Vec<serde_json::Value>, usize), ActualError> {
+        let path = self.session_path(session_id);
+        if !path.exists() {
+            return Ok((vec![], 0));
+        }
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            ActualError::ConfigError(format!("failed to read journal {}: {e}", path.display()))
+        })?;
+        let mut events = Vec::new();
+        let mut valid_count: usize = 0;
+        for (idx, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            valid_count += 1;
+            if valid_count <= from_line {
+                continue;
+            }
+            match serde_json::from_str(line) {
+                Ok(val) => events.push(val),
+                Err(e) => {
+                    eprintln!("advisor: journal line {} corrupt, skipping: {e}", idx + 1);
+                }
+            }
+        }
+        Ok((events, valid_count))
+    }
+
+    /// Read the boundary cursor (line offset) for a session.
+    pub fn read_cursor(&self, session_id: &str) -> usize {
+        let path = self.cursor_path(session_id);
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Write the boundary cursor after a successful evaluation.
+    pub fn write_cursor(&self, session_id: &str, offset: usize) -> Result<(), ActualError> {
+        let path = self.cursor_path(session_id);
+        std::fs::write(&path, offset.to_string()).map_err(|e| {
+            ActualError::ConfigError(format!(
+                "failed to write cursor {}: {e}",
+                path.display()
+            ))
+        })
+    }
+
     fn session_path(&self, session_id: &str) -> PathBuf {
-        let safe_id: String = session_id
+        self.dir.join(format!("{}.jsonl", Self::safe_id(session_id)))
+    }
+
+    fn cursor_path(&self, session_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.cursor", Self::safe_id(session_id)))
+    }
+
+    fn safe_id(session_id: &str) -> String {
+        session_id
             .chars()
             .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-            .collect();
-        self.dir.join(format!("{safe_id}.jsonl"))
+            .collect()
     }
 }
 
