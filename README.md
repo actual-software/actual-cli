@@ -157,6 +157,7 @@ actual advisor        # ask the Advisor an architecture question
 actual status         # check output file state (managed markers, staleness)
 actual auth           # verify authentication
 actual auth create-token  # mint a scoped token for CI / agents (prototype)
+actual mint-token     # mint a token from a service-account key (no browser)
 actual config show    # view current configuration
 actual config set     # set a config value
 actual config path    # print config file location
@@ -165,9 +166,12 @@ actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
 ```
 
-For non-interactive (CI / agent) authentication with scoped access tokens, see
-[Agent authentication](docs/AGENT_AUTH.md). It also covers the
-dedicated-token-per-agent and never-in-prompt rules agents must follow.
+For non-interactive (CI / agent) authentication, see
+[Agent authentication](docs/AGENT_AUTH.md). It covers both headless paths: the
+scoped access tokens `auth create-token` mints from an existing login session,
+and the service-account keys `mint-token` signs with when there is no human to
+log in at all. It also covers the dedicated-token-per-agent and never-in-prompt
+rules agents must follow.
 
 ## Configuration
 

@@ -9,7 +9,19 @@ headless callers authenticate without one.
 > **Status: prototype.** This command is a proof of concept. The issuance
 > endpoint it calls is being finalized on the server; the CLI is built against
 > the documented contract and is repointed with a single flag or environment
-> variable once the endpoint ships. See [Endpoint](#endpoint) below.
+> variable once the endpoint ships. See [Endpoint](#endpoint-create-token)
+> below.
+
+## Two headless paths
+
+Which one you want depends on whether a human ever logs in.
+
+- **`actual auth create-token`** derives a PAT from *your* browser login. It
+  carries a subset of that person's access into CI, and it's what the rest of
+  this page describes until the last section.
+- **`actual mint-token`** needs no login at all. An agent holds a registered
+  private key, signs a short-lived assertion with it, and trades that for an
+  access token. See [Service-account keys](#service-account-keys).
 
 ## Mint a token
 
@@ -171,7 +183,7 @@ OS keychain entirely:
   high-entropy value (the Argon2id work factor slows brute force but cannot
   rescue a guessable passphrase).
 
-## Endpoint
+## Endpoint (create-token)
 
 `create-token` calls `POST <base>/api/oauth/tokens` with the login session token
 as the bearer, and reads back the minted `actl_pat_…`. The base URL is resolved
@@ -179,3 +191,123 @@ from `--api-url`, then the `ACTUAL_API_URL` environment variable, then the
 api-service default, so a local mock or a future production path needs no code
 change. It isn't final yet. Until the server endpoint ships, treat the exact
 path and payload as provisional.
+
+## Service-account keys
+
+`create-token` still assumes a human logged in once. `mint-token` removes even
+that. An agent holds a private key whose public half is registered server-side,
+signs a short-lived assertion with it, and exchanges the assertion for an access
+token. No browser, no prompt, nothing interactive. This is the
+[RFC 7523](https://datatracker.ietf.org/doc/html/rfc7523) jwt-bearer grant, and
+it's the path for a long-running unattended agent.
+
+```console
+$ export ACTUAL_SERVICE_ACCOUNT_KEY="$(cat service-account.pk8.pem)"
+$ TOKEN=$(actual mint-token \
+    --service-account-id 6f1d9c30-4b21-4f83-9f0c-2a7b5d8e1c44 \
+    --kid sa-2026-08 \
+    --scope adr:query --scope adr:review)
+mint-token minting a token via jwt-bearer (ES256) as 6f1d9c30-…
+✔ minted token (expires in 3600s; scope: adr:query adr:review)
+```
+
+The capture contract matches `create-token`: the access token is the **only**
+thing written to stdout, so `TOKEN=$(actual mint-token …)` captures exactly the
+token and nothing else. Status lines go to stderr, and the token never appears
+there. Pass `--json` when you want the full response (`expires_in`, the granted
+scope) as one machine-readable line on stdout instead.
+
+`--service-account-id` (a UUID) and `--kid` are both required. The key id tells
+the server which registered public key to verify against, so it has to name the
+key you're actually signing with.
+
+### Supplying the key
+
+Two environment variables carry the key, and a key file wins when both are set:
+
+| Environment variable | Purpose |
+| --- | --- |
+| `ACTUAL_SERVICE_ACCOUNT_KEY` | The PEM contents inline. Preferred with a secret manager: the key reaches the process without touching disk. |
+| `ACTUAL_SERVICE_ACCOUNT_KEY_FILE` | Path to a PEM file. `--key <PATH>` is the flag form of the same thing. |
+
+There's deliberately no flag that takes the key material itself. A
+command-line argument is readable by every other process on the box and it
+lands in shell history, which is the one place a signing key must never be.
+
+Treat the private key as strictly more sensitive than a PAT. A leaked PAT is
+revoked one token at a time. A leaked service-account key keeps minting fresh
+tokens until someone rotates the registered public key.
+
+### EC keys must be PKCS#8
+
+An EC (P-256) key has to be PKCS#8, the PEM that opens with `BEGIN PRIVATE
+KEY`. Nothing exotic, just the newer of the two encodings. The older SEC1 encoding (`BEGIN EC PRIVATE KEY`), which is what
+`openssl ecparam -genkey` writes by default, is refused before anything is
+signed:
+
+```console
+$ actual mint-token --key sec1.pem --service-account-id <uuid> --kid <kid>
+Error: SEC1 EC private key ('BEGIN EC PRIVATE KEY'); PKCS#8 is required
+Fix: openssl pkcs8 -topk8 -nocrypt -in <key.pem> -out <key.pk8.pem>
+```
+
+Convert once and point at the result:
+
+```bash
+openssl pkcs8 -topk8 -nocrypt -in sec1.pem -out service-account.pk8.pem
+```
+
+The conversion re-encodes the same key pair, so the registered public key is
+untouched and `--kid` stays as it was. You get the same refusal and the same
+fix whether the algorithm was inferred from the key or you passed `--alg es256`
+yourself. RSA keys carry no equivalent restriction: PKCS#1 (`BEGIN RSA PRIVATE
+KEY`) and PKCS#8 both load.
+
+The refusal is a deliberate choice rather than a gap to work around. The
+signer this CLI pins
+cannot load a SEC1 key at all, so accepting one would only move the failure
+later, to signing time, where the error no longer names the key format. Failing
+at the door with the conversion command attached is the more useful answer.
+
+### Algorithm, lifetime, and audience
+
+`--alg` is inferred from the key, with EC signing ES256 and RSA signing RS256.
+Pass it explicitly only to pin what you expect. Just `rs256` and `es256` are
+accepted; `HS*` and `none` are refused outright, so the client cannot be talked
+into emitting a symmetric or unsigned assertion.
+
+`--assertion-ttl-seconds` bounds the assertion rather than the token the server
+returns. It defaults to 60 and is capped at 300. That short window plus a fresh
+`jti` on every call is what makes a captured assertion close to useless: the
+server anti-replays on the `jti`, and the assertion expires in a minute anyway.
+
+`--issuer` sets the authorization server base URL, resolved from the flag, then
+`ACTUAL_AUTH_URL`, then the production default. The token endpoint is
+`<issuer>/api/oauth/token`. `--aud` overrides the assertion audience, which
+otherwise follows the issuer origin. A non-HTTPS, non-loopback issuer is
+rejected before any assertion leaves the process.
+
+`--scope` is repeatable and asks for a subset of the principal's grant. Omit it
+and the server mints the principal's full whitelist.
+
+### In CI
+
+```yaml
+- name: Mint a service-account token
+  env:
+    ACTUAL_SERVICE_ACCOUNT_KEY: ${{ secrets.ACTUAL_SERVICE_ACCOUNT_KEY }}
+    ACTUAL_SERVICE_ACCOUNT_ID: ${{ secrets.ACTUAL_SERVICE_ACCOUNT_ID }}
+    ACTUAL_SERVICE_ACCOUNT_KID: ${{ vars.ACTUAL_SERVICE_ACCOUNT_KID }}
+  run: |
+    TOKEN=$(actual mint-token --scope adr:query)
+    echo "::add-mask::$TOKEN"
+    echo "ACTUAL_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+```
+
+The three required inputs (the id, the key id, and the key) all have
+environment-variable forms, so a CI step passes arguments only for what it
+wants to vary. Mint per job instead of storing a token:
+the assertion costs nothing, the token is short-lived, and the only long-lived
+secret is the key sitting in the secret store. Mask the minted token before it
+can reach a log, as the `add-mask` line does, because a token minted at runtime
+is not one of the secrets the platform already knows to redact.
