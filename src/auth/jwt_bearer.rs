@@ -43,6 +43,37 @@ pub const MAX_ASSERTION_LIFETIME_SECONDS: u64 = 300;
 /// round-trip. The assertion is one-shot and used immediately.
 pub const DEFAULT_ASSERTION_LIFETIME_SECONDS: u64 = 60;
 
+/// PEM label of a SEC1 (RFC 5915) EC private key — what `openssl ecparam
+/// -genkey` writes by default, so it is the shape a user is most likely to
+/// arrive with.
+///
+/// The pinned `jsonwebtoken` cannot sign with it. Its PEM decoder has arms for
+/// PKCS#1 (`RSA PRIVATE KEY`) and PKCS#8 (`PRIVATE KEY`) only; the SEC1 label
+/// falls through to `InvalidKeyFormat`, and `as_ec_private_key` is documented
+/// there as "Can only be PKCS8". So no EC key in this encoding can become an
+/// [`EncodingKey`], whatever curve it holds.
+const SEC1_EC_PEM_LABEL: &str = "BEGIN EC PRIVATE KEY";
+
+/// Whether `private_key_pem` carries the SEC1 EC private-key label.
+fn is_sec1_ec_pem(private_key_pem: &[u8]) -> bool {
+    matches!(std::str::from_utf8(private_key_pem), Ok(text) if text.contains(SEC1_EC_PEM_LABEL))
+}
+
+/// The rejection for a SEC1 EC private key: name the encoding in the message,
+/// and put the exact conversion command on the hint, because that command is
+/// the entire remedy and the error panel truncates the message but renders the
+/// hint whole. Both halves are kept inside the panel's width at the default
+/// 80 columns; see [`ActualError::Sec1KeyUnsupported`].
+///
+/// Converting re-encodes the same key pair, so the registered public key — and
+/// therefore `--kid` — is untouched.
+fn sec1_ec_key_error() -> ActualError {
+    ActualError::Sec1KeyUnsupported {
+        message: format!("SEC1 EC private key ('{SEC1_EC_PEM_LABEL}'); PKCS#8 is required"),
+        hint: "openssl pkcs8 -topk8 -nocrypt -in <key.pem> -out <key.pk8.pem>".to_string(),
+    }
+}
+
 /// The asymmetric JWS algorithms the authorization server accepts. Symmetric
 /// (`HS*`) and unsigned (`none`) assertions are absent by design — they have no
 /// public-key story and would open alg-confusion — so this enum has no way to
@@ -92,11 +123,17 @@ impl AssertionAlgorithm {
         let text = std::str::from_utf8(private_key_pem).map_err(|_| {
             ActualError::ConfigError("Private key is not valid UTF-8 PEM".to_string())
         })?;
+        // PKCS#1 ("BEGIN RSA PRIVATE KEY") names RSA in the header, and the key
+        // parser accepts that encoding directly, so the header alone is a safe
+        // answer here.
         if text.contains("BEGIN RSA PRIVATE KEY") {
             return Ok(AssertionAlgorithm::Rs256);
         }
-        if text.contains("BEGIN EC PRIVATE KEY") {
-            return Ok(AssertionAlgorithm::Es256);
+        // SEC1 names EC in the header, but the signer cannot load it. Answering
+        // `Es256` here would be a wrong answer that only surfaces later, at
+        // signing time, far from its cause — so reject it now, with the fix.
+        if is_sec1_ec_pem(private_key_pem) {
+            return Err(sec1_ec_key_error());
         }
         // PKCS#8 ("BEGIN PRIVATE KEY") does not name the key type in its header,
         // so try RSA then EC and let the key parser decide.
@@ -233,6 +270,12 @@ pub fn build_and_sign_assertion(
         AssertionAlgorithm::Es256 => EncodingKey::from_ec_pem(private_key_pem),
     }
     .map_err(|_| {
+        // An explicit `--alg es256` skips inference entirely, so a SEC1 key
+        // reaches the loader and fails here instead. Same defect, same remedy —
+        // give the conversion command rather than the generic message.
+        if params.algorithm == AssertionAlgorithm::Es256 && is_sec1_ec_pem(private_key_pem) {
+            return sec1_ec_key_error();
+        }
         ActualError::ConfigError(format!(
             "Failed to load the {} private key from PEM (is it the right key type?)",
             params.algorithm.as_str()
@@ -457,6 +500,37 @@ mod tests {
             .public_key()
             .to_public_key_pem(LineEnding::LF)
             .expect("ec pub pem")
+            .into_bytes();
+        (priv_pem, pub_pem)
+    }
+
+    /// Generate an ephemeral EC P-256 private key in **SEC1** form — a genuine
+    /// RFC 5915 `EC PRIVATE KEY` PEM over a real P-256 scalar, byte-compatible
+    /// with what `openssl ecparam -name prime256v1 -genkey -noout` writes. This
+    /// is the format the SEC1 tests need; generating it at runtime keeps a
+    /// private-key literal out of this public repo.
+    fn ec_private_key_sec1() -> Vec<u8> {
+        p256::SecretKey::random(&mut rand::thread_rng())
+            .to_sec1_pem(LineEnding::LF)
+            .expect("ec sec1 priv pem")
+            .as_bytes()
+            .to_vec()
+    }
+
+    /// Generate an ephemeral RSA-2048 keypair with the private half in
+    /// **PKCS#1** form (`BEGIN RSA PRIVATE KEY`), the counterpart encoding to
+    /// [`ec_private_key_sec1`]. Returned as (private PKCS#1 PEM, public SPKI
+    /// PEM).
+    fn rsa_keypair_pkcs1() -> (Vec<u8>, Vec<u8>) {
+        let mut rng = rand::thread_rng();
+        let private = RsaPrivateKey::new(&mut rng, 2048).expect("rsa keygen");
+        let public = RsaPublicKey::from(&private);
+        let priv_pem = rsa::pkcs1::EncodeRsaPrivateKey::to_pkcs1_pem(&private, LineEnding::LF)
+            .expect("rsa pkcs1 priv pem")
+            .as_bytes()
+            .to_vec();
+        let pub_pem = RsaEncodePublicKey::to_public_key_pem(&public, LineEnding::LF)
+            .expect("rsa pub pem")
             .into_bytes();
         (priv_pem, pub_pem)
     }
@@ -828,14 +902,132 @@ mod tests {
         );
     }
 
+    /// The premise the whole SEC1 rejection rests on: the pinned
+    /// `jsonwebtoken` genuinely cannot load a SEC1 EC key. If a future bump
+    /// teaches it SEC1, this test goes red and the rejection can be replaced
+    /// with acceptance — which is exactly the signal we want at that moment.
     #[test]
-    fn infer_from_pem_recognizes_sec1_ec_header() {
-        // A SEC1 header names EC directly (bare marker; see the RSA test).
-        let pem = b"test fixture header BEGIN EC PRIVATE KEY";
+    fn the_pinned_signer_cannot_load_a_sec1_ec_key() {
+        let sec1 = ec_private_key_sec1();
+        assert!(
+            EncodingKey::from_ec_pem(&sec1).is_err(),
+            "jsonwebtoken is expected to reject SEC1; if it now accepts it, \
+             infer_from_pem should accept SEC1 too"
+        );
+
+        // The counterpart it DOES accept, proving the fixture itself is sound
+        // and the rejection is about the encoding rather than the key.
+        let (pkcs8, _pub) = ec_keypair();
+        assert!(
+            EncodingKey::from_ec_pem(&pkcs8).is_ok(),
+            "PKCS#8 EC keys must still load"
+        );
+    }
+
+    /// Assert the two halves of the remedy on a SEC1 rejection: the message
+    /// names the encoding and the target, and the hint carries the exact
+    /// conversion command. Shared by the inference and explicit-`--alg` tests
+    /// so both paths are held to the identical contract.
+    fn assert_sec1_guidance(err: ActualError) {
+        assert!(
+            matches!(err, ActualError::Sec1KeyUnsupported { .. }),
+            "SEC1 rejection must be Sec1KeyUnsupported, got: {err:?}"
+        );
+        let hint = err.hint().expect("SEC1 rejection must carry a Fix hint");
+        // Display is `{message}` on this variant, so this is the message the
+        // error panel renders.
+        let message = err.to_string();
+        assert!(
+            message.contains("SEC1"),
+            "must name the encoding: {message}"
+        );
+        assert!(
+            message.contains("PKCS#8"),
+            "must name the target: {message}"
+        );
+        assert!(
+            hint.contains("openssl pkcs8 -topk8 -nocrypt"),
+            "hint must give the exact conversion command: {hint}"
+        );
+
+        // The remedy only helps if the user can read it. The error panel
+        // truncates every row to the terminal width, so both halves must fit
+        // inside a default 80-column panel: 4 columns of border and padding,
+        // then the "Error: " / "Fix: " prefix the panel adds.
+        const PANEL_INNER: usize = 80 - 4;
+        assert!(
+            message.len() + "Error: ".len() <= PANEL_INNER,
+            "message would be truncated in the error panel: {message}"
+        );
+        assert!(
+            hint.len() + "Fix: ".len() <= PANEL_INNER,
+            "hint would be truncated in the error panel: {hint}"
+        );
+    }
+
+    /// Regression test for the reported defect, with a genuine SEC1 P-256 key.
+    /// Before the fix `infer_from_pem` returned `Ok(Es256)` here on a header
+    /// match alone, and the failure surfaced later at signing time.
+    #[test]
+    fn infer_from_pem_rejects_a_genuine_sec1_ec_key() {
+        let sec1 = ec_private_key_sec1();
+        assert_sec1_guidance(AssertionAlgorithm::infer_from_pem(&sec1).unwrap_err());
+    }
+
+    /// An explicit `--alg es256` skips inference, so the SEC1 key reaches the
+    /// key loader instead. That path must give the same remedy, not the generic
+    /// "is it the right key type?" message.
+    #[test]
+    fn explicit_es256_with_a_sec1_key_gets_the_same_guidance() {
+        let sec1 = ec_private_key_sec1();
+        assert_sec1_guidance(
+            build_and_sign_assertion(&params(AssertionAlgorithm::Es256), &sec1, now_secs())
+                .unwrap_err(),
+        );
+    }
+
+    /// Positive control: the fix must not narrow the working path. A PKCS#8 EC
+    /// key still infers ES256 and still produces a verifiable assertion.
+    #[test]
+    fn pkcs8_ec_key_still_infers_es256_and_still_signs() {
+        let (priv_pem, pub_pem) = ec_keypair();
         assert_eq!(
-            AssertionAlgorithm::infer_from_pem(pem).unwrap(),
+            AssertionAlgorithm::infer_from_pem(&priv_pem).unwrap(),
             AssertionAlgorithm::Es256
         );
+
+        let assertion =
+            build_and_sign_assertion(&params(AssertionAlgorithm::Es256), &priv_pem, now_secs())
+                .expect("PKCS#8 EC key must still sign");
+        let decoding_key = DecodingKey::from_ec_pem(&pub_pem).expect("ec decoding key");
+        let claims = server_style_verify(&assertion, AssertionAlgorithm::Es256, &decoding_key);
+        assert_eq!(claims.iss, TEST_UUID);
+    }
+
+    /// The RSA branch has the same header-match shape as the old SEC1 branch,
+    /// which is why it was worth checking rather than assuming. It is sound:
+    /// the key parser accepts PKCS#1 directly, so inferring from the header
+    /// commits to an encoding that really does sign. This test pins that
+    /// asymmetry, so a future library change that drops PKCS#1 support is
+    /// caught here instead of at a user's signing call.
+    #[test]
+    fn pkcs1_rsa_key_infers_rs256_and_actually_signs() {
+        let (priv_pem, pub_pem) = rsa_keypair_pkcs1();
+        assert!(
+            String::from_utf8_lossy(&priv_pem).contains("BEGIN RSA PRIVATE KEY"),
+            "fixture must be PKCS#1, not PKCS#8"
+        );
+        assert_eq!(
+            AssertionAlgorithm::infer_from_pem(&priv_pem).unwrap(),
+            AssertionAlgorithm::Rs256
+        );
+
+        let assertion =
+            build_and_sign_assertion(&params(AssertionAlgorithm::Rs256), &priv_pem, now_secs())
+                .expect("PKCS#1 RSA key must sign");
+        let decoding_key = DecodingKey::from_rsa_pem(&pub_pem).expect("rsa decoding key");
+        let claims = server_style_verify(&assertion, AssertionAlgorithm::Rs256, &decoding_key);
+        assert_eq!(claims.iss, TEST_UUID);
     }
 
     #[test]

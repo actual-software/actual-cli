@@ -407,9 +407,11 @@ pub struct MintTokenArgs {
     pub kid: String,
 
     /// Path to the service-account PRIVATE key in PEM (RSA for RS256, EC P-256
-    /// for ES256). Alternatively set `ACTUAL_SERVICE_ACCOUNT_KEY` to the PEM
-    /// contents directly — preferred with a secret manager, and it keeps the
-    /// key off argv.
+    /// for ES256). An EC key must be PKCS#8 ("BEGIN PRIVATE KEY"); SEC1 ("BEGIN
+    /// EC PRIVATE KEY", what `openssl ecparam -genkey` writes) is refused, so
+    /// convert it first with `openssl pkcs8 -topk8 -nocrypt`. Alternatively set
+    /// `ACTUAL_SERVICE_ACCOUNT_KEY` to the PEM contents directly — preferred
+    /// with a secret manager, and it keeps the key off argv.
     #[arg(long, value_name = "PATH", env = "ACTUAL_SERVICE_ACCOUNT_KEY_FILE")]
     pub key: Option<std::path::PathBuf>,
 

@@ -28,6 +28,16 @@ fn ec_private_key_pem() -> String {
         .to_string()
 }
 
+/// Generate an ephemeral EC P-256 private key as a **SEC1** PEM string — the
+/// RFC 5915 `EC PRIVATE KEY` encoding `openssl ecparam -genkey` writes, which
+/// the assertion signer cannot load.
+fn ec_private_key_sec1_pem() -> String {
+    p256::SecretKey::random(&mut rand::thread_rng())
+        .to_sec1_pem(LineEnding::LF)
+        .expect("ec sec1 pem")
+        .to_string()
+}
+
 /// A successful ES256 mint: stdout is EXACTLY the token, stderr carries status,
 /// and the request reaches the token endpoint with the right grant + scope.
 #[test]
@@ -173,6 +183,45 @@ fn mint_token_rejects_non_https_issuer() {
         .failure()
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("HTTPS"));
+}
+
+/// A SEC1 EC key is refused, and — the part that matters — the conversion
+/// command survives all the way to the user's terminal.
+///
+/// The unit tests pin the error's message and hint. This one pins the surface a
+/// user actually reads, which is a separate question: the error panel truncates
+/// every row to the terminal width, so guidance that fits in a string can still
+/// be invisible in practice. Both entry points are covered, because inference
+/// (no `--alg`) and the explicit `--alg es256` loader are different code paths.
+#[test]
+fn mint_token_refuses_a_sec1_ec_key_and_shows_the_conversion_command() {
+    let key_pem = ec_private_key_sec1_pem();
+
+    for alg in [None, Some("es256")] {
+        let mut cmd = cargo_bin_cmd!("actual");
+        cmd.env("ACTUAL_SERVICE_ACCOUNT_KEY", &key_pem).args([
+            "mint-token",
+            "--service-account-id",
+            SERVICE_ACCOUNT_UUID,
+            "--kid",
+            "test-key-1",
+            "--issuer",
+            "https://app.example.test",
+        ]);
+        if let Some(alg) = alg {
+            cmd.args(["--alg", alg]);
+        }
+
+        cmd.assert()
+            .failure()
+            .stdout(predicate::str::is_empty())
+            // The condition, naming the encoding the user will see in their file.
+            .stderr(predicate::str::contains("SEC1"))
+            // The remedy, whole and untruncated.
+            .stderr(predicate::str::contains(
+                "openssl pkcs8 -topk8 -nocrypt -in <key.pem> -out <key.pk8.pem>",
+            ));
+    }
 }
 
 /// A non-UUID service-account id is rejected with a clean message and no token.
