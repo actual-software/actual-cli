@@ -1,22 +1,21 @@
-//! `actual doctor` — diagnose local development environment health.
-//!
-//! Checks that required services are reachable, env files exist, and key
-//! environment variables are set. Outputs copy-pasteable fix commands for
-//! any issues found.
+//! `actual doctor` — verify that this repository is set up correctly for
+//! Actual AI. Checks CLI authentication, observer hooks, repo onboarding,
+//! and API connectivity. Outputs copy-pasteable fix commands for any issues.
 
 use std::net::TcpStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::Utc;
 
+use crate::api::client::DEFAULT_API_URL;
 use crate::auth::store;
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::cli::ui::theme;
 use crate::error::ActualError;
+use crate::observe::setup;
 
-/// A single diagnostic check result.
 struct Check {
     name: String,
     passed: bool,
@@ -34,110 +33,11 @@ impl Check {
     }
 }
 
-fn probe_tcp(host: &str, port: u16) -> bool {
-    TcpStream::connect_timeout(
-        &format!("{host}:{port}").parse().unwrap(),
-        Duration::from_secs(2),
-    )
-    .is_ok()
-}
-
-fn check_service(name: &'static str, host: &str, port: u16, start_cmd: &str) -> Check {
-    if probe_tcp(host, port) {
-        Check::pass(name, format!("listening on {host}:{port}"))
-    } else {
-        Check::fail(
-            name,
-            format!("not reachable at {host}:{port}"),
-            start_cmd.to_string(),
-        )
-    }
-}
-
-fn find_project_root() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let mut dir = cwd.as_path();
-    loop {
-        if dir.join("pnpm-workspace.yaml").exists() || dir.join("supabase").join("config.toml").exists() {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
-}
-
-fn check_env_file(root: &Path, rel_path: &str) -> Check {
-    let full = root.join(rel_path);
-    let example = root.join(format!("{rel_path}.example"));
-    if full.exists() {
-        Check::pass(rel_path, "exists")
-    } else if example.exists() {
-        Check::fail(
-            "env file",
-            format!("{rel_path} missing"),
-            format!("cp {rel_path}.example {rel_path}"),
-        )
-    } else {
-        Check::fail(
-            "env file",
-            format!("{rel_path} missing (no .example template found)"),
-            format!("touch {rel_path}"),
-        )
-    }
-}
-
-fn check_env_var(name: &'static str, hint: &str) -> Check {
-    match std::env::var(name) {
-        Ok(val) if !val.is_empty() => Check::pass(name, "set"),
-        _ => Check::fail(name, "not set", hint.to_string()),
-    }
-}
-
-fn check_next_cache(root: &Path) -> Check {
-    let next_dir = root.join("apps/actual/.next");
-    if !next_dir.exists() {
-        return Check::pass(".next cache", "clean (no cache dir)");
-    }
-    let manifest = next_dir.join("static/development/_buildManifest.js");
-    if manifest.exists() {
-        Check::pass(".next cache", "OK")
-    } else {
-        Check::fail(
-            ".next cache",
-            "corrupted — missing _buildManifest.js",
-            "rm -rf apps/actual/.next",
-        )
-    }
-}
-
-fn check_python_venv(root: &Path) -> Check {
-    let venv = root.join(".venv");
-    if !venv.exists() {
-        return Check::fail(
-            "Python venv",
-            ".venv directory missing",
-            "pnpm python:build:dev",
-        );
-    }
-    let lock = root.join("uv.lock");
-    if !lock.exists() {
-        return Check::fail(
-            "Python venv",
-            "uv.lock missing",
-            "pnpm python:build:dev",
-        );
-    }
-    Check::pass("Python venv", "exists")
-}
-
 fn check_auth() -> Vec<Check> {
     let creds = match store::load() {
         Ok(Some(c)) => c,
         Ok(None) => {
-            return vec![Check::fail(
-                "Login",
-                "not logged in",
-                "actual login",
-            )];
+            return vec![Check::fail("Login", "not signed in", "actual login")];
         }
         Err(_) => {
             return vec![Check::fail(
@@ -152,157 +52,188 @@ fn check_auth() -> Vec<Check> {
 
     let now = Utc::now();
     if creds.is_expired(now) {
-        checks.push(Check::fail(
-            "Login",
-            "access token expired",
-            "actual login",
-        ));
+        checks.push(Check::fail("Login", "access token expired", "actual login"));
     } else {
-        let identity = creds
-            .email
-            .as_deref()
-            .unwrap_or(&creds.member_id);
+        let identity = creds.email.as_deref().unwrap_or(&creds.member_id);
         let org_short = if creds.organization_id.len() > 8 {
             &creds.organization_id[..8]
         } else {
             &creds.organization_id
         };
-        checks.push(Check::pass(
-            "Login",
-            format!("{identity} (org {org_short}…)"),
-        ));
+        checks.push(Check::pass("Login", format!("{identity} (org {org_short}...)")));
     }
 
     if let Some(scope) = &creds.scope {
-        if !scope.contains("openid") {
+        let has_observe = scope.contains("observe:events");
+        let has_adr = scope.contains("adr:query");
+        if has_observe && has_adr {
+            checks.push(Check::pass("Permissions", "observe + query scopes granted"));
+        } else if !has_observe {
             checks.push(Check::fail(
                 "Permissions",
-                format!("limited scope: {scope}"),
+                "missing observe:events scope",
                 "actual logout && actual login",
             ));
         } else {
-            checks.push(Check::pass("Permissions", format!("scope: {scope}")));
+            checks.push(Check::fail(
+                "Permissions",
+                "missing adr:query scope",
+                "actual logout && actual login",
+            ));
         }
     }
 
     checks
 }
 
+fn check_git_repo() -> Vec<Check> {
+    let cwd = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return vec![Check::fail("Git repo", "cannot read current directory", "cd into your project")],
+    };
+
+    let git_dir = find_git_root(&cwd);
+    if git_dir.is_none() {
+        return vec![Check::fail(
+            "Git repo",
+            "not inside a git repository",
+            "cd into a git repository",
+        )];
+    }
+
+    let origin = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output();
+
+    match origin {
+        Ok(out) if out.status.success() => {
+            let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let short = if url.len() > 50 {
+                format!("...{}", &url[url.len() - 47..])
+            } else {
+                url
+            };
+            vec![Check::pass("Git repo", short)]
+        }
+        _ => vec![Check::fail(
+            "Git remote",
+            "no 'origin' remote configured",
+            "git remote add origin <url>",
+        )],
+    }
+}
+
+fn check_observer_hooks() -> Vec<Check> {
+    let project_settings = setup::default_settings_path();
+    let home_settings = dirs::home_dir().map(|h| h.join(".claude").join("settings.json"));
+
+    let project_has_hooks = has_observer_hooks(&project_settings);
+    let global_has_hooks = home_settings.as_ref().map_or(false, |p| has_observer_hooks(p));
+
+    if project_has_hooks {
+        vec![Check::pass("Observer hooks", "installed (project)")]
+    } else if global_has_hooks {
+        vec![Check::pass("Observer hooks", "installed (global)")]
+    } else {
+        vec![Check::fail(
+            "Observer hooks",
+            "not installed — advisor won't receive events",
+            "actual observe setup",
+        )]
+    }
+}
+
+fn has_observer_hooks(path: &PathBuf) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    content.contains("actual observe pre-tool")
+}
+
+fn check_api_reachable() -> Check {
+    let api_url = std::env::var("ACTUAL_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+
+    let display_url = if api_url == DEFAULT_API_URL {
+        "production".to_string()
+    } else {
+        api_url.clone()
+    };
+
+    let parsed = match url::Url::parse(&api_url) {
+        Ok(u) => u,
+        Err(_) => return Check::fail("API", format!("invalid URL: {api_url}"), "check ACTUAL_API_URL"),
+    };
+
+    let host = parsed.host_str().unwrap_or("localhost");
+    let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+
+    let addr_str = format!("{host}:{port}");
+    let reachable = std::net::ToSocketAddrs::to_socket_addrs(&addr_str)
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .map(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok())
+        .unwrap_or(false);
+
+    if reachable {
+        Check::pass("API", format!("reachable ({display_url})"))
+    } else {
+        Check::fail(
+            "API",
+            format!("not reachable ({display_url})"),
+            if api_url == DEFAULT_API_URL {
+                "check your internet connection".to_string()
+            } else {
+                format!("start the API service or check ACTUAL_API_URL={api_url}")
+            },
+        )
+    }
+}
+
+fn find_git_root(start: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = start;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+fn render_section(panel: Panel, title: &str, checks: &[Check]) -> Panel {
+    let mut p = panel.separator().line(&format!("  {} {title}", theme::DIAMOND));
+    for c in checks {
+        let icon = if c.passed { theme::SUCCESS.to_string() } else { theme::ERROR.to_string() };
+        let styled = if c.passed {
+            theme::success(&c.detail).to_string()
+        } else {
+            theme::error(&c.detail).to_string()
+        };
+        p = p.kv(&format!("  {icon} {}", c.name), &styled);
+    }
+    p
+}
+
 pub fn exec() -> Result<(), ActualError> {
     let width = term_size::terminal_width();
-    let root = find_project_root();
 
-    // ── Auth ──
     let auth_checks = check_auth();
+    let repo_checks = check_git_repo();
+    let hook_checks = check_observer_hooks();
+    let api_check = vec![check_api_reachable()];
 
-    // ── Services ──
-    let services = vec![
-        check_service("Supabase DB", "127.0.0.1", 54322, "pnpm supabase start"),
-        check_service("Supabase API", "127.0.0.1", 54321, "pnpm supabase start"),
-        check_service("Temporal", "127.0.0.1", 7233, "cd backend && docker compose -f docker-compose.dev.yaml up -d"),
-        check_service("Redis", "127.0.0.1", 6380, "pnpm redis:start"),
-        check_service("API Service", "127.0.0.1", 3002, "pnpm --filter api-service dev"),
-        check_service("Next.js App", "127.0.0.1", 3000, "pnpm --filter actual-ai-app dev"),
-    ];
+    let all: Vec<&[Check]> = vec![&auth_checks, &repo_checks, &hook_checks, &api_check];
+    let total: usize = all.iter().map(|s| s.len()).sum();
+    let failed: Vec<&Check> = all.iter().flat_map(|s| s.iter()).filter(|c| !c.passed).collect();
 
-    // ── Env files ──
-    let env_checks: Vec<Check> = if let Some(ref r) = root {
-        vec![
-            check_env_file(r, "apps/actual/.env.local"),
-            check_env_file(r, "apps/api-service/.env"),
-            check_env_file(r, "backend/.env"),
-        ]
-    } else {
-        vec![Check::fail("project root", "could not locate monorepo root", "cd into the sprintreview directory")]
-    };
-
-    // ── Project health ──
-    let project_checks: Vec<Check> = if let Some(ref r) = root {
-        vec![
-            check_next_cache(r),
-            check_python_venv(r),
-        ]
-    } else {
-        vec![]
-    };
-
-    // ── Env vars ──
-    let env_var_checks = vec![
-        check_env_var("NEXT_PUBLIC_SUPABASE_URL", "Add to apps/actual/.env.local: NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321"),
-        check_env_var("TEMPORAL_ADDRESS", "Add to backend/.env: TEMPORAL_ADDRESS=localhost:7233"),
-    ];
-
-    // ── Render ──
-    let all_checks: Vec<&[Check]> = vec![&auth_checks, &services, &env_checks, &project_checks, &env_var_checks];
-    let total: usize = all_checks.iter().map(|s| s.len()).sum();
-    let failed: Vec<&Check> = all_checks.iter().flat_map(|s| s.iter()).filter(|c| !c.passed).collect();
-
-    // Summary panel
     let mut panel = Panel::titled("Actual Doctor");
+    panel = panel.line("");
 
-    // Auth
-    panel = panel.line("").line(&format!("  {} Authentication", theme::DIAMOND));
-    for c in &auth_checks {
-        let icon = if c.passed { theme::SUCCESS.to_string() } else { theme::ERROR.to_string() };
-        let styled_detail = if c.passed {
-            format!("{}", theme::success(&c.detail))
-        } else {
-            format!("{}", theme::error(&c.detail))
-        };
-        panel = panel.kv(&format!("  {icon} {}", c.name), &styled_detail);
-    }
+    panel = render_section(panel, "Authentication", &auth_checks);
+    panel = render_section(panel, "Repository", &repo_checks);
+    panel = render_section(panel, "Observer", &hook_checks);
+    panel = render_section(panel, "Connectivity", &api_check);
 
-    // Services
-    panel = panel.separator().line(&format!("  {} Services", theme::DIAMOND));
-    for c in &services {
-        let icon = if c.passed { theme::SUCCESS.to_string() } else { theme::ERROR.to_string() };
-        let styled_detail = if c.passed {
-            format!("{}", theme::success(&c.detail))
-        } else {
-            format!("{}", theme::error(&c.detail))
-        };
-        panel = panel.kv(&format!("  {icon} {}", c.name), &styled_detail);
-    }
-
-    // Env files
-    panel = panel.separator().line(&format!("  {} Environment Files", theme::DIAMOND));
-    for c in &env_checks {
-        let icon = if c.passed { theme::SUCCESS.to_string() } else { theme::ERROR.to_string() };
-        let styled_detail = if c.passed {
-            format!("{}", theme::success(&c.detail))
-        } else {
-            format!("{}", theme::error(&c.detail))
-        };
-        panel = panel.kv(&format!("  {icon} {}", c.name), &styled_detail);
-    }
-
-    // Project health
-    if !project_checks.is_empty() {
-        panel = panel.separator().line(&format!("  {} Project Health", theme::DIAMOND));
-        for c in &project_checks {
-            let icon = if c.passed { theme::SUCCESS.to_string() } else { theme::ERROR.to_string() };
-            let styled_detail = if c.passed {
-                format!("{}", theme::success(&c.detail))
-            } else {
-                format!("{}", theme::error(&c.detail))
-            };
-            panel = panel.kv(&format!("  {icon} {}", c.name), &styled_detail);
-        }
-    }
-
-    // Env vars
-    panel = panel.separator().line(&format!("  {} Environment Variables", theme::DIAMOND));
-    for c in &env_var_checks {
-        let icon = if c.passed { theme::SUCCESS.to_string() } else { theme::ERROR.to_string() };
-        let styled_detail = if c.passed {
-            format!("{}", theme::success(&c.detail))
-        } else {
-            format!("{}", theme::error(&c.detail))
-        };
-        panel = panel.kv(&format!("  {icon} {}", c.name), &styled_detail);
-    }
-
-    // Summary line
     let passed = total - failed.len();
     let summary = if failed.is_empty() {
         format!("{} All {total} checks passed", theme::SUCCESS)
@@ -311,9 +242,8 @@ pub fn exec() -> Result<(), ActualError> {
     };
     panel = panel.separator().line("").line(&format!("  {summary}"));
 
-    // Fix commands
     if !failed.is_empty() {
-        panel = panel.line("").line(&format!("  {} Fix commands (copy & paste):", theme::BULLET));
+        panel = panel.line("").line(&format!("  {} Fix commands:", theme::BULLET));
         panel = panel.line("");
         for (i, c) in failed.iter().enumerate() {
             if let Some(ref fix) = c.fix {
@@ -335,11 +265,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn probe_tcp_fails_on_unused_port() {
-        assert!(!probe_tcp("127.0.0.1", 19999));
-    }
-
-    #[test]
     fn check_pass_is_passed() {
         let c = Check::pass("test", "ok");
         assert!(c.passed);
@@ -354,18 +279,25 @@ mod tests {
     }
 
     #[test]
-    fn check_env_file_missing_returns_fail() {
-        let dir = tempfile::tempdir().unwrap();
-        let c = check_env_file(dir.path(), "nonexistent/.env");
-        assert!(!c.passed);
+    fn has_observer_hooks_false_for_missing_file() {
+        let p = PathBuf::from("/nonexistent/settings.json");
+        assert!(!has_observer_hooks(&p));
     }
 
     #[test]
-    fn check_env_file_present_returns_pass() {
+    fn has_observer_hooks_true_when_present() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".env.local"), "KEY=val").unwrap();
-        let c = check_env_file(dir.path(), ".env.local");
-        assert!(c.passed);
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"actual observe pre-tool"}]}]}}"#).unwrap();
+        assert!(has_observer_hooks(&path.to_path_buf()));
+    }
+
+    #[test]
+    fn has_observer_hooks_false_when_no_observe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"hooks":{"PreToolUse":[{"hooks":[{"command":"other command"}]}]}}"#).unwrap();
+        assert!(!has_observer_hooks(&path.to_path_buf()));
     }
 
     #[test]
