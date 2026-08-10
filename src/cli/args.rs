@@ -437,7 +437,8 @@ pub struct MintTokenArgs {
     #[arg(long = "scope", value_name = "SCOPE")]
     pub scopes: Vec<String>,
 
-    /// Assertion lifetime in seconds (clamped to 1..=300). Default 60.
+    /// Assertion lifetime in seconds, clamped to 1..=300. Default 60, which an
+    /// explicit `0` also selects.
     #[arg(long, value_name = "SECONDS", default_value_t = 60)]
     pub assertion_ttl_seconds: u64,
 
