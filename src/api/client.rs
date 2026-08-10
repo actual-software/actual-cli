@@ -241,7 +241,8 @@ impl ActualApiClient {
     }
 
     /// Post observer events for intervention evaluation at an evaluation boundary.
-    /// Uses a shorter timeout (10s) since this is in the hook critical path.
+    /// Sync-blocking: waits for the full advisor pipeline to complete before
+    /// returning, so Claude Code stays blocked until all event batches are processed.
     pub async fn post_intervention(
         &self,
         request: &InterventionRequest,
@@ -249,7 +250,7 @@ impl ActualApiClient {
         let url = format!("{}/v1/advisor/interventions", self.base_url);
         let response = self
             .authed(self.client.post(&url).json(request))
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(480))
             .send()
             .await
             .map_err(|e| ActualError::ApiError(e.to_string()))?;
