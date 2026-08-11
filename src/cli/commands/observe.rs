@@ -8,10 +8,11 @@ use crate::auth::{oauth, store};
 use crate::auth::store::StoredCredentials;
 use crate::cli::args::{ObserveArgs, ObserveCommand};
 use crate::error::ActualError;
-use crate::observe::boundary::is_evaluation_boundary;
+use crate::observe::boundary::{is_evaluation_boundary, classify_tool_action, ToolAction};
 use crate::observe::canonicalize;
 use crate::observe::hook_output::build_block_output;
 use crate::observe::journal::SessionJournal;
+use crate::observe::lease::{LeaseChecker, LeaseDecision, LeaseStore};
 use crate::observe::setup;
 use crate::observe::types::HookType;
 
@@ -71,28 +72,144 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
     let journal = SessionJournal::new()?;
     journal.append(session_id, &raw_payload, &aewo_code)?;
 
-    if is_evaluation_boundary(hook_type, tool_name, &raw_payload) {
-        let mut hook_output = evaluate_at_boundary(session_id, &journal);
-
-        let is_gating_hook = matches!(hook_type, HookType::PreToolUse | HookType::Stop);
-        let merged_disposition = extract_disposition(&hook_output);
-
-        if is_gating_hook && merged_disposition == "block" {
-            let reason = hook_output
-                .get("hookSpecificOutput")
-                .and_then(|h| h.get("additionalContext"))
-                .and_then(|c| c.as_str())
-                .unwrap_or("Architecture violation detected by Actual Advisor.");
-            println!("{}", build_block_output(reason, Some(reason), hook_type.as_str()));
-        } else {
-            inject_hook_event_name(&mut hook_output, hook_type.as_str());
-            println!("{}", serde_json::to_string(&hook_output).unwrap_or_else(|_| "{}".to_string()));
+    if hook_type == HookType::PreToolUse {
+        let action = classify_tool_action(tool_name, &raw_payload);
+        match action {
+            ToolAction::Free => {
+                println!("{{}}");
+            }
+            ToolAction::LeaseGated => {
+                match try_lease_check(session_id, tool_name, &raw_payload) {
+                    Some(LeaseDecision::Allow) => {
+                        println!("{{}}");
+                    }
+                    Some(LeaseDecision::Deny(reason)) => {
+                        println!("{}", build_block_output(&reason, Some(&reason), hook_type.as_str()));
+                    }
+                    Some(LeaseDecision::Escalate(_)) | None => {
+                        emit_boundary_output(session_id, &journal, hook_type);
+                    }
+                }
+            }
+            ToolAction::AdvisorGated => {
+                emit_boundary_output(session_id, &journal, hook_type);
+            }
         }
+    } else if hook_type == HookType::Stop {
+        let cwd = raw_payload
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from);
+        emit_stop_output(session_id, &journal, cwd.as_deref());
+    } else if is_evaluation_boundary(hook_type, tool_name, &raw_payload) {
+        emit_boundary_output(session_id, &journal, hook_type);
     } else {
         println!("{{}}");
     }
 
     Ok(())
+}
+
+/// Try to check a PreToolUse call against a locally cached lease.
+/// Returns None if no lease is available (triggering escalation to hosted Advisor).
+fn try_lease_check(
+    session_id: &str,
+    tool_name: Option<&str>,
+    payload: &serde_json::Value,
+) -> Option<LeaseDecision> {
+    let store = LeaseStore::new().ok()?;
+    let lease = store.load(session_id)?;
+
+    let file_path = extract_file_path(tool_name, payload);
+    let tool_input_text = extract_tool_input_text(payload);
+
+    Some(LeaseChecker::check(
+        &lease,
+        file_path.as_deref(),
+        tool_input_text.as_deref(),
+    ))
+}
+
+fn extract_file_path(tool_name: Option<&str>, payload: &serde_json::Value) -> Option<String> {
+    let input = payload.get("tool_input")?;
+    match tool_name {
+        Some("Edit" | "Write") => input.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        Some("Bash") => None,
+        _ => None,
+    }
+}
+
+fn extract_tool_input_text(payload: &serde_json::Value) -> Option<String> {
+    let input = payload.get("tool_input")?;
+    serde_json::to_string(input).ok()
+}
+
+fn emit_stop_output(session_id: &str, journal: &SessionJournal, cwd: Option<&std::path::Path>) {
+    let hook_type = HookType::Stop;
+    let diff_content = cwd
+        .map(|p| crate::observe::diff::capture_git_diff(p))
+        .unwrap_or_default();
+
+    let mut hook_output = evaluate_at_boundary(session_id, journal);
+
+    if !diff_content.is_empty() {
+        if let Some(obj) = hook_output.as_object_mut() {
+            obj.insert("_diff_content".to_string(), serde_json::json!(diff_content));
+        }
+    }
+
+    let merged_disposition = extract_disposition(&hook_output);
+
+    if merged_disposition == "block" {
+        let reason = hook_output
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("additionalContext"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("Architecture violations detected in your changes.");
+        println!("{}", build_block_output(reason, Some(reason), hook_type.as_str()));
+
+        if let Ok(store) = LeaseStore::new() {
+            store.invalidate(session_id);
+        }
+    } else {
+        inject_hook_event_name(&mut hook_output, hook_type.as_str());
+        println!("{}", serde_json::to_string(&hook_output).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    try_store_lease_from_response(session_id, &hook_output);
+}
+
+fn emit_boundary_output(session_id: &str, journal: &SessionJournal, hook_type: HookType) {
+    let mut hook_output = evaluate_at_boundary(session_id, journal);
+
+    let is_gating_hook = matches!(hook_type, HookType::PreToolUse | HookType::Stop);
+    let merged_disposition = extract_disposition(&hook_output);
+
+    if is_gating_hook && merged_disposition == "block" {
+        let reason = hook_output
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("additionalContext"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("Architecture violation detected by Actual Advisor.");
+        println!("{}", build_block_output(reason, Some(reason), hook_type.as_str()));
+    } else {
+        inject_hook_event_name(&mut hook_output, hook_type.as_str());
+        println!("{}", serde_json::to_string(&hook_output).unwrap_or_else(|_| "{}".to_string()));
+    }
+
+    try_store_lease_from_response(session_id, &hook_output);
+}
+
+fn try_store_lease_from_response(session_id: &str, response: &serde_json::Value) {
+    if let Some(lease_val) = response.get("architecture_lease") {
+        if let Ok(lease) = serde_json::from_value::<crate::observe::lease::ArchitectureLease>(lease_val.clone()) {
+            if let Ok(store) = LeaseStore::new() {
+                if let Err(e) = store.store(session_id, &lease) {
+                    eprintln!("advisor: failed to store lease: {e}");
+                }
+            }
+        }
+    }
 }
 
 /// At an evaluation boundary, load credentials, read all journal events,
@@ -224,6 +341,7 @@ fn extract_disposition(output: &serde_json::Value) -> String {
 fn inject_hook_event_name(output: &mut serde_json::Value, event_name: &str) {
     if let Some(obj) = output.as_object_mut() {
         obj.remove("_disposition");
+        obj.remove("_diff_content");
     }
     if let Some(hook_specific) = output
         .get_mut("hookSpecificOutput")

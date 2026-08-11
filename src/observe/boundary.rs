@@ -2,6 +2,34 @@ use super::types::HookType;
 
 const MIN_PROMPT_LENGTH: usize = 20;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAction {
+    Free,
+    LeaseGated,
+    AdvisorGated,
+}
+
+pub fn classify_tool_action(tool_name: Option<&str>, payload: &serde_json::Value) -> ToolAction {
+    match tool_name {
+        Some("Edit" | "Write") => ToolAction::LeaseGated,
+        Some("Bash") => {
+            if is_mutating_bash(payload) {
+                ToolAction::AdvisorGated
+            } else {
+                ToolAction::Free
+            }
+        }
+        Some("Agent") => {
+            if is_agent_launch(payload) {
+                ToolAction::AdvisorGated
+            } else {
+                ToolAction::Free
+            }
+        }
+        _ => ToolAction::Free,
+    }
+}
+
 pub fn is_evaluation_boundary(
     hook_type: HookType,
     tool_name: Option<&str>,
