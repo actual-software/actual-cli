@@ -47,3 +47,17 @@ verification run must accompany every code change that touches a governed area.
 ## ADR 2: Adopt Secure Secrets Management in CI/CD Pipeline
 
 1. Implement a dedicated secrets management system integrated into the CI/CD pipeline that separates secret storage from code. This includes using environment variables, encrypted secret stores, or dedicated secrets management services (such as HashiCorp Vault, AWS Secrets Manager, or CI platform-native solutions) to inject credentials at runtime rather than hardcoding them in configuration files or source code. The pattern is consistently applied across CLI commands and testing infrastructure to ensure uniform security practices.
+
+<!-- managed:actual-start -->
+<!-- last-synced: 2026-08-06T00:34:41Z -->
+<!-- version: 1 -->
+<!-- adr-ids: v2-governance -->
+
+<!-- adr:v2-governance start -->
+<adr_governance source="docs/adr/">
+ADRs govern validated architectural standards for this project.
+Full ADR documents: @docs/adr/
+</adr_governance>
+<!-- adr:v2-governance end -->
+
+<!-- managed:actual-end -->

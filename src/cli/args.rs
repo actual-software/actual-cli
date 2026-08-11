@@ -329,6 +329,8 @@ pub enum Command {
     Login(LoginArgs),
     /// Sign out of your Actual AI account and clear local credentials
     Logout,
+    /// Clear all local state (credentials, sessions, journals) for a clean test
+    Reset,
     /// Show the signed-in Actual AI account and organization
     Whoami,
     /// Ask the Advisor an org-scoped architecture question
@@ -341,6 +343,95 @@ pub enum Command {
     Models(ModelsArgs),
     /// Clear local cache (analysis and tailoring results)
     Cache(CacheArgs),
+    /// Manage repositories
+    Repo(RepoArgs),
+    /// Observer: capture coding agent events via Claude Code hooks
+    Observe(ObserveArgs),
+    /// Diagnose local dev environment health and suggest fixes
+    Doctor,
+}
+
+/// Arguments for the `repo` command
+#[derive(Parser, Debug)]
+pub struct RepoArgs {
+    #[command(subcommand)]
+    pub command: RepoCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RepoCommand {
+    /// Onboard a public repository for architecture analysis
+    Onboard(RepoOnboardArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct RepoOnboardArgs {
+    /// The public HTTPS URL of the repository to onboard
+    #[arg(value_name = "URL")]
+    pub url: String,
+
+    /// Use the device code flow instead of opening a browser
+    #[arg(long)]
+    pub device: bool,
+
+    /// Override the API service URL
+    #[arg(long)]
+    pub api_url: Option<String>,
+
+    /// Override the auth server URL
+    #[arg(long, env = "ACTUAL_AUTH_URL")]
+    pub auth_url: Option<String>,
+}
+
+/// Arguments for the `observe` command
+#[derive(Parser, Debug)]
+pub struct ObserveArgs {
+    #[command(subcommand)]
+    pub command: ObserveCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ObserveCommand {
+    /// Handle SessionStart hook event
+    SessionStart,
+    /// Handle UserPromptSubmit hook event
+    Prompt,
+    /// Handle PreToolUse hook event
+    PreTool,
+    /// Handle PostToolUse hook event
+    PostTool,
+    /// Handle PostToolUseFailure hook event
+    PostToolFailure,
+    /// Handle Stop hook event
+    Stop,
+    /// Handle SessionEnd hook event
+    SessionEnd,
+    /// Handle PreCompact hook event (re-inject context)
+    PreCompact,
+    /// Handle SubagentStart hook event
+    SubagentTool,
+    /// Install observer hooks into .claude/settings.json
+    Setup,
+    /// Check observer status (auth, hooks, API reachability)
+    Status,
+}
+
+impl ObserveCommand {
+    pub fn hook_name(&self) -> &'static str {
+        match self {
+            Self::SessionStart => "session-start",
+            Self::Prompt => "prompt",
+            Self::PreTool => "pre-tool",
+            Self::PostTool => "post-tool",
+            Self::PostToolFailure => "post-tool-failure",
+            Self::Stop => "stop",
+            Self::SessionEnd => "session-end",
+            Self::PreCompact => "pre-compact",
+            Self::SubagentTool => "subagent-tool",
+            Self::Setup => "setup",
+            Self::Status => "status",
+        }
+    }
 }
 
 /// Arguments for the `advisor` command
@@ -503,6 +594,13 @@ pub struct LoginArgs {
     /// is ignored in this mode (the org is selected on the approval page).
     #[arg(long)]
     pub device: bool,
+
+    /// Use the CLI-native magic link flow instead of the standard login page.
+    /// Opens the /authorize/cli page which allows signing up or signing in via
+    /// email magic link with built-in recovery (resend link, try different email).
+    /// Use this when GitHub/Google SSO is not available or you prefer email auth.
+    #[arg(long = "cli")]
+    pub cli_flow: bool,
 }
 
 /// Arguments for the `auth` command group.

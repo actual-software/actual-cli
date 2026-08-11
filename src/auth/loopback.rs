@@ -56,7 +56,17 @@ impl LoopbackServer {
         expected_state: &str,
         timeout: Duration,
     ) -> Result<AuthRedirect, ActualError> {
-        tokio::time::timeout(timeout, self.accept_until_callback(expected_state))
+        self.wait_for_code_with_app_url(expected_state, timeout, None).await
+    }
+
+    /// Like `wait_for_code` but includes an "Open web app" link on the success page.
+    pub async fn wait_for_code_with_app_url(
+        self,
+        expected_state: &str,
+        timeout: Duration,
+        app_url: Option<&str>,
+    ) -> Result<AuthRedirect, ActualError> {
+        tokio::time::timeout(timeout, self.accept_until_callback(expected_state, app_url))
             .await
             .map_err(|_| {
                 ActualError::ApiError(
@@ -74,6 +84,7 @@ impl LoopbackServer {
     async fn accept_until_callback(
         &self,
         expected_state: &str,
+        app_url: Option<&str>,
     ) -> Result<AuthRedirect, ActualError> {
         loop {
             let (mut stream, _) = self
@@ -123,11 +134,21 @@ impl LoopbackServer {
                             "OAuth state mismatch — possible CSRF; aborting login.".to_string(),
                         ));
                     }
+                    let msg = match app_url {
+                        Some(url) => format!(
+                            "You're signed in to Actual AI. You can close this tab and return to the terminal.\
+                             <br><br><a href=\"{}\" style=\"display:inline-block;padding:10px 24px;\
+                             background:#111;color:#fff;border-radius:6px;text-decoration:none;\
+                             font-weight:600\">Open web app</a>",
+                            url
+                        ),
+                        None => "You're signed in to Actual AI. You can close this tab and return to the terminal.".to_string(),
+                    };
                     write_html(
                         &mut stream,
                         "200 OK",
                         "Signed in",
-                        "You're signed in to Actual AI. You can close this tab and return to the terminal.",
+                        &msg,
                     )
                     .await;
                     return Ok(AuthRedirect { code, state });

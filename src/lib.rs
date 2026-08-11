@@ -8,6 +8,7 @@ pub mod error;
 pub mod generation;
 pub mod model_cache;
 pub mod net;
+pub mod observe;
 pub mod runner;
 pub mod tailoring;
 #[cfg(feature = "telemetry")]
@@ -23,8 +24,8 @@ pub use error::ActualError;
 // Re-export CLI types for backward compatibility with tests
 pub use cli::args::{
     AdvisorArgs, AuthArgs, AuthCommand, CacheAction, CacheArgs, Cli, Command, ConfigAction,
-    ConfigArgs, ConfigSetArgs, CreateTokenArgs, LoginArgs, ModelsArgs, RunnerChoice, StatusArgs,
-    SyncArgs,
+    ConfigArgs, ConfigSetArgs, CreateTokenArgs, LoginArgs, ModelsArgs, ObserveArgs, ObserveCommand,
+    RepoArgs, RepoCommand, RepoOnboardArgs, RunnerChoice, StatusArgs, SyncArgs,
 };
 
 pub fn run(cli: Cli) -> Result<(), ActualError> {
@@ -34,12 +35,20 @@ pub fn run(cli: Cli) -> Result<(), ActualError> {
         Command::Auth(args) => cli::commands::auth::exec(args),
         Command::Login(args) => cli::commands::login::exec(args),
         Command::Logout => cli::commands::logout::exec(),
+        Command::Reset => cli::commands::reset::exec(),
         Command::Whoami => cli::commands::whoami::exec(),
         Command::Advisor(args) => cli::commands::advisor::exec(args),
         Command::Config(args) => cli::commands::config::exec(args),
         Command::Runners => cli::commands::runners::exec(),
         Command::Models(args) => cli::commands::models::exec(args.no_fetch),
         Command::Cache(args) => cli::commands::cache::exec(args),
+        Command::Repo(args) => match &args.command {
+            RepoCommand::Onboard(onboard_args) => {
+                cli::commands::repo_onboard::exec(onboard_args)
+            }
+        },
+        Command::Observe(args) => cli::commands::observe::exec(args),
+        Command::Doctor => cli::commands::doctor::exec(),
     }
 }
 

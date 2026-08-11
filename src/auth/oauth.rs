@@ -16,6 +16,7 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::Deserialize;
 
+use crate::auth::ephemeral::EphemeralCredentials;
 use crate::auth::loopback::LoopbackServer;
 use crate::auth::pkce::{self, PkcePair};
 use crate::auth::store::StoredCredentials;
@@ -26,7 +27,7 @@ const DEFAULT_CLIENT_ID: &str = "actual-cli";
 
 /// Default requested scopes. `offline_access` is required to receive a
 /// refresh token. Overridable via `ACTUAL_OAUTH_SCOPES`.
-const DEFAULT_SCOPES: &str = "openid profile offline_access adr:query adr:review";
+const DEFAULT_SCOPES: &str = "openid profile offline_access adr:query adr:review observe:events";
 
 /// Default scopes for the browserless device-authorization grant. Colon-form
 /// resource scopes only; `offline_access` is intentionally omitted.
@@ -37,7 +38,7 @@ const DEFAULT_SCOPES: &str = "openid profile offline_access adr:query adr:review
 /// the same way the browser session does. `offline_access` is therefore
 /// unnecessary here — the refresh token is issued regardless of scope.
 /// Overridable via `ACTUAL_OAUTH_SCOPES`.
-const DEFAULT_DEVICE_SCOPES: &str = "adr:query adr:review mcp:invoke";
+const DEFAULT_DEVICE_SCOPES: &str = "adr:query adr:review mcp:invoke observe:events";
 
 /// URN grant type for the OAuth 2.0 device-authorization grant (RFC 8628 §3.4).
 const DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
@@ -157,7 +158,18 @@ pub fn build_authorize_url(
     state: &str,
     organization_id: Option<&str>,
 ) -> Result<String, ActualError> {
-    let mut url = reqwest::Url::parse(&format!("{}/authorize", cfg.base_url))
+    build_authorize_url_with_path(cfg, "/authorize", redirect_uri, code_challenge, state, organization_id)
+}
+
+fn build_authorize_url_with_path(
+    cfg: &OAuthConfig,
+    path: &str,
+    redirect_uri: &str,
+    code_challenge: &str,
+    state: &str,
+    organization_id: Option<&str>,
+) -> Result<String, ActualError> {
+    let mut url = reqwest::Url::parse(&format!("{}{}", cfg.base_url, path))
         .map_err(|e| ActualError::ConfigError(format!("Invalid auth server URL: {e}")))?;
     {
         let mut q = url.query_pairs_mut();
@@ -300,6 +312,36 @@ pub async fn login(
     let server = LoopbackServer::bind().await?;
     login_with(
         cfg,
+        "/authorize",
+        organization_id,
+        open_browser,
+        opener,
+        timeout,
+        pkce_pair,
+        state,
+        server,
+    )
+    .await
+}
+
+/// Run the browser OAuth login via `/authorize/cli` (magic link form).
+///
+/// Same as [`login`] but opens the CLI-native auth page which supports
+/// email magic links with resend/recovery, instead of the standard login
+/// page with GitHub/Google SSO.
+pub async fn login_cli(
+    cfg: &OAuthConfig,
+    organization_id: Option<String>,
+    open_browser: bool,
+    opener: &dyn Fn(&str),
+    timeout: Duration,
+) -> Result<StoredCredentials, ActualError> {
+    let pkce_pair = PkcePair::generate();
+    let state = pkce::generate_state();
+    let server = LoopbackServer::bind().await?;
+    login_with(
+        cfg,
+        "/authorize/cli",
         organization_id,
         open_browser,
         opener,
@@ -319,6 +361,7 @@ pub async fn login(
 #[allow(clippy::too_many_arguments)]
 async fn login_with(
     cfg: &OAuthConfig,
+    authorize_path: &str,
     organization_id: Option<String>,
     open_browser: bool,
     opener: &dyn Fn(&str),
@@ -330,8 +373,9 @@ async fn login_with(
     let http = build_http_client(&cfg.base_url)?;
     let redirect_uri = server.redirect_uri();
 
-    let auth_url = build_authorize_url(
+    let auth_url = build_authorize_url_with_path(
         cfg,
+        authorize_path,
         &redirect_uri,
         &pkce_pair.challenge,
         &state,
@@ -346,7 +390,9 @@ async fn login_with(
         opener(&auth_url);
     }
 
-    let redirect = server.wait_for_code(&state, timeout).await?;
+    let redirect = server
+        .wait_for_code_with_app_url(&state, timeout, Some(&cfg.base_url))
+        .await?;
     let token = exchange_code(
         &http,
         &cfg.base_url,
@@ -363,6 +409,106 @@ async fn login_with(
     // reach the same endpoint without the user re-specifying it.
     creds.auth_url = Some(cfg.base_url.clone());
     Ok(creds)
+}
+
+/// Ephemeral scopes for public-repo onboarding (no offline_access → no refresh
+/// token).
+const EPHEMERAL_SCOPES: &str = "openid profile adr:query adr:review mcp:invoke repo:onboard";
+
+/// Run the browser OAuth login for ephemeral credentials (no refresh token).
+///
+/// Uses `/authorize/cli` instead of `/authorize` so the server renders the
+/// inline magic-link form for new users. The returned `EphemeralCredentials`
+/// hold only an access token.
+pub async fn login_ephemeral(
+    auth_url: &str,
+    device: bool,
+) -> Result<EphemeralCredentials, ActualError> {
+    let cfg = OAuthConfig {
+        base_url: auth_url.to_string(),
+        client_id: DEFAULT_CLIENT_ID.to_string(),
+        scopes: EPHEMERAL_SCOPES.to_string(),
+    };
+    let timeout = Duration::from_secs(300);
+
+    if device {
+        let on_prompt = |resp: &DeviceCodeResponse| {
+            println!("\nOpen this URL in any browser:\n  {}", resp.verification_uri);
+            println!("Enter the code: {}\n", resp.user_code);
+            println!("Waiting for authorization...");
+        };
+        let creds = device_login(&cfg, &on_prompt).await?;
+        return Ok(ephemeral_from_stored(creds, auth_url));
+    }
+
+    let pkce_pair = PkcePair::generate();
+    let state = pkce::generate_state();
+    let server = LoopbackServer::bind().await?;
+    let http = build_http_client(&cfg.base_url)?;
+    let redirect_uri = server.redirect_uri();
+
+    // Use /authorize/cli instead of /authorize for the inline magic-link form
+    let mut url = reqwest::Url::parse(&format!("{}/authorize/cli", cfg.base_url))
+        .map_err(|e| ActualError::ConfigError(format!("Invalid auth server URL: {e}")))?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("response_type", "code")
+            .append_pair("client_id", &cfg.client_id)
+            .append_pair("redirect_uri", &redirect_uri)
+            .append_pair("code_challenge", &pkce_pair.challenge)
+            .append_pair("code_challenge_method", PkcePair::METHOD)
+            .append_pair("state", &state)
+            .append_pair("scope", &cfg.scopes);
+    }
+
+    let auth_url_str = url.to_string();
+    println!("Opening your browser to connect your Actual AI account…");
+    println!("If it doesn't open, visit this URL:\n\n  {auth_url_str}\n");
+    println!("Lost the link? Run: actual login --cli\n");
+
+    if let Err(e) = open::that(&auth_url_str) {
+        eprintln!("Could not open browser: {e}");
+    }
+
+    let redirect = server
+        .wait_for_code_with_app_url(&state, timeout, Some(&cfg.base_url))
+        .await?;
+    let token = exchange_code(
+        &http,
+        &cfg.base_url,
+        &cfg.client_id,
+        &redirect.code,
+        &pkce_pair.verifier,
+        &redirect_uri,
+    )
+    .await?;
+    let who = fetch_identity(&http, &cfg.base_url, &token.access_token).await?;
+
+    let expires_at = token
+        .expires_in
+        .map(|secs| Utc::now() + ChronoDuration::seconds(secs));
+
+    Ok(EphemeralCredentials {
+        access_token: token.access_token,
+        token_type: token.token_type,
+        expires_at,
+        scope: token.scope.or(who.scope),
+        organization_id: who.organization_id,
+        member_id: who.member_id,
+        auth_url: Some(auth_url.to_string()),
+    })
+}
+
+fn ephemeral_from_stored(creds: StoredCredentials, auth_url: &str) -> EphemeralCredentials {
+    EphemeralCredentials {
+        access_token: creds.access_token,
+        token_type: creds.token_type,
+        expires_at: creds.expires_at,
+        scope: creds.scope,
+        organization_id: creds.organization_id,
+        member_id: creds.member_id,
+        auth_url: Some(auth_url.to_string()),
+    }
 }
 
 /// Refresh an access token via the `refresh_token` grant (rotation: the server
@@ -1078,6 +1224,7 @@ mod tests {
         let opener = |_: &str| {};
         let creds = login_with(
             &cfg,
+            "/authorize",
             Some("org-1".to_string()),
             true,
             &opener,
@@ -1179,6 +1326,7 @@ mod tests {
         let opener = |_: &str| {};
         let err = login_with(
             &cfg,
+            "/authorize",
             None,
             false,
             &opener,

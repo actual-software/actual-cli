@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "command": "actual observe post-tool",
+        "type": "command"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "command": "actual observe post-tool-failure",
+        "type": "command"
+      }
+    ],
+    "PreCompact": [
+      {
+        "command": "actual observe pre-compact",
+        "type": "command"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "command": "actual observe pre-tool",
+        "type": "command"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "command": "actual observe session-end",
+        "type": "command"
+      }
+    ],
+    "SessionStart": [
+      {
+        "command": "actual observe session-start",
+        "type": "command"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "actual observe stop",
+        "type": "command"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "command": "actual observe prompt",
+        "type": "command"
+      }
+    ]
+  }
+}
