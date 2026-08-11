@@ -143,6 +143,74 @@ impl GovernanceState {
     }
 }
 
+// ── Enhanced Brief ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalAffordance {
+    pub command: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnhancedBrief {
+    pub normalized_intent: String,
+    pub critical_policy: Vec<NormativePolicyStatement>,
+    pub advisory_policy: Vec<NormativePolicyStatement>,
+    pub unknowns: Vec<String>,
+    pub retrieval_affordances: Vec<RetrievalAffordance>,
+    pub governance_instruction: String,
+}
+
+impl std::fmt::Display for PolicyStrength {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolicyStrength::Must => write!(f, "MUST"),
+            PolicyStrength::MustNot => write!(f, "MUST_NOT"),
+            PolicyStrength::Should => write!(f, "SHOULD"),
+            PolicyStrength::ShouldNot => write!(f, "SHOULD_NOT"),
+            PolicyStrength::May => write!(f, "MAY"),
+        }
+    }
+}
+
+pub fn format_brief_output(brief: &EnhancedBrief) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!("Intent: {}\n", brief.normalized_intent));
+
+    if !brief.critical_policy.is_empty() {
+        out.push_str("\nCritical Policies:\n");
+        for p in &brief.critical_policy {
+            out.push_str(&format!("  [{}] {}\n", p.strength, p.statement));
+        }
+    }
+
+    if !brief.advisory_policy.is_empty() {
+        out.push_str("\nAdvisory Policies:\n");
+        for p in &brief.advisory_policy {
+            out.push_str(&format!("  [{}] {}\n", p.strength, p.statement));
+        }
+    }
+
+    if !brief.unknowns.is_empty() {
+        out.push_str("\nUnknowns:\n");
+        for u in &brief.unknowns {
+            out.push_str(&format!("  - {}\n", u));
+        }
+    }
+
+    if !brief.retrieval_affordances.is_empty() {
+        out.push_str("\nRetrieval Affordances:\n");
+        for a in &brief.retrieval_affordances {
+            out.push_str(&format!("  {} \u{2014} {}\n", a.command, a.description));
+        }
+    }
+
+    out.push_str(&format!("\nGovernance: {}\n", brief.governance_instruction));
+
+    out
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -473,5 +541,208 @@ mod tests {
         // But session_id and rework_iteration should always be present
         assert!(json.contains("\"session_id\""));
         assert!(json.contains("\"rework_iteration\""));
+    }
+
+    // ── Enhanced Brief tests ──────────────────────────────────────────
+
+    // 14. RetrievalAffordance — serde round-trip
+    #[test]
+    fn retrieval_affordance_round_trip() {
+        let affordance = RetrievalAffordance {
+            command: "actual rules list".into(),
+            description: "List all ADR rules".into(),
+        };
+        let json = serde_json::to_string(&affordance).unwrap();
+        assert!(json.contains("\"command\":\"actual rules list\""));
+        assert!(json.contains("\"description\":\"List all ADR rules\""));
+        let back: RetrievalAffordance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.command, "actual rules list");
+        assert_eq!(back.description, "List all ADR rules");
+    }
+
+    // 15. EnhancedBrief — serde round-trip with all fields populated
+    #[test]
+    fn enhanced_brief_round_trip() {
+        let brief = EnhancedBrief {
+            normalized_intent: "Add user profile table with RLS".into(),
+            critical_policy: vec![NormativePolicyStatement {
+                strength: PolicyStrength::Must,
+                statement: "All tables must have RLS enabled".into(),
+                policy_id: "pol-001".into(),
+                source_adr_id: Some("adr-042".into()),
+            }],
+            advisory_policy: vec![NormativePolicyStatement {
+                strength: PolicyStrength::Should,
+                statement: "Use CTEs for multi-stage queries".into(),
+                policy_id: "pol-002".into(),
+                source_adr_id: None,
+            }],
+            unknowns: vec!["Does the profiles table need partitioning?".into()],
+            retrieval_affordances: vec![RetrievalAffordance {
+                command: "actual rules list".into(),
+                description: "List all ADR rules".into(),
+            }],
+            governance_instruction: "Submit plan for review before implementing".into(),
+        };
+        let json = serde_json::to_string(&brief).unwrap();
+        let back: EnhancedBrief = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.normalized_intent, "Add user profile table with RLS");
+        assert_eq!(back.critical_policy.len(), 1);
+        assert_eq!(back.critical_policy[0].strength, PolicyStrength::Must);
+        assert_eq!(back.advisory_policy.len(), 1);
+        assert_eq!(back.advisory_policy[0].strength, PolicyStrength::Should);
+        assert_eq!(back.unknowns.len(), 1);
+        assert_eq!(back.retrieval_affordances.len(), 1);
+        assert_eq!(
+            back.governance_instruction,
+            "Submit plan for review before implementing"
+        );
+    }
+
+    // 16. EnhancedBrief — empty optional collection fields
+    #[test]
+    fn enhanced_brief_empty_optional_fields() {
+        let brief = EnhancedBrief {
+            normalized_intent: "Simple refactor".into(),
+            critical_policy: vec![],
+            advisory_policy: vec![],
+            unknowns: vec![],
+            retrieval_affordances: vec![],
+            governance_instruction: "Proceed".into(),
+        };
+        let json = serde_json::to_string(&brief).unwrap();
+        let back: EnhancedBrief = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.normalized_intent, "Simple refactor");
+        assert!(back.critical_policy.is_empty());
+        assert!(back.advisory_policy.is_empty());
+        assert!(back.unknowns.is_empty());
+        assert!(back.retrieval_affordances.is_empty());
+        assert_eq!(back.governance_instruction, "Proceed");
+    }
+
+    // 17. format_brief_output — displays MUST policies
+    #[test]
+    fn format_brief_displays_must_policies() {
+        let brief = EnhancedBrief {
+            normalized_intent: "Add table".into(),
+            critical_policy: vec![
+                NormativePolicyStatement {
+                    strength: PolicyStrength::Must,
+                    statement: "Enable RLS on all tables".into(),
+                    policy_id: "pol-001".into(),
+                    source_adr_id: None,
+                },
+                NormativePolicyStatement {
+                    strength: PolicyStrength::MustNot,
+                    statement: "Never expose admin client to frontend".into(),
+                    policy_id: "pol-003".into(),
+                    source_adr_id: None,
+                },
+            ],
+            advisory_policy: vec![],
+            unknowns: vec![],
+            retrieval_affordances: vec![],
+            governance_instruction: "Review required".into(),
+        };
+        let output = format_brief_output(&brief);
+        assert!(output.contains("[MUST] Enable RLS on all tables"));
+        assert!(output.contains("[MUST_NOT] Never expose admin client to frontend"));
+    }
+
+    // 18. format_brief_output — displays SHOULD / SHOULD_NOT / MAY policies
+    #[test]
+    fn format_brief_displays_should_policies() {
+        let brief = EnhancedBrief {
+            normalized_intent: "Refactor queries".into(),
+            critical_policy: vec![],
+            advisory_policy: vec![
+                NormativePolicyStatement {
+                    strength: PolicyStrength::Should,
+                    statement: "Use CTEs for readability".into(),
+                    policy_id: "pol-010".into(),
+                    source_adr_id: None,
+                },
+                NormativePolicyStatement {
+                    strength: PolicyStrength::ShouldNot,
+                    statement: "Avoid nested subqueries beyond 2 levels".into(),
+                    policy_id: "pol-011".into(),
+                    source_adr_id: None,
+                },
+                NormativePolicyStatement {
+                    strength: PolicyStrength::May,
+                    statement: "Use materialized views for caching".into(),
+                    policy_id: "pol-012".into(),
+                    source_adr_id: None,
+                },
+            ],
+            unknowns: vec![],
+            retrieval_affordances: vec![],
+            governance_instruction: "Proceed".into(),
+        };
+        let output = format_brief_output(&brief);
+        assert!(output.contains("[SHOULD] Use CTEs for readability"));
+        assert!(output.contains("[SHOULD_NOT] Avoid nested subqueries beyond 2 levels"));
+        assert!(output.contains("[MAY] Use materialized views for caching"));
+    }
+
+    // 19. format_brief_output — displays unknowns as bulleted list
+    #[test]
+    fn format_brief_displays_unknowns() {
+        let brief = EnhancedBrief {
+            normalized_intent: "Add partitioning".into(),
+            critical_policy: vec![],
+            advisory_policy: vec![],
+            unknowns: vec![
+                "What is the expected table size?".into(),
+                "Which partition key to use?".into(),
+            ],
+            retrieval_affordances: vec![],
+            governance_instruction: "Investigate first".into(),
+        };
+        let output = format_brief_output(&brief);
+        assert!(output.contains("- What is the expected table size?"));
+        assert!(output.contains("- Which partition key to use?"));
+    }
+
+    // 20. format_brief_output — displays retrieval affordances
+    #[test]
+    fn format_brief_displays_affordances() {
+        let brief = EnhancedBrief {
+            normalized_intent: "Check rules".into(),
+            critical_policy: vec![],
+            advisory_policy: vec![],
+            unknowns: vec![],
+            retrieval_affordances: vec![
+                RetrievalAffordance {
+                    command: "actual rules list".into(),
+                    description: "List all ADR rules".into(),
+                },
+                RetrievalAffordance {
+                    command: "actual rules show pol-001".into(),
+                    description: "Show details of policy pol-001".into(),
+                },
+            ],
+            governance_instruction: "Proceed".into(),
+        };
+        let output = format_brief_output(&brief);
+        assert!(output.contains("actual rules list \u{2014} List all ADR rules"));
+        assert!(
+            output.contains("actual rules show pol-001 \u{2014} Show details of policy pol-001")
+        );
+    }
+
+    // 21. format_brief_output — displays governance instruction
+    #[test]
+    fn format_brief_displays_governance_instruction() {
+        let brief = EnhancedBrief {
+            normalized_intent: "Deploy change".into(),
+            critical_policy: vec![],
+            advisory_policy: vec![],
+            unknowns: vec![],
+            retrieval_affordances: vec![],
+            governance_instruction: "Submit plan for architecture review before coding".into(),
+        };
+        let output = format_brief_output(&brief);
+        assert!(output.contains("Governance: Submit plan for architecture review before coding"));
     }
 }
