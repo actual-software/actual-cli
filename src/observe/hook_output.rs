@@ -22,6 +22,14 @@ struct HookOutputWithContext {
     hook_specific_output: HookSpecificOutput,
 }
 
+#[derive(Serialize)]
+struct BlockDecisionOutput {
+    decision: String,
+    reason: String,
+    #[serde(rename = "hookSpecificOutput")]
+    hook_specific_output: HookSpecificOutput,
+}
+
 pub fn build_hook_output(disposition: Disposition, guidance: Option<&str>, hook_event_name: &str) -> String {
     match disposition {
         Disposition::Silent => "{}".to_string(),
@@ -63,6 +71,21 @@ pub fn build_hook_output(disposition: Disposition, guidance: Option<&str>, hook_
             .unwrap_or_else(|_| "{}".to_string())
         }
     }
+}
+
+/// Build a blocking output that uses Claude Code's `decision: "block"` protocol
+/// to actually prevent the tool call, while also injecting guidance context.
+pub fn build_block_output(reason: &str, guidance: Option<&str>, hook_event_name: &str) -> String {
+    let context = guidance.unwrap_or(reason);
+    serde_json::to_string(&BlockDecisionOutput {
+        decision: "block".to_string(),
+        reason: reason.to_string(),
+        hook_specific_output: HookSpecificOutput {
+            hook_event_name: hook_event_name.to_string(),
+            additional_context: context.to_string(),
+        },
+    })
+    .unwrap_or_else(|_| r#"{"decision":"block","reason":"Architecture violation detected."}"#.to_string())
 }
 
 #[cfg(test)]
@@ -173,5 +196,58 @@ mod tests {
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(&output);
             assert!(parsed.is_ok(), "disposition {:?} should produce valid JSON", disp);
         }
+    }
+
+    #[test]
+    fn test_block_output_has_decision_field() {
+        let output = build_block_output("Direct DB access violates ADR-1", None, "PreToolUse");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"].as_str().unwrap(), "block");
+        assert_eq!(
+            parsed["reason"].as_str().unwrap(),
+            "Direct DB access violates ADR-1"
+        );
+    }
+
+    #[test]
+    fn test_block_output_includes_context() {
+        let output = build_block_output(
+            "Violation detected",
+            Some("Full guidance with ADR citations"),
+            "PreToolUse",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["decision"].as_str().unwrap(), "block");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap(),
+            "Full guidance with ADR citations"
+        );
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"]
+                .as_str()
+                .unwrap(),
+            "PreToolUse"
+        );
+    }
+
+    #[test]
+    fn test_block_output_uses_reason_as_context_when_no_guidance() {
+        let output = build_block_output("Forbidden pattern detected", None, "Stop");
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap(),
+            "Forbidden pattern detected"
+        );
+    }
+
+    #[test]
+    fn test_block_output_produces_valid_json() {
+        let output = build_block_output("test reason", Some("test guidance"), "PreToolUse");
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&output);
+        assert!(parsed.is_ok(), "block output should produce valid JSON");
     }
 }

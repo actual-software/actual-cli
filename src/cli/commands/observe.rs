@@ -10,6 +10,7 @@ use crate::cli::args::{ObserveArgs, ObserveCommand};
 use crate::error::ActualError;
 use crate::observe::boundary::is_evaluation_boundary;
 use crate::observe::canonicalize;
+use crate::observe::hook_output::build_block_output;
 use crate::observe::journal::SessionJournal;
 use crate::observe::setup;
 use crate::observe::types::HookType;
@@ -72,8 +73,21 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
 
     if is_evaluation_boundary(hook_type, tool_name, &raw_payload) {
         let mut hook_output = evaluate_at_boundary(session_id, &journal);
-        inject_hook_event_name(&mut hook_output, hook_type.as_str());
-        println!("{}", serde_json::to_string(&hook_output).unwrap_or_else(|_| "{}".to_string()));
+
+        let is_gating_hook = matches!(hook_type, HookType::PreToolUse | HookType::Stop);
+        let merged_disposition = extract_disposition(&hook_output);
+
+        if is_gating_hook && merged_disposition == "block" {
+            let reason = hook_output
+                .get("hookSpecificOutput")
+                .and_then(|h| h.get("additionalContext"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("Architecture violation detected by Actual Advisor.");
+            println!("{}", build_block_output(reason, Some(reason), hook_type.as_str()));
+        } else {
+            inject_hook_event_name(&mut hook_output, hook_type.as_str());
+            println!("{}", serde_json::to_string(&hook_output).unwrap_or_else(|_| "{}".to_string()));
+        }
     } else {
         println!("{{}}");
     }
@@ -195,8 +209,22 @@ fn try_evaluate_at_boundary(
     Ok(merge_chunk_responses(responses))
 }
 
+/// Extract the highest disposition from a merged hook output.
+/// The merged output carries a `_disposition` field set by `merge_chunk_responses`.
+fn extract_disposition(output: &serde_json::Value) -> String {
+    output
+        .get("_disposition")
+        .and_then(|v| v.as_str())
+        .unwrap_or("silent")
+        .to_string()
+}
+
 /// Inject hookEventName into hookSpecificOutput so Claude Code validates the output.
+/// Also strips internal fields (prefixed with `_`) before output.
 fn inject_hook_event_name(output: &mut serde_json::Value, event_name: &str) {
+    if let Some(obj) = output.as_object_mut() {
+        obj.remove("_disposition");
+    }
     if let Some(hook_specific) = output
         .get_mut("hookSpecificOutput")
         .and_then(|h| h.as_object_mut())
@@ -225,8 +253,14 @@ fn merge_chunk_responses(mut responses: Vec<InterventionResponse>) -> serde_json
         return serde_json::json!({});
     }
 
+    let highest_disposition = &non_silent[0].disposition;
+
     if non_silent.len() == 1 {
-        return non_silent[0].hook_output.clone();
+        let mut output = non_silent[0].hook_output.clone();
+        if let Some(obj) = output.as_object_mut() {
+            obj.insert("_disposition".to_string(), serde_json::json!(highest_disposition));
+        }
+        return output;
     }
 
     let mut combined_sections: Vec<String> = Vec::new();
@@ -256,6 +290,7 @@ fn merge_chunk_responses(mut responses: Vec<InterventionResponse>) -> serde_json
     );
 
     serde_json::json!({
+        "_disposition": highest_disposition,
         "hookSpecificOutput": {
             "additionalContext": format!("{}{}", header, combined_sections.join("\n")),
         }

@@ -10,6 +10,7 @@ pub fn is_evaluation_boundary(
     match hook_type {
         HookType::PreToolUse => match tool_name {
             Some("Edit" | "Write") => true,
+            Some("Bash") => is_mutating_bash(payload),
             Some("Agent") => is_agent_launch(payload),
             _ => false,
         },
@@ -27,6 +28,52 @@ fn is_substantial_prompt(payload: &serde_json::Value) -> bool {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     prompt.len() >= MIN_PROMPT_LENGTH
+}
+
+const MUTATING_BASH_PATTERNS: &[&str] = &[
+    "rm ", "rm\t", "rmdir",
+    "mv ", "mv\t",
+    "cp ", "cp\t",
+    "chmod", "chown",
+    "git commit", "git push", "git reset", "git checkout", "git merge", "git rebase",
+    "git stash", "git cherry-pick", "git revert",
+    "npm install", "npm uninstall", "npm ci",
+    "pnpm install", "pnpm add", "pnpm remove",
+    "yarn add", "yarn remove",
+    "pip install", "pip uninstall",
+    "uv add", "uv remove", "uv sync",
+    "cargo add", "cargo install",
+    "docker build", "docker push", "docker run",
+    "kubectl apply", "kubectl delete",
+    "make ",
+    "curl -X POST", "curl -X PUT", "curl -X DELETE", "curl -X PATCH",
+];
+
+const MUTATING_BASH_OPERATORS: &[&str] = &[
+    ">", ">>", "| tee",
+];
+
+fn is_mutating_bash(payload: &serde_json::Value) -> bool {
+    let command = payload
+        .get("tool_input")
+        .and_then(|v| v.get("command"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if command.is_empty() {
+        return false;
+    }
+    let lower = command.to_lowercase();
+    for pattern in MUTATING_BASH_PATTERNS {
+        if lower.contains(pattern) {
+            return true;
+        }
+    }
+    for op in MUTATING_BASH_OPERATORS {
+        if command.contains(op) {
+            return true;
+        }
+    }
+    false
 }
 
 fn is_agent_launch(payload: &serde_json::Value) -> bool {
@@ -102,11 +149,121 @@ mod tests {
     }
 
     #[test]
-    fn test_bash_is_not_boundary() {
+    fn test_bash_readonly_is_not_boundary() {
+        let payload = json!({"tool_input": {"command": "ls -la src/"}});
+        assert!(!is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_empty_command_is_not_boundary() {
         assert!(!is_evaluation_boundary(
             HookType::PreToolUse,
             Some("Bash"),
             &empty()
+        ));
+    }
+
+    #[test]
+    fn test_bash_grep_is_not_boundary() {
+        let payload = json!({"tool_input": {"command": "grep -rn 'pattern' src/"}});
+        assert!(!is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_rm_is_boundary() {
+        let payload = json!({"tool_input": {"command": "rm -rf dist/"}});
+        assert!(is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_git_commit_is_boundary() {
+        let payload = json!({"tool_input": {"command": "git commit -m 'fix bug'"}});
+        assert!(is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_git_push_is_boundary() {
+        let payload = json!({"tool_input": {"command": "git push origin main"}});
+        assert!(is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_redirect_is_boundary() {
+        let payload = json!({"tool_input": {"command": "echo 'data' > output.txt"}});
+        assert!(is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_pnpm_install_is_boundary() {
+        let payload = json!({"tool_input": {"command": "pnpm install lodash"}});
+        assert!(is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_npm_ci_is_boundary() {
+        let payload = json!({"tool_input": {"command": "npm ci"}});
+        assert!(is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_git_status_is_not_boundary() {
+        let payload = json!({"tool_input": {"command": "git status"}});
+        assert!(!is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_git_log_is_not_boundary() {
+        let payload = json!({"tool_input": {"command": "git log --oneline -5"}});
+        assert!(!is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
+        ));
+    }
+
+    #[test]
+    fn test_bash_git_diff_is_not_boundary() {
+        let payload = json!({"tool_input": {"command": "git diff HEAD"}});
+        assert!(!is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("Bash"),
+            &payload
         ));
     }
 
