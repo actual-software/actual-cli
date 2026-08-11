@@ -5,16 +5,25 @@ use serde_json::Value;
 
 use crate::error::ActualError;
 
-const HOOK_COMMANDS: &[(&str, &str)] = &[
-    ("SessionStart", "actual observe session-start"),
-    ("UserPromptSubmit", "actual observe prompt"),
-    ("PreToolUse", "actual observe pre-tool"),
-    ("PostToolUse", "actual observe post-tool"),
-    ("PostToolUseFailure", "actual observe post-tool-failure"),
-    ("Stop", "actual observe stop"),
-    ("SessionEnd", "actual observe session-end"),
-    ("PreCompact", "actual observe pre-compact"),
-    ("SubagentStart", "actual observe subagent-tool"),
+struct HookEntry {
+    hook_name: &'static str,
+    command: &'static str,
+    matcher: &'static str,
+    timeout: u64,
+}
+
+const HOOK_ENTRIES: &[HookEntry] = &[
+    HookEntry { hook_name: "SessionStart", command: "actual observe session-start", matcher: "", timeout: 1200 },
+    HookEntry { hook_name: "UserPromptSubmit", command: "actual observe prompt", matcher: "", timeout: 1200 },
+    HookEntry { hook_name: "PreToolUse", command: "actual observe pre-tool", matcher: "Edit|Write", timeout: 30 },
+    HookEntry { hook_name: "PreToolUse", command: "actual observe pre-tool", matcher: "Bash", timeout: 30 },
+    HookEntry { hook_name: "PreToolUse", command: "actual observe pre-tool", matcher: "Agent", timeout: 600 },
+    HookEntry { hook_name: "PostToolUse", command: "actual observe post-tool", matcher: "", timeout: 1200 },
+    HookEntry { hook_name: "PostToolUseFailure", command: "actual observe post-tool-failure", matcher: "", timeout: 1200 },
+    HookEntry { hook_name: "Stop", command: "actual observe stop", matcher: "", timeout: 1200 },
+    HookEntry { hook_name: "SessionEnd", command: "actual observe session-end", matcher: "", timeout: 1200 },
+    HookEntry { hook_name: "PreCompact", command: "actual observe pre-compact", matcher: "", timeout: 1200 },
+    HookEntry { hook_name: "SubagentStart", command: "actual observe subagent-tool", matcher: "", timeout: 1200 },
 ];
 
 pub fn install_hooks(settings_path: &Path) -> Result<(), ActualError> {
@@ -39,35 +48,40 @@ pub fn install_hooks(settings_path: &Path) -> Result<(), ActualError> {
         ActualError::ConfigError("hooks is not a JSON object".to_string())
     })?;
 
-    for (hook_name, command) in HOOK_COMMANDS {
+    for entry in HOOK_ENTRIES {
         let entries = hooks_obj
-            .entry(*hook_name)
+            .entry(entry.hook_name)
             .or_insert_with(|| serde_json::json!([]));
 
         let arr = entries.as_array_mut().ok_or_else(|| {
-            ActualError::ConfigError(format!("hooks.{hook_name} is not an array"))
+            ActualError::ConfigError(format!("hooks.{} is not an array", entry.hook_name))
         })?;
 
         let already_present = arr.iter().any(|matcher_group| {
-            matcher_group
+            let matcher_matches = matcher_group
+                .get("matcher")
+                .and_then(|m| m.as_str())
+                .unwrap_or("") == entry.matcher;
+            let command_matches = matcher_group
                 .get("hooks")
                 .and_then(|h| h.as_array())
                 .map(|hooks| {
                     hooks.iter().any(|hook| {
-                        hook.get("command").and_then(|c| c.as_str()) == Some(command)
+                        hook.get("command").and_then(|c| c.as_str()) == Some(entry.command)
                     })
                 })
-                .unwrap_or(false)
+                .unwrap_or(false);
+            matcher_matches && command_matches
         });
 
         if !already_present {
             arr.push(serde_json::json!({
-                "matcher": "",
+                "matcher": entry.matcher,
                 "hooks": [
                     {
                         "type": "command",
-                        "command": command,
-                        "timeout": 1200
+                        "command": entry.command,
+                        "timeout": entry.timeout
                     }
                 ]
             }));
@@ -121,10 +135,14 @@ mod tests {
             hooks["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap(),
             "actual observe session-start"
         );
-        assert_eq!(
-            hooks["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap(),
-            "actual observe pre-tool"
-        );
+        // PreToolUse now has 3 matcher-specific entries
+        let pre_tool = hooks["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool.len(), 3);
+        assert_eq!(pre_tool[0]["matcher"].as_str().unwrap(), "Edit|Write");
+        assert_eq!(pre_tool[0]["hooks"][0]["timeout"].as_u64().unwrap(), 30);
+        assert_eq!(pre_tool[1]["matcher"].as_str().unwrap(), "Bash");
+        assert_eq!(pre_tool[2]["matcher"].as_str().unwrap(), "Agent");
+        assert_eq!(pre_tool[2]["hooks"][0]["timeout"].as_u64().unwrap(), 600);
         assert_eq!(
             hooks["SessionStart"][0]["matcher"].as_str().unwrap(),
             ""
@@ -175,6 +193,12 @@ mod tests {
             session_start.len(),
             1,
             "should not duplicate hooks on re-run"
+        );
+        let pre_tool = content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(
+            pre_tool.len(),
+            3,
+            "PreToolUse should have exactly 3 matcher entries after re-run"
         );
     }
 
@@ -237,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_entries_have_correct_type_and_timeout() {
+    fn test_hook_entries_have_correct_type_and_valid_timeout() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
@@ -253,7 +277,8 @@ mod tests {
                 let inner_hooks = matcher_group["hooks"].as_array().unwrap();
                 for hook in inner_hooks {
                     assert_eq!(hook["type"].as_str().unwrap(), "command");
-                    assert_eq!(hook["timeout"].as_u64().unwrap(), 1200);
+                    let timeout = hook["timeout"].as_u64().unwrap();
+                    assert!(timeout > 0 && timeout <= 1200, "timeout should be between 1 and 1200, got {timeout}");
                 }
             }
         }

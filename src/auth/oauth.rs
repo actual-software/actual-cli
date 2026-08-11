@@ -447,21 +447,14 @@ pub async fn login_ephemeral(
     let http = build_http_client(&cfg.base_url)?;
     let redirect_uri = server.redirect_uri();
 
-    // Use /authorize/cli instead of /authorize for the inline magic-link form
-    let mut url = reqwest::Url::parse(&format!("{}/authorize/cli", cfg.base_url))
-        .map_err(|e| ActualError::ConfigError(format!("Invalid auth server URL: {e}")))?;
-    {
-        let mut q = url.query_pairs_mut();
-        q.append_pair("response_type", "code")
-            .append_pair("client_id", &cfg.client_id)
-            .append_pair("redirect_uri", &redirect_uri)
-            .append_pair("code_challenge", &pkce_pair.challenge)
-            .append_pair("code_challenge_method", PkcePair::METHOD)
-            .append_pair("state", &state)
-            .append_pair("scope", &cfg.scopes);
-    }
-
-    let auth_url_str = url.to_string();
+    let auth_url_str = build_authorize_url_with_path(
+        &cfg,
+        "/authorize/cli",
+        &redirect_uri,
+        &pkce_pair.challenge,
+        &state,
+        None,
+    )?;
     println!("Opening your browser to connect your Actual AI account…");
     println!("If it doesn't open, visit this URL:\n\n  {auth_url_str}\n");
     println!("Lost the link? Run: actual login --cli\n");
