@@ -135,13 +135,16 @@ impl LoopbackServer {
                         ));
                     }
                     let msg = match app_url {
-                        Some(url) => format!(
-                            "You're signed in to Actual AI. You can close this tab and return to the terminal.\
-                             <br><br><a href=\"{}\" style=\"display:inline-block;padding:10px 24px;\
-                             background:#111;color:#fff;border-radius:6px;text-decoration:none;\
-                             font-weight:600\">Open web app</a>",
-                            url
-                        ),
+                        Some(url) => {
+                            let escaped = html_escape_attr(url);
+                            format!(
+                                "You're signed in to Actual AI. You can close this tab and return to the terminal.\
+                                 <br><br><a href=\"{}\" style=\"display:inline-block;padding:10px 24px;\
+                                 background:#111;color:#fff;border-radius:6px;text-decoration:none;\
+                                 font-weight:600\">Open web app</a>",
+                                escaped
+                            )
+                        }
                         None => "You're signed in to Actual AI. You can close this tab and return to the terminal.".to_string(),
                     };
                     write_html(
@@ -239,6 +242,14 @@ fn param(params: &[(String, String)], key: &str) -> Option<String> {
         .iter()
         .find(|(k, _)| k == key)
         .map(|(_, v)| v.clone())
+}
+
+fn html_escape_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Minimal percent-decoding for query values (`%XX` → byte). A literal `+` is

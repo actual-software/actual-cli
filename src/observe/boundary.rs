@@ -74,11 +74,7 @@ const MUTATING_BASH_PATTERNS: &[&str] = &[
     "docker build", "docker push", "docker run",
     "kubectl apply", "kubectl delete",
     "make ",
-    "curl -X POST", "curl -X PUT", "curl -X DELETE", "curl -X PATCH",
-];
-
-const MUTATING_BASH_OPERATORS: &[&str] = &[
-    ">", ">>", "| tee",
+    "curl -x post", "curl -x put", "curl -x delete", "curl -x patch",
 ];
 
 fn is_mutating_bash(payload: &serde_json::Value) -> bool {
@@ -96,8 +92,24 @@ fn is_mutating_bash(payload: &serde_json::Value) -> bool {
             return true;
         }
     }
-    for op in MUTATING_BASH_OPERATORS {
-        if command.contains(op) {
+    if has_output_redirect(command) {
+        return true;
+    }
+    false
+}
+
+fn has_output_redirect(command: &str) -> bool {
+    if command.contains("| tee") || command.contains(">>") {
+        return true;
+    }
+    for (i, ch) in command.char_indices() {
+        if ch == '>' {
+            if i > 0 {
+                let prev = command.as_bytes()[i - 1];
+                if prev == b'2' || prev == b'&' {
+                    continue;
+                }
+            }
             return true;
         }
     }

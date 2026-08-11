@@ -33,7 +33,14 @@ fn exec_setup() -> Result<(), ActualError> {
 
 fn exec_status() -> Result<(), ActualError> {
     let settings_path = setup::default_settings_path();
-    if settings_path.exists() {
+    let has_hooks = settings_path.exists() && {
+        std::fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("hooks")?.get("PreToolUse")?.as_array().map(|a| !a.is_empty()))
+            .unwrap_or(false)
+    };
+    if has_hooks {
         eprintln!("hooks: installed");
     } else {
         eprintln!("hooks: not installed");
@@ -52,7 +59,7 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
         ActualError::ConfigError(format!("failed to read stdin: {e}"))
     })?;
 
-    let raw_payload: serde_json::Value = if stdin_buf.trim().is_empty() {
+    let mut raw_payload: serde_json::Value = if stdin_buf.trim().is_empty() {
         serde_json::json!({})
     } else {
         serde_json::from_str(&stdin_buf).map_err(|e| {
@@ -60,14 +67,21 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
         })?
     };
 
-    let tool_name = raw_payload.get("tool_name").and_then(|v| v.as_str());
+    let tool_name_owned = raw_payload.get("tool_name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let tool_name = tool_name_owned.as_deref();
 
     let aewo_code = canonicalize::canonicalize(hook_type, tool_name);
 
-    let session_id = raw_payload
+    let session_id_owned = raw_payload
         .get("session_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .unwrap_or("unknown")
+        .to_string();
+    let session_id = session_id_owned.as_str();
+
+    if let Some(obj) = raw_payload.as_object_mut() {
+        obj.insert("hook_type".to_string(), serde_json::json!(hook_type.as_str()));
+    }
 
     let journal = SessionJournal::new()?;
     journal.append(session_id, &raw_payload, &aewo_code)?;
@@ -374,10 +388,14 @@ fn merge_chunk_responses(mut responses: Vec<InterventionResponse>) -> serde_json
     let highest_disposition = &non_silent[0].disposition;
 
     if non_silent.len() == 1 {
-        let mut output = non_silent[0].hook_output.clone();
-        if let Some(obj) = output.as_object_mut() {
-            obj.insert("_disposition".to_string(), serde_json::json!(highest_disposition));
-        }
+        let mut output = match non_silent[0].hook_output {
+            serde_json::Value::Object(_) => non_silent[0].hook_output.clone(),
+            _ => serde_json::json!({}),
+        };
+        output
+            .as_object_mut()
+            .unwrap()
+            .insert("_disposition".to_string(), serde_json::json!(highest_disposition));
         return output;
     }
 
