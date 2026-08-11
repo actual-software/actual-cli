@@ -11,6 +11,7 @@ pub enum HookType {
     Stop,
     SessionEnd,
     PreCompact,
+    SubagentStart,
 }
 
 impl HookType {
@@ -24,6 +25,7 @@ impl HookType {
             "stop" => Some(Self::Stop),
             "session-end" => Some(Self::SessionEnd),
             "pre-compact" => Some(Self::PreCompact),
+            "subagent-tool" => Some(Self::SubagentStart),
             _ => None,
         }
     }
@@ -38,6 +40,7 @@ impl HookType {
             Self::Stop => "Stop",
             Self::SessionEnd => "SessionEnd",
             Self::PreCompact => "PreCompact",
+            Self::SubagentStart => "SubagentStart",
         }
     }
 }

@@ -408,6 +408,8 @@ pub enum ObserveCommand {
     SessionEnd,
     /// Handle PreCompact hook event (re-inject context)
     PreCompact,
+    /// Handle SubagentStart hook event
+    SubagentTool,
     /// Install observer hooks into .claude/settings.json
     Setup,
     /// Check observer status (auth, hooks, API reachability)
@@ -425,6 +427,7 @@ impl ObserveCommand {
             Self::Stop => "stop",
             Self::SessionEnd => "session-end",
             Self::PreCompact => "pre-compact",
+            Self::SubagentTool => "subagent-tool",
             Self::Setup => "setup",
             Self::Status => "status",
         }

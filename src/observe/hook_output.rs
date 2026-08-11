@@ -10,6 +10,8 @@ pub enum Disposition {
 
 #[derive(Serialize)]
 struct HookSpecificOutput {
+    #[serde(rename = "hookEventName")]
+    hook_event_name: String,
     #[serde(rename = "additionalContext")]
     additional_context: String,
 }
@@ -20,13 +22,14 @@ struct HookOutputWithContext {
     hook_specific_output: HookSpecificOutput,
 }
 
-pub fn build_hook_output(disposition: Disposition, guidance: Option<&str>) -> String {
+pub fn build_hook_output(disposition: Disposition, guidance: Option<&str>, hook_event_name: &str) -> String {
     match disposition {
         Disposition::Silent => "{}".to_string(),
         Disposition::Inform => {
             let context = guidance.unwrap_or("The advisor has informational guidance for this action.");
             serde_json::to_string(&HookOutputWithContext {
                 hook_specific_output: HookSpecificOutput {
+                    hook_event_name: hook_event_name.to_string(),
                     additional_context: context.to_string(),
                 },
             })
@@ -38,6 +41,7 @@ pub fn build_hook_output(disposition: Disposition, guidance: Option<&str>) -> St
             );
             serde_json::to_string(&HookOutputWithContext {
                 hook_specific_output: HookSpecificOutput {
+                    hook_event_name: hook_event_name.to_string(),
                     additional_context: context.to_string(),
                 },
             })
@@ -52,6 +56,7 @@ pub fn build_hook_output(disposition: Disposition, guidance: Option<&str>) -> St
             );
             serde_json::to_string(&HookOutputWithContext {
                 hook_specific_output: HookSpecificOutput {
+                    hook_event_name: hook_event_name.to_string(),
                     additional_context: context,
                 },
             })
@@ -66,20 +71,20 @@ mod tests {
 
     #[test]
     fn test_silent_returns_empty_json() {
-        assert_eq!(build_hook_output(Disposition::Silent, None), "{}");
+        assert_eq!(build_hook_output(Disposition::Silent, None, "PreToolUse"), "{}");
     }
 
     #[test]
     fn test_silent_ignores_guidance() {
         assert_eq!(
-            build_hook_output(Disposition::Silent, Some("ignored")),
+            build_hook_output(Disposition::Silent, Some("ignored"), "PreToolUse"),
             "{}"
         );
     }
 
     #[test]
     fn test_inform_returns_additional_context() {
-        let output = build_hook_output(Disposition::Inform, Some("Use JWT for auth"));
+        let output = build_hook_output(Disposition::Inform, Some("Use JWT for auth"), "PostToolUse");
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(
             parsed["hookSpecificOutput"]["additionalContext"]
@@ -87,21 +92,33 @@ mod tests {
                 .unwrap(),
             "Use JWT for auth"
         );
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"]
+                .as_str()
+                .unwrap(),
+            "PostToolUse"
+        );
     }
 
     #[test]
     fn test_inform_default_message() {
-        let output = build_hook_output(Disposition::Inform, None);
+        let output = build_hook_output(Disposition::Inform, None, "UserPromptSubmit");
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap()
             .contains("informational"));
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"]
+                .as_str()
+                .unwrap(),
+            "UserPromptSubmit"
+        );
     }
 
     #[test]
     fn test_warn_returns_additional_context() {
-        let output = build_hook_output(Disposition::Warn, Some("Auth pattern violates ADR-7"));
+        let output = build_hook_output(Disposition::Warn, Some("Auth pattern violates ADR-7"), "PreToolUse");
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(
             parsed["hookSpecificOutput"]["additionalContext"]
@@ -113,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_warn_default_message() {
-        let output = build_hook_output(Disposition::Warn, None);
+        let output = build_hook_output(Disposition::Warn, None, "PreToolUse");
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -124,7 +141,7 @@ mod tests {
     #[test]
     fn test_block_returns_advisory_note() {
         let output =
-            build_hook_output(Disposition::Block, Some("Direct DB access violates ADR-1"));
+            build_hook_output(Disposition::Block, Some("Direct DB access violates ADR-1"), "PreToolUse");
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let ctx = parsed["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -135,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_block_default_message() {
-        let output = build_hook_output(Disposition::Block, None);
+        let output = build_hook_output(Disposition::Block, None, "PreToolUse");
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let ctx = parsed["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -152,7 +169,7 @@ mod tests {
             Disposition::Warn,
             Disposition::Block,
         ] {
-            let output = build_hook_output(disp, Some("test"));
+            let output = build_hook_output(disp, Some("test"), "PostToolUse");
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(&output);
             assert!(parsed.is_ok(), "disposition {:?} should produce valid JSON", disp);
         }

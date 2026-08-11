@@ -71,7 +71,8 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
     journal.append(session_id, &raw_payload, &aewo_code)?;
 
     if is_evaluation_boundary(hook_type, tool_name, &raw_payload) {
-        let hook_output = evaluate_at_boundary(session_id, &journal);
+        let mut hook_output = evaluate_at_boundary(session_id, &journal);
+        inject_hook_event_name(&mut hook_output, hook_type.as_str());
         println!("{}", serde_json::to_string(&hook_output).unwrap_or_else(|_| "{}".to_string()));
     } else {
         println!("{{}}");
@@ -192,6 +193,19 @@ fn try_evaluate_at_boundary(
     journal.write_cursor(session_id, new_cursor)?;
 
     Ok(merge_chunk_responses(responses))
+}
+
+/// Inject hookEventName into hookSpecificOutput so Claude Code validates the output.
+fn inject_hook_event_name(output: &mut serde_json::Value, event_name: &str) {
+    if let Some(hook_specific) = output
+        .get_mut("hookSpecificOutput")
+        .and_then(|h| h.as_object_mut())
+    {
+        hook_specific.insert(
+            "hookEventName".to_string(),
+            serde_json::Value::String(event_name.to_string()),
+        );
+    }
 }
 
 /// Merge all chunk responses into a single hook_output. Non-silent responses

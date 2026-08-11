@@ -14,6 +14,7 @@ const HOOK_COMMANDS: &[(&str, &str)] = &[
     ("Stop", "actual observe stop"),
     ("SessionEnd", "actual observe session-end"),
     ("PreCompact", "actual observe pre-compact"),
+    ("SubagentStart", "actual observe subagent-tool"),
 ];
 
 pub fn install_hooks(settings_path: &Path) -> Result<(), ActualError> {
@@ -66,6 +67,7 @@ pub fn install_hooks(settings_path: &Path) -> Result<(), ActualError> {
                     {
                         "type": "command",
                         "command": command,
+                        "timeout": 1200
                     }
                 ]
             }));
@@ -114,7 +116,7 @@ mod tests {
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = content["hooks"].as_object().unwrap();
 
-        assert_eq!(hooks.len(), 8);
+        assert_eq!(hooks.len(), 9);
         assert_eq!(
             hooks["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap(),
             "actual observe session-start"
@@ -224,6 +226,7 @@ mod tests {
             "Stop",
             "SessionEnd",
             "PreCompact",
+            "SubagentStart",
         ];
         for hook in &expected {
             assert!(
@@ -234,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_entries_have_correct_type() {
+    fn test_hook_entries_have_correct_type_and_timeout() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
@@ -250,6 +253,7 @@ mod tests {
                 let inner_hooks = matcher_group["hooks"].as_array().unwrap();
                 for hook in inner_hooks {
                     assert_eq!(hook["type"].as_str().unwrap(), "command");
+                    assert_eq!(hook["timeout"].as_u64().unwrap(), 1200);
                 }
             }
         }
