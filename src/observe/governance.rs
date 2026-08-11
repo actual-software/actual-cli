@@ -161,6 +161,29 @@ pub struct EnhancedBrief {
     pub governance_instruction: String,
 }
 
+impl std::fmt::Display for GovernanceDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GovernanceDecision::Approve => write!(f, "APPROVE"),
+            GovernanceDecision::ApproveWithConstraints => write!(f, "APPROVE_WITH_CONSTRAINTS"),
+            GovernanceDecision::Rework => write!(f, "REWORK"),
+            GovernanceDecision::Decompose => write!(f, "DECOMPOSE"),
+            GovernanceDecision::Escalate => write!(f, "ESCALATE"),
+            GovernanceDecision::Deny => write!(f, "DENY"),
+        }
+    }
+}
+
+impl std::fmt::Display for FindingSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FindingSeverity::Violation => write!(f, "violation"),
+            FindingSeverity::Concern => write!(f, "concern"),
+            FindingSeverity::Observation => write!(f, "observation"),
+        }
+    }
+}
+
 impl std::fmt::Display for PolicyStrength {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -207,6 +230,93 @@ pub fn format_brief_output(brief: &EnhancedBrief) -> String {
     }
 
     out.push_str(&format!("\nGovernance: {}\n", brief.governance_instruction));
+
+    out
+}
+
+// ── Plan Capture ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum PlanCaptureResult {
+    Approved(GovernanceDecisionResponse),
+    Blocked(GovernanceDecisionResponse),
+    Error(String),
+}
+
+pub fn classify_decision_for_hook(response: &GovernanceDecisionResponse) -> PlanCaptureResult {
+    match response.decision {
+        GovernanceDecision::Approve | GovernanceDecision::ApproveWithConstraints => {
+            PlanCaptureResult::Approved(response.clone())
+        }
+        GovernanceDecision::Rework
+        | GovernanceDecision::Decompose
+        | GovernanceDecision::Escalate
+        | GovernanceDecision::Deny => PlanCaptureResult::Blocked(response.clone()),
+    }
+}
+
+pub fn format_governance_block_output(response: &GovernanceDecisionResponse) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!("GOVERNANCE DECISION: {}\n", response.decision));
+
+    if !response.findings.is_empty() {
+        out.push_str("\nFindings:\n");
+        for f in &response.findings {
+            out.push_str(&format!(
+                "  [{}] {} (policy: {})\n",
+                f.severity, f.finding_text, f.policy_id
+            ));
+        }
+    }
+
+    match response.decision {
+        GovernanceDecision::Decompose => {
+            if let Some(ref guidance) = response.decomposition_guidance {
+                out.push_str("\nDecomposition guidance:\n");
+                if !guidance.reasons.is_empty() {
+                    out.push_str("  Reasons:\n");
+                    for r in &guidance.reasons {
+                        out.push_str(&format!("    - {}\n", r));
+                    }
+                }
+                if !guidance.suggested_boundaries.is_empty() {
+                    out.push_str("  Suggested boundaries:\n");
+                    for b in &guidance.suggested_boundaries {
+                        out.push_str(&format!("    - {}\n", b));
+                    }
+                }
+                if !guidance.suggested_tasks.is_empty() {
+                    out.push_str("  Suggested tasks:\n");
+                    for (i, t) in guidance.suggested_tasks.iter().enumerate() {
+                        out.push_str(&format!(
+                            "    {}. {} \u{2014} {}\n",
+                            i + 1,
+                            t.title,
+                            t.description
+                        ));
+                    }
+                }
+                out.push_str("\nBreak this plan into the suggested tasks above and submit each separately with `actual governance submit-plan`.\n");
+            }
+        }
+        GovernanceDecision::Rework => {
+            if !response.constraints.is_empty() {
+                out.push_str("\nConstraints to address:\n");
+                for c in &response.constraints {
+                    out.push_str(&format!("  - {}\n", c));
+                }
+            }
+            out.push_str("\nRevise your plan to address the findings above and resubmit with `actual governance submit-plan`.\n");
+        }
+        GovernanceDecision::Escalate => {
+            out.push_str("\nThis plan requires human architect review. Escalation has been filed.\n");
+        }
+        GovernanceDecision::Deny => {
+            out.push_str("\nThis plan has been denied. Review the findings above and consider an alternative approach.\n");
+        }
+        GovernanceDecision::Approve | GovernanceDecision::ApproveWithConstraints => {}
+    }
 
     out
 }
@@ -744,5 +854,147 @@ mod tests {
         };
         let output = format_brief_output(&brief);
         assert!(output.contains("Governance: Submit plan for architecture review before coding"));
+    }
+
+    // ── Plan Capture tests ───────────────────────────────────────────
+
+    fn make_response(decision: GovernanceDecision) -> GovernanceDecisionResponse {
+        GovernanceDecisionResponse {
+            decision,
+            proposal_id: "prop-test".into(),
+            findings: vec![],
+            constraints: vec![],
+            additional_context: vec![],
+            decomposition_guidance: None,
+            authorization: None,
+        }
+    }
+
+    // 22. classify_decision_for_hook — APPROVE maps to Approved
+    #[test]
+    fn classify_approve_is_approved() {
+        let resp = make_response(GovernanceDecision::Approve);
+        let result = classify_decision_for_hook(&resp);
+        assert!(matches!(result, PlanCaptureResult::Approved(_)));
+    }
+
+    // 23. classify_decision_for_hook — APPROVE_WITH_CONSTRAINTS maps to Approved
+    #[test]
+    fn classify_approve_with_constraints_is_approved() {
+        let resp = make_response(GovernanceDecision::ApproveWithConstraints);
+        let result = classify_decision_for_hook(&resp);
+        assert!(matches!(result, PlanCaptureResult::Approved(_)));
+    }
+
+    // 24. classify_decision_for_hook — REWORK maps to Blocked
+    #[test]
+    fn classify_rework_is_blocked() {
+        let resp = make_response(GovernanceDecision::Rework);
+        let result = classify_decision_for_hook(&resp);
+        assert!(matches!(result, PlanCaptureResult::Blocked(_)));
+    }
+
+    // 25. classify_decision_for_hook — DECOMPOSE maps to Blocked
+    #[test]
+    fn classify_decompose_is_blocked() {
+        let resp = make_response(GovernanceDecision::Decompose);
+        let result = classify_decision_for_hook(&resp);
+        assert!(matches!(result, PlanCaptureResult::Blocked(_)));
+    }
+
+    // 26. classify_decision_for_hook — ESCALATE maps to Blocked
+    #[test]
+    fn classify_escalate_is_blocked() {
+        let resp = make_response(GovernanceDecision::Escalate);
+        let result = classify_decision_for_hook(&resp);
+        assert!(matches!(result, PlanCaptureResult::Blocked(_)));
+    }
+
+    // 27. classify_decision_for_hook — DENY maps to Blocked
+    #[test]
+    fn classify_deny_is_blocked() {
+        let resp = make_response(GovernanceDecision::Deny);
+        let result = classify_decision_for_hook(&resp);
+        assert!(matches!(result, PlanCaptureResult::Blocked(_)));
+    }
+
+    // 28. format_governance_block_output — output contains the decision string
+    #[test]
+    fn format_block_shows_decision_type() {
+        let resp = make_response(GovernanceDecision::Rework);
+        let output = format_governance_block_output(&resp);
+        assert!(
+            output.contains("REWORK"),
+            "output should contain decision type, got: {}",
+            output
+        );
+    }
+
+    // 29. format_governance_block_output — output contains finding text and policy_id
+    #[test]
+    fn format_block_shows_findings() {
+        let mut resp = make_response(GovernanceDecision::Rework);
+        resp.findings = vec![ConformanceFinding {
+            policy_id: "pol-001".into(),
+            strength: PolicyStrength::Must,
+            statement: "RLS required".into(),
+            finding_text: "Missing RLS on users table".into(),
+            severity: FindingSeverity::Violation,
+            evidence_ref: None,
+        }];
+        let output = format_governance_block_output(&resp);
+        assert!(
+            output.contains("Missing RLS on users table"),
+            "output should contain finding_text, got: {}",
+            output
+        );
+        assert!(
+            output.contains("pol-001"),
+            "output should contain policy_id, got: {}",
+            output
+        );
+    }
+
+    // 30. format_governance_block_output — output contains suggested tasks when DECOMPOSE
+    #[test]
+    fn format_block_shows_decompose_guidance() {
+        let mut resp = make_response(GovernanceDecision::Decompose);
+        resp.decomposition_guidance = Some(DecompositionGuidance {
+            reasons: vec!["Too broad".into()],
+            suggested_boundaries: vec!["database".into()],
+            suggested_tasks: vec![SuggestedTask {
+                title: "Add migration".into(),
+                description: "Create schema migration".into(),
+            }],
+        });
+        let output = format_governance_block_output(&resp);
+        assert!(
+            output.contains("Add migration"),
+            "output should contain suggested task title, got: {}",
+            output
+        );
+        assert!(
+            output.contains("Create schema migration"),
+            "output should contain suggested task description, got: {}",
+            output
+        );
+    }
+
+    // 31. format_governance_block_output — tells agent to revise and resubmit
+    #[test]
+    fn format_block_shows_rework_instructions() {
+        let mut resp = make_response(GovernanceDecision::Rework);
+        resp.constraints = vec!["Add RLS".into()];
+        let output = format_governance_block_output(&resp);
+        assert!(
+            output.contains("Revise"),
+            "output should tell agent to revise, got: {}",
+            output
+        );
+        assert!(
+            output.contains("resubmit"),
+            "output should tell agent to resubmit, got: {}",
+            output
+        );
     }
 }
