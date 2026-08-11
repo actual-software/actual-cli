@@ -1,3 +1,4 @@
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 // ── Enums ──────────────────────────────────────────────────────────────
@@ -120,26 +121,86 @@ pub struct GovernanceDecisionResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovernanceDecisionSummary {
+    pub decision: GovernanceDecision,
+    pub proposal_id: String,
+    pub finding_count: usize,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovernanceState {
     pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub proposal_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub decision: Option<GovernanceDecision>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub authorization: Option<BoundedAuthorization>,
-    pub rework_iteration: u32,
+    pub rework_iterations: u32,
+    pub max_rework_iterations: u32,
+    pub current_authorization: Option<BoundedAuthorization>,
+    pub decision_history: Vec<GovernanceDecisionSummary>,
 }
 
 impl GovernanceState {
     pub fn new(session_id: String) -> Self {
         Self {
             session_id,
-            proposal_id: None,
-            decision: None,
-            authorization: None,
-            rework_iteration: 0,
+            rework_iterations: 0,
+            max_rework_iterations: 5,
+            current_authorization: None,
+            decision_history: Vec::new(),
         }
+    }
+
+    pub fn record_decision(&mut self, response: &GovernanceDecisionResponse) {
+        let summary = GovernanceDecisionSummary {
+            decision: response.decision.clone(),
+            proposal_id: response.proposal_id.clone(),
+            finding_count: response.findings.len(),
+            timestamp: Utc::now().to_rfc3339(),
+        };
+        self.decision_history.push(summary);
+
+        match response.decision {
+            GovernanceDecision::Rework => {
+                self.rework_iterations += 1;
+            }
+            GovernanceDecision::Approve | GovernanceDecision::ApproveWithConstraints => {
+                self.rework_iterations = 0;
+                self.current_authorization = response.authorization.clone();
+            }
+            _ => {}
+        }
+    }
+
+    pub fn should_escalate(&self) -> bool {
+        self.rework_iterations >= self.max_rework_iterations
+    }
+
+    pub fn format_rework_feedback(&self, response: &GovernanceDecisionResponse) -> String {
+        let mut out = String::new();
+
+        out.push_str(&format!(
+            "GOVERNANCE: REWORK (iteration {}/{})\n",
+            self.rework_iterations, self.max_rework_iterations
+        ));
+
+        if !response.findings.is_empty() {
+            out.push_str("\nFindings:\n");
+            for f in &response.findings {
+                out.push_str(&format!(
+                    "  [{}] {} (policy: {})\n",
+                    f.severity, f.finding_text, f.policy_id
+                ));
+            }
+        }
+
+        if !response.constraints.is_empty() {
+            out.push_str("\nConstraints to address:\n");
+            for c in &response.constraints {
+                out.push_str(&format!("  - {}\n", c));
+            }
+        }
+
+        out.push_str("\nRevise your plan to address the findings above and resubmit.\n");
+
+        out
     }
 }
 
@@ -602,55 +663,289 @@ mod tests {
         assert_eq!(guidance.suggested_tasks.len(), 2);
     }
 
-    // 12. GovernanceState — round-trip and new() default
+    // 12. GovernanceState — new() defaults
     #[test]
     fn governance_state_new_defaults() {
         let state = GovernanceState::new("sess-001".into());
         assert_eq!(state.session_id, "sess-001");
-        assert_eq!(state.proposal_id, None);
-        assert_eq!(state.decision, None);
-        assert_eq!(state.authorization, None);
-        assert_eq!(state.rework_iteration, 0);
+        assert_eq!(state.rework_iterations, 0);
+        assert_eq!(state.max_rework_iterations, 5);
+        assert!(state.current_authorization.is_none());
+        assert!(state.decision_history.is_empty());
     }
 
+    // 13. GovernanceState — record_decision stores authorization on APPROVE
     #[test]
-    fn governance_state_round_trip() {
-        let state = GovernanceState {
-            session_id: "sess-001".into(),
-            proposal_id: Some("prop-001".into()),
-            decision: Some(GovernanceDecision::ApproveWithConstraints),
+    fn governance_state_record_approve_stores_auth() {
+        let mut state = GovernanceState::new("sess-001".into());
+        let resp = GovernanceDecisionResponse {
+            decision: GovernanceDecision::Approve,
+            proposal_id: "prop-001".into(),
+            findings: vec![],
+            constraints: vec![],
+            additional_context: vec![],
+            decomposition_guidance: None,
             authorization: Some(BoundedAuthorization {
-                authorization_id: "auth-002".into(),
-                task_id: "task-xyz".into(),
-                repo_state: "def5678".into(),
+                authorization_id: "auth-001".into(),
+                task_id: "task-abc".into(),
+                repo_state: "abc1234".into(),
                 allowed_scope: vec!["src/**".into()],
-                protected_boundaries: vec!["migrations/**".into()],
-                policies: vec!["pol-001".into(), "pol-002".into()],
-                conditions: vec!["must pass CI".into()],
-                issued_at: "2026-08-11T12:00:00Z".into(),
-                ttl_seconds: 1800,
+                protected_boundaries: vec![],
+                policies: vec![],
+                conditions: vec![],
+                issued_at: "2026-08-11T00:00:00Z".into(),
+                ttl_seconds: 7200,
             }),
-            rework_iteration: 2,
         };
-        let json = serde_json::to_string(&state).unwrap();
-        assert!(json.contains("\"APPROVE_WITH_CONSTRAINTS\""));
-        let back: GovernanceState = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.session_id, "sess-001");
-        assert_eq!(back.rework_iteration, 2);
-        assert!(back.decision.is_some());
+        state.record_decision(&resp);
+        assert!(state.current_authorization.is_some());
+        assert_eq!(
+            state.current_authorization.as_ref().unwrap().authorization_id,
+            "auth-001"
+        );
+        assert_eq!(state.rework_iterations, 0);
+        assert_eq!(state.decision_history.len(), 1);
+        assert_eq!(state.decision_history[0].proposal_id, "prop-001");
+        assert_eq!(state.decision_history[0].finding_count, 0);
     }
 
-    // 13. GovernanceState — serialization skips None fields
+    // 14. GovernanceState — record_decision increments rework_iterations on REWORK
     #[test]
-    fn governance_state_skips_none_fields() {
-        let state = GovernanceState::new("sess-002".into());
-        let json = serde_json::to_string(&state).unwrap();
-        assert!(!json.contains("proposal_id"), "None proposal_id should be skipped");
-        assert!(!json.contains("decision"), "None decision should be skipped");
-        assert!(!json.contains("authorization"), "None authorization should be skipped");
-        // But session_id and rework_iteration should always be present
-        assert!(json.contains("\"session_id\""));
-        assert!(json.contains("\"rework_iteration\""));
+    fn governance_state_record_rework_increments() {
+        let mut state = GovernanceState::new("sess-001".into());
+        let resp = GovernanceDecisionResponse {
+            decision: GovernanceDecision::Rework,
+            proposal_id: "prop-002".into(),
+            findings: vec![ConformanceFinding {
+                policy_id: "pol-001".into(),
+                strength: PolicyStrength::Must,
+                statement: "RLS required".into(),
+                finding_text: "Missing RLS".into(),
+                severity: FindingSeverity::Violation,
+                evidence_ref: None,
+            }],
+            constraints: vec!["Add RLS".into()],
+            additional_context: vec![],
+            decomposition_guidance: None,
+            authorization: None,
+        };
+        state.record_decision(&resp);
+        assert_eq!(state.rework_iterations, 1);
+        assert!(state.current_authorization.is_none());
+
+        state.record_decision(&resp);
+        assert_eq!(state.rework_iterations, 2);
+        assert_eq!(state.decision_history.len(), 2);
+    }
+
+    // 15. GovernanceState — should_escalate returns true after max iterations
+    #[test]
+    fn governance_state_should_escalate_after_max() {
+        let mut state = GovernanceState::new("sess-001".into());
+        assert!(!state.should_escalate());
+
+        let resp = GovernanceDecisionResponse {
+            decision: GovernanceDecision::Rework,
+            proposal_id: "prop-003".into(),
+            findings: vec![],
+            constraints: vec![],
+            additional_context: vec![],
+            decomposition_guidance: None,
+            authorization: None,
+        };
+
+        for i in 0..5 {
+            assert!(!state.should_escalate(), "should not escalate at iteration {}", i);
+            state.record_decision(&resp);
+        }
+        assert!(state.should_escalate());
+        assert_eq!(state.rework_iterations, 5);
+    }
+
+    // 16. GovernanceState — format_rework_feedback shows iteration count and findings
+    #[test]
+    fn governance_state_format_rework_shows_iteration() {
+        let mut state = GovernanceState::new("sess-001".into());
+        let resp = GovernanceDecisionResponse {
+            decision: GovernanceDecision::Rework,
+            proposal_id: "prop-004".into(),
+            findings: vec![
+                ConformanceFinding {
+                    policy_id: "pol-001".into(),
+                    strength: PolicyStrength::Must,
+                    statement: "RLS required".into(),
+                    finding_text: "Missing RLS on users table".into(),
+                    severity: FindingSeverity::Violation,
+                    evidence_ref: None,
+                },
+                ConformanceFinding {
+                    policy_id: "pol-002".into(),
+                    strength: PolicyStrength::Should,
+                    statement: "Use CTEs".into(),
+                    finding_text: "Nested subquery too deep".into(),
+                    severity: FindingSeverity::Concern,
+                    evidence_ref: None,
+                },
+            ],
+            constraints: vec!["Add RLS to all tables".into(), "Refactor to use CTEs".into()],
+            additional_context: vec![],
+            decomposition_guidance: None,
+            authorization: None,
+        };
+
+        // Record 2 rework decisions so iteration shows 2/5
+        state.record_decision(&resp);
+        state.record_decision(&resp);
+
+        let output = state.format_rework_feedback(&resp);
+
+        assert!(
+            output.contains("GOVERNANCE: REWORK (iteration 2/5)"),
+            "should show iteration count, got: {}",
+            output
+        );
+        assert!(
+            output.contains("[violation] Missing RLS on users table (policy: pol-001)"),
+            "should show violation finding, got: {}",
+            output
+        );
+        assert!(
+            output.contains("[concern] Nested subquery too deep (policy: pol-002)"),
+            "should show concern finding, got: {}",
+            output
+        );
+        assert!(
+            output.contains("- Add RLS to all tables"),
+            "should show constraint, got: {}",
+            output
+        );
+        assert!(
+            output.contains("- Refactor to use CTEs"),
+            "should show constraint, got: {}",
+            output
+        );
+        assert!(
+            output.contains("Revise your plan to address the findings above and resubmit."),
+            "should show resubmit instruction, got: {}",
+            output
+        );
+    }
+
+    // 16b. GovernanceState — approval resets rework counter
+    #[test]
+    fn governance_state_approval_resets_rework_counter() {
+        let mut state = GovernanceState::new("sess-001".into());
+        let rework_resp = GovernanceDecisionResponse {
+            decision: GovernanceDecision::Rework,
+            proposal_id: "prop-001".into(),
+            findings: vec![ConformanceFinding {
+                policy_id: "pol-001".into(),
+                strength: PolicyStrength::Must,
+                statement: "RLS required".into(),
+                finding_text: "Missing RLS".into(),
+                severity: FindingSeverity::Violation,
+                evidence_ref: None,
+            }],
+            constraints: vec![],
+            additional_context: vec![],
+            decomposition_guidance: None,
+            authorization: None,
+        };
+        state.record_decision(&rework_resp);
+        state.record_decision(&rework_resp);
+        state.record_decision(&rework_resp);
+        assert_eq!(state.rework_iterations, 3);
+
+        let approve_resp = GovernanceDecisionResponse {
+            decision: GovernanceDecision::Approve,
+            proposal_id: "prop-001".into(),
+            findings: vec![],
+            constraints: vec![],
+            additional_context: vec![],
+            decomposition_guidance: None,
+            authorization: Some(BoundedAuthorization {
+                authorization_id: "auth-reset".into(),
+                task_id: "task-001".into(),
+                repo_state: "abc123".into(),
+                allowed_scope: vec![],
+                protected_boundaries: vec![],
+                policies: vec![],
+                conditions: vec![],
+                issued_at: "2026-08-11T00:00:00Z".into(),
+                ttl_seconds: 3600,
+            }),
+        };
+        state.record_decision(&approve_resp);
+        assert_eq!(state.rework_iterations, 0);
+
+        // New rework cycle starts fresh
+        state.record_decision(&rework_resp);
+        assert_eq!(state.rework_iterations, 1);
+        assert!(!state.should_escalate());
+    }
+
+    // 16c. GovernanceState — approval without authorization clears stale auth
+    #[test]
+    fn governance_state_approval_clears_stale_authorization() {
+        let mut state = GovernanceState::new("sess-001".into());
+        let approve_with_auth = GovernanceDecisionResponse {
+            decision: GovernanceDecision::Approve,
+            proposal_id: "prop-001".into(),
+            findings: vec![],
+            constraints: vec![],
+            additional_context: vec![],
+            decomposition_guidance: None,
+            authorization: Some(BoundedAuthorization {
+                authorization_id: "auth-old".into(),
+                task_id: "task-001".into(),
+                repo_state: "abc123".into(),
+                allowed_scope: vec![],
+                protected_boundaries: vec![],
+                policies: vec![],
+                conditions: vec![],
+                issued_at: "2026-08-11T00:00:00Z".into(),
+                ttl_seconds: 3600,
+            }),
+        };
+        state.record_decision(&approve_with_auth);
+        assert!(state.current_authorization.is_some());
+
+        let approve_without_auth = GovernanceDecisionResponse {
+            decision: GovernanceDecision::Approve,
+            proposal_id: "prop-002".into(),
+            findings: vec![],
+            constraints: vec![],
+            additional_context: vec![],
+            decomposition_guidance: None,
+            authorization: None,
+        };
+        state.record_decision(&approve_without_auth);
+        assert!(state.current_authorization.is_none());
+    }
+
+    // 16d. GovernanceState — record_decision with Decompose/Escalate/Deny
+    #[test]
+    fn governance_state_record_other_decisions() {
+        let mut state = GovernanceState::new("sess-001".into());
+        for decision in [
+            GovernanceDecision::Decompose,
+            GovernanceDecision::Escalate,
+            GovernanceDecision::Deny,
+        ] {
+            let resp = GovernanceDecisionResponse {
+                decision,
+                proposal_id: "prop-other".into(),
+                findings: vec![],
+                constraints: vec![],
+                additional_context: vec![],
+                decomposition_guidance: None,
+                authorization: None,
+            };
+            state.record_decision(&resp);
+        }
+        assert_eq!(state.decision_history.len(), 3);
+        assert_eq!(state.rework_iterations, 0);
+        assert!(state.current_authorization.is_none());
     }
 
     // ── Enhanced Brief tests ──────────────────────────────────────────
