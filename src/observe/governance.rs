@@ -135,6 +135,8 @@ pub struct GovernanceState {
     pub max_rework_iterations: u32,
     pub current_authorization: Option<BoundedAuthorization>,
     pub decision_history: Vec<GovernanceDecisionSummary>,
+    pub touched_paths: Vec<String>,
+    pub assurance_passed: bool,
 }
 
 impl GovernanceState {
@@ -145,7 +147,23 @@ impl GovernanceState {
             max_rework_iterations: 5,
             current_authorization: None,
             decision_history: Vec::new(),
+            touched_paths: Vec::new(),
+            assurance_passed: false,
         }
+    }
+
+    pub fn track_path(&mut self, path: &str) {
+        if !self.touched_paths.contains(&path.to_string()) {
+            self.touched_paths.push(path.to_string());
+        }
+    }
+
+    pub fn needs_scope_review(&self) -> bool {
+        self.current_authorization.is_some() && !self.touched_paths.is_empty()
+    }
+
+    pub fn needs_assurance(&self) -> bool {
+        self.current_authorization.is_some() && !self.assurance_passed
     }
 
     pub fn record_decision(&mut self, response: &GovernanceDecisionResponse) {
@@ -291,6 +309,142 @@ pub fn format_brief_output(brief: &EnhancedBrief) -> String {
     }
 
     out.push_str(&format!("\nGovernance: {}\n", brief.governance_instruction));
+
+    out
+}
+
+// ── Scope Monitoring ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeClassification {
+    WithinScope,
+    MinorExpansion,
+    MaterialExpansion,
+    BoundaryViolation,
+}
+
+impl std::fmt::Display for ScopeClassification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WithinScope => write!(f, "within_scope"),
+            Self::MinorExpansion => write!(f, "minor_expansion"),
+            Self::MaterialExpansion => write!(f, "material_expansion"),
+            Self::BoundaryViolation => write!(f, "boundary_violation"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeReviewResponse {
+    pub decision: GovernanceDecision,
+    pub authorization_id: String,
+    pub scope_review: ScopeReviewData,
+    pub findings: Vec<ConformanceFinding>,
+    pub constraints: Vec<String>,
+    pub additional_context: Vec<AdditionalContext>,
+    pub updated_authorization: Option<BoundedAuthorization>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopeReviewData {
+    pub classification: ScopeClassification,
+    pub details: Vec<String>,
+    pub out_of_scope_paths: Vec<String>,
+    pub boundary_violations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssuranceResponse {
+    pub decision: GovernanceDecision,
+    pub authorization_id: String,
+    pub assurance: AssuranceResult,
+    pub findings: Vec<ConformanceFinding>,
+    pub constraints: Vec<String>,
+    pub additional_context: Vec<AdditionalContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssuranceConformance {
+    Conformant,
+    NonConformant,
+    InsufficientEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssuranceResult {
+    pub conformance: AssuranceConformance,
+    pub findings: Vec<AssuranceFinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssuranceFinding {
+    pub area: String,
+    pub finding_text: String,
+    pub severity: FindingSeverity,
+    pub policy_id: Option<String>,
+    pub strength: Option<PolicyStrength>,
+    pub statement: Option<String>,
+}
+
+pub fn format_scope_review_output(response: &ScopeReviewResponse) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!("SCOPE REVIEW: {} ({})\n",
+        response.decision,
+        response.scope_review.classification,
+    ));
+
+    if !response.scope_review.boundary_violations.is_empty() {
+        out.push_str("\nBoundary violations:\n");
+        for v in &response.scope_review.boundary_violations {
+            out.push_str(&format!("  - {}\n", v));
+        }
+    }
+
+    if !response.scope_review.out_of_scope_paths.is_empty() {
+        out.push_str("\nOut-of-scope paths:\n");
+        for p in &response.scope_review.out_of_scope_paths {
+            out.push_str(&format!("  - {}\n", p));
+        }
+    }
+
+    if !response.findings.is_empty() {
+        out.push_str("\nFindings:\n");
+        for f in &response.findings {
+            out.push_str(&format!("  [{}] {} (policy: {})\n",
+                f.severity, f.finding_text, f.policy_id
+            ));
+        }
+    }
+
+    out
+}
+
+pub fn format_assurance_output(response: &AssuranceResponse) -> String {
+    let mut out = String::new();
+
+    let conformance_label = match response.assurance.conformance {
+        AssuranceConformance::Conformant => "CONFORMANT",
+        AssuranceConformance::NonConformant => "NON-CONFORMANT",
+        AssuranceConformance::InsufficientEvidence => "INSUFFICIENT EVIDENCE",
+    };
+
+    out.push_str(&format!("FINAL ASSURANCE: {} ({})\n",
+        response.decision, conformance_label,
+    ));
+
+    if !response.assurance.findings.is_empty() {
+        out.push_str("\nAssurance findings:\n");
+        for f in &response.assurance.findings {
+            out.push_str(&format!("  [{}] {}\n", f.severity, f.finding_text));
+        }
+    }
+
+    if response.decision == GovernanceDecision::Rework {
+        out.push_str("\nAddress the findings above before completion.\n");
+    }
 
     out
 }
@@ -1291,5 +1445,222 @@ mod tests {
             "output should tell agent to resubmit, got: {}",
             output
         );
+    }
+
+    // ── Scope Monitoring tests ───────────────────────────────────────
+
+    // 20. ScopeClassification serde round-trip
+    #[test]
+    fn scope_classification_round_trip() {
+        let variants = vec![
+            (ScopeClassification::WithinScope, "\"within_scope\""),
+            (ScopeClassification::MinorExpansion, "\"minor_expansion\""),
+            (ScopeClassification::MaterialExpansion, "\"material_expansion\""),
+            (ScopeClassification::BoundaryViolation, "\"boundary_violation\""),
+        ];
+        for (variant, expected_json) in variants {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected_json);
+            let back: ScopeClassification = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    // 21. ScopeReviewResponse serde round-trip
+    #[test]
+    fn scope_review_response_round_trip() {
+        let resp = ScopeReviewResponse {
+            decision: GovernanceDecision::Escalate,
+            authorization_id: "auth-001".into(),
+            scope_review: ScopeReviewData {
+                classification: ScopeClassification::BoundaryViolation,
+                details: vec!["Crossed migration boundary".into()],
+                out_of_scope_paths: vec![],
+                boundary_violations: vec!["supabase/migrations/001.sql".into()],
+            },
+            findings: vec![ConformanceFinding {
+                policy_id: "scope-boundary".into(),
+                strength: PolicyStrength::MustNot,
+                statement: "Must not cross protected boundary".into(),
+                finding_text: "Boundary violation".into(),
+                severity: FindingSeverity::Violation,
+                evidence_ref: None,
+            }],
+            constraints: vec![],
+            additional_context: vec![],
+            updated_authorization: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: ScopeReviewResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.decision, GovernanceDecision::Escalate);
+        assert_eq!(back.scope_review.classification, ScopeClassification::BoundaryViolation);
+    }
+
+    // 22. AssuranceConformance serde round-trip
+    #[test]
+    fn assurance_conformance_round_trip() {
+        let variants = vec![
+            (AssuranceConformance::Conformant, "\"conformant\""),
+            (AssuranceConformance::NonConformant, "\"non_conformant\""),
+            (AssuranceConformance::InsufficientEvidence, "\"insufficient_evidence\""),
+        ];
+        for (variant, expected_json) in variants {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected_json);
+            let back: AssuranceConformance = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    // 23. AssuranceResponse serde round-trip
+    #[test]
+    fn assurance_response_round_trip() {
+        let resp = AssuranceResponse {
+            decision: GovernanceDecision::Approve,
+            authorization_id: "auth-001".into(),
+            assurance: AssuranceResult {
+                conformance: AssuranceConformance::Conformant,
+                findings: vec![],
+            },
+            findings: vec![],
+            constraints: vec![],
+            additional_context: vec![],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: AssuranceResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.decision, GovernanceDecision::Approve);
+        assert_eq!(back.assurance.conformance, AssuranceConformance::Conformant);
+    }
+
+    // 24. GovernanceState — track_path deduplicates
+    #[test]
+    fn governance_state_track_path_deduplicates() {
+        let mut state = GovernanceState::new("sess-001".into());
+        state.track_path("src/handler.ts");
+        state.track_path("src/handler.ts");
+        state.track_path("src/utils.ts");
+        assert_eq!(state.touched_paths.len(), 2);
+    }
+
+    // 25. GovernanceState — needs_scope_review
+    #[test]
+    fn governance_state_needs_scope_review() {
+        let mut state = GovernanceState::new("sess-001".into());
+        assert!(!state.needs_scope_review());
+
+        state.current_authorization = Some(BoundedAuthorization {
+            authorization_id: "auth-001".into(),
+            task_id: "task-001".into(),
+            repo_state: "abc123".into(),
+            allowed_scope: vec!["src/**".into()],
+            protected_boundaries: vec![],
+            policies: vec![],
+            conditions: vec![],
+            issued_at: "2026-08-11T00:00:00Z".into(),
+            ttl_seconds: 3600,
+        });
+        assert!(!state.needs_scope_review());
+
+        state.track_path("src/handler.ts");
+        assert!(state.needs_scope_review());
+    }
+
+    // 26. GovernanceState — needs_assurance
+    #[test]
+    fn governance_state_needs_assurance() {
+        let mut state = GovernanceState::new("sess-001".into());
+        assert!(!state.needs_assurance());
+
+        state.current_authorization = Some(BoundedAuthorization {
+            authorization_id: "auth-001".into(),
+            task_id: "task-001".into(),
+            repo_state: "abc123".into(),
+            allowed_scope: vec![],
+            protected_boundaries: vec![],
+            policies: vec![],
+            conditions: vec![],
+            issued_at: "2026-08-11T00:00:00Z".into(),
+            ttl_seconds: 3600,
+        });
+        assert!(state.needs_assurance());
+
+        state.assurance_passed = true;
+        assert!(!state.needs_assurance());
+    }
+
+    // 27. format_scope_review_output
+    #[test]
+    fn format_scope_review_shows_violations() {
+        let resp = ScopeReviewResponse {
+            decision: GovernanceDecision::Escalate,
+            authorization_id: "auth-001".into(),
+            scope_review: ScopeReviewData {
+                classification: ScopeClassification::BoundaryViolation,
+                details: vec![],
+                out_of_scope_paths: vec![],
+                boundary_violations: vec!["supabase/migrations/001.sql".into()],
+            },
+            findings: vec![ConformanceFinding {
+                policy_id: "scope-boundary".into(),
+                strength: PolicyStrength::MustNot,
+                statement: "No migrations".into(),
+                finding_text: "Boundary violation: migrations".into(),
+                severity: FindingSeverity::Violation,
+                evidence_ref: None,
+            }],
+            constraints: vec![],
+            additional_context: vec![],
+            updated_authorization: None,
+        };
+        let output = format_scope_review_output(&resp);
+        assert!(output.contains("SCOPE REVIEW:"));
+        assert!(output.contains("boundary_violation"));
+        assert!(output.contains("supabase/migrations/001.sql"));
+    }
+
+    // 28. format_assurance_output
+    #[test]
+    fn format_assurance_output_shows_conformance() {
+        let resp = AssuranceResponse {
+            decision: GovernanceDecision::Approve,
+            authorization_id: "auth-001".into(),
+            assurance: AssuranceResult {
+                conformance: AssuranceConformance::Conformant,
+                findings: vec![],
+            },
+            findings: vec![],
+            constraints: vec![],
+            additional_context: vec![],
+        };
+        let output = format_assurance_output(&resp);
+        assert!(output.contains("FINAL ASSURANCE:"));
+        assert!(output.contains("CONFORMANT"));
+    }
+
+    // 29. format_assurance_output — rework shows instruction
+    #[test]
+    fn format_assurance_output_rework_shows_instruction() {
+        let resp = AssuranceResponse {
+            decision: GovernanceDecision::Rework,
+            authorization_id: "auth-001".into(),
+            assurance: AssuranceResult {
+                conformance: AssuranceConformance::NonConformant,
+                findings: vec![AssuranceFinding {
+                    area: "tests".into(),
+                    finding_text: "2 tests failing".into(),
+                    severity: FindingSeverity::Violation,
+                    policy_id: None,
+                    strength: None,
+                    statement: None,
+                }],
+            },
+            findings: vec![],
+            constraints: vec![],
+            additional_context: vec![],
+        };
+        let output = format_assurance_output(&resp);
+        assert!(output.contains("NON-CONFORMANT"));
+        assert!(output.contains("2 tests failing"));
+        assert!(output.contains("Address the findings"));
     }
 }
