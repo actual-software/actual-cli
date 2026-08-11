@@ -49,6 +49,102 @@ pub enum NavCmd {
     CopyOutput,
     /// Toggle full-screen output mode (hides the left sidebar).
     ToggleFullscreen,
+    /// Leave full-screen output mode (idempotent — safe under the routing
+    /// race where fullscreen was already exited).
+    ExitFullscreen,
+    /// Redraw the frame without changing state (e.g. after a terminal resize).
+    Redraw,
+}
+
+/// A terminal input event relevant to the TUI: a key press or a resize.
+///
+/// Resize is surfaced (rather than silently discarded) so blocking prompt
+/// loops can redraw the frame immediately instead of leaving a stale layout
+/// until the next keypress.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InputEvent {
+    Key(crossterm::event::KeyEvent),
+    Resize,
+}
+
+/// Route flag values shared with the background input thread: input is
+/// dispatched as navigation/cancel commands during execution, or forwarded
+/// verbatim to the active prompt.
+pub(crate) const ROUTE_EXEC: u8 = 0;
+pub(crate) const ROUTE_PROMPT: u8 = 1;
+
+/// Whether the real terminal is currently in TUI state (raw mode + alternate
+/// screen). Read by the panic hook so a crash restores the terminal *before*
+/// the panic message prints — otherwise the message lands inside the
+/// alternate screen and is erased when [`TuiRenderer`] drops on unwind,
+/// leaving the user with a blank terminal and no diagnostic.
+static TUI_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One-time installation guard for the panic hook.
+static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
+
+/// Install (once) a panic hook that restores the terminal and then delegates
+/// to the previously installed hook, so panic output reaches the normal
+/// screen buffer.
+///
+/// Known trade-off: the hook cannot distinguish fatal panics from panics
+/// that are caught (e.g. a worker panic surfaced as a `JoinError`), so a
+/// recovered panic also restores the terminal while the TUI is live. Every
+/// such path in the sync pipeline aborts the run immediately afterwards, so
+/// the brief cooked-mode window is accepted.
+fn install_panic_hook() {
+    PANIC_HOOK.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal_if_active();
+            prev(info);
+        }));
+    });
+}
+
+/// Leave TUI state if it is active: disable raw mode, leave the alternate
+/// screen, and show the cursor. The flag is cleared first (atomic swap), so
+/// duplicate or concurrent calls restore at most once; restoring an
+/// already-restored terminal is harmless anyway.
+fn restore_terminal_if_active() {
+    if TUI_ACTIVE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stderr(), LeaveAlternateScreen, Show);
+    }
+}
+
+/// State shared between the renderer and the input-hub thread.
+///
+/// Grouped in one struct (rather than separately plumbed atomics) so the
+/// renderer↔hub contract is handed over as a unit and cannot be half-wired.
+pub(crate) struct HubShared {
+    /// Input routing: [`ROUTE_EXEC`] or [`ROUTE_PROMPT`]. While a prompt is
+    /// active the hub forwards events verbatim over the prompt channel
+    /// instead of interpreting them as navigation/cancel.
+    pub(crate) route: std::sync::atomic::AtomicU8,
+    /// Mirror of the renderer's fullscreen state; drives Esc routing (exit
+    /// fullscreen vs cancel the run).
+    pub(crate) fullscreen: std::sync::atomic::AtomicBool,
+    /// Stops the hub thread (set by the hub's Drop, or by the renderer's
+    /// plain-mode fallback so dialoguer prompts never race the hub).
+    pub(crate) stop: std::sync::atomic::AtomicBool,
+}
+
+impl HubShared {
+    pub(crate) fn new() -> Self {
+        Self {
+            route: std::sync::atomic::AtomicU8::new(ROUTE_EXEC),
+            fullscreen: std::sync::atomic::AtomicBool::new(false),
+            stop: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+/// Everything the renderer needs from the input hub, connected in one step.
+pub(crate) struct HubConnection {
+    pub(crate) nav_rx: std::sync::mpsc::Receiver<NavCmd>,
+    pub(crate) prompt_rx: std::sync::mpsc::Receiver<InputEvent>,
+    pub(crate) shared: std::sync::Arc<HubShared>,
 }
 
 /// Abstraction over crossterm event reading so the event loop can be tested
@@ -56,20 +152,60 @@ pub enum NavCmd {
 pub(crate) trait EventSource {
     /// Block until the next key event and return it.
     fn next_key(&mut self) -> io::Result<crossterm::event::KeyEvent>;
+
+    /// Block until the next input event (key or resize). Key-only sources
+    /// need not override this.
+    fn next_event(&mut self) -> io::Result<InputEvent> {
+        self.next_key().map(InputEvent::Key)
+    }
 }
 
-/// Production event source that reads from crossterm.
+/// Production event source that reads from crossterm directly.
+///
+/// Only used when no input hub is active (defensive fallback); with a hub
+/// running, prompts read from [`ChannelEventSource`] instead so the hub
+/// thread remains the sole crossterm reader.
 pub(crate) struct CrosstermEventSource;
 
 impl EventSource for CrosstermEventSource {
     fn next_key(&mut self) -> io::Result<crossterm::event::KeyEvent> {
+        loop {
+            if let InputEvent::Key(key) = self.next_event()? {
+                return Ok(key);
+            }
+        }
+    }
+
+    fn next_event(&mut self) -> io::Result<InputEvent> {
         use crossterm::event::{read, Event};
         loop {
             match read()? {
-                Event::Key(key) => return Ok(key),
+                Event::Key(key) => return Ok(InputEvent::Key(key)),
+                Event::Resize(_, _) => return Ok(InputEvent::Resize),
                 _ => continue,
             }
         }
+    }
+}
+
+/// Event source that reads prompt input forwarded by the input hub thread.
+struct ChannelEventSource {
+    rx: std::sync::mpsc::Receiver<InputEvent>,
+}
+
+impl EventSource for ChannelEventSource {
+    fn next_key(&mut self) -> io::Result<crossterm::event::KeyEvent> {
+        loop {
+            if let InputEvent::Key(key) = self.next_event()? {
+                return Ok(key);
+            }
+        }
+    }
+
+    fn next_event(&mut self) -> io::Result<InputEvent> {
+        self.rx
+            .recv()
+            .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "input hub stopped"))
     }
 }
 
@@ -665,6 +801,13 @@ pub struct TuiRenderer {
     version: String,
     /// Receives navigation commands from the background keyboard poller during execution.
     nav_rx: Option<std::sync::mpsc::Receiver<NavCmd>>,
+    /// Prompt-input channel from the input hub. When present, interactive
+    /// prompts read from it (flipping the shared route flag) instead of
+    /// reading crossterm directly.
+    prompt_rx: Option<std::sync::mpsc::Receiver<InputEvent>>,
+    /// Shared renderer↔hub state: routing flag, fullscreen mirror (kept in
+    /// sync by [`Self::set_fullscreen`]), and the hub thread's stop flag.
+    hub: Option<std::sync::Arc<HubShared>>,
 }
 
 impl TuiRenderer {
@@ -725,6 +868,8 @@ impl TuiRenderer {
             fullscreen: false,
             version: version.to_string(),
             nav_rx: None,
+            prompt_rx: None,
+            hub: None,
         }
     }
 
@@ -735,12 +880,29 @@ impl TuiRenderer {
     /// visible tearing on slow terminals.
     fn try_setup_tui() -> Option<Mode> {
         enable_raw_mode().ok()?;
-        execute!(io::stderr(), EnterAlternateScreen, Hide).ok()?;
-        Terminal::new(ratatui::backend::CrosstermBackend::new(BufWriter::new(
+        if execute!(io::stderr(), EnterAlternateScreen, Hide).is_err() {
+            // Unwind the partial setup: raw mode is already on but the
+            // alternate screen was never entered. Without this, falling back
+            // to Plain mode leaves the terminal raw for the whole process.
+            let _ = disable_raw_mode();
+            return None;
+        }
+        match Terminal::new(ratatui::backend::CrosstermBackend::new(BufWriter::new(
             io::stderr(),
-        )))
-        .ok()
-        .map(|t| Mode::Tui(Box::new(TuiTerminalImpl(t)) as Box<dyn TuiTerminal>))
+        ))) {
+            Ok(t) => {
+                install_panic_hook();
+                TUI_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(Mode::Tui(
+                    Box::new(TuiTerminalImpl(t)) as Box<dyn TuiTerminal>
+                ))
+            }
+            Err(_) => {
+                let _ = execute!(io::stderr(), LeaveAlternateScreen, Show);
+                let _ = disable_raw_mode();
+                None
+            }
+        }
     }
 
     /// Construct a renderer in Tui mode using the given backend (for tests).
@@ -781,6 +943,8 @@ impl TuiRenderer {
             fullscreen: false,
             version: "0.0.0-test".to_string(),
             nav_rx: None,
+            prompt_rx: None,
+            hub: None,
         }
     }
 
@@ -789,6 +953,84 @@ impl TuiRenderer {
     /// the existing `nav_rx` field is cleared so no stale receiver remains.
     pub fn set_nav_rx_opt(&mut self, rx: Option<std::sync::mpsc::Receiver<NavCmd>>) {
         self.nav_rx = rx;
+    }
+
+    /// Connect the input hub in one step: nav channel, prompt channel, and
+    /// the shared state. A single handover means the wiring cannot be
+    /// half-done (e.g. prompt channel set but the fullscreen mirror not,
+    /// which would silently revert Esc to "cancel the run" in fullscreen).
+    /// `None` (non-TUI mode) clears everything.
+    pub(crate) fn connect_input_hub(&mut self, conn: Option<HubConnection>) {
+        match conn {
+            Some(conn) => {
+                self.nav_rx = Some(conn.nav_rx);
+                self.prompt_rx = Some(conn.prompt_rx);
+                self.hub = Some(conn.shared);
+            }
+            None => {
+                self.nav_rx = None;
+                self.prompt_rx = None;
+                self.hub = None;
+            }
+        }
+    }
+
+    /// Single mutation point for fullscreen state: updates the field and the
+    /// hub-shared mirror together so Esc routing never observes a stale value.
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+        if let Some(hub) = &self.hub {
+            hub.fullscreen
+                .store(on, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Begin routing input to a prompt: flip the shared route flag to
+    /// [`ROUTE_PROMPT`] and drain any stale events left over from a
+    /// previously aborted prompt. Returns `None` when no hub is connected.
+    fn take_prompt_source(&mut self) -> Option<(ChannelEventSource, std::sync::Arc<HubShared>)> {
+        let rx = self.prompt_rx.take()?;
+        let shared = match &self.hub {
+            Some(hub) => hub.clone(),
+            None => {
+                // Half-connected state (should be unreachable): put the
+                // channel back and fall back to direct reads.
+                self.prompt_rx = Some(rx);
+                return None;
+            }
+        };
+        // Drain BEFORE flipping the route: everything in the prompt channel
+        // right now is provably stale (the hub only feeds it while the route
+        // is PROMPT, which it hasn't been since the last prompt closed).
+        // Draining after the flip could discard a fresh type-ahead key the
+        // hub forwards the instant the route changes.
+        while rx.try_recv().is_ok() {}
+        shared
+            .route
+            .store(ROUTE_PROMPT, std::sync::atomic::Ordering::Relaxed);
+        // Discard navigation commands queued before the flip: draw() applies
+        // drained NavCmds, so a stale scroll/copy/fullscreen command would
+        // otherwise fire mid-prompt (or reset review-mode scroll state that
+        // was just initialized). One in-flight event may still slip through
+        // after this drain — that is cosmetic only (scroll/flash), never a
+        // prompt-consuming or panicking action.
+        if let Some(nav) = &self.nav_rx {
+            while nav.try_recv().is_ok() {}
+        }
+        Some((ChannelEventSource { rx }, shared))
+    }
+
+    /// End prompt routing: flip the route flag back to [`ROUTE_EXEC`] and
+    /// keep the channel for the next prompt.
+    fn restore_prompt_source(
+        &mut self,
+        source: ChannelEventSource,
+        shared: std::sync::Arc<HubShared>,
+    ) {
+        shared
+            .route
+            .store(ROUTE_EXEC, std::sync::atomic::Ordering::Relaxed);
+        self.prompt_rx = Some(source.rx);
     }
 
     /// Drain all pending [`NavCmd`]s from the channel and apply each one.
@@ -857,8 +1099,16 @@ impl TuiRenderer {
                 self.copy_and_flash(log_idx);
             }
             NavCmd::ToggleFullscreen => {
-                self.fullscreen = !self.fullscreen;
+                self.set_fullscreen(!self.fullscreen);
                 self.scroll_offset = 0;
+            }
+            NavCmd::ExitFullscreen => {
+                self.set_fullscreen(false);
+                self.scroll_offset = 0;
+            }
+            NavCmd::Redraw => {
+                // No state change: nav commands are drained inside draw(), so
+                // the redraw this requested is already in progress.
             }
         }
     }
@@ -1017,6 +1267,35 @@ impl TuiRenderer {
         }
     }
 
+    /// Push a diagnostic line: log pane in TUI mode, **stderr** in Plain mode.
+    ///
+    /// Use for --verbose/diagnostic output. Plain mode reserves stdout for
+    /// primary output (the documented stream contract, pinned by
+    /// integration tests), so diagnostics must go to stderr there — while
+    /// in TUI mode the log pane is the only surface the user can read.
+    pub fn eprintln(&mut self, line: &str) {
+        if let Mode::Quiet = &self.mode {
+            return;
+        }
+        self.push_log(self.active_step, line);
+        self.draw();
+        if let Mode::Plain = &self.mode {
+            eprintln!("{line}");
+        }
+    }
+
+    /// Hold the TUI open after a failed run so the transcript (subprocess
+    /// stderr, API errors) stays readable, then wait for a key.
+    /// No-op outside TUI mode — non-interactive runs must never block.
+    pub fn pause_for_failure_review(&mut self) {
+        if !self.is_tui() {
+            return;
+        }
+        self.println("");
+        self.println("  Run failed \u{2014} press any key to close this view");
+        self.wait_for_keypress();
+    }
+
     /// Push a line to a specific step's log pane, stripping ANSI escape codes.
     ///
     /// All internal log pushes should go through this method (or through
@@ -1047,7 +1326,13 @@ impl TuiRenderer {
     /// Show "Press any key to close" hint and block until a keypress in TUI mode.
     /// In Plain/Quiet mode: no-op (non-interactive sessions should not block).
     pub fn wait_for_keypress(&mut self) {
-        self.wait_for_keypress_impl(&mut CrosstermEventSource);
+        match self.take_prompt_source() {
+            Some((mut source, route)) => {
+                self.wait_for_keypress_impl(&mut source);
+                self.restore_prompt_source(source, route);
+            }
+            None => self.wait_for_keypress_impl(&mut CrosstermEventSource),
+        }
     }
 
     fn wait_for_keypress_impl(&mut self, source: &mut dyn EventSource) {
@@ -1061,7 +1346,16 @@ impl TuiRenderer {
             self.hint = true;
             self.scroll_offset = 0;
             self.draw();
-            while let Ok(key) = source.next_key() {
+            while let Ok(event) = source.next_event() {
+                let key = match event {
+                    InputEvent::Key(key) => key,
+                    InputEvent::Resize => {
+                        // Reflow the layout immediately instead of waiting
+                        // for the next keypress.
+                        self.draw();
+                        continue;
+                    }
+                };
                 // Clear any flash message from the previous key.
                 self.flash_message = None;
                 // Compute log_height matching render_to's formula exactly.
@@ -1100,7 +1394,7 @@ impl TuiRenderer {
                     }
                     (KeyCode::Esc, _) => {
                         if self.fullscreen {
-                            self.fullscreen = false;
+                            self.set_fullscreen(false);
                             self.scroll_offset = 0;
                             self.draw();
                         } else {
@@ -1110,7 +1404,7 @@ impl TuiRenderer {
                     (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => break,
                     // Toggle full-screen output mode
                     (KeyCode::Char('f'), _) => {
-                        self.fullscreen = !self.fullscreen;
+                        self.set_fullscreen(!self.fullscreen);
                         self.scroll_offset = 0;
                         self.draw();
                     }
@@ -1128,7 +1422,10 @@ impl TuiRenderer {
                     }
                     // Scroll output up within selected step (PgUp)
                     (KeyCode::PageUp, _) | (KeyCode::Char('u'), _) => {
-                        self.scroll_offset = (self.scroll_offset + log_height / 2).min(max);
+                        // saturating_add: a stale exec-phase ScrollTop can leave
+                        // the offset at usize::MAX, which a plain add overflows.
+                        self.scroll_offset =
+                            self.scroll_offset.saturating_add(log_height / 2).min(max);
                         self.draw();
                     }
                     // Scroll output down within selected step (PgDn)
@@ -1169,7 +1466,14 @@ impl TuiRenderer {
         analysis: &RepoAnalysis,
         term: &dyn TerminalIO,
     ) -> Result<ConfirmAction, crate::error::ActualError> {
-        self.confirm_project_impl(analysis, term, &mut CrosstermEventSource)
+        match self.take_prompt_source() {
+            Some((mut source, route)) => {
+                let result = self.confirm_project_impl(analysis, term, &mut source);
+                self.restore_prompt_source(source, route);
+                result
+            }
+            None => self.confirm_project_impl(analysis, term, &mut CrosstermEventSource),
+        }
     }
 
     fn confirm_project_impl(
@@ -1207,9 +1511,15 @@ impl TuiRenderer {
     ) -> Result<ConfirmAction, crate::error::ActualError> {
         use crossterm::event::{KeyCode, KeyModifiers};
         loop {
-            let key = source.next_key().map_err(|e| {
+            let key = match source.next_event().map_err(|e| {
                 crate::error::ActualError::InternalError(format!("event read failed: {e}"))
-            })?;
+            })? {
+                InputEvent::Key(key) => key,
+                InputEvent::Resize => {
+                    self.draw();
+                    continue;
+                }
+            };
             match (key.code, key.modifiers) {
                 (KeyCode::Enter, _) => {
                     let focus = self
@@ -1278,7 +1588,14 @@ impl TuiRenderer {
         force: bool,
         term: &dyn TerminalIO,
     ) -> Result<Vec<crate::tailoring::types::FileOutput>, crate::error::ActualError> {
-        self.select_files_in_tui_impl(output, force, term, &mut CrosstermEventSource)
+        match self.take_prompt_source() {
+            Some((mut source, route)) => {
+                let result = self.select_files_in_tui_impl(output, force, term, &mut source);
+                self.restore_prompt_source(source, route);
+                result
+            }
+            None => self.select_files_in_tui_impl(output, force, term, &mut CrosstermEventSource),
+        }
     }
 
     fn select_files_in_tui_impl(
@@ -1368,9 +1685,15 @@ impl TuiRenderer {
     ) -> Result<Option<Vec<usize>>, crate::error::ActualError> {
         use crossterm::event::{KeyCode, KeyModifiers};
         loop {
-            let key = source.next_key().map_err(|e| {
+            let key = match source.next_event().map_err(|e| {
                 crate::error::ActualError::InternalError(format!("event read failed: {e}"))
-            })?;
+            })? {
+                InputEvent::Key(key) => key,
+                InputEvent::Resize => {
+                    self.draw();
+                    continue;
+                }
+            };
             let n = self
                 .file_select_state
                 .as_ref()
@@ -1441,7 +1764,16 @@ impl TuiRenderer {
         default: Option<usize>,
         term: &dyn TerminalIO,
     ) -> Result<usize, crate::error::ActualError> {
-        self.select_one_in_tui_impl(prompt, items, default, term, &mut CrosstermEventSource)
+        match self.take_prompt_source() {
+            Some((mut source, route)) => {
+                let result = self.select_one_in_tui_impl(prompt, items, default, term, &mut source);
+                self.restore_prompt_source(source, route);
+                result
+            }
+            None => {
+                self.select_one_in_tui_impl(prompt, items, default, term, &mut CrosstermEventSource)
+            }
+        }
     }
 
     fn select_one_in_tui_impl(
@@ -1482,9 +1814,15 @@ impl TuiRenderer {
     ) -> Result<Option<usize>, crate::error::ActualError> {
         use crossterm::event::{KeyCode, KeyModifiers};
         loop {
-            let key = source.next_key().map_err(|e| {
+            let key = match source.next_event().map_err(|e| {
                 crate::error::ActualError::InternalError(format!("event read failed: {e}"))
-            })?;
+            })? {
+                InputEvent::Key(key) => key,
+                InputEvent::Resize => {
+                    self.draw();
+                    continue;
+                }
+            };
             match (key.code, key.modifiers) {
                 (KeyCode::Up, _) => {
                     if let Some(ref mut ss) = self.single_select_state {
@@ -1605,9 +1943,20 @@ impl TuiRenderer {
             tracing::error!("TUI draw failed: {err_msg}; falling back to plain output");
             // Clean up terminal state before switching to plain mode so the
             // Drop impl does not attempt a double-cleanup.
+            TUI_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
             let _ = disable_raw_mode();
             let _ = execute!(io::stderr(), LeaveAlternateScreen, Show);
             self.mode = Mode::Plain;
+            // Shut the input hub down and drop its channels: plain-mode
+            // prompts read the terminal directly (dialoguer), and a live hub
+            // thread would compete with them for keystrokes — the exact
+            // two-reader race the hub exists to prevent.
+            if let Some(hub) = &self.hub {
+                hub.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.prompt_rx = None;
+            self.nav_rx = None;
+            self.hub = None;
         }
     }
 }
@@ -1615,6 +1964,10 @@ impl TuiRenderer {
 impl Drop for TuiRenderer {
     fn drop(&mut self) {
         if let Mode::Tui(_) = &self.mode {
+            // Restore unconditionally rather than via the flag: test
+            // renderers (new_with_tui) never set TUI_ACTIVE but still hold
+            // Mode::Tui, and the escapes are harmless on a non-TTY stderr.
+            TUI_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
             // Silently ignore errors — in tests there is no raw-mode TTY.
             let _ = disable_raw_mode();
             let _ = execute!(io::stderr(), LeaveAlternateScreen, Show);
@@ -1639,6 +1992,39 @@ impl MockEventSource {
 #[cfg(test)]
 impl EventSource for MockEventSource {
     fn next_key(&mut self) -> io::Result<crossterm::event::KeyEvent> {
+        self.events
+            .pop_front()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no more events"))
+    }
+}
+
+/// Like [`MockEventSource`] but yields full [`InputEvent`]s, so tests can
+/// inject resize events into the prompt loops.
+#[cfg(test)]
+pub(crate) struct MockInputSource {
+    pub(crate) events: std::collections::VecDeque<InputEvent>,
+}
+
+#[cfg(test)]
+impl MockInputSource {
+    pub(crate) fn new(events: Vec<InputEvent>) -> Self {
+        Self {
+            events: events.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl EventSource for MockInputSource {
+    fn next_key(&mut self) -> io::Result<crossterm::event::KeyEvent> {
+        loop {
+            if let InputEvent::Key(key) = self.next_event()? {
+                return Ok(key);
+            }
+        }
+    }
+
+    fn next_event(&mut self) -> io::Result<InputEvent> {
         self.events
             .pop_front()
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no more events"))
@@ -4162,5 +4548,405 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    // ── input hub integration: resize events in prompt loops ──
+
+    fn tui_renderer_100x30() -> TuiRenderer {
+        let backend = TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        TuiRenderer::new_with_tui(terminal)
+    }
+
+    fn enter_key() -> crossterm::event::KeyEvent {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn test_confirm_loop_resize_redraws_and_continues() {
+        let mut r = tui_renderer_100x30();
+        r.confirm_state = Some(ConfirmState {
+            question: "Proceed?".to_string(),
+            focus: ConfirmFocus::Accept,
+        });
+        let mut source =
+            MockInputSource::new(vec![InputEvent::Resize, InputEvent::Key(enter_key())]);
+        let result = r.run_confirm_loop(&mut source);
+        assert!(
+            matches!(result, Ok(ConfirmAction::Accept)),
+            "resize must not consume the prompt; Enter after it accepts"
+        );
+        assert!(source.events.is_empty(), "both events consumed");
+    }
+
+    #[test]
+    fn test_file_select_loop_resize_redraws_and_continues() {
+        let mut r = tui_renderer_100x30();
+        r.file_select_state = Some(FileSelectState {
+            items: vec!["a.md".to_string(), "b.md".to_string()],
+            checked: vec![true, true],
+            cursor: 0,
+        });
+        let mut source =
+            MockInputSource::new(vec![InputEvent::Resize, InputEvent::Key(enter_key())]);
+        let result = r.run_file_select_loop(&mut source);
+        assert!(
+            matches!(result, Ok(Some(ref v)) if v == &vec![0, 1]),
+            "expected all items selected after resize + Enter, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_single_select_loop_resize_redraws_and_continues() {
+        let mut r = tui_renderer_100x30();
+        r.single_select_state = Some(SingleSelectState {
+            prompt: "Pick one".to_string(),
+            items: vec!["x".to_string(), "y".to_string()],
+            cursor: 1,
+        });
+        let mut source =
+            MockInputSource::new(vec![InputEvent::Resize, InputEvent::Key(enter_key())]);
+        let result = r.run_single_select_loop(&mut source);
+        assert!(
+            matches!(result, Ok(Some(1))),
+            "expected cursor position confirmed after resize + Enter, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_wait_for_keypress_resize_redraws_and_continues() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut r = tui_renderer_100x30();
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockInputSource::new(vec![InputEvent::Resize, InputEvent::Key(q)]);
+        r.wait_for_keypress_impl(&mut source);
+        assert!(source.events.is_empty(), "resize then quit both consumed");
+        assert!(!r.hint, "review mode exited");
+    }
+
+    // ── input hub integration: prompt channel routing ──
+
+    /// Build a hub connection for tests, returning the senders and shared
+    /// state alongside it.
+    fn test_hub_connection() -> (
+        std::sync::mpsc::Sender<NavCmd>,
+        std::sync::mpsc::Sender<InputEvent>,
+        std::sync::Arc<HubShared>,
+        HubConnection,
+    ) {
+        let (nav_tx, nav_rx) = std::sync::mpsc::channel();
+        let (key_tx, prompt_rx) = std::sync::mpsc::channel();
+        let shared = std::sync::Arc::new(HubShared::new());
+        let conn = HubConnection {
+            nav_rx,
+            prompt_rx,
+            shared: shared.clone(),
+        };
+        (nav_tx, key_tx, shared, conn)
+    }
+
+    #[test]
+    fn test_take_prompt_source_flips_route_and_drains_stale_events() {
+        use std::sync::atomic::Ordering;
+
+        let mut r = tui_renderer_100x30();
+        let (_nav_tx, tx, shared, conn) = test_hub_connection();
+        r.connect_input_hub(Some(conn));
+
+        // A stale event left over from an aborted prompt must be discarded.
+        tx.send(InputEvent::Resize).unwrap();
+
+        let (mut source, taken_shared) = r.take_prompt_source().expect("channel connected");
+        assert_eq!(shared.route.load(Ordering::Relaxed), ROUTE_PROMPT);
+
+        // Only events sent after the take are visible.
+        tx.send(InputEvent::Key(enter_key())).unwrap();
+        match source.next_event().expect("event available") {
+            InputEvent::Key(k) => assert_eq!(k.code, crossterm::event::KeyCode::Enter),
+            other => panic!("stale event leaked into prompt: {other:?}"),
+        }
+
+        r.restore_prompt_source(source, taken_shared);
+        assert_eq!(shared.route.load(Ordering::Relaxed), ROUTE_EXEC);
+        assert!(
+            r.take_prompt_source().is_some(),
+            "channel is reusable for the next prompt"
+        );
+    }
+
+    #[test]
+    fn test_confirm_project_reads_from_prompt_channel() {
+        use crate::cli::ui::test_utils::MockTerminal;
+        use std::sync::atomic::Ordering;
+
+        let mut r = tui_renderer_100x30();
+        let term = MockTerminal::new(vec![]);
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![],
+        };
+
+        let (_nav_tx, tx, shared, conn) = test_hub_connection();
+        r.connect_input_hub(Some(conn));
+
+        // Simulate the hub thread: forward Enter once the route flips to
+        // prompt (sending earlier would be drained as stale).
+        let shared_probe = shared.clone();
+        let sender = std::thread::spawn(move || {
+            while shared_probe.route.load(Ordering::Relaxed) != ROUTE_PROMPT {
+                std::thread::yield_now();
+            }
+            tx.send(InputEvent::Key(enter_key())).unwrap();
+        });
+
+        let result = r.confirm_project(&analysis, &term);
+        sender.join().unwrap();
+
+        assert!(matches!(result, Ok(ConfirmAction::Accept)));
+        assert_eq!(
+            shared.route.load(Ordering::Relaxed),
+            ROUTE_EXEC,
+            "route restored after the prompt"
+        );
+        assert!(
+            r.take_prompt_source().is_some(),
+            "channel returned to the renderer for the next prompt"
+        );
+    }
+
+    #[test]
+    fn test_pause_for_failure_review_plain_mode_is_noop() {
+        let mut r = TuiRenderer::new(false, true); // Plain mode
+        r.pause_for_failure_review(); // must return immediately, no block
+    }
+
+    #[test]
+    fn test_pause_for_failure_review_tui_shows_message_and_waits() {
+        use std::sync::atomic::Ordering;
+        let mut r = tui_renderer_100x30();
+        let (_nav_tx, tx, shared, conn) = test_hub_connection();
+        r.connect_input_hub(Some(conn));
+
+        let shared_probe = shared.clone();
+        let sender = std::thread::spawn(move || {
+            while shared_probe.route.load(Ordering::Relaxed) != ROUTE_PROMPT {
+                std::thread::yield_now();
+            }
+            tx.send(InputEvent::Key(enter_key())).unwrap();
+        });
+
+        r.pause_for_failure_review();
+        sender.join().unwrap();
+
+        assert!(
+            r.all_log_text().contains("Run failed"),
+            "failure notice must be in the pane"
+        );
+    }
+
+    #[test]
+    fn test_eprintln_writes_to_log_pane_in_tui_mode() {
+        let mut r = tui_renderer_100x30();
+        r.eprintln("diagnostic line");
+        assert!(r.all_log_text().contains("diagnostic line"));
+    }
+
+    #[test]
+    fn test_eprintln_quiet_mode_is_noop() {
+        let mut r = TuiRenderer::new(true, false); // Quiet mode
+        r.eprintln("should vanish");
+        assert!(!r.all_log_text().contains("should vanish"));
+    }
+
+    #[test]
+    fn test_prompt_channel_disconnect_surfaces_as_error() {
+        let mut r = tui_renderer_100x30();
+        r.confirm_state = Some(ConfirmState {
+            question: "Proceed?".to_string(),
+            focus: ConfirmFocus::Accept,
+        });
+        let (tx, rx) = std::sync::mpsc::channel::<InputEvent>();
+        drop(tx);
+        let mut source = ChannelEventSource { rx };
+        let result = r.run_confirm_loop(&mut source);
+        assert!(
+            matches!(result, Err(crate::error::ActualError::InternalError(_))),
+            "hub gone must surface as an error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_confirm_project_without_hub_falls_back() {
+        // No prompt channel set: Plain-mode path must still work unchanged.
+        use crate::cli::ui::test_utils::MockTerminal;
+        let term = MockTerminal::new(vec![]);
+        let mut r = TuiRenderer::new(false, true); // Plain mode
+        let analysis = RepoAnalysis {
+            is_monorepo: false,
+            workspace_type: None,
+            projects: vec![],
+        };
+        let _ = r.confirm_project(&analysis, &term);
+    }
+
+    #[test]
+    fn test_handle_nav_cmd_redraw_is_stateless() {
+        let mut r = tui_renderer_100x30();
+        let before_scroll = r.scroll_offset;
+        let before_fullscreen = r.fullscreen;
+        r.handle_nav_cmd(NavCmd::Redraw);
+        assert_eq!(r.scroll_offset, before_scroll);
+        assert_eq!(r.fullscreen, before_fullscreen);
+        assert!(r.viewing_step.is_none());
+    }
+
+    #[test]
+    fn test_set_fullscreen_syncs_shared_mirror() {
+        use std::sync::atomic::Ordering;
+        let mut r = tui_renderer_100x30();
+        let (_nav_tx, _key_tx, shared, conn) = test_hub_connection();
+        r.connect_input_hub(Some(conn));
+
+        r.handle_nav_cmd(NavCmd::ToggleFullscreen);
+        assert!(r.fullscreen);
+        assert!(
+            shared.fullscreen.load(Ordering::Relaxed),
+            "hub mirror must track fullscreen ON"
+        );
+
+        r.handle_nav_cmd(NavCmd::ExitFullscreen);
+        assert!(!r.fullscreen);
+        assert!(
+            !shared.fullscreen.load(Ordering::Relaxed),
+            "hub mirror must track fullscreen OFF"
+        );
+    }
+
+    #[test]
+    fn test_connect_input_hub_none_clears_everything() {
+        let mut r = tui_renderer_100x30();
+        let (_nav_tx, _key_tx, _shared, conn) = test_hub_connection();
+        r.connect_input_hub(Some(conn));
+        assert!(r.hub.is_some());
+        r.connect_input_hub(None);
+        assert!(r.hub.is_none());
+        assert!(r.prompt_rx.is_none());
+        assert!(r.nav_rx.is_none());
+        assert!(
+            r.take_prompt_source().is_none(),
+            "disconnected renderer falls back to direct reads"
+        );
+    }
+
+    #[test]
+    fn test_exit_fullscreen_is_idempotent() {
+        let mut r = tui_renderer_100x30();
+        assert!(!r.fullscreen);
+        // Exiting while already windowed must not toggle fullscreen ON —
+        // that is the race ExitFullscreen exists to avoid.
+        r.handle_nav_cmd(NavCmd::ExitFullscreen);
+        assert!(!r.fullscreen);
+        r.handle_nav_cmd(NavCmd::ExitFullscreen);
+        assert!(!r.fullscreen);
+    }
+
+    // ── crash-safe terminal lifecycle ──
+
+    /// Serializes the tests that mutate the process-global `TUI_ACTIVE`.
+    /// Poison-tolerant: a failing serialized test must not cascade.
+    static TUI_ACTIVE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn tui_active_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        TUI_ACTIVE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn test_restore_terminal_if_active_clears_flag_and_is_idempotent() {
+        use std::sync::atomic::Ordering;
+        let _guard = tui_active_test_guard();
+        TUI_ACTIVE.store(true, Ordering::SeqCst);
+        restore_terminal_if_active();
+        assert!(
+            !TUI_ACTIVE.load(Ordering::SeqCst),
+            "restore must clear the active flag"
+        );
+        // Second call must be a no-op (flag already cleared).
+        restore_terminal_if_active();
+        assert!(!TUI_ACTIVE.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_install_panic_hook_is_idempotent() {
+        // Once-guarded: repeated installs must not stack hooks or panic.
+        install_panic_hook();
+        install_panic_hook();
+    }
+
+    #[test]
+    fn test_panic_hook_restores_terminal_state_before_reporting() {
+        use std::sync::atomic::Ordering;
+        let _guard = tui_active_test_guard();
+        install_panic_hook();
+        TUI_ACTIVE.store(true, Ordering::SeqCst);
+        let result = std::panic::catch_unwind(|| panic!("deliberate panic: hook test"));
+        assert!(result.is_err(), "closure must have panicked");
+        assert!(
+            !TUI_ACTIVE.load(Ordering::SeqCst),
+            "panic hook must leave TUI state before the message prints"
+        );
+    }
+
+    #[test]
+    fn test_review_scroll_up_saturates_after_stale_scroll_top() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut r = tui_renderer_100x30();
+        // A ScrollTop queued during execution can still be applied by the
+        // entry draw() after review mode resets the offset — the 'u' branch
+        // must not overflow on the resulting usize::MAX.
+        let (tx, rx) = std::sync::mpsc::channel();
+        r.set_nav_rx_opt(Some(rx));
+        tx.send(NavCmd::ScrollTop).unwrap();
+        let u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE);
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        let mut source = MockEventSource::new(vec![u, q]);
+        // Pre-fix this panicked in debug builds (usize::MAX + log_height/2).
+        r.wait_for_keypress_impl(&mut source);
+    }
+
+    #[test]
+    fn test_take_prompt_source_discards_stale_nav_commands() {
+        let mut r = tui_renderer_100x30();
+        let (nav_tx, _key_tx, _shared, conn) = test_hub_connection();
+        r.connect_input_hub(Some(conn));
+
+        // Queue a nav command from before the prompt, then open the prompt.
+        nav_tx.send(NavCmd::ScrollTop).unwrap();
+        let taken = r.take_prompt_source().expect("hub connected");
+        // The stale command must NOT be applied by subsequent draws.
+        r.draw();
+        assert_eq!(
+            r.scroll_offset, 0,
+            "stale ScrollTop leaked into the prompt: offset={}",
+            r.scroll_offset
+        );
+        let (source, taken_shared) = taken;
+        r.restore_prompt_source(source, taken_shared);
+    }
+
+    #[test]
+    fn test_drop_clears_tui_active_flag() {
+        use std::sync::atomic::Ordering;
+        let _guard = tui_active_test_guard();
+        let r = tui_renderer_100x30();
+        TUI_ACTIVE.store(true, Ordering::SeqCst);
+        drop(r);
+        assert!(
+            !TUI_ACTIVE.load(Ordering::SeqCst),
+            "dropping a TUI renderer must clear the active flag"
+        );
     }
 }

@@ -10,6 +10,7 @@ use crate::analysis::types::{
 use crate::api::client::{build_match_request, ActualApiClient, DEFAULT_API_URL};
 use crate::api::retry::{with_retry, RetryConfig};
 use crate::cli::args::SyncArgs;
+use crate::cli::commands::sync_kb_poller::{setup_input_hub, wait_cancelled, InputHub};
 use crate::cli::ui::confirm::format_project_summary_plain;
 use crate::cli::ui::header::{AuthDisplay, RunnerDisplay};
 use crate::cli::ui::progress::SyncPhase;
@@ -158,12 +159,62 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     //    banner box (rendered by the TUI directly), not in the log pane.
     let mut pipeline = TuiRenderer::new_with_version(false, args.no_tui, env!("CARGO_PKG_VERSION"));
 
-    // Start a nav-only keyboard poller so navigation (↑/↓, scroll, fullscreen)
-    // works during all phases, not just tailoring.
-    let (nav_poller, nav_rx) = super::super::sync_kb_poller::setup_nav_only(pipeline.is_tui());
-    pipeline.set_nav_rx_opt(nav_rx);
-    let mut nav_poller = Some(nav_poller);
+    // Start the input hub: one background thread owns crossterm events for
+    // the whole run, routing navigation (↑/↓, scroll, fullscreen), prompt
+    // input, resize redraws, and quit/cancel keys. A single reader means
+    // prompts never race a poller thread for keystrokes.
+    let mut input = setup_input_hub(pipeline.is_tui());
+    pipeline.connect_input_hub(input.connect());
 
+    let result = run_sync_inner(
+        args,
+        root_dir,
+        cfg_path,
+        term,
+        runner,
+        auth_display,
+        runner_display,
+        runner_probe,
+        semgrep_check,
+        &mut pipeline,
+        &mut input,
+    );
+
+    // Keep the transcript readable before the alternate screen closes: on
+    // failure the log pane holds the diagnostics that were just written
+    // (subprocess stderr, API errors) — pause so the user can read, scroll,
+    // and copy them before teardown erases the pane, symmetric with the
+    // success-path review pause below (a contract the PTY e2e suite pins,
+    // including under --force). Skip the pause when the user cancelled —
+    // they asked to leave. Both pauses are no-ops in Plain/Quiet modes:
+    // `--no-tui` is the non-blocking path for pty-wrapped automation, which
+    // would otherwise present a real TTY and wait here forever.
+    match &result {
+        Ok(()) => pipeline.wait_for_keypress(),
+        Err(ActualError::UserCancelled) => {}
+        Err(_) => pipeline.pause_for_failure_review(),
+    }
+    result
+}
+
+/// Body of [`run_sync_with_probe`], with the renderer and input hub owned by
+/// the caller so the wrapper can hold the TUI open for transcript review on
+/// both success and failure exits (previously error paths tore the TUI down
+/// instantly, erasing the very diagnostics just written to the log pane).
+#[allow(clippy::too_many_arguments)]
+fn run_sync_inner<R: TailoringRunner>(
+    args: &SyncArgs,
+    root_dir: &Path,
+    cfg_path: &Path,
+    term: &dyn TerminalIO,
+    runner: &R,
+    auth_display: Option<&AuthDisplay>,
+    runner_display: Option<&RunnerDisplay>,
+    runner_probe: Option<Box<dyn Fn() -> Result<(), ActualError>>>,
+    semgrep_check: Option<Box<dyn Fn() -> bool>>,
+    pipeline: &mut TuiRenderer,
+    input: &mut InputHub,
+) -> Result<(), ActualError> {
     pipeline.start(SyncPhase::Environment, "Checking environment...");
 
     // Load config early so we can show server URL and cache status in the
@@ -324,6 +375,9 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     // Blank line for visual breathing room.
     pipeline.println("");
 
+    // A quit key during the (possibly long) semgrep download takes effect here.
+    cancel_checkpoint(input.is_cancelled(), pipeline)?;
+
     // Runner pre-flight probe (runs during Environment phase, before Analysis).
     // Failures surface here rather than deep in the Tailor phase.
     if let Some(probe) = runner_probe {
@@ -361,6 +415,10 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         }
     };
 
+    // Analysis is synchronous CPU-bound work; a quit key pressed during it
+    // takes effect at this stage boundary.
+    cancel_checkpoint(input.is_cancelled(), pipeline)?;
+
     // 4. Filter by --project if specified
     let analysis = match filter_projects(analysis, &args.projects) {
         Ok(filtered) => filtered,
@@ -387,7 +445,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             pipeline.println(line);
         }
     } else {
-        confirm_or_change_loop(&mut analysis, &mut pipeline, term)?;
+        confirm_or_change_loop(&mut analysis, pipeline, term)?;
     }
 
     // ── Phase 2: fetch + tailor ──
@@ -400,12 +458,13 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     if args.reset_rejections {
         clear_rejections(&mut config, &repo_key);
         save_to(&config, cfg_path)?;
-        pipeline.suspend(|| {
-            eprintln!(
-                "{} Cleared ADR rejection memory for this repository",
-                theme::success(&theme::SUCCESS)
-            );
-        });
+        // eprintln (not suspend): suspend leaves and re-enters the alternate
+        // screen around output the user never gets to read — the log pane is
+        // the visible surface in TUI mode, stderr in plain mode.
+        pipeline.eprintln(&format!(
+            "  {} Cleared ADR rejection memory for this repository",
+            theme::success(&theme::SUCCESS)
+        ));
     }
 
     let rejected_ids = get_rejections(&config, &repo_key);
@@ -425,25 +484,27 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         root_dir, &analysis,
     ));
 
+    // Signals analysis is another long synchronous stage; honor a quit key here.
+    cancel_checkpoint(input.is_cancelled(), pipeline)?;
+
     let request = build_match_request(&analysis, &config, &signals);
     let client = ActualApiClient::new(&api_url)?;
 
     if args.verbose {
-        pipeline.suspend(|| {
-            eprintln!("API request to: {api_url}/adrs/match");
-            eprintln!(
-                "  projects: {}",
-                request
-                    .projects
-                    .iter()
-                    .map(|p| p.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        });
+        pipeline.eprintln(&format!("  API request to: {api_url}/adrs/match"));
+        pipeline.eprintln(&format!(
+            "  projects: {}",
+            request
+                .projects
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     let root_dir_owned = root_dir.to_path_buf();
+    let cancel_token = input.cancel_token();
     // Resolve the effective output format: CLI flag takes precedence over config,
     // and config takes precedence over the default.
     let output_format = args
@@ -465,17 +526,16 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
             std::time::Duration::from_secs(60),
         ];
         let retry_config = RetryConfig::default();
-        let api_response = fetch_with_503_backoff(
-            || async {
-                tokio::select! {
-                    result = with_retry(&retry_config, || client.post_match(&request)) => result,
-                    _ = tokio::signal::ctrl_c() => Err(ActualError::UserCancelled),
-                }
-            },
-            &DELAYS_503,
-            &mut pipeline,
-        )
-        .await;
+        // The cancel future wraps the WHOLE fetch (attempts and backoff
+        // sleeps alike), so a quit key or SIGINT aborts even mid-backoff.
+        let api_response = tokio::select! {
+            result = fetch_with_503_backoff(
+                || with_retry(&retry_config, || client.post_match(&request)),
+                &DELAYS_503,
+                &mut *pipeline,
+            ) => result,
+            _ = wait_cancelled(cancel_token) => Err(ActualError::UserCancelled),
+        };
 
         (api_response, fs_future.await)
     });
@@ -504,22 +564,20 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     };
 
     if args.verbose {
-        pipeline.suspend(|| {
-            eprintln!(
-                "  matched: {}, by_framework: {:?}",
-                response.metadata.total_matched, response.metadata.by_framework
-            );
-        });
+        pipeline.eprintln(&format!(
+            "  matched: {}, by_framework: {:?}",
+            response.metadata.total_matched, response.metadata.by_framework
+        ));
     }
 
     // 2c. Filter by rejections
     let filtered_adrs = pre_filter_rejected(&response.matched_adrs, &rejected_ids);
 
     if !rejected_ids.is_empty() && args.verbose {
-        pipeline.suspend(|| {
-            let removed = response.matched_adrs.len() - filtered_adrs.len();
-            eprintln!("  filtered out {removed} previously rejected ADRs");
-        });
+        let removed = response.matched_adrs.len() - filtered_adrs.len();
+        pipeline.eprintln(&format!(
+            "  filtered out {removed} previously rejected ADRs"
+        ));
     }
 
     // 2d. Tailor or skip (--no-tailor), with caching
@@ -621,19 +679,11 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         runner.set_event_tx(event_tx);
 
-        // Stop the nav-only poller before starting the tailoring poller
-        // (which also handles quit/cancel keys) to avoid two threads reading
-        // crossterm events simultaneously.
-        drop(nav_poller.take());
-        pipeline.set_nav_rx_opt(None);
-
         // In TUI mode (raw mode active) the terminal consumes keyboard input,
         // so OS-level SIGINT from Ctrl+C may not reach the process reliably.
-        // `sync_kb_poller::setup` optionally spawns a background poller thread
-        // and returns a combined OS-signal + keyboard cancel future, plus a
-        // nav channel receiver for arrow-key navigation during execution.
-        let (kb_poller, nav_rx, cancel) = super::super::sync_kb_poller::setup(pipeline.is_tui());
-        pipeline.set_nav_rx_opt(nav_rx);
+        // The input hub's quit keys (q/Q/Esc/Ctrl+C) set the cancel signal;
+        // `wait_cancelled` combines it with OS SIGINT for non-TUI mode.
+        let cancel = wait_cancelled(input.cancel_token());
 
         let result = rt.block_on(async {
             let tailor_fut = tailor_all_projects(
@@ -647,15 +697,13 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
                 tailor_fut,
                 &mut progress_rx,
                 &mut event_rx,
-                &mut pipeline,
+                &mut *pipeline,
                 project_count,
                 cancel,
             )
             .await
         });
 
-        // The keyboard poller (if started) is signalled to stop via its Drop impl.
-        drop(kb_poller);
         match result {
             Ok(output) => {
                 pipeline.success(
@@ -762,6 +810,12 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
     // edits) to avoid unnecessary writes.
     let output = crate::tailoring::minor_change::filter_minor_changes(output, root_dir);
 
+    // A quit key pressed during tailoring wind-down or diff preparation
+    // takes effect here, before anything is written. (Safe against a key
+    // racing the upcoming file prompt: the hub clears the cancel latch when
+    // a prompt opens, so an unanswered latch here is genuine exec intent.)
+    cancel_checkpoint(input.is_cancelled(), pipeline)?;
+
     // ── Phase 3: confirm + write (fully implemented) ──
     // pipeline stays alive through confirm+write so output goes into the TUI
     // log pane. It drops naturally at end of run_sync.
@@ -773,7 +827,7 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         args.full,
         &output_format,
         term,
-        &mut pipeline,
+        pipeline,
     )?;
     // Keep `sync_result` alive when telemetry is compiled out.
     #[cfg(not(feature = "telemetry"))]
@@ -856,13 +910,6 @@ pub(crate) fn run_sync_with_probe<R: TailoringRunner>(
         }
     }
 
-    // Stop the nav poller (if still alive) before entering review mode,
-    // so its background thread doesn't compete for crossterm key events
-    // with `wait_for_keypress`'s direct key reader.
-    drop(nav_poller.take());
-    pipeline.set_nav_rx_opt(None);
-
-    pipeline.wait_for_keypress();
     Ok(())
 }
 
@@ -889,20 +936,46 @@ where
         match result {
             Ok(v) => break Ok(v),
             Err(ActualError::ServiceUnavailable) if attempt_503 < delays_503.len() => {
-                let delay_secs = delays_503[attempt_503].as_secs();
-                pipeline.update_message(
-                    SyncPhase::Fetch,
-                    &format!(
-                        "Actual AI API is updating \u{2014} retrying in {delay_secs}s ({}/{})...",
-                        attempt_503 + 1,
-                        delays_503.len()
-                    ),
-                );
-                tokio::time::sleep(delays_503[attempt_503]).await;
+                // Sleep in 1 s slices so the wait stays responsive: each
+                // tick refreshes the spinner/elapsed display and drains nav
+                // commands (including resize redraws) via draw(). Note the
+                // countdown TEXT is currently discarded by update_message —
+                // the string documents intent for when messages surface.
+                const TICK: std::time::Duration = std::time::Duration::from_secs(1);
+                let mut remaining = delays_503[attempt_503];
+                while !remaining.is_zero() {
+                    pipeline.update_message(
+                        SyncPhase::Fetch,
+                        &format!(
+                            "Actual AI API is updating \u{2014} retrying in {}s ({}/{})...",
+                            remaining.as_secs(),
+                            attempt_503 + 1,
+                            delays_503.len()
+                        ),
+                    );
+                    let step = remaining.min(TICK);
+                    tokio::time::sleep(step).await;
+                    remaining = remaining.saturating_sub(step);
+                }
                 attempt_503 += 1;
             }
             Err(e) => break Err(e),
         }
+    }
+}
+
+/// Abort between synchronous pipeline stages when the user pressed a quit key.
+///
+/// Long CPU-bound stages (analysis, signals) cannot be interrupted mid-flight;
+/// this makes a quit key pressed during them take effect at the next stage
+/// boundary, mirroring the Reject path (finish steps, then `UserCancelled`).
+fn cancel_checkpoint(cancelled: bool, pipeline: &mut TuiRenderer) -> Result<(), ActualError> {
+    if cancelled {
+        tracing::info!("run cancelled by user at stage boundary");
+        pipeline.finish_remaining();
+        Err(ActualError::UserCancelled)
+    } else {
+        Ok(())
     }
 }
 
@@ -5592,10 +5665,12 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_error_message_user_cancelled_catch_all() {
+    fn test_fetch_error_message_user_cancelled_is_not_an_api_failure() {
+        // A quit key / SIGINT during the fetch is the user's decision;
+        // presenting it as an API failure was misleading.
         let e = ActualError::UserCancelled;
         let msg = fetch_error_message(&e, "https://api.example.com");
-        assert!(msg.contains("API request failed:"), "unexpected msg: {msg}");
+        assert_eq!(msg, "Cancelled", "unexpected msg: {msg}");
     }
 
     #[test]
@@ -7132,6 +7207,54 @@ mod tests {
         assert_eq!(
             call_count, 3,
             "should be called 3 times: fail, fail, succeed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_fetch_with_503_backoff_countdown_sleeps_in_slices() {
+        // A multi-second delay is slept in 1 s slices (live countdown); the
+        // retry must still happen after the full delay elapses.
+        let mut pipeline = TuiRenderer::new(false, true);
+        let delays: &[std::time::Duration] = &[std::time::Duration::from_secs(3)];
+        let mut call_count = 0usize;
+        let result = super::fetch_with_503_backoff(
+            || {
+                call_count += 1;
+                let n = call_count;
+                async move {
+                    if n == 1 {
+                        Err(ActualError::ServiceUnavailable)
+                    } else {
+                        Ok(7u32)
+                    }
+                }
+            },
+            delays,
+            &mut pipeline,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "expected Ok after countdown, got {result:?}"
+        );
+        assert_eq!(call_count, 2, "fail once, then succeed after the wait");
+    }
+
+    // ── cancel_checkpoint tests ──
+
+    #[test]
+    fn test_cancel_checkpoint_not_cancelled_is_ok() {
+        let mut pipeline = TuiRenderer::new(false, true);
+        assert!(super::cancel_checkpoint(false, &mut pipeline).is_ok());
+    }
+
+    #[test]
+    fn test_cancel_checkpoint_cancelled_returns_user_cancelled() {
+        let mut pipeline = TuiRenderer::new(false, true);
+        let result = super::cancel_checkpoint(true, &mut pipeline);
+        assert!(
+            matches!(result, Err(ActualError::UserCancelled)),
+            "expected UserCancelled, got {result:?}"
         );
     }
 
