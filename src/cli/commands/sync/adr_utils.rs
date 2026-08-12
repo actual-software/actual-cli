@@ -75,6 +75,9 @@ pub(crate) fn fetch_error_message(e: &ActualError, api_url: &str) -> String {
         ActualError::ApiResponseError { code, message } => {
             format!("Actual AI returned an error ({code}): {message}")
         }
+        // A quit key or SIGINT during the fetch is the user's decision, not
+        // an API failure — do not dress it up as one.
+        ActualError::UserCancelled => "Cancelled".to_string(),
         _ => format!("API request failed: {e}"),
     }
 }
@@ -253,4 +256,59 @@ pub(crate) fn find_existing_output_files(root_dir: &Path, format: &OutputFormat)
 fn log_skip_invalid_project(project_path: &str, adr_id: &str) {
     let clean = console::strip_ansi_codes(project_path);
     tracing::warn!("skipping invalid project path '{clean}' for ADR '{adr_id}'");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── fetch_error_message ──
+
+    #[test]
+    fn test_fetch_error_message_service_unavailable() {
+        let msg = fetch_error_message(&ActualError::ServiceUnavailable, "https://api.test");
+        assert!(msg.contains("being updated"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_fetch_error_message_connection_refused_mentions_url() {
+        let e = ActualError::ApiError("error trying to connect: Connection refused".to_string());
+        let msg = fetch_error_message(&e, "https://api.test");
+        assert!(msg.contains("https://api.test"), "got: {msg}");
+        assert!(msg.contains("network"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_fetch_error_message_timeout() {
+        let e = ActualError::ApiError("operation timed out".to_string());
+        let msg = fetch_error_message(&e, "https://api.test");
+        assert!(msg.contains("timed out"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_fetch_error_message_api_response_error() {
+        let e = ActualError::ApiResponseError {
+            code: "500".to_string(),
+            message: "boom".to_string(),
+        };
+        let msg = fetch_error_message(&e, "https://api.test");
+        assert!(msg.contains("500") && msg.contains("boom"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_fetch_error_message_user_cancelled_is_not_an_api_failure() {
+        let msg = fetch_error_message(&ActualError::UserCancelled, "https://api.test");
+        assert_eq!(msg, "Cancelled");
+        assert!(
+            !msg.contains("API request failed"),
+            "a user cancel must not be presented as an API failure"
+        );
+    }
+
+    #[test]
+    fn test_fetch_error_message_generic_fallback() {
+        let e = ActualError::ApiError("something else".to_string());
+        let msg = fetch_error_message(&e, "https://api.test");
+        assert!(msg.starts_with("API request failed:"), "got: {msg}");
+    }
 }

@@ -64,6 +64,40 @@ fn build_tokio_runtime() -> Result<tokio::runtime::Runtime, ActualError> {
 /// Inner async logic for [`check_auth_with_timeout`].
 ///
 /// Separated for testability with `#[tokio::test]`.
+/// `ETXTBSY`: exec of a file that some process still holds open for writing.
+/// Same value (26) on Linux and macOS; Windows never produces it.
+const ETXTBSY: i32 = 26;
+
+/// Attempts for [`spawn_with_etxtbsy_retry`]; the race window is
+/// microseconds, so a couple of short retries always clears it.
+const SPAWN_ATTEMPTS: u32 = 3;
+const SPAWN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Spawn with a brief retry on ETXTBSY ("Text file busy").
+///
+/// Between an executable being written and exec'd, a subprocess forked by
+/// any other thread briefly inherits the writer's file descriptor and the
+/// exec fails with ETXTBSY. The condition is always transient (routine in
+/// the parallel test suite, which writes fake binaries while other tests
+/// spawn processes; possible in production when the claude binary is being
+/// updated concurrently), so retry before giving up.
+async fn spawn_with_etxtbsy_retry(
+    cmd: &mut tokio::process::Command,
+    attempts: u32,
+    delay: std::time::Duration,
+) -> std::io::Result<tokio::process::Child> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && attempt < attempts => {
+                tokio::time::sleep(delay).await;
+            }
+            result => return result,
+        }
+    }
+}
+
 async fn check_auth_async(
     binary_path: &Path,
     timeout: std::time::Duration,
@@ -74,11 +108,11 @@ async fn check_auth_async(
     // When the timeout future is dropped, the Child is dropped. With
     // kill_on_drop(true) tokio sends SIGKILL, preventing orphaned processes.
     cmd.kill_on_drop(true);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    let child = spawn_with_etxtbsy_retry(&mut cmd, SPAWN_ATTEMPTS, SPAWN_RETRY_DELAY)
+        .await
         .map_err(|e| ActualError::RunnerFailed {
             message: format!("failed to spawn claude: {e}"),
             stderr: String::new(),
@@ -142,11 +176,11 @@ async fn check_auth_async_no_json(
     cmd.args(["auth", "status"]);
     cmd.stdin(std::process::Stdio::null());
     cmd.kill_on_drop(true);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    let child = spawn_with_etxtbsy_retry(&mut cmd, SPAWN_ATTEMPTS, SPAWN_RETRY_DELAY)
+        .await
         .map_err(|e| ActualError::RunnerFailed {
             message: format!("failed to spawn claude: {e}"),
             stderr: String::new(),
@@ -236,6 +270,30 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         script
+    }
+
+    /// ETXTBSY retry: while any handle holds the script open for writing,
+    /// exec deterministically fails with ETXTBSY (checked against all open
+    /// write descriptions, including our own) — so the retry loop runs to
+    /// exhaustion and surfaces the original error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_spawn_retry_exhausts_on_persistent_etxtbsy() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("busy-claude");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&script)
+            .unwrap();
+
+        let mut cmd = tokio::process::Command::new(&script);
+        let result =
+            spawn_with_etxtbsy_retry(&mut cmd, 3, std::time::Duration::from_millis(1)).await;
+        let err = result.expect_err("spawn must fail while a writer holds the script");
+        assert_eq!(err.raw_os_error(), Some(ETXTBSY), "got: {err:?}");
     }
 
     #[test]

@@ -258,11 +258,9 @@ pub fn format_adr_diffs(adr_diffs: &[AdrDiff]) -> Vec<String> {
     let mut lines = Vec::new();
 
     for adr_diff in adr_diffs {
-        let short_id = if adr_diff.adr_id.len() > 8 {
-            &adr_diff.adr_id[..8]
-        } else {
-            &adr_diff.adr_id
-        };
+        // chars().take() rather than a byte slice: a byte index can split a
+        // multi-byte character in a non-ASCII id and panic.
+        let short_id: String = adr_diff.adr_id.chars().take(8).collect();
 
         match &adr_diff.change {
             AdrChange::Added => {
@@ -1086,6 +1084,40 @@ mod tests {
         assert!(
             plain.contains("+ [abcdef12] added"),
             "expected '+ [abcdef12] added' in: {plain}"
+        );
+    }
+
+    #[test]
+    fn test_format_adr_diffs_non_ascii_id_truncates_on_char_boundary() {
+        // A byte slice at index 8 would split the multi-byte 'β' here and
+        // panic; truncation must count characters, not bytes.
+        let diffs = vec![AdrDiff {
+            adr_id: "αβγδεζηθικλμ".to_string(),
+            change: AdrChange::Removed,
+            old_content: None,
+            new_content: None,
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let plain = console::strip_ansi_codes(&lines.join("\n")).into_owned();
+        assert!(
+            plain.contains("- [αβγδεζηθ] removed"),
+            "expected 8-character truncated id in: {plain}"
+        );
+    }
+
+    #[test]
+    fn test_format_adr_diffs_short_id_kept_whole() {
+        let diffs = vec![AdrDiff {
+            adr_id: "abc".to_string(),
+            change: AdrChange::Removed,
+            old_content: None,
+            new_content: None,
+        }];
+        let lines = format_adr_diffs(&diffs);
+        let plain = console::strip_ansi_codes(&lines.join("\n")).into_owned();
+        assert!(
+            plain.contains("- [abc] removed"),
+            "expected whole short id in: {plain}"
         );
     }
 
