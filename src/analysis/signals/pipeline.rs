@@ -56,6 +56,10 @@ fn walk_dir(current: &Path, out: &mut Vec<(PathBuf, TreeSitterLanguage)>) {
         return;
     };
     for entry in entries.flatten() {
+        // Symlinks are skipped to avoid infinite recursion from symlink cycles.
+        if matches!(entry.file_type(), Ok(ft) if ft.is_symlink()) {
+            continue;
+        }
         let path = entry.path();
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
@@ -578,8 +582,8 @@ mod tests {
 
     #[test]
     fn walk_dir_skips_symlinks_to_nonexistent_targets() {
-        // Create a directory with a broken symlink — the entry is neither
-        // is_dir() nor is_file(), so it should be silently skipped.
+        // Create a directory with a broken symlink — it's skipped by the
+        // is_symlink() guard before ever reaching is_dir()/is_file().
         let dir = TempDir::new().unwrap();
         // Write a real source file so the overall collect is non-empty
         fs::write(dir.path().join("real.rs"), "fn foo() {}").unwrap();
@@ -594,6 +598,37 @@ mod tests {
         let files = collect_source_files(dir.path());
         // Only the real file should be present; the broken symlink is skipped.
         assert_eq!(files.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_dir_skips_entries_that_are_neither_dir_nor_file() {
+        // A Unix domain socket is neither a directory nor a regular file
+        // (and isn't a symlink either) — exercises the fallthrough for
+        // exotic entry types like sockets, FIFOs, and devices.
+        use std::os::unix::net::UnixListener;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("real.rs"), "fn foo() {}").unwrap();
+        let _listener = UnixListener::bind(dir.path().join("sock")).unwrap();
+
+        let files = collect_source_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.to_string_lossy().contains("real.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_source_files_skips_symlink_cycle() {
+        // A symlink pointing back to an ancestor directory would cause
+        // infinite recursion (and a stack-overflow abort) if followed.
+        use std::os::unix::fs::symlink;
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("real.rs"), "fn foo() {}").unwrap();
+        symlink(dir.path(), dir.path().join("cycle")).unwrap();
+
+        let files = collect_source_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert!(files[0].0.to_string_lossy().contains("real.rs"));
     }
 
     #[tokio::test]

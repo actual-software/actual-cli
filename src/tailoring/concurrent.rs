@@ -63,6 +63,11 @@ impl<'a> ConcurrentTailoringConfig<'a> {
                 "concurrent_batch_size must be greater than 0".to_string(),
             ));
         }
+        if concurrency == 0 {
+            return Err(ActualError::ConfigError(
+                "concurrency must be greater than 0".to_string(),
+            ));
+        }
         Ok(Self {
             concurrency,
             batch_size,
@@ -1785,6 +1790,25 @@ mod tests {
         assert!(
             matches!(result, Err(ActualError::ConfigError(_))),
             "expected ConfigError for batch_size=0"
+        );
+    }
+
+    #[test]
+    fn test_config_new_zero_concurrency_returns_config_error() {
+        let fmt = OutputFormat::ClaudeMd;
+        let result = ConcurrentTailoringConfig::new(
+            0, // zero concurrency — should be rejected
+            15,
+            "",
+            None,
+            None,
+            Duration::from_secs(600),
+            &fmt,
+            None,
+        );
+        assert!(
+            matches!(result, Err(ActualError::ConfigError(_))),
+            "expected ConfigError for concurrency=0"
         );
     }
 

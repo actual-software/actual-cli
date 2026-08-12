@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 
 use super::markers;
@@ -168,8 +168,34 @@ pub fn write_files(
                 };
             }
 
-            // Write file
-            if let Err(e) = std::fs::write(&full_path, &result) {
+            // Refuse a target the user has made read-only. rename(2) needs
+            // write permission only on the containing directory, so an atomic
+            // write would happily replace a protected file — something the
+            // fs::write this replaced could not do. Probe for writability to
+            // preserve that behaviour. Opening without truncate leaves the
+            // file untouched, and this reproduces fs::write's own decision,
+            // so ACLs and non-owner cases resolve identically.
+            if full_path.exists() {
+                if let Err(e) = std::fs::OpenOptions::new().write(true).open(&full_path) {
+                    return WriteResult {
+                        path: file.path.clone(),
+                        action: WriteAction::Failed,
+                        version: 0,
+                        error: Some(format!("Failed to write file: {e}")),
+                    };
+                }
+            }
+
+            // Write atomically: write to a temp file in the same directory,
+            // then rename it into place. A plain fs::write truncates the
+            // target before writing, so a crash mid-write (SIGKILL, disk
+            // full) would leave the file truncated — and any hand-written
+            // prose outside the managed markers is unrecoverable, since this
+            // tool never authored it.
+            if let Err(e) = tempfile::NamedTempFile::new_in(parent).and_then(|mut tmp| {
+                tmp.write_all(result.as_bytes())?;
+                tmp.persist(&full_path).map_err(|e| e.error)
+            }) {
                 return WriteResult {
                     path: file.path.clone(),
                     action: WriteAction::Failed,
@@ -723,7 +749,7 @@ mod tests {
         );
     }
 
-    // ── 4eo.4: fs::write failure returns Failed ──
+    // ── 4eo.4: a read-only target is refused, not silently replaced ──
 
     #[test]
     #[cfg(unix)]
@@ -733,24 +759,59 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create temp dir");
         let target = dir.path().join("CLAUDE.md");
 
-        // Create the file and make it read-only.
+        // rename(2) only requires write permission on the containing directory,
+        // so an unguarded atomic write would replace this file even though the
+        // user deliberately made it read-only. write_files probes the target
+        // for writability first and refuses, matching the behaviour of the
+        // fs::write it replaced.
         std::fs::write(&target, "existing content").expect("failed to write initial file");
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444))
             .expect("failed to set permissions");
 
-        let files = vec![make_file("CLAUDE.md", "new content", "test", &[])];
+        let files = vec![make_file("CLAUDE.md", "new content", "test", &["adr-1"])];
 
         let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
-
-        // Restore permissions for cleanup
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644))
-            .expect("failed to restore permissions");
 
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].action,
             WriteAction::Failed,
-            "expected Failed when fs::write fails on read-only file"
+            "expected Failed: a read-only target must not be silently replaced"
+        );
+        assert_eq!(results[0].version, 0, "expected version 0 on failure");
+
+        let written = std::fs::read_to_string(&target).expect("failed to read file");
+        assert_eq!(
+            written, "existing content",
+            "a read-only target must be left byte-for-byte untouched"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_fails_when_temp_file_cannot_be_created() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let subdir = dir.path().join("locked");
+        std::fs::create_dir(&subdir).expect("failed to create subdir");
+
+        // Make the directory read-only. create_dir_all is a no-op (already
+        // exists) and canonicalize only needs read+execute, but
+        // NamedTempFile::new_in requires write permission to create the
+        // temp file — so the atomic write itself must fail here.
+        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o555))
+            .expect("failed to set permissions");
+
+        let files = vec![make_file("locked/CLAUDE.md", "content", "test", &["adr-1"])];
+
+        let results = write_files(dir.path(), &files, &OutputFormat::ClaudeMd);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].action,
+            WriteAction::Failed,
+            "expected Failed when the temp file can't be created in a read-only directory"
         );
         assert_eq!(results[0].version, 0, "expected version 0 on failure");
         let err_msg = results[0].error.as_ref().expect("expected error message");
