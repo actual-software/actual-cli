@@ -157,12 +157,30 @@ impl SessionJournal {
         })
     }
 
+    pub fn is_stop_acknowledged(&self, session_id: &str) -> bool {
+        self.stop_ack_path(session_id).exists()
+    }
+
+    pub fn set_stop_acknowledged(&self, session_id: &str) {
+        let path = self.stop_ack_path(session_id);
+        fs::write(&path, "1").ok();
+    }
+
+    pub fn clear_stop_acknowledged(&self, session_id: &str) {
+        let path = self.stop_ack_path(session_id);
+        fs::remove_file(&path).ok();
+    }
+
     fn session_path(&self, session_id: &str) -> PathBuf {
         self.dir.join(format!("{}.jsonl", Self::safe_id(session_id)))
     }
 
     fn cursor_path(&self, session_id: &str) -> PathBuf {
         self.dir.join(format!("{}.cursor", Self::safe_id(session_id)))
+    }
+
+    fn stop_ack_path(&self, session_id: &str) -> PathBuf {
+        self.dir.join(format!("{}.stop_ack", Self::safe_id(session_id)))
     }
 
     fn safe_id(session_id: &str) -> String {
@@ -329,6 +347,31 @@ mod tests {
         let events = journal.read_session("s1").unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event"], "valid");
+    }
+
+    #[test]
+    fn test_stop_ack_lifecycle() {
+        let dir = tempdir().unwrap();
+        let journal = SessionJournal::with_dir(dir.path().to_path_buf());
+        fs::create_dir_all(dir.path()).unwrap();
+
+        assert!(!journal.is_stop_acknowledged("s1"));
+
+        journal.set_stop_acknowledged("s1");
+        assert!(journal.is_stop_acknowledged("s1"));
+
+        journal.clear_stop_acknowledged("s1");
+        assert!(!journal.is_stop_acknowledged("s1"));
+    }
+
+    #[test]
+    fn test_stop_ack_clear_is_idempotent() {
+        let dir = tempdir().unwrap();
+        let journal = SessionJournal::with_dir(dir.path().to_path_buf());
+        fs::create_dir_all(dir.path()).unwrap();
+
+        journal.clear_stop_acknowledged("nonexistent");
+        assert!(!journal.is_stop_acknowledged("nonexistent"));
     }
 
     #[test]

@@ -26,7 +26,7 @@ const HOOK_ENTRIES: &[HookEntry] = &[
     HookEntry { hook_name: "SubagentStart", command: "actual observe subagent-tool", matcher: "", timeout: 1200 },
 ];
 
-pub fn install_hooks(settings_path: &Path) -> Result<(), ActualError> {
+pub fn install_hooks(settings_path: &Path, localhost: bool) -> Result<(), ActualError> {
     let mut settings: Value = if settings_path.exists() {
         let content = fs::read_to_string(settings_path).map_err(|e| {
             ActualError::ConfigError(format!("failed to read {}: {e}", settings_path.display()))
@@ -49,6 +49,15 @@ pub fn install_hooks(settings_path: &Path) -> Result<(), ActualError> {
     })?;
 
     for entry in HOOK_ENTRIES {
+        let command = if localhost {
+            format!(
+                "ACTUAL_AUTH_URL=http://localhost:3000 ACTUAL_API_URL=http://localhost:3002 {}",
+                entry.command
+            )
+        } else {
+            entry.command.to_string()
+        };
+
         let entries = hooks_obj
             .entry(entry.hook_name)
             .or_insert_with(|| serde_json::json!([]));
@@ -57,7 +66,7 @@ pub fn install_hooks(settings_path: &Path) -> Result<(), ActualError> {
             ActualError::ConfigError(format!("hooks.{} is not an array", entry.hook_name))
         })?;
 
-        let already_present = arr.iter().any(|matcher_group| {
+        let existing_idx = arr.iter().position(|matcher_group| {
             let matcher_matches = matcher_group
                 .get("matcher")
                 .and_then(|m| m.as_str())
@@ -67,24 +76,39 @@ pub fn install_hooks(settings_path: &Path) -> Result<(), ActualError> {
                 .and_then(|h| h.as_array())
                 .map(|hooks| {
                     hooks.iter().any(|hook| {
-                        hook.get("command").and_then(|c| c.as_str()) == Some(entry.command)
+                        let cmd = hook.get("command").and_then(|c| c.as_str()).unwrap_or("");
+                        cmd == command || cmd.ends_with(entry.command)
                     })
                 })
                 .unwrap_or(false);
             matcher_matches && command_matches
         });
 
-        if !already_present {
-            arr.push(serde_json::json!({
-                "matcher": entry.matcher,
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": entry.command,
-                        "timeout": entry.timeout
-                    }
-                ]
-            }));
+        match existing_idx {
+            Some(idx) => {
+                arr[idx] = serde_json::json!({
+                    "matcher": entry.matcher,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": command,
+                            "timeout": entry.timeout
+                        }
+                    ]
+                });
+            }
+            None => {
+                arr.push(serde_json::json!({
+                    "matcher": entry.matcher,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": command,
+                            "timeout": entry.timeout
+                        }
+                    ]
+                }));
+            }
         }
     }
 
@@ -125,7 +149,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path).unwrap();
+        install_hooks(&path, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = content["hooks"].as_object().unwrap();
@@ -163,7 +187,7 @@ mod tests {
         });
         fs::write(&path, serde_json::to_string(&existing).unwrap()).unwrap();
 
-        install_hooks(&path).unwrap();
+        install_hooks(&path, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
@@ -184,8 +208,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path).unwrap();
-        install_hooks(&path).unwrap();
+        install_hooks(&path, false).unwrap();
+        install_hooks(&path, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
@@ -213,7 +237,7 @@ mod tests {
         });
         fs::write(&path, serde_json::to_string(&existing).unwrap()).unwrap();
 
-        install_hooks(&path).unwrap();
+        install_hooks(&path, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(content["model"].as_str().unwrap(), "opus");
@@ -226,7 +250,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nested").join("deep").join("settings.json");
 
-        install_hooks(&path).unwrap();
+        install_hooks(&path, false).unwrap();
 
         assert!(path.exists());
     }
@@ -236,7 +260,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path).unwrap();
+        install_hooks(&path, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = content["hooks"].as_object().unwrap();
@@ -265,7 +289,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path).unwrap();
+        install_hooks(&path, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = content["hooks"].as_object().unwrap();
@@ -282,5 +306,65 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_localhost_flag_prefixes_commands() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        install_hooks(&path, true).unwrap();
+
+        let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let hooks = content["hooks"].as_object().unwrap();
+
+        let prefix = "ACTUAL_AUTH_URL=http://localhost:3000 ACTUAL_API_URL=http://localhost:3002 ";
+        assert_eq!(
+            hooks["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap(),
+            format!("{}actual observe session-start", prefix)
+        );
+        assert_eq!(
+            hooks["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap(),
+            format!("{}actual observe pre-tool", prefix)
+        );
+        assert_eq!(
+            hooks["Stop"][0]["hooks"][0]["command"].as_str().unwrap(),
+            format!("{}actual observe stop", prefix)
+        );
+    }
+
+    #[test]
+    fn test_localhost_to_production_replaces_commands() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        install_hooks(&path, true).unwrap();
+        install_hooks(&path, false).unwrap();
+
+        let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(session_start.len(), 1);
+        assert_eq!(
+            session_start[0]["hooks"][0]["command"].as_str().unwrap(),
+            "actual observe session-start"
+        );
+    }
+
+    #[test]
+    fn test_production_to_localhost_replaces_commands() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        install_hooks(&path, false).unwrap();
+        install_hooks(&path, true).unwrap();
+
+        let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(session_start.len(), 1);
+        let prefix = "ACTUAL_AUTH_URL=http://localhost:3000 ACTUAL_API_URL=http://localhost:3002 ";
+        assert_eq!(
+            session_start[0]["hooks"][0]["command"].as_str().unwrap(),
+            format!("{}actual observe session-start", prefix)
+        );
     }
 }

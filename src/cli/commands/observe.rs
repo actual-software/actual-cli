@@ -18,15 +18,15 @@ use crate::observe::types::HookType;
 
 pub fn exec(args: &ObserveArgs) -> Result<(), ActualError> {
     match &args.command {
-        ObserveCommand::Setup => exec_setup(),
+        ObserveCommand::Setup { localhost } => exec_setup(*localhost),
         ObserveCommand::Status => exec_status(),
         _ => exec_hook(args),
     }
 }
 
-fn exec_setup() -> Result<(), ActualError> {
+fn exec_setup(localhost: bool) -> Result<(), ActualError> {
     let settings_path = setup::default_settings_path();
-    setup::install_hooks(&settings_path)?;
+    setup::install_hooks(&settings_path, localhost)?;
     eprintln!("Observer hooks installed in {}", settings_path.display());
     Ok(())
 }
@@ -87,6 +87,7 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
     journal.append(session_id, &raw_payload, &aewo_code)?;
 
     if hook_type == HookType::PreToolUse {
+        journal.clear_stop_acknowledged(session_id);
         let action = classify_tool_action(tool_name, &raw_payload);
         match action {
             ToolAction::Free => {
@@ -110,12 +111,17 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
             }
         }
     } else if hook_type == HookType::Stop {
+        if journal.is_stop_acknowledged(session_id) {
+            println!("{{}}");
+            return Ok(());
+        }
         let cwd = raw_payload
             .get("cwd")
             .and_then(|v| v.as_str())
             .map(std::path::PathBuf::from);
         emit_stop_output(session_id, &journal, cwd.as_deref());
     } else if is_evaluation_boundary(hook_type, tool_name, &raw_payload) {
+        journal.clear_stop_acknowledged(session_id);
         emit_boundary_output(session_id, &journal, hook_type);
     } else {
         println!("{{}}");
@@ -158,6 +164,17 @@ fn extract_tool_input_text(payload: &serde_json::Value) -> Option<String> {
     serde_json::to_string(input).ok()
 }
 
+const ACTUAL_END_MARKER: &str = "<actual-end/>";
+
+fn response_contains_end_marker(output: &serde_json::Value) -> bool {
+    output
+        .get("hookSpecificOutput")
+        .and_then(|h| h.get("additionalContext"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.contains(ACTUAL_END_MARKER))
+        .unwrap_or(false)
+}
+
 fn emit_stop_output(session_id: &str, journal: &SessionJournal, cwd: Option<&std::path::Path>) {
     let hook_type = HookType::Stop;
     let diff_content = cwd
@@ -170,6 +187,10 @@ fn emit_stop_output(session_id: &str, journal: &SessionJournal, cwd: Option<&std
         if let Some(obj) = hook_output.as_object_mut() {
             obj.insert("_diff_content".to_string(), serde_json::json!(diff_content));
         }
+    }
+
+    if response_contains_end_marker(&hook_output) {
+        journal.set_stop_acknowledged(session_id);
     }
 
     let merged_disposition = extract_disposition(&hook_output);
