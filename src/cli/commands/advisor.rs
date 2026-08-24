@@ -173,14 +173,14 @@ fn ambiguous_message(value: &str, matches: &[&ConnectedRepository]) -> String {
 /// A git remote parsed into the repository's owner and name — the
 /// `actual-software` / `actual-cli` of `git@github.com:actual-software/actual-cli.git`.
 #[derive(Debug, PartialEq, Eq)]
-struct RepoRemote {
-    owner: String,
-    name: String,
+pub(crate) struct RepoRemote {
+    pub(crate) owner: String,
+    pub(crate) name: String,
 }
 
 impl RepoRemote {
     /// The `owner/name` form used in user-facing messages.
-    fn slug(&self) -> String {
+    pub(crate) fn slug(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
 }
@@ -191,7 +191,7 @@ impl RepoRemote {
 /// last two path segments are taken as owner and name, so a scheme, an optional
 /// `user@`, and a `host:port` prefix are all tolerated. Returns `None` when the
 /// URL does not yield an owner/name pair.
-fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
+pub(crate) fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
     let trimmed = url.trim().trim_end_matches('/');
     let without_git = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     // Split on both the path separator and the scp-style host separator, dropping
@@ -215,7 +215,7 @@ fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
 /// owner differs still resolves to its connected upstream. Returns every
 /// candidate — the caller scopes on exactly one and falls back to org level on
 /// zero or several.
-fn match_remote_to_repos<'a>(
+pub(crate) fn match_remote_to_repos<'a>(
     remote: &RepoRemote,
     repos: &'a [ConnectedRepository],
 ) -> Vec<&'a ConnectedRepository> {

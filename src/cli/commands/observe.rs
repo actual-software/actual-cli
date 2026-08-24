@@ -1,12 +1,15 @@
 use std::io::{self, Read};
+use std::path::Path;
 
 use chrono::{Duration as ChronoDuration, Utc};
+use sha2::{Digest, Sha256};
 
 use crate::api::client::{ActualApiClient, DEFAULT_API_URL};
 use crate::api::types::{InterventionEvent, InterventionRequest, InterventionResponse};
 use crate::auth::{oauth, store};
 use crate::auth::store::StoredCredentials;
 use crate::cli::args::{ObserveArgs, ObserveCommand};
+use crate::config::{paths as config_paths, sticky};
 use crate::error::ActualError;
 use crate::observe::boundary::{is_evaluation_boundary, classify_tool_action, ToolAction};
 use crate::observe::canonicalize;
@@ -28,7 +31,91 @@ fn exec_setup(localhost: bool) -> Result<(), ActualError> {
     let settings_path = setup::default_settings_path();
     setup::install_hooks(&settings_path, localhost)?;
     eprintln!("Observer hooks installed in {}", settings_path.display());
+
+    if let Err(e) = try_resolve_and_persist_scope(localhost) {
+        eprintln!("advisor: could not resolve repo scope: {e}");
+        eprintln!("advisor: hooks will query at org level until scope is resolved");
+    }
+
     Ok(())
+}
+
+fn try_resolve_and_persist_scope(localhost: bool) -> Result<(), ActualError> {
+    let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
+    let org_id = &creds.organization_id;
+
+    let cwd = std::env::current_dir().map_err(|e| {
+        ActualError::ConfigError(format!("failed to get cwd: {e}"))
+    })?;
+
+    let origin_url = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(&cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let origin_url = origin_url.ok_or_else(|| {
+        ActualError::ConfigError("no git remote origin found".to_string())
+    })?;
+
+    let repo_key = format!("{:x}", Sha256::digest(origin_url.as_bytes()));
+
+    let remote = super::advisor::parse_git_remote_url(&origin_url).ok_or_else(|| {
+        ActualError::ConfigError(format!("could not parse git remote: {origin_url}"))
+    })?;
+
+    let api_url = if localhost {
+        "http://localhost:3002".to_string()
+    } else {
+        std::env::var("ACTUAL_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string())
+    };
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+        ActualError::ConfigError(format!("failed to create runtime: {e}"))
+    })?;
+
+    rt.block_on(async {
+        let client = ActualApiClient::new(&api_url)?.with_bearer(&creds.access_token);
+        let repos = client.list_connected_repos(org_id).await.map_err(|e| {
+            ActualError::ConfigError(format!("failed to list repos: {e}"))
+        })?;
+
+        let matches = super::advisor::match_remote_to_repos(&remote, &repos);
+        match matches.as_slice() {
+            [single] => {
+                let qname = format!("{}/{}", single.external_owner, single.name);
+                let scope = crate::config::types::StickyScope::repo(
+                    &single.repo_unique_id,
+                    Some(qname.clone()),
+                );
+                let mut config = config_paths::load()?;
+                sticky::set_scope(&mut config, &repo_key, scope);
+                config_paths::save(&config)?;
+                eprintln!("advisor: scoped to {} ({})", qname, &single.repo_unique_id[..8]);
+                Ok(())
+            }
+            [] => {
+                eprintln!(
+                    "advisor: {} is not a connected repository; hooks will query at org level",
+                    remote.slug()
+                );
+                Ok(())
+            }
+            _many => {
+                eprintln!(
+                    "advisor: origin {} matches multiple repos; run `actual advisor query --repo owner/name` to pin scope",
+                    remote.slug()
+                );
+                Ok(())
+            }
+        }
+    })
 }
 
 fn exec_status() -> Result<(), ActualError> {
@@ -318,10 +405,12 @@ fn try_evaluate_at_boundary(
 
     let mut responses: Vec<InterventionResponse> = Vec::new();
 
+    let repo_unique_id = resolve_repo_unique_id_from_events(&new_events);
+
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let request = InterventionRequest {
             org_id: creds.organization_id.clone(),
-            repo_unique_id: None,
+            repo_unique_id: repo_unique_id.clone(),
             session_id: session_id.to_string(),
             events: chunk.to_vec(),
         };
@@ -359,6 +448,59 @@ fn try_evaluate_at_boundary(
     journal.write_cursor(session_id, new_cursor)?;
 
     Ok(merge_chunk_responses(responses))
+}
+
+/// Resolve the repo_unique_id from the sticky scope using the cwd from event payloads.
+/// Falls back to None (org-level) if no sticky scope is cached or no cwd is available.
+fn resolve_repo_unique_id_from_events(events: &[serde_json::Value]) -> Option<String> {
+    let cwd = events
+        .iter()
+        .find_map(|e| e.get("cwd").and_then(|v| v.as_str()))
+        .map(Path::new);
+
+    if cwd.is_none() {
+        eprintln!("advisor: resolve_repo_unique_id: no cwd in {} events", events.len());
+        return None;
+    }
+    let cwd = cwd.unwrap();
+
+    let origin_url = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let key_input = origin_url.as_deref().unwrap_or(&cwd_str);
+    let repo_key = format!("{:x}", Sha256::digest(key_input.as_bytes()));
+
+    eprintln!(
+        "advisor: resolve_repo_unique_id: cwd={} origin={:?} key={}",
+        cwd.display(),
+        origin_url.as_deref().unwrap_or("(none)"),
+        &repo_key[..12],
+    );
+
+    let config = match config_paths::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("advisor: resolve_repo_unique_id: config load failed: {e}");
+            return None;
+        }
+    };
+
+    let scope = sticky::get_scope(&config, &repo_key);
+    eprintln!(
+        "advisor: resolve_repo_unique_id: scope={:?}",
+        scope.as_ref().map(|s| s.repo_unique_id.as_deref()),
+    );
+    scope?.repo_unique_id
 }
 
 /// Extract the highest disposition from a merged hook output.
