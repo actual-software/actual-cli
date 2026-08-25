@@ -12,21 +12,25 @@ struct HookEntry {
     timeout: u64,
 }
 
-const HOOK_ENTRIES: &[HookEntry] = &[
+const DEFAULT_HOOK_ENTRIES: &[HookEntry] = &[
     HookEntry { hook_name: "SessionStart", command: "actual observe session-start", matcher: "", timeout: 1200 },
     HookEntry { hook_name: "UserPromptSubmit", command: "actual observe prompt", matcher: "", timeout: 1200 },
+    HookEntry { hook_name: "PreToolUse", command: "actual observe pre-tool", matcher: "ExitPlanMode", timeout: 30 },
+    HookEntry { hook_name: "Stop", command: "actual observe stop", matcher: "", timeout: 1200 },
+    HookEntry { hook_name: "SessionEnd", command: "actual observe session-end", matcher: "", timeout: 1200 },
+];
+
+const EXTRA_HOOK_ENTRIES: &[HookEntry] = &[
     HookEntry { hook_name: "PreToolUse", command: "actual observe pre-tool", matcher: "Edit|Write", timeout: 30 },
     HookEntry { hook_name: "PreToolUse", command: "actual observe pre-tool", matcher: "Bash", timeout: 30 },
     HookEntry { hook_name: "PreToolUse", command: "actual observe pre-tool", matcher: "Agent", timeout: 600 },
     HookEntry { hook_name: "PostToolUse", command: "actual observe post-tool", matcher: "", timeout: 1200 },
     HookEntry { hook_name: "PostToolUseFailure", command: "actual observe post-tool-failure", matcher: "", timeout: 1200 },
-    HookEntry { hook_name: "Stop", command: "actual observe stop", matcher: "", timeout: 1200 },
-    HookEntry { hook_name: "SessionEnd", command: "actual observe session-end", matcher: "", timeout: 1200 },
     HookEntry { hook_name: "PreCompact", command: "actual observe pre-compact", matcher: "", timeout: 1200 },
     HookEntry { hook_name: "SubagentStart", command: "actual observe subagent-tool", matcher: "", timeout: 1200 },
 ];
 
-pub fn install_hooks(settings_path: &Path, localhost: bool) -> Result<(), ActualError> {
+pub fn install_hooks(settings_path: &Path, localhost: bool, hook_all: bool) -> Result<(), ActualError> {
     let mut settings: Value = if settings_path.exists() {
         let content = fs::read_to_string(settings_path).map_err(|e| {
             ActualError::ConfigError(format!("failed to read {}: {e}", settings_path.display()))
@@ -48,7 +52,13 @@ pub fn install_hooks(settings_path: &Path, localhost: bool) -> Result<(), Actual
         ActualError::ConfigError("hooks is not a JSON object".to_string())
     })?;
 
-    for entry in HOOK_ENTRIES {
+    let entries: Vec<&HookEntry> = if hook_all {
+        DEFAULT_HOOK_ENTRIES.iter().chain(EXTRA_HOOK_ENTRIES.iter()).collect()
+    } else {
+        DEFAULT_HOOK_ENTRIES.iter().collect()
+    };
+
+    for entry in entries {
         let command = if localhost {
             format!(
                 "ACTUAL_AUTH_URL=http://localhost:3000 ACTUAL_API_URL=http://localhost:3002 {}",
@@ -145,32 +155,54 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn test_inserts_hooks_into_empty_settings() {
+    fn test_inserts_default_hooks_into_empty_settings() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path, false).unwrap();
+        install_hooks(&path, false, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = content["hooks"].as_object().unwrap();
 
-        assert_eq!(hooks.len(), 9);
+        assert_eq!(hooks.len(), 5, "default installs 5 hook types: SessionStart, UserPromptSubmit, PreToolUse, Stop, SessionEnd");
+        let expected_default = vec!["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop", "SessionEnd"];
+        for hook in &expected_default {
+            assert!(hooks.contains_key(*hook), "missing default hook: {hook}");
+        }
         assert_eq!(
             hooks["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap(),
             "actual observe session-start"
         );
-        // PreToolUse now has 3 matcher-specific entries
         let pre_tool = hooks["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool.len(), 3);
-        assert_eq!(pre_tool[0]["matcher"].as_str().unwrap(), "Edit|Write");
-        assert_eq!(pre_tool[0]["hooks"][0]["timeout"].as_u64().unwrap(), 30);
-        assert_eq!(pre_tool[1]["matcher"].as_str().unwrap(), "Bash");
-        assert_eq!(pre_tool[2]["matcher"].as_str().unwrap(), "Agent");
-        assert_eq!(pre_tool[2]["hooks"][0]["timeout"].as_u64().unwrap(), 600);
-        assert_eq!(
-            hooks["SessionStart"][0]["matcher"].as_str().unwrap(),
-            ""
-        );
+        assert_eq!(pre_tool.len(), 1, "default has only ExitPlanMode matcher");
+        assert_eq!(pre_tool[0]["matcher"].as_str().unwrap(), "ExitPlanMode");
+    }
+
+    #[test]
+    fn test_hook_all_installs_all_hooks() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        install_hooks(&path, false, true).unwrap();
+
+        let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let hooks = content["hooks"].as_object().unwrap();
+
+        let expected = vec![
+            "SessionStart", "UserPromptSubmit", "PreToolUse",
+            "PostToolUse", "PostToolUseFailure", "Stop",
+            "SessionEnd", "PreCompact", "SubagentStart",
+        ];
+        for hook in &expected {
+            assert!(hooks.contains_key(*hook), "missing hook: {hook}");
+        }
+        let pre_tool = hooks["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool.len(), 4, "hook-all has 4 PreToolUse matchers: ExitPlanMode, Edit|Write, Bash, Agent");
+        assert_eq!(pre_tool[0]["matcher"].as_str().unwrap(), "ExitPlanMode");
+        assert_eq!(pre_tool[1]["matcher"].as_str().unwrap(), "Edit|Write");
+        assert_eq!(pre_tool[2]["matcher"].as_str().unwrap(), "Bash");
+        assert_eq!(pre_tool[3]["matcher"].as_str().unwrap(), "Agent");
+        assert_eq!(pre_tool[3]["hooks"][0]["timeout"].as_u64().unwrap(), 600);
     }
 
     #[test]
@@ -187,7 +219,7 @@ mod tests {
         });
         fs::write(&path, serde_json::to_string(&existing).unwrap()).unwrap();
 
-        install_hooks(&path, false).unwrap();
+        install_hooks(&path, false, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
@@ -204,26 +236,33 @@ mod tests {
     }
 
     #[test]
-    fn test_idempotent() {
+    fn test_idempotent_default() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path, false).unwrap();
-        install_hooks(&path, false).unwrap();
+        install_hooks(&path, false, false).unwrap();
+        install_hooks(&path, false, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
-        assert_eq!(
-            session_start.len(),
-            1,
-            "should not duplicate hooks on re-run"
-        );
+        assert_eq!(session_start.len(), 1, "should not duplicate hooks on re-run");
         let pre_tool = content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(
-            pre_tool.len(),
-            3,
-            "PreToolUse should have exactly 3 matcher entries after re-run"
-        );
+        assert_eq!(pre_tool.len(), 1, "default PreToolUse should have exactly 1 matcher entry after re-run");
+    }
+
+    #[test]
+    fn test_idempotent_hook_all() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        install_hooks(&path, false, true).unwrap();
+        install_hooks(&path, false, true).unwrap();
+
+        let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(session_start.len(), 1, "should not duplicate hooks on re-run");
+        let pre_tool = content["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre_tool.len(), 4, "hook-all PreToolUse should have exactly 4 matcher entries after re-run");
     }
 
     #[test]
@@ -237,7 +276,7 @@ mod tests {
         });
         fs::write(&path, serde_json::to_string(&existing).unwrap()).unwrap();
 
-        install_hooks(&path, false).unwrap();
+        install_hooks(&path, false, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(content["model"].as_str().unwrap(), "opus");
@@ -250,38 +289,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nested").join("deep").join("settings.json");
 
-        install_hooks(&path, false).unwrap();
+        install_hooks(&path, false, false).unwrap();
 
         assert!(path.exists());
-    }
-
-    #[test]
-    fn test_all_eight_hooks_installed() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-
-        install_hooks(&path, false).unwrap();
-
-        let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        let hooks = content["hooks"].as_object().unwrap();
-
-        let expected = vec![
-            "SessionStart",
-            "UserPromptSubmit",
-            "PreToolUse",
-            "PostToolUse",
-            "PostToolUseFailure",
-            "Stop",
-            "SessionEnd",
-            "PreCompact",
-            "SubagentStart",
-        ];
-        for hook in &expected {
-            assert!(
-                hooks.contains_key(*hook),
-                "missing hook: {hook}"
-            );
-        }
     }
 
     #[test]
@@ -289,7 +299,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path, false).unwrap();
+        install_hooks(&path, false, true).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = content["hooks"].as_object().unwrap();
@@ -313,7 +323,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path, true).unwrap();
+        install_hooks(&path, true, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let hooks = content["hooks"].as_object().unwrap();
@@ -338,8 +348,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path, true).unwrap();
-        install_hooks(&path, false).unwrap();
+        install_hooks(&path, true, false).unwrap();
+        install_hooks(&path, false, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
@@ -355,8 +365,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("settings.json");
 
-        install_hooks(&path, false).unwrap();
-        install_hooks(&path, true).unwrap();
+        install_hooks(&path, false, false).unwrap();
+        install_hooks(&path, true, false).unwrap();
 
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let session_start = content["hooks"]["SessionStart"].as_array().unwrap();

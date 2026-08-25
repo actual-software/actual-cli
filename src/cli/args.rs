@@ -415,6 +415,9 @@ pub enum ObserveCommand {
         /// Write hooks that target local dev services (localhost:3000 auth, localhost:3002 API)
         #[arg(long)]
         localhost: bool,
+        /// Install all hooks (including per-tool-use, post-tool, pre-compact, subagent) instead of the lean default set
+        #[arg(long)]
+        hook_all: bool,
     },
     /// Check observer status (auth, hooks, API reachability)
     Status,

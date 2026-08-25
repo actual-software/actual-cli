@@ -21,16 +21,17 @@ use crate::observe::types::HookType;
 
 pub fn exec(args: &ObserveArgs) -> Result<(), ActualError> {
     match &args.command {
-        ObserveCommand::Setup { localhost } => exec_setup(*localhost),
+        ObserveCommand::Setup { localhost, hook_all } => exec_setup(*localhost, *hook_all),
         ObserveCommand::Status => exec_status(),
         _ => exec_hook(args),
     }
 }
 
-fn exec_setup(localhost: bool) -> Result<(), ActualError> {
+fn exec_setup(localhost: bool, hook_all: bool) -> Result<(), ActualError> {
     let settings_path = setup::default_settings_path();
-    setup::install_hooks(&settings_path, localhost)?;
-    eprintln!("Observer hooks installed in {}", settings_path.display());
+    setup::install_hooks(&settings_path, localhost, hook_all)?;
+    let mode = if hook_all { "all hooks" } else { "default hooks (lean)" };
+    eprintln!("Observer hooks installed in {} ({})", settings_path.display(), mode);
 
     if let Err(e) = try_resolve_and_persist_scope(localhost) {
         eprintln!("advisor: could not resolve repo scope: {e}");
