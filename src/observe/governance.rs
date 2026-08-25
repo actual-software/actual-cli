@@ -449,6 +449,93 @@ pub fn format_assurance_output(response: &AssuranceResponse) -> String {
     out
 }
 
+// ── Provenance ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProvenanceEventType {
+    IntentReceived,
+    PrePlanBrief,
+    PlanProposed,
+    PlanReviewed,
+    AuthorizationIssued,
+    ScopeChangeDetected,
+    ScopeReviewed,
+    ReworkRequested,
+    DecompositionRequested,
+    FinalAssurance,
+    ConformanceDetermined,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceEvent {
+    pub event_type: ProvenanceEventType,
+    pub actor: String,
+    pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    #[serde(default)]
+    pub policy_refs: Vec<String>,
+    #[serde(default)]
+    pub context: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceChainResponse {
+    pub session_id: String,
+    pub events: Vec<ProvenanceEvent>,
+}
+
+pub fn format_governance_history(response: &ProvenanceChainResponse) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "GOVERNANCE PROVENANCE — session {}",
+        response.session_id
+    ));
+    lines.push(format!("{} events in chain\n", response.events.len()));
+
+    for (i, event) in response.events.iter().enumerate() {
+        let decision_str = event
+            .decision
+            .as_deref()
+            .map(|d| format!(" → {d}"))
+            .unwrap_or_default();
+
+        lines.push(format!(
+            "  {}. [{:?}]{} — {} at {}",
+            i + 1,
+            event.event_type,
+            decision_str,
+            event.actor,
+            event.timestamp,
+        ));
+
+        if let Some(ref state) = event.repo_state {
+            lines.push(format!("     repo: {state}"));
+        }
+
+        if !event.evidence_refs.is_empty() {
+            lines.push(format!(
+                "     evidence: {}",
+                event.evidence_refs.join(", ")
+            ));
+        }
+
+        if !event.policy_refs.is_empty() {
+            lines.push(format!(
+                "     policies: {}",
+                event.policy_refs.join(", ")
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
 // ── Plan Capture ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -1662,5 +1749,133 @@ mod tests {
         assert!(output.contains("NON-CONFORMANT"));
         assert!(output.contains("2 tests failing"));
         assert!(output.contains("Address the findings"));
+    }
+
+    // ── Provenance tests ─────────────────────────────────────────────
+
+    // 30. ProvenanceEventType serde round-trip
+    #[test]
+    fn provenance_event_type_round_trip() {
+        let types = vec![
+            ProvenanceEventType::IntentReceived,
+            ProvenanceEventType::PrePlanBrief,
+            ProvenanceEventType::PlanProposed,
+            ProvenanceEventType::PlanReviewed,
+            ProvenanceEventType::AuthorizationIssued,
+            ProvenanceEventType::ScopeChangeDetected,
+            ProvenanceEventType::ScopeReviewed,
+            ProvenanceEventType::ReworkRequested,
+            ProvenanceEventType::DecompositionRequested,
+            ProvenanceEventType::FinalAssurance,
+            ProvenanceEventType::ConformanceDetermined,
+        ];
+        for t in types {
+            let json = serde_json::to_string(&t).unwrap();
+            let back: ProvenanceEventType = serde_json::from_str(&json).unwrap();
+            assert_eq!(t, back);
+        }
+    }
+
+    // 31. ProvenanceEvent round-trip
+    #[test]
+    fn provenance_event_round_trip() {
+        let event = ProvenanceEvent {
+            event_type: ProvenanceEventType::PlanReviewed,
+            actor: "governance-evaluator".into(),
+            timestamp: "2026-08-11T12:00:00Z".into(),
+            repo_state: Some("abc123".into()),
+            decision: Some("APPROVE".into()),
+            evidence_refs: vec!["proposal-1".into()],
+            policy_refs: vec!["p1".into(), "p2".into()],
+            context: serde_json::json!({"findings_count": 0}),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: ProvenanceEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.event_type, ProvenanceEventType::PlanReviewed);
+        assert_eq!(back.decision, Some("APPROVE".into()));
+        assert_eq!(back.policy_refs.len(), 2);
+    }
+
+    // 32. ProvenanceChainResponse round-trip
+    #[test]
+    fn provenance_chain_response_round_trip() {
+        let resp = ProvenanceChainResponse {
+            session_id: "sess-1".into(),
+            events: vec![
+                ProvenanceEvent {
+                    event_type: ProvenanceEventType::IntentReceived,
+                    actor: "agent".into(),
+                    timestamp: "2026-08-11T12:00:00Z".into(),
+                    repo_state: None,
+                    decision: None,
+                    evidence_refs: vec![],
+                    policy_refs: vec![],
+                    context: serde_json::json!({}),
+                },
+                ProvenanceEvent {
+                    event_type: ProvenanceEventType::PlanReviewed,
+                    actor: "evaluator".into(),
+                    timestamp: "2026-08-11T12:00:01Z".into(),
+                    repo_state: Some("abc123".into()),
+                    decision: Some("APPROVE".into()),
+                    evidence_refs: vec!["proposal-1".into()],
+                    policy_refs: vec![],
+                    context: serde_json::json!({}),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let back: ProvenanceChainResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.session_id, "sess-1");
+        assert_eq!(back.events.len(), 2);
+    }
+
+    // 33. format_governance_history shows events
+    #[test]
+    fn format_governance_history_shows_events() {
+        let resp = ProvenanceChainResponse {
+            session_id: "sess-1".into(),
+            events: vec![
+                ProvenanceEvent {
+                    event_type: ProvenanceEventType::PlanProposed,
+                    actor: "agent".into(),
+                    timestamp: "2026-08-11T12:00:00Z".into(),
+                    repo_state: Some("abc123".into()),
+                    decision: None,
+                    evidence_refs: vec!["proposal-1".into()],
+                    policy_refs: vec![],
+                    context: serde_json::json!({}),
+                },
+                ProvenanceEvent {
+                    event_type: ProvenanceEventType::PlanReviewed,
+                    actor: "evaluator".into(),
+                    timestamp: "2026-08-11T12:00:01Z".into(),
+                    repo_state: None,
+                    decision: Some("APPROVE".into()),
+                    evidence_refs: vec![],
+                    policy_refs: vec!["policy-1".into()],
+                    context: serde_json::json!({}),
+                },
+            ],
+        };
+        let output = format_governance_history(&resp);
+        assert!(output.contains("GOVERNANCE PROVENANCE"));
+        assert!(output.contains("sess-1"));
+        assert!(output.contains("2 events"));
+        assert!(output.contains("PlanProposed"));
+        assert!(output.contains("APPROVE"));
+        assert!(output.contains("abc123"));
+        assert!(output.contains("policy-1"));
+    }
+
+    // 34. format_governance_history empty chain
+    #[test]
+    fn format_governance_history_empty_chain() {
+        let resp = ProvenanceChainResponse {
+            session_id: "sess-empty".into(),
+            events: vec![],
+        };
+        let output = format_governance_history(&resp);
+        assert!(output.contains("0 events"));
     }
 }

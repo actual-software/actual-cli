@@ -1,12 +1,15 @@
 use std::io::{self, Read};
+use std::path::Path;
 
 use chrono::{Duration as ChronoDuration, Utc};
+use sha2::{Digest, Sha256};
 
 use crate::api::client::{ActualApiClient, DEFAULT_API_URL};
 use crate::api::types::{InterventionEvent, InterventionRequest, InterventionResponse};
 use crate::auth::{oauth, store};
 use crate::auth::store::StoredCredentials;
 use crate::cli::args::{ObserveArgs, ObserveCommand};
+use crate::config::{paths as config_paths, sticky};
 use crate::error::ActualError;
 use crate::observe::boundary::{is_evaluation_boundary, classify_tool_action, ToolAction};
 use crate::observe::canonicalize;
@@ -18,17 +21,102 @@ use crate::observe::types::HookType;
 
 pub fn exec(args: &ObserveArgs) -> Result<(), ActualError> {
     match &args.command {
-        ObserveCommand::Setup => exec_setup(),
+        ObserveCommand::Setup { localhost, hook_all } => exec_setup(*localhost, *hook_all),
         ObserveCommand::Status => exec_status(),
         _ => exec_hook(args),
     }
 }
 
-fn exec_setup() -> Result<(), ActualError> {
+fn exec_setup(localhost: bool, hook_all: bool) -> Result<(), ActualError> {
     let settings_path = setup::default_settings_path();
-    setup::install_hooks(&settings_path)?;
-    eprintln!("Observer hooks installed in {}", settings_path.display());
+    setup::install_hooks(&settings_path, localhost, hook_all)?;
+    let mode = if hook_all { "all hooks" } else { "default hooks (lean)" };
+    eprintln!("Observer hooks installed in {} ({})", settings_path.display(), mode);
+
+    if let Err(e) = try_resolve_and_persist_scope(localhost) {
+        eprintln!("advisor: could not resolve repo scope: {e}");
+        eprintln!("advisor: hooks will query at org level until scope is resolved");
+    }
+
     Ok(())
+}
+
+fn try_resolve_and_persist_scope(localhost: bool) -> Result<(), ActualError> {
+    let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
+    let org_id = &creds.organization_id;
+
+    let cwd = std::env::current_dir().map_err(|e| {
+        ActualError::ConfigError(format!("failed to get cwd: {e}"))
+    })?;
+
+    let origin_url = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(&cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let origin_url = origin_url.ok_or_else(|| {
+        ActualError::ConfigError("no git remote origin found".to_string())
+    })?;
+
+    let repo_key = format!("{:x}", Sha256::digest(origin_url.as_bytes()));
+
+    let remote = super::advisor::parse_git_remote_url(&origin_url).ok_or_else(|| {
+        ActualError::ConfigError(format!("could not parse git remote: {origin_url}"))
+    })?;
+
+    let api_url = if localhost {
+        "http://localhost:3002".to_string()
+    } else {
+        std::env::var("ACTUAL_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string())
+    };
+
+    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+        ActualError::ConfigError(format!("failed to create runtime: {e}"))
+    })?;
+
+    rt.block_on(async {
+        let client = ActualApiClient::new(&api_url)?.with_bearer(&creds.access_token);
+        let repos = client.list_connected_repos(org_id).await.map_err(|e| {
+            ActualError::ConfigError(format!("failed to list repos: {e}"))
+        })?;
+
+        let matches = super::advisor::match_remote_to_repos(&remote, &repos);
+        match matches.as_slice() {
+            [single] => {
+                let qname = format!("{}/{}", single.external_owner, single.name);
+                let scope = crate::config::types::StickyScope::repo(
+                    &single.repo_unique_id,
+                    Some(qname.clone()),
+                );
+                let mut config = config_paths::load()?;
+                sticky::set_scope(&mut config, &repo_key, scope);
+                config_paths::save(&config)?;
+                eprintln!("advisor: scoped to {} ({})", qname, &single.repo_unique_id[..8]);
+                Ok(())
+            }
+            [] => {
+                eprintln!(
+                    "advisor: {} is not a connected repository; hooks will query at org level",
+                    remote.slug()
+                );
+                Ok(())
+            }
+            _many => {
+                eprintln!(
+                    "advisor: origin {} matches multiple repos; run `actual advisor query --repo owner/name` to pin scope",
+                    remote.slug()
+                );
+                Ok(())
+            }
+        }
+    })
 }
 
 fn exec_status() -> Result<(), ActualError> {
@@ -87,6 +175,7 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
     journal.append(session_id, &raw_payload, &aewo_code)?;
 
     if hook_type == HookType::PreToolUse {
+        journal.clear_stop_acknowledged(session_id);
         let action = classify_tool_action(tool_name, &raw_payload);
         match action {
             ToolAction::Free => {
@@ -110,12 +199,17 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
             }
         }
     } else if hook_type == HookType::Stop {
+        if journal.is_stop_acknowledged(session_id) {
+            println!("{{}}");
+            return Ok(());
+        }
         let cwd = raw_payload
             .get("cwd")
             .and_then(|v| v.as_str())
             .map(std::path::PathBuf::from);
         emit_stop_output(session_id, &journal, cwd.as_deref());
     } else if is_evaluation_boundary(hook_type, tool_name, &raw_payload) {
+        journal.clear_stop_acknowledged(session_id);
         emit_boundary_output(session_id, &journal, hook_type);
     } else {
         println!("{{}}");
@@ -158,6 +252,17 @@ fn extract_tool_input_text(payload: &serde_json::Value) -> Option<String> {
     serde_json::to_string(input).ok()
 }
 
+const ACTUAL_END_MARKER: &str = "<actual-end/>";
+
+fn response_contains_end_marker(output: &serde_json::Value) -> bool {
+    output
+        .get("hookSpecificOutput")
+        .and_then(|h| h.get("additionalContext"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.contains(ACTUAL_END_MARKER))
+        .unwrap_or(false)
+}
+
 fn emit_stop_output(session_id: &str, journal: &SessionJournal, cwd: Option<&std::path::Path>) {
     let hook_type = HookType::Stop;
     let diff_content = cwd
@@ -170,6 +275,10 @@ fn emit_stop_output(session_id: &str, journal: &SessionJournal, cwd: Option<&std
         if let Some(obj) = hook_output.as_object_mut() {
             obj.insert("_diff_content".to_string(), serde_json::json!(diff_content));
         }
+    }
+
+    if response_contains_end_marker(&hook_output) {
+        journal.set_stop_acknowledged(session_id);
     }
 
     let merged_disposition = extract_disposition(&hook_output);
@@ -297,10 +406,12 @@ fn try_evaluate_at_boundary(
 
     let mut responses: Vec<InterventionResponse> = Vec::new();
 
+    let repo_unique_id = resolve_repo_unique_id_from_events(&new_events);
+
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let request = InterventionRequest {
             org_id: creds.organization_id.clone(),
-            repo_unique_id: None,
+            repo_unique_id: repo_unique_id.clone(),
             session_id: session_id.to_string(),
             events: chunk.to_vec(),
         };
@@ -338,6 +449,59 @@ fn try_evaluate_at_boundary(
     journal.write_cursor(session_id, new_cursor)?;
 
     Ok(merge_chunk_responses(responses))
+}
+
+/// Resolve the repo_unique_id from the sticky scope using the cwd from event payloads.
+/// Falls back to None (org-level) if no sticky scope is cached or no cwd is available.
+fn resolve_repo_unique_id_from_events(events: &[serde_json::Value]) -> Option<String> {
+    let cwd = events
+        .iter()
+        .find_map(|e| e.get("cwd").and_then(|v| v.as_str()))
+        .map(Path::new);
+
+    if cwd.is_none() {
+        eprintln!("advisor: resolve_repo_unique_id: no cwd in {} events", events.len());
+        return None;
+    }
+    let cwd = cwd.unwrap();
+
+    let origin_url = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let key_input = origin_url.as_deref().unwrap_or(&cwd_str);
+    let repo_key = format!("{:x}", Sha256::digest(key_input.as_bytes()));
+
+    eprintln!(
+        "advisor: resolve_repo_unique_id: cwd={} origin={:?} key={}",
+        cwd.display(),
+        origin_url.as_deref().unwrap_or("(none)"),
+        &repo_key[..12],
+    );
+
+    let config = match config_paths::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("advisor: resolve_repo_unique_id: config load failed: {e}");
+            return None;
+        }
+    };
+
+    let scope = sticky::get_scope(&config, &repo_key);
+    eprintln!(
+        "advisor: resolve_repo_unique_id: scope={:?}",
+        scope.as_ref().map(|s| s.repo_unique_id.as_deref()),
+    );
+    scope?.repo_unique_id
 }
 
 /// Extract the highest disposition from a merged hook output.

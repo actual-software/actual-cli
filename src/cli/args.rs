@@ -411,7 +411,14 @@ pub enum ObserveCommand {
     /// Handle SubagentStart hook event
     SubagentTool,
     /// Install observer hooks into .claude/settings.json
-    Setup,
+    Setup {
+        /// Write hooks that target local dev services (localhost:3000 auth, localhost:3002 API)
+        #[arg(long)]
+        localhost: bool,
+        /// Install all hooks (including per-tool-use, post-tool, pre-compact, subagent) instead of the lean default set
+        #[arg(long)]
+        hook_all: bool,
+    },
     /// Check observer status (auth, hooks, API reachability)
     Status,
 }
@@ -428,7 +435,7 @@ impl ObserveCommand {
             Self::SessionEnd => "session-end",
             Self::PreCompact => "pre-compact",
             Self::SubagentTool => "subagent-tool",
-            Self::Setup => "setup",
+            Self::Setup { .. } => "setup",
             Self::Status => "status",
         }
     }

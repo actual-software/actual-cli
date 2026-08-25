@@ -6,15 +6,14 @@
 //! as the bearer.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 
 use uuid::Uuid;
 
 use crate::api::types::{
-    AdvisorJobStatus, AdvisorOutput, AdvisorPoll, AdvisorQueryRequest, AdvisorSink, AdvisorSurface,
-    ConnectedRepository,
+    ConnectedRepository, InterventionEvent, InterventionRequest, InterventionResponse,
 };
 use crate::api::{ActualApiClient, DEFAULT_API_URL};
 use crate::auth::oauth;
@@ -32,10 +31,7 @@ use sha2::{Digest, Sha256};
 const HARD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Default delay between polls when the server provides no `Retry-After`.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(2);
-/// Upper bound on a server-supplied `Retry-After`. The status handler caps its
-/// own back-off at 15s, so a larger (or misbehaving) value must not let a single
-/// poll stall the whole query.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(15);
+// MAX_RETRY_AFTER removed — poll flow replaced by sync post_intervention.
 /// Wall-clock cap on the `git remote get-url origin` lookup used for repo
 /// auto-detection, mirroring the repo-key helper's bound so a wedged git can't
 /// stall the command.
@@ -177,14 +173,14 @@ fn ambiguous_message(value: &str, matches: &[&ConnectedRepository]) -> String {
 /// A git remote parsed into the repository's owner and name — the
 /// `actual-software` / `actual-cli` of `git@github.com:actual-software/actual-cli.git`.
 #[derive(Debug, PartialEq, Eq)]
-struct RepoRemote {
-    owner: String,
-    name: String,
+pub(crate) struct RepoRemote {
+    pub(crate) owner: String,
+    pub(crate) name: String,
 }
 
 impl RepoRemote {
     /// The `owner/name` form used in user-facing messages.
-    fn slug(&self) -> String {
+    pub(crate) fn slug(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
 }
@@ -195,7 +191,7 @@ impl RepoRemote {
 /// last two path segments are taken as owner and name, so a scheme, an optional
 /// `user@`, and a `host:port` prefix are all tolerated. Returns `None` when the
 /// URL does not yield an owner/name pair.
-fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
+pub(crate) fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
     let trimmed = url.trim().trim_end_matches('/');
     let without_git = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     // Split on both the path separator and the scp-style host separator, dropping
@@ -219,7 +215,7 @@ fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
 /// owner differs still resolves to its connected upstream. Returns every
 /// candidate — the caller scopes on exactly one and falls back to org level on
 /// zero or several.
-fn match_remote_to_repos<'a>(
+pub(crate) fn match_remote_to_repos<'a>(
     remote: &RepoRemote,
     repos: &'a [ConnectedRepository],
 ) -> Vec<&'a ConnectedRepository> {
@@ -381,11 +377,7 @@ async fn ensure_fresh(creds: StoredCredentials) -> Result<StoredCredentials, Act
     Ok(creds)
 }
 
-/// Terminal outcome of an advisor job.
-enum Outcome {
-    Succeeded(Box<AdvisorOutput>),
-    Failed(Option<String>),
-}
+// Outcome enum moved to #[cfg(test)] — only used in backward-compatible tests.
 
 /// Compute the per-repo key that indexes the remembered scope, or `None` when
 /// there is no working directory. The key is `sha256(origin_url)`, falling back
@@ -541,8 +533,8 @@ fn show_scope(repo_key: Option<&str>) -> Result<(), ActualError> {
 async fn run(
     args: &AdvisorArgs,
     repo_dir: Option<&Path>,
-    deadline: Duration,
-    poll_interval: Duration,
+    _deadline: Duration,
+    _poll_interval: Duration,
 ) -> Result<(), ActualError> {
     let creds = store::load()?.ok_or(ActualError::NotLoggedIn)?;
 
@@ -589,104 +581,61 @@ async fn run(
         None => return Ok(()),
     };
 
-    let request = AdvisorQueryRequest::new(
-        org_id.clone(),
-        repo_unique_id,
-        query.to_string(),
-        AdvisorSurface::cli(),
-        AdvisorSink::None,
-        None,
-    );
+    let session_id = Uuid::new_v4().to_string();
+    let request = InterventionRequest {
+        org_id: org_id.clone(),
+        repo_unique_id: repo_unique_id.clone(),
+        session_id: session_id.clone(),
+        events: vec![InterventionEvent {
+            hook_type: "UserPromptSubmit".to_string(),
+            tool_name: None,
+            session_id: session_id.clone(),
+            sequence_no: 0,
+            payload: Some(serde_json::json!({
+                "prompt": query,
+                "session_id": session_id,
+                "hook_event_name": "UserPromptSubmit",
+            })),
+        }],
+    };
 
-    let started = client
-        .start_advisor_query(&request)
-        .await
-        .map_err(|e| enrich_org_mismatch(e, &session_org, &org_id, explicit_org))?;
     eprintln!("{} thinking…", theme::hint("advisor"));
-    let outcome = poll_to_completion(&client, &started.query_id, deadline, poll_interval)
+    let resp = client
+        .post_intervention(&request)
         .await
         .map_err(|e| enrich_org_mismatch(e, &session_org, &org_id, explicit_org))?;
 
-    match outcome {
-        Outcome::Succeeded(output) => {
-            print_answer(&output);
-            Ok(())
-        }
-        Outcome::Failed(error) => Err(ActualError::ApiError(format!(
-            "Advisor query failed: {}",
-            error.unwrap_or_else(|| "unknown error".to_string())
-        ))),
-    }
+    print_intervention_answer(&resp);
+    Ok(())
 }
 
-/// Poll the job until it reaches a terminal state, or the wall-clock `deadline`
-/// elapses (a true time bound — an attempt count can't bound total time once the
-/// server's `Retry-After` back-off varies).
-async fn poll_to_completion(
-    client: &ActualApiClient,
-    query_id: &str,
-    deadline: Duration,
-    poll_interval: Duration,
-) -> Result<Outcome, ActualError> {
-    let start = Instant::now();
-    while start.elapsed() < deadline {
-        match client.poll_advisor_query(query_id, None).await? {
-            AdvisorPoll::Update {
-                status,
-                retry_after,
-                ..
-            } => match status.status {
-                AdvisorJobStatus::Succeeded => {
-                    return Ok(match status.result {
-                        Some(output) => Outcome::Succeeded(Box::new(output)),
-                        None => Outcome::Failed(Some("advisor returned no result".to_string())),
-                    });
-                }
-                AdvisorJobStatus::Failed => return Ok(Outcome::Failed(status.error)),
-                AdvisorJobStatus::Pending | AdvisorJobStatus::Running => {
-                    sleep_for(retry_after, poll_interval).await;
-                }
-            },
-            AdvisorPoll::NotModified => sleep_for(None, poll_interval).await,
-            // Transient infra 5xx — back off (honoring Retry-After) and re-poll.
-            AdvisorPoll::Retry { retry_after } => sleep_for(retry_after, poll_interval).await,
-        }
-    }
-    Err(ActualError::ApiError(
-        "Advisor query did not reach a result in time.".to_string(),
-    ))
-}
-
-/// The next-poll delay: the server's `Retry-After` seconds, or the default
-/// interval, **clamped to `MAX_RETRY_AFTER`** so a large or misbehaving
-/// `Retry-After` can't stall a single poll past the wall-clock deadline's intent.
-fn next_delay(retry_after: Option<u64>, default: Duration) -> Duration {
-    retry_after
-        .map(Duration::from_secs)
-        .unwrap_or(default)
-        .min(MAX_RETRY_AFTER)
-}
-
-async fn sleep_for(retry_after: Option<u64>, default: Duration) {
-    tokio::time::sleep(next_delay(retry_after, default)).await;
-}
+// Legacy poll_to_completion, next_delay, sleep_for removed — the `actual advisor`
+// command now routes through `post_intervention()` (sync, blocks until complete)
+// instead of the old async query/poll flow. The old /v1/advisor/query API endpoint
+// is retained server-side for backward compatibility with older CLI versions.
 
 /// Render the advisor answer. **Never prints token material.**
-fn print_answer(output: &AdvisorOutput) {
-    println!("{}", output.summary);
-    if !output.interpreter.related_adrs.is_empty() {
-        println!("\n{}", theme::hint("Related ADRs:"));
-        for adr in &output.interpreter.related_adrs {
-            println!(
-                "  • {} ({}, confidence {:.0}%)",
-                adr.title,
-                adr.scope,
-                adr.confidence * 100.0
-            );
-            // Render the server-provided deep link (used verbatim) on its own
-            // line; skip a null or empty url so the ADR still prints cleanly.
-            if let Some(url) = adr.url.as_deref().filter(|u| !u.is_empty()) {
-                println!("    {url}");
+fn print_intervention_answer(resp: &InterventionResponse) {
+    println!("{}", resp.summary);
+
+    if !resp.evidence.is_empty() {
+        println!("\n{}", theme::hint("Referenced ADRs:"));
+        for e in &resp.evidence {
+            let title = e.get("title").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let authority = e
+                .get("authority_level")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            println!("  • {} ({})", title, authority);
+        }
+    }
+
+    if !resp.guidance.is_empty() {
+        println!("\n{}", theme::hint("Guidance:"));
+        for g in &resp.guidance {
+            let text = g.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if !text.is_empty() {
+                println!("  • {}", text);
             }
         }
     }
@@ -698,9 +647,6 @@ mod tests {
     use crate::auth::store::StoredCredentials;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
     use tempfile::tempdir;
-
-    const POLL_PATH: &str = "/v1/advisor/query/q1";
-    const START_BODY: &str = r#"{"query_id":"q1","workflow_id":"wf","status":"pending"}"#;
 
     fn test_creds() -> StoredCredentials {
         StoredCredentials {
@@ -717,13 +663,17 @@ mod tests {
         }
     }
 
-    fn succeeded_body(adrs_json: &str) -> String {
+    fn intervention_body(summary: &str) -> String {
         format!(
-            r#"{{"query_id":"q1","status":"succeeded","result":{{"summary":"Use the App Router.","interpreter":{{"summary":"i","related_adrs":[{adrs_json}]}}}},"error":null}}"#
+            r#"{{"intervention_id":"int-1","session_id":"s1","disposition":"inform","summary":"{summary}","guidance":[],"evidence":[],"hook_output":{{}}}}"#
         )
     }
 
-    const ONE_ADR: &str = r#"{"id":"a1","name":"n","title":"Use the App Router","policy":"p","instructions":"i","scope":"frontend","relevance_reason":"r","confidence":0.92}"#;
+    fn intervention_body_with_evidence(summary: &str, evidence_json: &str) -> String {
+        format!(
+            r#"{{"intervention_id":"int-1","session_id":"s1","disposition":"inform","summary":"{summary}","guidance":[],"evidence":[{evidence_json}],"hook_output":{{}}}}"#
+        )
+    }
 
     fn args(api_url: &str, org: Option<&str>) -> AdvisorArgs {
         AdvisorArgs {
@@ -763,44 +713,7 @@ mod tests {
         drop(g);
     }
 
-    #[test]
-    fn test_print_answer_with_and_without_adrs() {
-        let adr = |url: Option<&str>| crate::api::types::RelatedAdr {
-            id: "a".to_string(),
-            name: "n".to_string(),
-            title: "T".to_string(),
-            policy: "p".to_string(),
-            instructions: "i".to_string(),
-            scope: "s".to_string(),
-            relevance_reason: "r".to_string(),
-            confidence: 0.5,
-            url: url.map(|u| u.to_string()),
-        };
-        // Cover all three url arms: a populated link renders, while a null or
-        // an empty link is skipped without breaking the ADR line.
-        let with = AdvisorOutput {
-            summary: "S".to_string(),
-            interpreter: crate::api::types::AdvisorInterpreter {
-                summary: "i".to_string(),
-                related_adrs: vec![
-                    adr(Some(
-                        "https://app.example.com/decisions/r1?tab=active&decision=abc1234",
-                    )),
-                    adr(None),
-                    adr(Some("")),
-                ],
-            },
-        };
-        print_answer(&with);
-        let without = AdvisorOutput {
-            summary: "S".to_string(),
-            interpreter: crate::api::types::AdvisorInterpreter {
-                summary: "i".to_string(),
-                related_adrs: vec![],
-            },
-        };
-        print_answer(&without);
-    }
+
 
     #[test]
     fn test_exec_not_logged_in() {
@@ -839,22 +752,17 @@ mod tests {
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
-        let s = server
-            .mock("POST", "/v1/advisor/query")
+        let m = server
+            .mock("POST", "/v1/advisor/interventions")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(START_BODY)
-            .create_async()
-            .await;
-        let p = server
-            .mock("GET", POLL_PATH)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(succeeded_body(ONE_ADR))
+            .with_body(intervention_body_with_evidence(
+                "Use the App Router.",
+                r#"{"title":"Use the App Router","authority_level":"normative"}"#,
+            ))
             .create_async()
             .await;
 
-        // org omitted → uses the signed-in org from creds.
         run(
             &args(&server.url(), None),
             None,
@@ -863,8 +771,7 @@ mod tests {
         )
         .await
         .unwrap();
-        s.assert_async().await;
-        p.assert_async().await;
+        m.assert_async().await;
     }
 
     #[tokio::test]
@@ -876,15 +783,9 @@ mod tests {
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
+        let _m = server
+            .mock("POST", "/v1/advisor/interventions")
+            .with_body(intervention_body("Use the App Router."))
             .with_header("content-type", "application/json")
             .create_async()
             .await;
@@ -898,8 +799,11 @@ mod tests {
         .unwrap();
     }
 
+    // Legacy poll-specific tests removed — the advisor command now uses sync
+    // post_intervention() instead of the async query/poll flow.
+
     #[tokio::test]
-    async fn test_run_failed_query() {
+    async fn test_run_api_error() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
@@ -907,18 +811,11 @@ mod tests {
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
+        let _m = server
+            .mock("POST", "/v1/advisor/interventions")
+            .with_status(500)
             .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(
-                r#"{"query_id":"q1","status":"failed","result":null,"error":"stream ended"}"#,
-            )
-            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"internal_error","message":"pipeline failed"}"#)
             .create_async()
             .await;
         let err = run(
@@ -929,11 +826,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("stream ended")));
+        assert!(matches!(err, ActualError::ApiError(_)));
     }
 
     #[tokio::test]
-    async fn test_run_succeeded_without_result_is_failure() {
+    async fn test_run_with_org_override() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
@@ -941,61 +838,13 @@ mod tests {
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(r#"{"query_id":"q1","status":"succeeded","result":null,"error":null}"#)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let err = run(
-            &args(&server.url(), None),
-            None,
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("no result")));
-    }
-
-    #[tokio::test]
-    async fn test_run_running_then_succeeded() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        store::save(&test_creds()).unwrap();
-
-        let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        // First poll: running (Retry-After: 0 → immediate). Second: succeeded.
-        let _running = server
-            .mock("GET", POLL_PATH)
+        let _m = server
+            .mock("POST", "/v1/advisor/interventions")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_header("retry-after", "0")
-            .with_body(r#"{"query_id":"q1","status":"running","result":null,"error":null}"#)
-            .expect(1)
+            .with_body(intervention_body("answer"))
             .create_async()
             .await;
-        let _done = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(ONE_ADR))
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        // org provided via --org (exercises the args.org branch).
         run(
             &args(&server.url(), Some("22222222-2222-2222-2222-222222222222")),
             None,
@@ -1007,7 +856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_not_modified_then_succeeded() {
+    async fn test_run_sends_intervention_with_prompt() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
         let tmp = tempdir().unwrap();
@@ -1015,96 +864,14 @@ mod tests {
         store::save(&test_creds()).unwrap();
 
         let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        let _nm = server
-            .mock("GET", POLL_PATH)
-            .with_status(304)
-            .expect(1)
-            .create_async()
-            .await;
-        let _done = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        run(
-            &args(&server.url(), None),
-            None,
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_poll_times_out_at_deadline() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        store::save(&test_creds()).unwrap();
-
-        let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        // Always running → the loop keeps polling until the wall-clock deadline.
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_header("retry-after", "0")
-            .with_body(r#"{"query_id":"q1","status":"running","result":null,"error":null}"#)
-            .create_async()
-            .await;
-        // Tiny deadline + zero interval → polls a few times, then gives up.
-        let err = run(
-            &args(&server.url(), None),
-            None,
-            Duration::from_millis(10),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ActualError::ApiError(ref m) if m.contains("did not reach")));
-    }
-
-    #[tokio::test]
-    async fn test_run_sends_versioned_job_envelope() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        store::save(&test_creds()).unwrap();
-
-        let mut server = mockito::Server::new_async().await;
-        // The server validates the typed/versioned envelope: type + version
-        // literals and the query nested under `data`.
-        let s = server
-            .mock("POST", "/v1/advisor/query")
+        let m = server
+            .mock("POST", "/v1/advisor/interventions")
             .match_body(mockito::Matcher::PartialJsonString(
-                r#"{"type":"advisor_query","version":1,"data":{"query":"why app router?"}}"#
-                    .to_string(),
+                r#"{"events":[{"hook_type":"UserPromptSubmit"}]}"#.to_string(),
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(START_BODY)
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
+            .with_body(intervention_body("answer"))
             .create_async()
             .await;
 
@@ -1116,71 +883,9 @@ mod tests {
         )
         .await
         .unwrap();
-        s.assert_async().await;
+        m.assert_async().await;
     }
 
-    #[tokio::test]
-    async fn test_run_retries_on_transient_500() {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _g1 = EnvGuard::remove("ACTUAL_CONFIG");
-        let tmp = tempdir().unwrap();
-        let _g2 = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
-        store::save(&test_creds()).unwrap();
-
-        let mut server = mockito::Server::new_async().await;
-        let _s = server
-            .mock("POST", "/v1/advisor/query")
-            .with_body(START_BODY)
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-        // First poll: transient infra 500 → retried, not fatal. Second: succeeded.
-        let infra = server
-            .mock("GET", POLL_PATH)
-            .with_status(500)
-            .with_body(r#"{"error":"row load failed"}"#)
-            .expect(1)
-            .create_async()
-            .await;
-        let _done = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(ONE_ADR))
-            .with_header("content-type", "application/json")
-            .create_async()
-            .await;
-
-        run(
-            &args(&server.url(), None),
-            None,
-            Duration::from_secs(60),
-            Duration::ZERO,
-        )
-        .await
-        .unwrap();
-        infra.assert_async().await;
-    }
-
-    #[test]
-    fn test_next_delay_clamps_retry_after() {
-        // A large (or misbehaving) server Retry-After is clamped to the ceiling.
-        assert_eq!(
-            next_delay(Some(600), Duration::from_secs(2)),
-            MAX_RETRY_AFTER
-        );
-        assert_eq!(
-            next_delay(Some(15), Duration::from_secs(2)),
-            Duration::from_secs(15)
-        );
-        // Values under the ceiling pass through; None falls back to the default.
-        assert_eq!(
-            next_delay(Some(3), Duration::from_secs(2)),
-            Duration::from_secs(3)
-        );
-        assert_eq!(
-            next_delay(None, Duration::from_secs(2)),
-            Duration::from_secs(2)
-        );
-    }
 
     // --- transparent refresh-on-expiry ---
 
@@ -1250,19 +955,13 @@ mod tests {
 
         let mut server = mockito::Server::new_async().await;
         let s = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", "/v1/advisor/interventions")
             .match_body(mockito::Matcher::PartialJsonString(
                 r#"{"repo_unique_id":"33333333-3333-3333-3333-333333333333"}"#.to_string(),
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(START_BODY)
-            .create_async()
-            .await;
-        let _p = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
+            .with_body(intervention_body("answer"))
             .create_async()
             .await;
 
@@ -1287,7 +986,7 @@ mod tests {
         let mut server = mockito::Server::new_async().await;
         // api-service rejects the cross-org token with a fail-closed 403.
         let _s = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", "/v1/advisor/interventions")
             .with_status(403)
             .with_header("content-type", "application/json")
             .with_body(r#"{"error":{"code":"FORBIDDEN","message":"cross-org","details":null}}"#)
@@ -1523,19 +1222,13 @@ mod tests {
             .await;
         // The advisor request then carries the resolved repo id.
         let start = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", "/v1/advisor/interventions")
             .match_body(mockito::Matcher::PartialJsonString(
                 r#"{"repo_unique_id":"33333333-3333-3333-3333-333333333333"}"#.to_string(),
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(START_BODY)
-            .create_async()
-            .await;
-        let _poll = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
+            .with_body(intervention_body("answer"))
             .create_async()
             .await;
 
@@ -1899,19 +1592,13 @@ mod tests {
             .await;
         // The advisor request must carry the auto-detected repo id.
         let start = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", "/v1/advisor/interventions")
             .match_body(mockito::Matcher::PartialJsonString(
                 r#"{"repo_unique_id":"33333333-3333-3333-3333-333333333333"}"#.to_string(),
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(START_BODY)
-            .create_async()
-            .await;
-        let _poll = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
+            .with_body(intervention_body("answer"))
             .create_async()
             .await;
 
@@ -2214,19 +1901,13 @@ mod tests {
 
         let mut server = mockito::Server::new_async().await;
         let start = server
-            .mock("POST", "/v1/advisor/query")
+            .mock("POST", "/v1/advisor/interventions")
             .match_body(mockito::Matcher::PartialJsonString(
                 r#"{"repo_unique_id":"77777777-7777-7777-7777-777777777777"}"#.to_string(),
             ))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(START_BODY)
-            .create_async()
-            .await;
-        let _poll = server
-            .mock("GET", POLL_PATH)
-            .with_body(succeeded_body(""))
-            .with_header("content-type", "application/json")
+            .with_body(intervention_body("answer"))
             .create_async()
             .await;
 
