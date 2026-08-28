@@ -62,6 +62,13 @@ pub fn canonicalize(hook_type: HookType, tool_name: Option<&str>) -> AewoCode {
             assignment_method: "deterministic-mapping",
             mapping_rule: "claude-code.PreToolUse.Bash",
         },
+        (HookType::PreToolUse, Some("AskUserQuestion")) => AewoCode {
+            event_code: "actual.event.user.questioned",
+            tool_class: Some("interaction"),
+            artifact_type: Some("clarification"),
+            assignment_method: "deterministic-mapping",
+            mapping_rule: "claude-code.PreToolUse.AskUserQuestion",
+        },
         (HookType::PreToolUse, Some("Agent")) => AewoCode {
             event_code: "actual.event.agent.delegated",
             tool_class: Some("orchestration"),
@@ -242,5 +249,14 @@ mod tests {
     fn test_all_codes_have_deterministic_assignment() {
         let code = canonicalize(HookType::PreToolUse, Some("Edit"));
         assert_eq!(code.assignment_method, "deterministic-mapping");
+    }
+
+    #[test]
+    fn test_ask_user_question_maps_to_user_questioned() {
+        let code = canonicalize(HookType::PreToolUse, Some("AskUserQuestion"));
+        assert_eq!(code.event_code, "actual.event.user.questioned");
+        assert_eq!(code.tool_class, Some("interaction"));
+        assert_eq!(code.artifact_type, Some("clarification"));
+        assert_eq!(code.mapping_rule, "claude-code.PreToolUse.AskUserQuestion");
     }
 }

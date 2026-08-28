@@ -16,6 +16,7 @@ const DEFAULT_HOOK_ENTRIES: &[HookEntry] = &[
     HookEntry { hook_name: "SessionStart", command: "actual observe session-start", matcher: "", timeout: 1200 },
     HookEntry { hook_name: "UserPromptSubmit", command: "actual observe prompt", matcher: "", timeout: 1200 },
     HookEntry { hook_name: "PreToolUse", command: "actual observe pre-tool", matcher: "ExitPlanMode", timeout: 30 },
+    HookEntry { hook_name: "PreToolUse", command: "actual observe pre-tool", matcher: "AskUserQuestion", timeout: 30 },
     HookEntry { hook_name: "Stop", command: "actual observe stop", matcher: "", timeout: 1200 },
     HookEntry { hook_name: "SessionEnd", command: "actual observe session-end", matcher: "", timeout: 1200 },
 ];
@@ -174,8 +175,9 @@ mod tests {
             "actual observe session-start"
         );
         let pre_tool = hooks["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool.len(), 1, "default has only ExitPlanMode matcher");
+        assert_eq!(pre_tool.len(), 2, "default has ExitPlanMode + AskUserQuestion matchers");
         assert_eq!(pre_tool[0]["matcher"].as_str().unwrap(), "ExitPlanMode");
+        assert_eq!(pre_tool[1]["matcher"].as_str().unwrap(), "AskUserQuestion");
     }
 
     #[test]
@@ -197,12 +199,13 @@ mod tests {
             assert!(hooks.contains_key(*hook), "missing hook: {hook}");
         }
         let pre_tool = hooks["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool.len(), 4, "hook-all has 4 PreToolUse matchers: ExitPlanMode, Edit|Write, Bash, Agent");
+        assert_eq!(pre_tool.len(), 5, "hook-all has 5 PreToolUse matchers: ExitPlanMode, AskUserQuestion, Edit|Write, Bash, Agent");
         assert_eq!(pre_tool[0]["matcher"].as_str().unwrap(), "ExitPlanMode");
-        assert_eq!(pre_tool[1]["matcher"].as_str().unwrap(), "Edit|Write");
-        assert_eq!(pre_tool[2]["matcher"].as_str().unwrap(), "Bash");
-        assert_eq!(pre_tool[3]["matcher"].as_str().unwrap(), "Agent");
-        assert_eq!(pre_tool[3]["hooks"][0]["timeout"].as_u64().unwrap(), 600);
+        assert_eq!(pre_tool[1]["matcher"].as_str().unwrap(), "AskUserQuestion");
+        assert_eq!(pre_tool[2]["matcher"].as_str().unwrap(), "Edit|Write");
+        assert_eq!(pre_tool[3]["matcher"].as_str().unwrap(), "Bash");
+        assert_eq!(pre_tool[4]["matcher"].as_str().unwrap(), "Agent");
+        assert_eq!(pre_tool[4]["hooks"][0]["timeout"].as_u64().unwrap(), 600);
     }
 
     #[test]
@@ -247,7 +250,7 @@ mod tests {
         let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(session_start.len(), 1, "should not duplicate hooks on re-run");
         let pre_tool = content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool.len(), 1, "default PreToolUse should have exactly 1 matcher entry after re-run");
+        assert_eq!(pre_tool.len(), 2, "default PreToolUse should have exactly 2 matcher entries after re-run");
     }
 
     #[test]
@@ -262,7 +265,7 @@ mod tests {
         let session_start = content["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(session_start.len(), 1, "should not duplicate hooks on re-run");
         let pre_tool = content["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre_tool.len(), 4, "hook-all PreToolUse should have exactly 4 matcher entries after re-run");
+        assert_eq!(pre_tool.len(), 5, "hook-all PreToolUse should have exactly 5 matcher entries after re-run");
     }
 
     #[test]

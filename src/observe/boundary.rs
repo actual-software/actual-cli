@@ -26,6 +26,7 @@ pub fn classify_tool_action(tool_name: Option<&str>, payload: &serde_json::Value
                 ToolAction::Free
             }
         }
+        Some("AskUserQuestion") => ToolAction::AdvisorGated,
         _ => ToolAction::Free,
     }
 }
@@ -38,6 +39,7 @@ pub fn is_evaluation_boundary(
     match hook_type {
         HookType::PreToolUse => match tool_name {
             Some("Edit" | "Write") => true,
+            Some("AskUserQuestion") => true,
             Some("Bash") => is_mutating_bash(payload),
             Some("Agent") => is_agent_launch(payload),
             _ => false,
@@ -525,5 +527,24 @@ mod tests {
             None,
             &empty()
         ));
+    }
+
+    // ── AskUserQuestion ──
+
+    #[test]
+    fn test_ask_user_question_is_boundary() {
+        assert!(is_evaluation_boundary(
+            HookType::PreToolUse,
+            Some("AskUserQuestion"),
+            &empty(),
+        ));
+    }
+
+    #[test]
+    fn test_ask_user_question_is_advisor_gated() {
+        assert_eq!(
+            classify_tool_action(Some("AskUserQuestion"), &empty()),
+            ToolAction::AdvisorGated,
+        );
     }
 }
