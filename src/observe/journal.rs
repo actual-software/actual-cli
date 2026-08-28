@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -157,13 +159,21 @@ impl SessionJournal {
         })
     }
 
-    pub fn is_stop_acknowledged(&self, session_id: &str) -> bool {
-        self.stop_ack_path(session_id).exists()
+    pub fn is_stop_acknowledged(&self, session_id: &str, message_hash: Option<u64>) -> bool {
+        let path = self.stop_ack_path(session_id);
+        match fs::read_to_string(&path) {
+            Ok(stored) => match message_hash {
+                Some(current) => stored.trim() == current.to_string(),
+                None => true,
+            },
+            Err(_) => false,
+        }
     }
 
-    pub fn set_stop_acknowledged(&self, session_id: &str) {
+    pub fn set_stop_acknowledged(&self, session_id: &str, message_hash: Option<u64>) {
         let path = self.stop_ack_path(session_id);
-        fs::write(&path, "1").ok();
+        let content = message_hash.map(|h| h.to_string()).unwrap_or_else(|| "1".to_string());
+        fs::write(&path, content).ok();
     }
 
     pub fn clear_stop_acknowledged(&self, session_id: &str) {
@@ -177,6 +187,12 @@ impl SessionJournal {
 
     fn cursor_path(&self, session_id: &str) -> PathBuf {
         self.dir.join(format!("{}.cursor", Self::safe_id(session_id)))
+    }
+
+    pub fn hash_message(message: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        message.hash(&mut hasher);
+        hasher.finish()
     }
 
     fn stop_ack_path(&self, session_id: &str) -> PathBuf {
@@ -355,13 +371,37 @@ mod tests {
         let journal = SessionJournal::with_dir(dir.path().to_path_buf());
         fs::create_dir_all(dir.path()).unwrap();
 
-        assert!(!journal.is_stop_acknowledged("s1"));
+        assert!(!journal.is_stop_acknowledged("s1", None));
 
-        journal.set_stop_acknowledged("s1");
-        assert!(journal.is_stop_acknowledged("s1"));
+        let hash = SessionJournal::hash_message("explore output");
+        journal.set_stop_acknowledged("s1", Some(hash));
+        assert!(journal.is_stop_acknowledged("s1", Some(hash)));
 
         journal.clear_stop_acknowledged("s1");
-        assert!(!journal.is_stop_acknowledged("s1"));
+        assert!(!journal.is_stop_acknowledged("s1", None));
+    }
+
+    #[test]
+    fn test_stop_ack_different_message_not_acknowledged() {
+        let dir = tempdir().unwrap();
+        let journal = SessionJournal::with_dir(dir.path().to_path_buf());
+        fs::create_dir_all(dir.path()).unwrap();
+
+        let hash1 = SessionJournal::hash_message("explore phase output");
+        journal.set_stop_acknowledged("s1", Some(hash1));
+
+        let hash2 = SessionJournal::hash_message("question phase output with questions?");
+        assert!(!journal.is_stop_acknowledged("s1", Some(hash2)));
+    }
+
+    #[test]
+    fn test_stop_ack_no_hash_always_matches() {
+        let dir = tempdir().unwrap();
+        let journal = SessionJournal::with_dir(dir.path().to_path_buf());
+        fs::create_dir_all(dir.path()).unwrap();
+
+        journal.set_stop_acknowledged("s1", None);
+        assert!(journal.is_stop_acknowledged("s1", None));
     }
 
     #[test]
@@ -371,7 +411,7 @@ mod tests {
         fs::create_dir_all(dir.path()).unwrap();
 
         journal.clear_stop_acknowledged("nonexistent");
-        assert!(!journal.is_stop_acknowledged("nonexistent"));
+        assert!(!journal.is_stop_acknowledged("nonexistent", None));
     }
 
     #[test]

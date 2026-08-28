@@ -199,7 +199,16 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
             }
         }
     } else if hook_type == HookType::Stop {
-        if journal.is_stop_acknowledged(session_id) {
+        let last_msg = raw_payload
+            .get("last_assistant_message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let msg_hash = if last_msg.is_empty() {
+            None
+        } else {
+            Some(SessionJournal::hash_message(last_msg))
+        };
+        if journal.is_stop_acknowledged(session_id, msg_hash) {
             println!("{{}}");
             return Ok(());
         }
@@ -207,7 +216,7 @@ fn exec_hook(args: &ObserveArgs) -> Result<(), ActualError> {
             .get("cwd")
             .and_then(|v| v.as_str())
             .map(std::path::PathBuf::from);
-        emit_stop_output(session_id, &journal, cwd.as_deref());
+        emit_stop_output(session_id, &journal, cwd.as_deref(), msg_hash);
     } else if is_evaluation_boundary(hook_type, tool_name, &raw_payload) {
         journal.clear_stop_acknowledged(session_id);
         emit_boundary_output(session_id, &journal, hook_type);
@@ -263,7 +272,7 @@ fn response_contains_end_marker(output: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-fn emit_stop_output(session_id: &str, journal: &SessionJournal, cwd: Option<&std::path::Path>) {
+fn emit_stop_output(session_id: &str, journal: &SessionJournal, cwd: Option<&std::path::Path>, msg_hash: Option<u64>) {
     let hook_type = HookType::Stop;
     let diff_content = cwd
         .map(|p| crate::observe::diff::capture_git_diff(p))
@@ -278,7 +287,7 @@ fn emit_stop_output(session_id: &str, journal: &SessionJournal, cwd: Option<&std
     }
 
     if response_contains_end_marker(&hook_output) {
-        journal.set_stop_acknowledged(session_id);
+        journal.set_stop_acknowledged(session_id, msg_hash);
     }
 
     let merged_disposition = extract_disposition(&hook_output);
