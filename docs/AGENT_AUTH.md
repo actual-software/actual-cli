@@ -102,6 +102,8 @@ $ actual advisor "why is the build failing?"
 
 In CI, pass the token through the platform's secret store as `ACTUAL_TOKEN`. Do
 not re-mint a token on every run, and do not write it to a file the job logs.
+That re-mint advice is about `create-token` PATs. With `mint-token` you mint
+once per job instead; see [Service-account keys](#service-account-keys).
 
 ## Storage
 
