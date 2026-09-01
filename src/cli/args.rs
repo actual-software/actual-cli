@@ -343,6 +343,8 @@ pub enum Command {
     Models(ModelsArgs),
     /// Clear local cache (analysis and tailoring results)
     Cache(CacheArgs),
+    /// Inspect the rule documents committed under `.actual/rules/`
+    Rules(RulesArgs),
 }
 
 /// Arguments for the `advisor` command
@@ -649,6 +651,31 @@ pub struct CacheArgs {
 pub enum CacheAction {
     /// Clear all cached data (analysis and tailoring results)
     Clear,
+}
+
+/// Arguments for the `rules` command
+#[derive(Parser, Debug)]
+pub struct RulesArgs {
+    #[command(subcommand)]
+    pub action: RulesAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RulesAction {
+    /// List the rule documents committed under `.actual/rules/`
+    Ls(RulesLsArgs),
+}
+
+/// Arguments for `rules ls`
+#[derive(Parser, Debug)]
+pub struct RulesLsArgs {
+    /// Repository root to scan. Defaults to the current directory.
+    #[arg(value_name = "PATH")]
+    pub path: Option<std::path::PathBuf>,
+
+    /// Print the parsed rule set as JSON instead of a panel.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[cfg(test)]

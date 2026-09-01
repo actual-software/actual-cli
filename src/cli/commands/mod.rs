@@ -16,6 +16,7 @@ pub mod login;
 pub mod logout;
 pub mod mint_token;
 pub mod models;
+pub mod rules;
 pub mod runners;
 pub mod status;
 pub mod sync;
