@@ -466,3 +466,68 @@ fn test_run_models() {
     let cli = Cli::parse_from(["actual", "models"]);
     assert_eq!(handle_result(run(cli)), 0);
 }
+
+#[test]
+fn test_cli_parse_rules_ls() {
+    let cli = Cli::parse_from(["actual", "rules", "ls"]);
+    assert!(matches!(cli.command, Command::Rules(_)));
+}
+
+#[test]
+fn test_cli_parse_rules_ls_with_path_and_json() {
+    let cli = Cli::parse_from(["actual", "rules", "ls", "/some/repo", "--json"]);
+    let Command::Rules(args) = cli.command else {
+        unreachable!()
+    };
+    let actual_cli::RulesAction::Ls(ls) = args.action;
+    assert_eq!(ls.path.as_deref(), Some(std::path::Path::new("/some/repo")));
+    assert!(ls.json);
+}
+
+/// `rules ls` in a directory with no `.actual/rules/` is a successful empty
+/// listing, not a failure — an unsynced repository is an ordinary state.
+#[test]
+fn test_run_rules_ls_without_a_rules_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::parse_from([
+        "actual",
+        "rules",
+        "ls",
+        dir.path().to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(handle_result(run(cli)), 0);
+}
+
+/// The reader is consumed the way the downstream scope-index task will consume
+/// it: through the crate's public path, never a private item.
+#[test]
+fn test_public_rules_api_loads_committed_rule_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let rules_dir = actual_cli::rules::rules_dir(dir.path());
+    std::fs::create_dir_all(&rules_dir).unwrap();
+    std::fs::write(
+        rules_dir.join("alpha.md"),
+        "# Alpha\n\nThese rules are ALWAYS ACTIVE.\n\n### Rules\n\n\
+         - **R-A-001** MUST: hold.\n- **R-A-002** MUST NOT: break.\n",
+    )
+    .unwrap();
+    std::fs::write(rules_dir.join("beta.md"), "not a rule file\n").unwrap();
+
+    let report = actual_cli::rules::load_rule_set(dir.path()).unwrap();
+
+    assert_eq!(report.documents.len(), 1);
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.rule_count(), 2);
+    assert_eq!(
+        report.documents[0]
+            .rules
+            .iter()
+            .map(|rule| rule.level)
+            .collect::<Vec<_>>(),
+        vec![
+            actual_cli::rules::RuleLevel::Must,
+            actual_cli::rules::RuleLevel::MustNot,
+        ]
+    );
+}
