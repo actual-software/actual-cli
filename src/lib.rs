@@ -8,6 +8,7 @@ pub mod error;
 pub mod generation;
 pub mod model_cache;
 pub mod net;
+pub mod rules;
 pub mod runner;
 pub mod tailoring;
 #[cfg(feature = "telemetry")]
