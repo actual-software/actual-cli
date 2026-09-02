@@ -77,6 +77,16 @@ fn render_panel(report: &RuleSetLoadReport, width: usize) -> String {
         }
     }
 
+    if report.warning_count() > 0 {
+        panel = panel.separator().line("Warnings:");
+        for doc in &report.documents {
+            let name = doc.slug().unwrap_or("<unnamed>");
+            for warning in &doc.warnings {
+                panel = panel.line(&format!("  {name}: {warning}"));
+            }
+        }
+    }
+
     if !report.errors.is_empty() {
         panel = panel.separator().line("Failed to parse:");
         for error in &report.errors {
@@ -195,6 +205,20 @@ mod tests {
         assert!(out.contains("1 documents · 2 rules · 1 warnings · 0 errors"));
     }
 
+    /// Dropped bullets (unknown levels, malformed rules) are listed by slug and
+    /// rule id, not only counted in the summary.
+    #[test]
+    fn test_render_panel_lists_warnings() {
+        let root = seed(&[("a.md", DOC)]);
+        let report = load_rule_set(root.path()).unwrap();
+        let out = render_panel(&report, 100);
+
+        assert!(out.contains("Warnings:"));
+        assert!(out.contains("a: line 9:"));
+        assert!(out.contains("R-A-003"));
+        assert!(out.contains("MUST 1 · MAY 1"));
+    }
+
     #[test]
     fn test_render_panel_lists_failures() {
         let root = seed(&[("a.md", DOC), ("b.md", BAD)]);
@@ -204,6 +228,12 @@ mod tests {
         assert!(out.contains("Failed to parse:"));
         assert!(out.contains("no `### Rules` section"));
         assert!(out.contains("1 documents · 2 rules · 1 warnings · 1 errors"));
+        let warnings_at = out.find("Warnings:").expect("warnings section");
+        let errors_at = out.find("Failed to parse:").expect("errors section");
+        assert!(
+            warnings_at < errors_at,
+            "warnings should be listed before parse failures"
+        );
     }
 
     #[test]
@@ -212,6 +242,7 @@ mod tests {
         let report = load_rule_set(root.path()).unwrap();
         let out = render_panel(&report, 80);
         assert!(out.contains("No rule documents found."));
+        assert!(!out.contains("Warnings:"));
     }
 
     /// A report holding only failures still renders the failure list, without a
@@ -223,6 +254,7 @@ mod tests {
         let out = render_panel(&report, 120);
         assert!(out.contains("Failed to parse:"));
         assert!(out.contains("0 documents · 0 rules · 0 warnings · 1 errors"));
+        assert!(!out.contains("Warnings:"));
     }
 
     #[test]
