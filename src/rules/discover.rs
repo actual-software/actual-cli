@@ -17,6 +17,7 @@
 //! synced is an ordinary state, and the useful response is an empty rule set,
 //! not a failed command.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::error::ActualError;
@@ -27,8 +28,9 @@ use crate::rules::types::{RuleFileError, RuleIssueKind, RuleSetLoadReport};
 pub const RULES_DIR_NAME: &str = ".actual/rules";
 
 /// Per-file size cap, mirroring the config loader's limit in
-/// [`crate::config::paths`]. Checked before the file is read, because the size
-/// of a rules corpus is not known in advance.
+/// [`crate::config::paths`]. Enforced against the bytes actually read, not
+/// `metadata().len()`, so a failed stat cannot bypass it. The read itself is
+/// limited to one byte past the cap so a huge file cannot be fully buffered.
 pub const MAX_RULE_FILE_SIZE: u64 = 1024 * 1024; // 1 MiB
 
 /// The rules directory for a repository rooted at `root_dir`.
@@ -61,41 +63,18 @@ pub fn load_rule_set(root_dir: &Path) -> Result<RuleSetLoadReport, ActualError> 
     };
 
     // Collect first, then sort, so both `documents` and `errors` come back in a
-    // stable order regardless of what the filesystem hands back.
-    let mut files: Vec<(PathBuf, u64)> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
-        if symlink || !is_markdown(&path) {
-            continue;
-        }
-        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-        files.push((path, size));
-    }
-    files.sort();
+    // stable order regardless of what the filesystem hands back. Listing errors
+    // are recorded, not dropped: `flatten()` would hide a vanished entry.
+    let files = collect_rule_files(&dir, entries, &mut report);
 
-    for (path, size) in files {
+    for path in files {
         // INVARIANT: no `?` below this line. Every failure becomes a
         // `RuleFileError` in `report.errors` and the loop moves to the next
         // file, so one unreadable or malformed document never costs the set.
-        if size > MAX_RULE_FILE_SIZE {
-            report.errors.push(RuleFileError::new(
-                &path,
-                RuleIssueKind::TooLarge,
-                None,
-                format!("file is {size} bytes, over the {MAX_RULE_FILE_SIZE} byte limit"),
-            ));
-            continue;
-        }
-        let bytes = match std::fs::read(&path) {
+        let bytes = match read_rule_file(&path) {
             Ok(bytes) => bytes,
-            Err(e) => {
-                report.errors.push(RuleFileError::new(
-                    &path,
-                    RuleIssueKind::Io,
-                    None,
-                    format!("failed to read file: {e}"),
-                ));
+            Err(err) => {
+                report.errors.push(err);
                 continue;
             }
         };
@@ -118,6 +97,70 @@ pub fn load_rule_set(root_dir: &Path) -> Result<RuleSetLoadReport, ActualError> 
     }
 
     Ok(report)
+}
+
+/// Markdown rule files in `dir`, sorted by path. Per-entry listing failures are
+/// recorded on `report` and skipped so they cannot hide a sibling file.
+fn collect_rule_files(
+    dir: &Path,
+    entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
+    report: &mut RuleSetLoadReport,
+) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                report.errors.push(RuleFileError::new(
+                    dir,
+                    RuleIssueKind::Io,
+                    None,
+                    format!("failed to read directory entry: {e}"),
+                ));
+                continue;
+            }
+        };
+        let path = entry.path();
+        let symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
+        if symlink || !is_markdown(&path) {
+            continue;
+        }
+        files.push(path);
+    }
+    files.sort();
+    files
+}
+
+/// Read one rule file, stopping one byte past [`MAX_RULE_FILE_SIZE`].
+fn read_rule_file(path: &Path) -> Result<Vec<u8>, RuleFileError> {
+    let file = std::fs::File::open(path).map_err(|e| {
+        RuleFileError::new(
+            path,
+            RuleIssueKind::Io,
+            None,
+            format!("failed to read file: {e}"),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    let mut limited = file.take(MAX_RULE_FILE_SIZE + 1);
+    limited.read_to_end(&mut bytes).map_err(|e| {
+        RuleFileError::new(
+            path,
+            RuleIssueKind::Io,
+            None,
+            format!("failed to read file: {e}"),
+        )
+    })?;
+    let size = bytes.len() as u64;
+    if size > MAX_RULE_FILE_SIZE {
+        return Err(RuleFileError::new(
+            path,
+            RuleIssueKind::TooLarge,
+            None,
+            format!("file is {size} bytes, over the {MAX_RULE_FILE_SIZE} byte limit"),
+        ));
+    }
+    Ok(bytes)
 }
 
 /// True for a `.md` path, case-insensitively — a case-insensitive checkout can
@@ -232,6 +275,30 @@ mod tests {
         assert!(report.errors[0].to_string().contains("over the"));
     }
 
+    /// A `read_dir` entry error is recorded instead of being dropped by
+    /// `flatten()`, so a vanished entry cannot hide the rest of the set.
+    #[test]
+    fn test_collect_rule_files_records_a_listing_error() {
+        let mut report = RuleSetLoadReport {
+            rules_dir: PathBuf::from("/x/.actual/rules"),
+            documents: Vec::new(),
+            errors: Vec::new(),
+        };
+        let files = collect_rule_files(
+            Path::new("/x/.actual/rules"),
+            std::iter::once(Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "entry vanished",
+            ))),
+            &mut report,
+        );
+        assert!(files.is_empty());
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors[0].issue.kind, RuleIssueKind::Io);
+        assert!(report.errors[0].to_string().contains("directory entry"));
+        assert!(report.errors[0].to_string().contains("entry vanished"));
+    }
+
     #[test]
     fn test_load_rule_set_reports_a_non_utf8_file() {
         let root = seed(&[("a-good.md", DOC_A)]);
@@ -259,6 +326,13 @@ mod tests {
         assert_eq!(report.documents.len(), 1);
         assert_eq!(report.errors.len(), 1);
         assert_eq!(report.errors[0].issue.kind, RuleIssueKind::Io);
+    }
+
+    #[test]
+    fn test_read_rule_file_reports_an_open_failure() {
+        let err = read_rule_file(Path::new("/no/such/actual-rule-file.md")).unwrap_err();
+        assert_eq!(err.issue.kind, RuleIssueKind::Io);
+        assert!(err.to_string().contains("failed to read file"));
     }
 
     #[cfg(unix)]
