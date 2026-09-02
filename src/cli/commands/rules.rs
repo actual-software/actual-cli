@@ -11,13 +11,17 @@
 //! way [`crate::cli::commands::runners`] does, so the output can be asserted on
 //! without a terminal.
 
+use std::path::Path;
+
 use serde::Serialize;
 
 use crate::cli::args::{RulesAction, RulesArgs, RulesLsArgs};
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
-use crate::rules::{load_rule_set, RuleDocument, RuleIssue, RuleLevel, RuleSetLoadReport};
+use crate::rules::{
+    load_rule_set, Rule, RuleDocument, RuleIssue, RuleLevel, RuleSetLoadReport, VerifyBlock,
+};
 
 pub fn exec(args: &RulesArgs) -> Result<(), ActualError> {
     match &args.action {
@@ -33,7 +37,7 @@ fn exec_ls(args: &RulesLsArgs) -> Result<(), ActualError> {
     let report = load_rule_set(&root)?;
 
     if args.json {
-        println!("{}", render_json(&report));
+        println!("{}", render_json(&report, &root));
     } else {
         println!("{}", render_panel(&report, term_size::terminal_width()));
     }
@@ -106,14 +110,20 @@ fn render_panel(report: &RuleSetLoadReport, width: usize) -> String {
 
 /// Serializable view of a load report.
 ///
-/// [`RuleSetLoadReport`] itself is deliberately not `Serialize` — it carries an
-/// absolute machine path — so the JSON shape is declared here, where it is a
+/// Neither [`RuleSetLoadReport`] nor [`RuleDocument`] is serialized straight to
+/// the wire. Both carry the absolute on-disk path a document was read from, so
+/// serializing them directly makes `--json` differ between machines for an
+/// identical rule set. The shape is declared here instead, where it is a
 /// user-facing contract rather than an accident of the data model.
+///
+/// `rules_dir` is the one deliberately machine-specific field: it records which
+/// checkout was scanned, and is the anchor every relative path below resolves
+/// against. Dropping it would make the relative paths uninterpretable.
 #[derive(Serialize)]
 struct JsonReport<'a> {
     rules_dir: String,
     summary: JsonSummary,
-    documents: &'a [RuleDocument],
+    documents: Vec<JsonDocument<'a>>,
     errors: Vec<JsonError<'a>>,
 }
 
@@ -125,13 +135,41 @@ struct JsonSummary {
     errors: usize,
 }
 
+/// One parsed document.
+///
+/// `path` is relative to the scanned root, so an identical rule set serializes
+/// identically wherever it is checked out. `slug` is the stable identity the
+/// scope index keys on, which the document type computes rather than storing
+/// as a field of its own.
+#[derive(Serialize)]
+struct JsonDocument<'a> {
+    path: String,
+    slug: Option<&'a str>,
+    title: Option<&'a str>,
+    scope: Option<&'a str>,
+    rules: &'a [Rule],
+    verify: &'a [VerifyBlock],
+    accept_when: &'a [String],
+    enforcement: Option<&'a str>,
+    warnings: &'a [RuleIssue],
+}
+
 #[derive(Serialize)]
 struct JsonError<'a> {
     path: String,
     issue: &'a RuleIssue,
 }
 
-fn render_json(report: &RuleSetLoadReport) -> String {
+/// `path` expressed relative to `root`.
+///
+/// Falls back to the full path when `path` lies outside the scanned root. That
+/// cannot happen for a document discovered under `root`, but an unstable path
+/// is a better outcome than a panic if it ever does.
+fn relative_to(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root).unwrap_or(path).display().to_string()
+}
+
+fn render_json(report: &RuleSetLoadReport, root: &Path) -> String {
     let payload = JsonReport {
         rules_dir: report.rules_dir.display().to_string(),
         summary: JsonSummary {
@@ -140,12 +178,26 @@ fn render_json(report: &RuleSetLoadReport) -> String {
             warnings: report.warning_count(),
             errors: report.errors.len(),
         },
-        documents: &report.documents,
+        documents: report
+            .documents
+            .iter()
+            .map(|doc| JsonDocument {
+                path: relative_to(root, &doc.source_path),
+                slug: doc.slug(),
+                title: doc.title.as_deref(),
+                scope: doc.scope.as_deref(),
+                rules: &doc.rules,
+                verify: &doc.verify,
+                accept_when: &doc.accept_when,
+                enforcement: doc.enforcement.as_deref(),
+                warnings: &doc.warnings,
+            })
+            .collect(),
         errors: report
             .errors
             .iter()
             .map(|error| JsonError {
-                path: error.path.display().to_string(),
+                path: relative_to(root, &error.path),
                 issue: &error.issue,
             })
             .collect(),
@@ -157,8 +209,6 @@ fn render_json(report: &RuleSetLoadReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::path::Path;
 
     use tempfile::{tempdir, TempDir};
 
@@ -261,19 +311,57 @@ mod tests {
     fn test_render_json_carries_summary_documents_and_errors() {
         let root = seed(&[("a.md", DOC), ("b.md", BAD)]);
         let report = load_rule_set(root.path()).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&render_json(&report)).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&report, root.path())).unwrap();
 
         assert_eq!(value["summary"]["documents"], 1);
         assert_eq!(value["summary"]["rules"], 2);
         assert_eq!(value["summary"]["warnings"], 1);
         assert_eq!(value["summary"]["errors"], 1);
+        assert_eq!(value["documents"][0]["title"], "Alpha");
+        assert_eq!(value["documents"][0]["scope"], "Scope.");
         assert_eq!(value["documents"][0]["rules"][0]["id"], "R-A-001");
         assert_eq!(value["documents"][0]["rules"][0]["level"], "MUST");
+        assert_eq!(value["documents"][0]["warnings"][0]["kind"], "unknown_level");
         assert_eq!(value["errors"][0]["issue"]["kind"], "missing_rules_section");
         assert!(value["rules_dir"]
             .as_str()
             .unwrap()
             .ends_with(".actual/rules"));
+    }
+
+    /// The one field that names this machine is `rules_dir`. Every per-file
+    /// path is relative to the scanned root, so the same rule set serializes
+    /// byte-identically wherever it is checked out.
+    #[test]
+    fn test_render_json_paths_are_relative_to_the_scanned_root() {
+        let root = seed(&[("a.md", DOC), ("b.md", BAD)]);
+        let report = load_rule_set(root.path()).unwrap();
+        let json = render_json(&report, root.path());
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(value["documents"][0]["path"], ".actual/rules/a.md");
+        assert_eq!(value["documents"][0]["slug"], "a");
+        assert_eq!(value["errors"][0]["path"], ".actual/rules/b.md");
+
+        // The scanned root is the only place the temp directory may appear.
+        let root_display = root.path().display().to_string();
+        let occurrences = json.matches(root_display.as_str()).count();
+        assert_eq!(occurrences, 1, "temp root leaked outside rules_dir: {json}");
+    }
+
+    /// A path outside the scanned root cannot arise from discovery, but it must
+    /// degrade to the full path rather than panicking.
+    #[test]
+    fn test_relative_to_falls_back_to_the_full_path() {
+        assert_eq!(
+            relative_to(Path::new("/repo"), Path::new("/repo/.actual/rules/a.md")),
+            ".actual/rules/a.md"
+        );
+        assert_eq!(
+            relative_to(Path::new("/repo"), Path::new("/elsewhere/a.md")),
+            "/elsewhere/a.md"
+        );
     }
 
     #[test]
