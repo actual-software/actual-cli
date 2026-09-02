@@ -1,4 +1,4 @@
-//! `actual rules` — inspect the rule documents committed under `.actual/rules/`.
+//! `actual rules` — inspect the rule documents under `.actual/rules/`.
 //!
 //! # Design
 //!
@@ -61,7 +61,7 @@ fn level_histogram(doc: &RuleDocument) -> String {
 }
 
 fn render_panel(report: &RuleSetLoadReport, width: usize) -> String {
-    let mut panel = Panel::titled("Committed Rules");
+    let mut panel = Panel::titled("Rules");
     panel = panel.line(&report.rules_dir.display().to_string());
 
     if report.is_empty() {
@@ -189,7 +189,7 @@ mod tests {
         let report = load_rule_set(root.path()).unwrap();
         let out = render_panel(&report, 100);
 
-        assert!(out.contains("Committed Rules"));
+        assert!(out.contains("Rules"));
         assert!(out.contains(".actual/rules"));
         assert!(out.contains("MUST 1 · MAY 1"));
         assert!(out.contains("1 documents · 2 rules · 1 warnings · 0 errors"));

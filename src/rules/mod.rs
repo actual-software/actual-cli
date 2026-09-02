@@ -1,4 +1,4 @@
-//! Reader and parser for the rule documents committed under `.actual/rules/`.
+//! Reader and parser for the rule documents under `.actual/rules/`.
 //!
 //! # Design
 //!

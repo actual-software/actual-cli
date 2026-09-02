@@ -1,4 +1,4 @@
-//! Typed model for the rule documents committed under `.actual/rules/`.
+//! Typed model for the rule documents under `.actual/rules/`.
 //!
 //! # Design
 //!

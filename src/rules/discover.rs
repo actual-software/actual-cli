@@ -23,12 +23,12 @@ use crate::error::ActualError;
 use crate::rules::parse::parse_rule_document;
 use crate::rules::types::{RuleFileError, RuleIssueKind, RuleSetLoadReport};
 
-/// Directory, relative to the repository root, holding committed rule files.
+/// Directory, relative to the repository root, holding rule files.
 pub const RULES_DIR_NAME: &str = ".actual/rules";
 
 /// Per-file size cap, mirroring the config loader's limit in
 /// [`crate::config::paths`]. Checked before the file is read, because the size
-/// of a committed corpus is not known in advance.
+/// of a rules corpus is not known in advance.
 pub const MAX_RULE_FILE_SIZE: u64 = 1024 * 1024; // 1 MiB
 
 /// The rules directory for a repository rooted at `root_dir`.
@@ -36,7 +36,7 @@ pub fn rules_dir(root_dir: &Path) -> PathBuf {
     root_dir.join(RULES_DIR_NAME)
 }
 
-/// Load every rule document committed under `<root_dir>/.actual/rules/`.
+/// Load every rule document under `<root_dir>/.actual/rules/`.
 ///
 /// Returns `Err` only when the rules directory exists but cannot be listed at
 /// all. Per-file failures are collected in [`RuleSetLoadReport::errors`] and do

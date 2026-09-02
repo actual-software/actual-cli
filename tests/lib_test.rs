@@ -502,7 +502,7 @@ fn test_run_rules_ls_without_a_rules_directory() {
 /// The reader is consumed the way the downstream scope-index task will consume
 /// it: through the crate's public path, never a private item.
 #[test]
-fn test_public_rules_api_loads_committed_rule_documents() {
+fn test_public_rules_api_loads_rule_documents() {
     let dir = tempfile::tempdir().unwrap();
     let rules_dir = actual_cli::rules::rules_dir(dir.path());
     std::fs::create_dir_all(&rules_dir).unwrap();
