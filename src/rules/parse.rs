@@ -851,9 +851,8 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
 
     #[test]
     fn test_parse_unterminated_verify_fence_warns_and_keeps_the_rules() {
-        let doc = parse_ok(
-            "# T\n\n### Rules\n\n- **R-A-001** MAY: a\n\n### Verify\n\n```bash\nls\n",
-        );
+        let doc =
+            parse_ok("# T\n\n### Rules\n\n- **R-A-001** MAY: a\n\n### Verify\n\n```bash\nls\n");
         assert_eq!(ids(&doc), vec!["R-A-001"]);
         assert_eq!(doc.verify.len(), 1);
         assert_eq!(doc.verify[0].lang.as_deref(), Some("bash"));
