@@ -64,6 +64,15 @@ fn level_histogram(doc: &RuleDocument) -> String {
         .join(" · ")
 }
 
+/// `1 document` / `2 documents`. Zero uses the plural, like English counts.
+fn counted(n: usize, singular: &str) -> String {
+    if n == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{n} {singular}s")
+    }
+}
+
 fn render_panel(report: &RuleSetLoadReport, width: usize) -> String {
     let mut panel = Panel::titled("Rules");
     panel = panel.line(&report.rules_dir.display().to_string());
@@ -99,11 +108,11 @@ fn render_panel(report: &RuleSetLoadReport, width: usize) -> String {
     }
 
     panel = panel.separator().line(&format!(
-        "{} documents · {} rules · {} warnings · {} errors",
-        report.documents.len(),
-        report.rule_count(),
-        report.warning_count(),
-        report.errors.len(),
+        "{} · {} · {} · {}",
+        counted(report.documents.len(), "document"),
+        counted(report.rule_count(), "rule"),
+        counted(report.warning_count(), "warning"),
+        counted(report.errors.len(), "error"),
     ));
     panel.render(width)
 }
@@ -237,6 +246,13 @@ mod tests {
     }
 
     #[test]
+    fn test_counted_singular_only_for_one() {
+        assert_eq!(counted(0, "document"), "0 documents");
+        assert_eq!(counted(1, "document"), "1 document");
+        assert_eq!(counted(2, "warning"), "2 warnings");
+    }
+
+    #[test]
     fn test_level_histogram_lists_only_used_levels() {
         let root = seed(&[("a.md", DOC)]);
         let report = load_rule_set(root.path()).unwrap();
@@ -252,7 +268,7 @@ mod tests {
         assert!(out.contains("Rules"));
         assert!(out.contains(".actual/rules"));
         assert!(out.contains("MUST 1 · MAY 1"));
-        assert!(out.contains("1 documents · 2 rules · 1 warnings · 0 errors"));
+        assert!(out.contains("1 document · 2 rules · 1 warning · 0 errors"));
     }
 
     /// Dropped bullets (unknown levels, malformed rules) are listed by slug and
@@ -277,7 +293,7 @@ mod tests {
 
         assert!(out.contains("Failed to parse:"));
         assert!(out.contains("no `### Rules` section"));
-        assert!(out.contains("1 documents · 2 rules · 1 warnings · 1 errors"));
+        assert!(out.contains("1 document · 2 rules · 1 warning · 1 error"));
         let warnings_at = out.find("Warnings:").expect("warnings section");
         let errors_at = out.find("Failed to parse:").expect("errors section");
         assert!(
@@ -303,7 +319,7 @@ mod tests {
         let report = load_rule_set(root.path()).unwrap();
         let out = render_panel(&report, 120);
         assert!(out.contains("Failed to parse:"));
-        assert!(out.contains("0 documents · 0 rules · 0 warnings · 1 errors"));
+        assert!(out.contains("0 documents · 0 rules · 0 warnings · 1 error"));
         assert!(!out.contains("Warnings:"));
     }
 

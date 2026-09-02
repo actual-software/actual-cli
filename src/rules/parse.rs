@@ -134,14 +134,16 @@ pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, Rule
         }
 
         if is_bold_run_in(trimmed) {
-            section = if is_accept_when(trimmed) {
-                Section::AcceptWhen
-            } else {
-                // A bold aside such as `**In scope:**` introduces bullets that
-                // are not rules. Leaving the section keeps them from being
-                // reported as malformed.
-                Section::Ignored
-            };
+            if is_accept_when(trimmed) {
+                section = Section::AcceptWhen;
+            } else if section != Section::Rules {
+                // A bold aside such as `**In scope:**` outside ### Rules
+                // introduces bullets that are not rules.
+                section = Section::Ignored;
+            }
+            // In ### Rules, skip the aside line but stay in the section so a
+            // later rule bullet is not silently dropped. Aside bullets warn
+            // as malformed rather than ending the list.
             i += 1;
             continue;
         }
@@ -692,14 +694,28 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         assert!(doc.warnings.is_empty());
     }
 
-    /// A bold aside such as `**In scope:**` introduces bullets that are not
-    /// rules; leaving the section keeps them from being reported.
+    /// A bold aside such as `**In scope:**` is not a rule. Staying in ### Rules
+    /// means the aside bullets warn as malformed, and a later real rule is kept.
     #[test]
-    fn test_parse_bold_run_in_heading_ends_the_rules_section() {
+    fn test_parse_bold_aside_in_rules_does_not_end_the_section() {
         let doc = parse_ok(
             "# T\n\n### Rules\n\n- **R-A-001** MAY: a\n\n**In scope:**\n- request bodies\n- cache reads\n\n**Out of scope:**\n- internal config\n",
         );
         assert_eq!(ids(&doc), vec!["R-A-001"]);
+        assert_eq!(doc.warnings.len(), 3);
+        assert!(doc
+            .warnings
+            .iter()
+            .all(|warning| warning.kind == RuleIssueKind::MalformedRule));
+    }
+
+    /// `**Note:**` mid-list used to end ### Rules and drop every bullet after it.
+    #[test]
+    fn test_parse_bold_note_mid_rules_keeps_later_rules() {
+        let doc = parse_ok(
+            "# T\n\n### Rules\n\n- **R-A-001** MUST: a\n\n**Note:**\n- **R-A-002** SHOULD: b\n",
+        );
+        assert_eq!(ids(&doc), vec!["R-A-001", "R-A-002"]);
         assert!(doc.warnings.is_empty());
     }
 
