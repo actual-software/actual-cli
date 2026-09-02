@@ -211,8 +211,9 @@ pub enum RuleIssueKind {
     Empty,
     MissingRulesSection,
     NoRules,
-    UnterminatedFence,
     // ── non-fatal, recorded on the document ──
+    // Promoted to a file error when the scan is left with no parseable rules.
+    UnterminatedFence,
     UnknownLevel,
     MalformedRule,
     EmptyStatement,

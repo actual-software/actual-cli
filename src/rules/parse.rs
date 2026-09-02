@@ -21,10 +21,12 @@
 //!   statement.
 //!
 //! Failures are two-tier. Structural absence — an empty file, no `### Rules`,
-//! nothing parseable under it, an unterminated fence — is fatal and the file is
-//! skipped. Anything local to one bullet is a warning recorded on the document,
-//! because losing one malformed rule is better than losing the eight good ones
-//! beside it.
+//! nothing parseable under it — is fatal and the file is skipped. An
+//! unterminated fence is fatal only when it leaves the document with no
+//! parseable rules; otherwise it is a warning, the same as an unterminated
+//! `<enforcement>` tag. Anything local to one bullet is a warning recorded on
+//! the document, because losing one malformed rule is better than losing the
+//! eight good ones beside it.
 
 use std::path::Path;
 use std::sync::LazyLock;
@@ -94,15 +96,10 @@ pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, Rule
         }
 
         // Fences first: their contents must never be able to move the scanner.
+        // An unclosed fence is consumed through EOF, like `<enforcement>`, so
+        // later headings cannot be mistaken for structure.
         if let Some(lang) = fence_lang(trimmed) {
-            let (block, next) = capture_fence(&lines, i, lang).ok_or_else(|| {
-                RuleFileError::new(
-                    path,
-                    RuleIssueKind::UnterminatedFence,
-                    Some(lineno),
-                    "code fence opened but never closed",
-                )
-            })?;
+            let (block, next) = capture_fence(&lines, i, lang, &mut doc);
             if section == Section::Verify {
                 doc.verify.push(block);
             }
@@ -158,15 +155,20 @@ pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, Rule
         i += 1;
     }
 
-    if !saw_rules_heading {
-        return Err(RuleFileError::new(
-            path,
-            RuleIssueKind::MissingRulesSection,
-            None,
-            "no `### Rules` section",
-        ));
-    }
     if doc.rules.is_empty() {
+        // An unclosed fence that ate the Rules section is more specific than
+        // "no heading" / "no rules", and keeps the opening-line location.
+        if let Some(err) = unterminated_fence_error(path, &doc) {
+            return Err(err);
+        }
+        if !saw_rules_heading {
+            return Err(RuleFileError::new(
+                path,
+                RuleIssueKind::MissingRulesSection,
+                None,
+                "no `### Rules` section",
+            ));
+        }
         return Err(RuleFileError::new(
             path,
             RuleIssueKind::NoRules,
@@ -233,27 +235,43 @@ fn strip_bullet(trimmed: &str) -> Option<&str> {
 // ── block capture ────────────────────────────────────────────────────────
 
 /// Capture a fenced block opened at `start`, returning it with the index of the
-/// line after the closing fence. `None` when the fence is never closed.
+/// line after the closing fence. Reaching end of input is recorded as a
+/// warning rather than discarding the document — the same policy as
+/// [`capture_enforcement`]. The body through EOF is still captured so later
+/// lines cannot be re-read as headings.
 fn capture_fence(
     lines: &[&str],
     start: usize,
     lang: Option<String>,
-) -> Option<(VerifyBlock, usize)> {
+    doc: &mut RuleDocument,
+) -> (VerifyBlock, usize) {
     let mut end = start + 1;
     while end < lines.len() {
         if lines[end].trim().starts_with("```") {
-            return Some((
+            return (
                 VerifyBlock {
                     lang,
                     body: lines[start + 1..end].join("\n"),
                     line: start + 1,
                 },
                 end + 1,
-            ));
+            );
         }
         end += 1;
     }
-    None
+    doc.warnings.push(issue(
+        RuleIssueKind::UnterminatedFence,
+        start + 1,
+        "code fence opened but never closed",
+    ));
+    (
+        VerifyBlock {
+            lang,
+            body: lines[start + 1..end].join("\n"),
+            line: start + 1,
+        },
+        end,
+    )
 }
 
 /// Capture `<enforcement> ... </enforcement>` starting at `start`, returning
@@ -362,6 +380,15 @@ fn issue(kind: RuleIssueKind, line: usize, detail: impl Into<String>) -> RuleIss
         line: Some(line),
         detail: detail.into(),
     }
+}
+
+/// Promote an unterminated-fence warning to a file error. Used only when the
+/// scan produced no rules, so the more specific fence location is kept.
+fn unterminated_fence_error(path: &Path, doc: &RuleDocument) -> Option<RuleFileError> {
+    doc.warnings
+        .iter()
+        .find(|warning| warning.kind == RuleIssueKind::UnterminatedFence)
+        .map(|warning| RuleFileError::new(path, warning.kind, warning.line, warning.detail.clone()))
 }
 
 #[cfg(test)]
@@ -807,11 +834,39 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
     }
 
     #[test]
-    fn test_parse_error_unterminated_fence_reports_its_opening_line() {
-        let err = parse("# T\n\n### Rules\n\n- **R-A-001** MAY: a\n\n### Verify\n\n```bash\nls\n")
-            .unwrap_err();
+    fn test_parse_unterminated_verify_fence_warns_and_keeps_the_rules() {
+        let doc = parse_ok(
+            "# T\n\n### Rules\n\n- **R-A-001** MAY: a\n\n### Verify\n\n```bash\nls\n",
+        );
+        assert_eq!(ids(&doc), vec!["R-A-001"]);
+        assert_eq!(doc.verify.len(), 1);
+        assert_eq!(doc.verify[0].lang.as_deref(), Some("bash"));
+        assert_eq!(doc.verify[0].body, "ls");
+        assert_eq!(doc.warnings.len(), 1);
+        assert_eq!(doc.warnings[0].kind, RuleIssueKind::UnterminatedFence);
+        assert_eq!(doc.warnings[0].line, Some(9));
+        assert!(doc.warnings[0]
+            .detail
+            .contains("code fence opened but never closed"));
+    }
+
+    /// An unclosed fence in the preamble swallows `### Rules`, so the file is
+    /// still skipped — with the fence's opening line, not a vaguer missing-section
+    /// error.
+    #[test]
+    fn test_parse_error_unterminated_fence_before_any_rules() {
+        let err = parse("# T\n\n```bash\n### Rules\n- **R-A-001** MAY: a\n").unwrap_err();
         assert_eq!(err.issue.kind, RuleIssueKind::UnterminatedFence);
-        assert_eq!(err.issue.line, Some(9));
+        assert_eq!(err.issue.line, Some(3));
+    }
+
+    /// An unclosed fence under `### Rules` that ate every bullet is still the
+    /// fence, not `NoRules`.
+    #[test]
+    fn test_parse_error_unterminated_fence_inside_rules_with_nothing_parsed() {
+        let err = parse("# T\n\n### Rules\n\n```\n- **R-A-001** MAY: a\n").unwrap_err();
+        assert_eq!(err.issue.kind, RuleIssueKind::UnterminatedFence);
+        assert_eq!(err.issue.line, Some(5));
     }
 
     #[test]
