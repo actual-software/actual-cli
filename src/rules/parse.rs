@@ -719,6 +719,18 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         assert!(doc.warnings.is_empty());
     }
 
+    /// Outside ### Rules the same aside *does* end the section, because a
+    /// bullet there is not expected to be a rule and warning about it would be
+    /// noise. Here it stops `**Accept when:**` from swallowing a trailing list.
+    #[test]
+    fn test_parse_bold_aside_outside_rules_ends_the_section() {
+        let doc = parse_ok(
+            "# T\n\n### Rules\n\n- **R-A-001** MAY: a\n\n**Accept when:**\n- one\n\n**Notes:**\n- not an acceptance criterion\n",
+        );
+        assert_eq!(doc.accept_when, vec!["one".to_string()]);
+        assert!(doc.warnings.is_empty());
+    }
+
     #[test]
     fn test_parse_accept_when_ends_at_enforcement_and_at_a_heading() {
         let by_enforcement = parse_ok(
