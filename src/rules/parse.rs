@@ -388,7 +388,7 @@ mod tests {
         doc.rules.iter().map(|rule| rule.id.as_str()).collect()
     }
 
-    /// A real committed rule file, copied byte for byte from
+    /// A real rule file, copied byte for byte from
     /// `.actual/rules/cross-cutting-access-tokens-include-e410.md` in the
     /// sprintreview corpus. Note the absence of a trailing newline, which is
     /// how every file in that corpus ends.
@@ -436,7 +436,7 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
     // ── the real corpus shape ────────────────────────────────────────────
 
     #[test]
-    fn test_parse_real_committed_rule_file() {
+    fn test_parse_real_rule_file() {
         let doc = parse_ok(FIXTURE_REAL);
 
         assert_eq!(

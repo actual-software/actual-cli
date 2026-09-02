@@ -343,7 +343,7 @@ pub enum Command {
     Models(ModelsArgs),
     /// Clear local cache (analysis and tailoring results)
     Cache(CacheArgs),
-    /// Inspect the rule documents committed under `.actual/rules/`
+    /// Inspect the rule documents under `.actual/rules/`
     Rules(RulesArgs),
 }
 
@@ -662,7 +662,7 @@ pub struct RulesArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum RulesAction {
-    /// List the rule documents committed under `.actual/rules/`
+    /// List the rule documents under `.actual/rules/`
     Ls(RulesLsArgs),
 }
 
