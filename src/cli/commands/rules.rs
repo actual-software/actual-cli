@@ -175,7 +175,10 @@ struct JsonError<'a> {
 /// cannot happen for a document discovered under `root`, but an unstable path
 /// is a better outcome than a panic if it ever does.
 fn relative_to(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root).unwrap_or(path).display().to_string()
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn render_json(report: &RuleSetLoadReport, root: &Path) -> String {
@@ -338,7 +341,10 @@ mod tests {
         assert_eq!(value["documents"][0]["scope"], "Scope.");
         assert_eq!(value["documents"][0]["rules"][0]["id"], "R-A-001");
         assert_eq!(value["documents"][0]["rules"][0]["level"], "MUST");
-        assert_eq!(value["documents"][0]["warnings"][0]["kind"], "unknown_level");
+        assert_eq!(
+            value["documents"][0]["warnings"][0]["kind"],
+            "unknown_level"
+        );
         assert_eq!(value["errors"][0]["issue"]["kind"], "missing_rules_section");
         assert!(value["rules_dir"]
             .as_str()
