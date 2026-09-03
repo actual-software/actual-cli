@@ -432,6 +432,12 @@ mod tests {
                 repo: Some(root.path().to_path_buf()),
                 files: Vec::new(),
                 limit: 5,
+                candidates: crate::rules::scope::DEFAULT_CANDIDATES,
+                // Stage 1 only: this test asserts dispatch, and reaching for a
+                // runner would make it depend on the machine it runs on.
+                no_rank: true,
+                runner: None,
+                model: None,
                 explain: false,
                 json: false,
                 rebuild: false,
@@ -447,6 +453,10 @@ mod tests {
                 repo: Some(root.path().to_path_buf()),
                 limit: 5,
                 ablate: Vec::new(),
+                rank: false,
+                candidates: crate::rules::scope::DEFAULT_CANDIDATES,
+                runner: None,
+                model: None,
                 json: false,
                 rebuild: false,
             }),

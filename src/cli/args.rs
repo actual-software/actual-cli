@@ -731,6 +731,24 @@ pub struct RulesSelectArgs {
     #[arg(long, default_value_t = 10)]
     pub limit: usize,
 
+    /// How many candidates the deterministic prefilter retrieves before stage 2
+    /// judges them. Raised to `--limit` when smaller.
+    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
+    pub candidates: usize,
+
+    /// Skip stage 2 and return the deterministic prefilter alone. Offline, and
+    /// exactly reproducible.
+    #[arg(long)]
+    pub no_rank: bool,
+
+    /// Runner to use for stage 2. Probed automatically when omitted.
+    #[arg(long, value_enum)]
+    pub runner: Option<RunnerChoice>,
+
+    /// Model for stage 2, overriding the configured one.
+    #[arg(long)]
+    pub model: Option<String>,
+
     /// Show the signal behind every hit, and what the filename scan would have
     /// chosen instead.
     #[arg(long)]
@@ -764,6 +782,22 @@ pub struct RulesEvalArgs {
     /// signal is worth. Repeatable.
     #[arg(long = "ablate", value_name = "FIELD")]
     pub ablate: Vec<String>,
+
+    /// Also score the two-stage selector, which costs one runner call per case.
+    #[arg(long)]
+    pub rank: bool,
+
+    /// How many candidates the prefilter hands to stage 2 under `--rank`.
+    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
+    pub candidates: usize,
+
+    /// Runner to use for `--rank`. Probed automatically when omitted.
+    #[arg(long, value_enum)]
+    pub runner: Option<RunnerChoice>,
+
+    /// Model for `--rank`, overriding the configured one.
+    #[arg(long)]
+    pub model: Option<String>,
 
     /// Print the full comparison as JSON instead of a panel.
     #[arg(long)]

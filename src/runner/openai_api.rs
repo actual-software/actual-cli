@@ -164,24 +164,24 @@ impl OpenAiApiRunner {
 
 // ── TailoringRunner impl ──────────────────────────────────────────────────────
 
-impl TailoringRunner for OpenAiApiRunner {
-    fn set_event_tx(&self, tx: UnboundedSender<String>) {
-        *self.event_tx.lock().unwrap() = Some(tx);
-    }
-
-    async fn run_tailoring(
+impl OpenAiApiRunner {
+    /// One structured Responses-API call, generic over what the schema
+    /// describes.
+    ///
+    /// Extracted from `run_tailoring` unchanged so a second caller with a
+    /// different schema — the stage-2 rule ranker — reuses this request loop,
+    /// rate-limit retry and refusal handling rather than growing a parallel
+    /// copy. `system_prompt` and `schema_name` are the caller's: they are the
+    /// parts of the call that describe the task rather than the transport.
+    async fn run_structured<T: serde::de::DeserializeOwned + Send>(
         &self,
+        system_prompt: &str,
+        schema_name: &str,
         prompt: &str,
         schema: &str,
-        _model_override: Option<&str>,
-        _max_budget_usd: Option<f64>,
-    ) -> Result<TailoringOutput, ActualError> {
+    ) -> Result<T, ActualError> {
         let event_tx = self.event_tx.lock().unwrap().clone();
 
-        // Ignore `_model_override` — it comes from `ConcurrentTailoringConfig`
-        // which resolves from `config.model` (a Claude Code alias like "haiku").
-        // The OpenAI runner's `self.model` was already correctly resolved in
-        // `sync_wiring` from `--model` flag > `config.model` > default.
         let model = self.model.clone();
         let mut schema_value: Value = serde_json::from_str(schema)?;
         inject_additional_properties_false(&mut schema_value);
@@ -195,10 +195,7 @@ impl TailoringRunner for OpenAiApiRunner {
             input: vec![
                 InputMessage {
                     role: "system".to_string(),
-                    content: "You are an expert software architect. \
-                        Analyze the provided repository context and the user's request, \
-                        then respond with a valid JSON object matching the specified schema."
-                        .to_string(),
+                    content: system_prompt.to_string(),
                 },
                 InputMessage {
                     role: "user".to_string(),
@@ -208,7 +205,7 @@ impl TailoringRunner for OpenAiApiRunner {
             text: TextOptions {
                 format: JsonSchemaFormat {
                     format_type: "json_schema".to_string(),
-                    name: "tailoring_output".to_string(),
+                    name: schema_name.to_string(),
                     schema: schema_value,
                     strict: true,
                 },
@@ -363,13 +360,57 @@ impl TailoringRunner for OpenAiApiRunner {
             }
         };
 
-        let output: TailoringOutput = serde_json::from_str(&text)?;
+        let output: T = serde_json::from_str(&text)?;
 
         if let Some(ref tx) = event_tx {
             let _ = tx.send("Response received from OpenAI API".to_string());
         }
 
         Ok(output)
+    }
+}
+
+/// The system prompt for the tailoring call.
+const TAILORING_SYSTEM_PROMPT: &str = "You are an expert software architect. \
+    Analyze the provided repository context and the user's request, \
+    then respond with a valid JSON object matching the specified schema.";
+
+/// The system prompt for the stage-2 rule-selection call.
+const SELECTION_SYSTEM_PROMPT: &str = "You are a precise reviewer deciding which of a \
+    repository's committed rule documents govern a proposed change. \
+    Respond with a valid JSON object matching the specified schema.";
+
+impl TailoringRunner for OpenAiApiRunner {
+    fn set_event_tx(&self, tx: UnboundedSender<String>) {
+        *self.event_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// `_model_override` is ignored: it comes from `ConcurrentTailoringConfig`,
+    /// which resolves from `config.model` (a Claude Code alias like "haiku").
+    /// The OpenAI runner's `self.model` was already correctly resolved in
+    /// `sync_wiring` from `--model` flag > `config.model` > default.
+    async fn run_tailoring(
+        &self,
+        prompt: &str,
+        schema: &str,
+        _model_override: Option<&str>,
+        _max_budget_usd: Option<f64>,
+    ) -> Result<TailoringOutput, ActualError> {
+        self.run_structured(TAILORING_SYSTEM_PROMPT, "tailoring_output", prompt, schema)
+            .await
+    }
+}
+
+impl crate::runner::structured::StructuredRunner for OpenAiApiRunner {
+    async fn run_structured_json(
+        &self,
+        prompt: &str,
+        schema: &str,
+        _model_override: Option<&str>,
+        _max_budget_usd: Option<f64>,
+    ) -> Result<Value, ActualError> {
+        self.run_structured(SELECTION_SYSTEM_PROMPT, "rule_selection", prompt, schema)
+            .await
     }
 }
 

@@ -656,17 +656,22 @@ async fn run_subprocess_streaming<T: DeserializeOwned>(
     }
 }
 
-impl TailoringRunner for CliClaudeRunner {
-    async fn run_tailoring(
+impl CliClaudeRunner {
+    /// One structured invocation under `opts`, generic over what the schema
+    /// describes.
+    ///
+    /// Extracted from `run_tailoring` unchanged so a second caller with a
+    /// different schema — the stage-2 rule ranker — reuses this subprocess
+    /// plumbing rather than growing a parallel copy of it. The invocation
+    /// profile is the caller's, because a ranker needs neither the tailoring
+    /// profile's write tools nor its ten turns.
+    async fn run_structured<T: DeserializeOwned + Send>(
         &self,
+        mut opts: crate::runner::options::InvocationOptions,
         prompt: &str,
         schema: &str,
-        model_override: Option<&str>,
         max_budget_usd: Option<f64>,
-    ) -> Result<TailoringOutput, ActualError> {
-        use crate::runner::options::InvocationOptions;
-
-        let mut opts = InvocationOptions::for_tailoring(model_override);
+    ) -> Result<T, ActualError> {
         if let Some(t) = self.max_turns_override {
             opts.max_turns = t;
         }
@@ -684,9 +689,49 @@ impl TailoringRunner for CliClaudeRunner {
             .clone();
         run_subprocess_streaming(&self.binary_path, self.timeout, &args, event_tx).await
     }
+}
+
+impl TailoringRunner for CliClaudeRunner {
+    async fn run_tailoring(
+        &self,
+        prompt: &str,
+        schema: &str,
+        model_override: Option<&str>,
+        max_budget_usd: Option<f64>,
+    ) -> Result<TailoringOutput, ActualError> {
+        use crate::runner::options::InvocationOptions;
+
+        self.run_structured(
+            InvocationOptions::for_tailoring(model_override),
+            prompt,
+            schema,
+            max_budget_usd,
+        )
+        .await
+    }
 
     fn set_event_tx(&self, tx: UnboundedSender<String>) {
         *self.event_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
+    }
+}
+
+impl crate::runner::structured::StructuredRunner for CliClaudeRunner {
+    async fn run_structured_json(
+        &self,
+        prompt: &str,
+        schema: &str,
+        model_override: Option<&str>,
+        max_budget_usd: Option<f64>,
+    ) -> Result<serde_json::Value, ActualError> {
+        use crate::runner::options::InvocationOptions;
+
+        self.run_structured(
+            InvocationOptions::for_selection(model_override),
+            prompt,
+            schema,
+            max_budget_usd,
+        )
+        .await
     }
 }
 

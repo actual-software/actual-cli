@@ -10,6 +10,7 @@ pub mod options;
 pub mod probe;
 pub mod prompts;
 pub mod schemas;
+pub mod structured;
 pub mod subprocess;
 pub(crate) mod util;
 
@@ -18,4 +19,5 @@ pub use codex_cli::{find_codex_binary, CodexCliRunner};
 pub use cursor_cli::{find_cursor_binary, CursorCliRunner};
 pub use openai_api::OpenAiApiRunner;
 pub use options::InvocationOptions;
+pub use structured::StructuredRunner;
 pub use subprocess::{ClaudeRunner, CliClaudeRunner, TailoringRunner};
