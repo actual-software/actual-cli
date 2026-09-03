@@ -40,10 +40,12 @@ pub fn rules_dir(root_dir: &Path) -> PathBuf {
 
 /// Load every rule document under `<root_dir>/.actual/rules/`.
 ///
-/// Returns `Err` only when the rules directory exists but cannot be listed at
-/// all. Per-file failures are collected in [`RuleSetLoadReport::errors`] and do
-/// not stop the scan.
+/// Returns `Err` when the supplied repository root does not exist or is not a
+/// directory, and when the rules directory exists but cannot be listed at all.
+/// Per-file failures are collected in [`RuleSetLoadReport::errors`] and do not
+/// stop the scan.
 pub fn load_rule_set(root_dir: &Path) -> Result<RuleSetLoadReport, ActualError> {
+    validate_root(root_dir)?;
     let dir = rules_dir(root_dir);
     let mut report = RuleSetLoadReport {
         rules_dir: dir.clone(),
@@ -97,6 +99,33 @@ pub fn load_rule_set(root_dir: &Path) -> Result<RuleSetLoadReport, ActualError> 
     }
 
     Ok(report)
+}
+
+/// Reject a repository root that does not exist or is not a directory.
+///
+/// This exists to keep two states apart that are otherwise indistinguishable in
+/// the result. A real repository with no `.actual/rules` is an ordinary state —
+/// it has never been synced — and yields an empty report. A root that is not
+/// there at all is a bad argument. Without this check both collapse into the
+/// same successful empty report, so a typo or a stale checkout path reports
+/// "no governance documents" rather than "no such directory", and the CLI exits
+/// zero while having scanned nothing.
+///
+/// The check is here rather than in the CLI so that a direct library caller and
+/// the command get the same contract. `metadata` follows symlinks, so a
+/// symlinked checkout is still accepted.
+fn validate_root(root_dir: &Path) -> Result<(), ActualError> {
+    match std::fs::metadata(root_dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(ActualError::IoError(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!("Repository root {} is not a directory", root_dir.display()),
+        ))),
+        Err(e) => Err(ActualError::IoError(std::io::Error::new(
+            e.kind(),
+            format!("Failed to read repository root {}: {e}", root_dir.display()),
+        ))),
+    }
 }
 
 /// Markdown rule files in `dir`, sorted by path. Per-entry listing failures are
@@ -206,6 +235,55 @@ mod tests {
         let report = load_rule_set(root.path()).unwrap();
         assert!(report.is_empty());
         assert_eq!(report.rules_dir, rules_dir(root.path()));
+    }
+
+    /// The distinction APR-002 is about: a root that exists but was never
+    /// synced is an empty report, while a root that does not exist is an error.
+    /// Collapsing the two makes a mistyped path look like a governed repository
+    /// with nothing in it.
+    #[test]
+    fn test_load_rule_set_rejects_a_missing_root() {
+        let root = tempdir().unwrap();
+        let missing = root.path().join("no-such-checkout");
+
+        let err = load_rule_set(&missing).unwrap_err();
+        assert!(matches!(err, ActualError::IoError(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("Failed to read repository root"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("no-such-checkout"), "{message}");
+    }
+
+    #[test]
+    fn test_load_rule_set_rejects_a_root_that_is_a_file() {
+        let root = tempdir().unwrap();
+        let file = root.path().join("a-file");
+        std::fs::write(&file, "not a checkout").unwrap();
+
+        let err = load_rule_set(&file).unwrap_err();
+        assert!(matches!(err, ActualError::IoError(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("is not a directory"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("a-file"), "{message}");
+    }
+
+    /// A root reached through a symlink is a normal checkout layout, so the
+    /// validation must follow the link rather than reject it.
+    #[cfg(unix)]
+    #[test]
+    fn test_load_rule_set_accepts_a_symlinked_root() {
+        let real = seed(&[("a.md", DOC_A)]);
+        let parent = tempdir().unwrap();
+        let link = parent.path().join("linked-root");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+
+        let report = load_rule_set(&link).unwrap();
+        assert_eq!(report.documents.len(), 1);
     }
 
     #[test]
