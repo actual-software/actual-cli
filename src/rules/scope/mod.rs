@@ -14,7 +14,7 @@
 //! `### Verify` block, whose grep and test operands name concrete paths. This
 //! module reads both.
 //!
-//! Five layers, each testable alone:
+//! Seven layers, each testable alone:
 //!
 //! * [`signals`] extracts globs and terms from one document's text. Pure.
 //! * [`index`] builds the searchable index and scores a plan against it. Pure,
@@ -25,6 +25,12 @@
 //! * [`baseline`] mechanizes the filename scan, so the claim that this is
 //!   better than the status quo is a measurement rather than an assertion.
 //! * [`eval`] is the metric both selectors are scored with.
+//! * [`rank`] is stage 2: the runner-backed judgement over a prefiltered
+//!   candidate set, asked for only when stage 1 leaves more candidates than the
+//!   caller may keep.
+//! * [`select`] joins the two, and is what a caller wanting an answer should
+//!   use. Every failure in stage 2 degrades to the stage-1 answer rather than
+//!   to an error.
 //!
 //! [`resolve`] is the one entry point most callers want: load, reuse or build
 //! the index, and hand back something searchable.
@@ -33,6 +39,8 @@ pub mod baseline;
 pub mod cache;
 pub mod eval;
 pub mod index;
+pub mod rank;
+pub mod select;
 pub mod signals;
 
 use std::path::Path;
@@ -42,6 +50,10 @@ use crate::rules::{parse_rule_sources, read_rule_sources, rules_dir, RuleSetLoad
 
 pub use eval::{CaseResult, EvaluationReport, GoldenCase, Scores};
 pub use index::{Field, GlobMatch, IndexedDocument, Match, Query, ScopeIndex, Weights};
+pub use rank::{Candidate, RankedVerdict, Verdict};
+pub use select::{
+    prefilter, select, Prefiltered, SelectedRule, Selection, Stage, Stage2, DEFAULT_CANDIDATES,
+};
 
 /// Whether a resolved index was reused from cache or built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

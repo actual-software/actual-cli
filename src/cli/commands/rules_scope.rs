@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::cli::args::{RulesEvalArgs, RulesIndexArgs, RulesSelectArgs};
+use crate::cli::commands::rules_rank::{self, ResolvedRunner};
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
@@ -26,6 +27,8 @@ use crate::rules::scope::{
     self, baseline,
     eval::{CaseResult, EvaluationReport, GoldenCase, Scores},
     index::{Field, Match, Query, ScopeIndex, Weights},
+    rank,
+    select::{self, Selection, Stage2},
     IndexSource, ResolvedIndex,
 };
 
@@ -150,12 +153,12 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
     let root = repo_root(args.repo.as_ref());
     let resolved = scope::resolve(&root, args.rebuild)?;
     let query = Query::new(args.plan.join(" ")).with_paths(args.files.clone());
-    let matches = resolved.index.search(&query, args.limit);
+    let run = run_selection(&resolved.index, &query, args)?;
 
     if args.json {
         println!(
             "{}",
-            render_select_json(&resolved.index, &query, &matches, args.limit, args.explain)
+            render_select_json(&resolved.index, &query, &run, args.explain)
         );
     } else {
         println!(
@@ -163,9 +166,8 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
             render_select_panel(
                 &resolved.index,
                 &query,
-                &matches,
+                &run,
                 args.explain,
-                args.limit,
                 term_size::terminal_width(),
             )
         );
@@ -173,16 +175,104 @@ pub fn exec_select(args: &RulesSelectArgs) -> Result<(), ActualError> {
     Ok(())
 }
 
-/// `0.83  cross-cutting-access-tokens-include-e410`, with the evidence beneath
-/// it when `--explain` is on.
+/// A selection, and the runner that shaped it.
+///
+/// The runner label lives beside the selection rather than inside it because
+/// which backend answered is a fact about this invocation, not about the
+/// selection — the library type stays free of CLI wiring.
+pub struct SelectionRun {
+    pub selection: Selection,
+    pub runner: Option<String>,
+}
+
+/// Run both stages, degrading to stage 1 whenever stage 2 cannot help.
+///
+/// Every branch here returns `Ok`. A missing config, an absent runner, a runner
+/// that fails: each is recorded in the selection's [`Stage2`] status and the
+/// deterministic answer is returned. The only `Err` a caller sees comes from
+/// being unable to read the rule set at all, which is raised before this.
+fn run_selection(
+    index: &ScopeIndex,
+    query: &Query,
+    args: &RulesSelectArgs,
+) -> Result<SelectionRun, ActualError> {
+    let prefiltered = select::prefilter(index, query, args.limit, args.candidates);
+
+    // `finish` reports `NotNeeded` on its own when the prefilter already fits
+    // inside the cap, so both of these produce the honest status.
+    if args.no_rank || !prefiltered.needs_rank() {
+        return Ok(SelectionRun {
+            selection: prefiltered.finish(Stage2::NotRequested),
+            runner: None,
+        });
+    }
+
+    // An unreadable config is not a reason to refuse a selection: stage 1 needs
+    // nothing from it, and stage 2 degrades the same way it would with no
+    // runner configured at all.
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    let resolved_runner =
+        match rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg) {
+            Ok(runner) => runner,
+            Err(reason) => {
+                return Ok(SelectionRun {
+                    selection: prefiltered.finish(Stage2::Unavailable { reason }),
+                    runner: None,
+                })
+            }
+        };
+
+    let label = resolved_runner.label();
+    match rank_with(&resolved_runner, &prefiltered) {
+        Ok(verdicts) => Ok(SelectionRun {
+            selection: prefiltered.apply(&verdicts),
+            runner: Some(label),
+        }),
+        Err(e) => Ok(SelectionRun {
+            selection: prefiltered.finish(Stage2::Failed {
+                reason: e.to_string(),
+            }),
+            runner: Some(label),
+        }),
+    }
+}
+
+/// Drive one rank call on its own runtime.
+///
+/// `rules select` is a synchronous command, so the async runner is bridged here
+/// rather than colouring the whole command surface — the same shape `login` and
+/// `mint-token` use.
+fn rank_with(
+    resolved: &ResolvedRunner,
+    prefiltered: &select::Prefiltered,
+) -> Result<Vec<rank::RankedVerdict>, ActualError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
+    runtime.block_on(rank::rank(
+        &resolved.runner,
+        prefiltered.plan(),
+        prefiltered.paths(),
+        &prefiltered.candidates(),
+        resolved.model.as_deref(),
+        None,
+    ))
+}
+
+/// `0.83  governs  cross-cutting-access-tokens-include-e410`, with the reason
+/// beneath it and the index's own evidence too when `--explain` is on.
+///
+/// The reason is printed unconditionally. A selection nobody can justify is the
+/// failure this command exists to fix, so it is not put behind a flag.
 fn render_select_panel(
     index: &ScopeIndex,
     query: &Query,
-    matches: &[Match],
+    run: &SelectionRun,
     explain: bool,
-    limit: usize,
     width: usize,
 ) -> String {
+    let selection = &run.selection;
     let mut panel = Panel::titled("Rule selection");
     panel = panel.kv("Plan", &truncate(&query.text, 72));
     let paths = query.all_paths();
@@ -190,23 +280,39 @@ fn render_select_panel(
         panel = panel.kv("Paths", &paths.join(", "));
     }
     panel = panel.kv("Indexed documents", &index.len().to_string());
+    panel = panel.kv("Stage 2", &selection.stage2.summary());
+    if let Some(runner) = &run.runner {
+        panel = panel.kv("Runner", runner);
+    }
 
-    if matches.is_empty() {
+    if selection.selected.is_empty() {
         return panel
             .separator()
             .line("No rule document matched this plan.")
             .render(width);
     }
 
+    let evidence = index_evidence(index, query, selection);
     panel = panel.separator();
-    for hit in matches {
-        panel = panel.kv(&format!("{:.2}", hit.score), &hit.slug);
+    for (position, rule) in selection.selected.iter().enumerate() {
+        let verdict = rule
+            .verdict
+            .map(|v| format!("{:<9}", v.as_str()))
+            .unwrap_or_default();
+        panel = panel.kv(
+            &format!("{:.2}", rule.score),
+            &format!("{verdict}{}", rule.slug),
+        );
+        panel = panel.line(&format!("      {}", truncate(&rule.reason, 68)));
         if !explain {
             continue;
         }
-        if let Some(title) = &hit.title {
+        if let Some(title) = &rule.title {
             panel = panel.line(&format!("      {}", truncate(title, 68)));
         }
+        let Some(hit) = evidence.get(position) else {
+            continue;
+        };
         for contribution in &hit.contributions {
             let detail = if contribution.matched.is_empty() {
                 String::new()
@@ -243,11 +349,14 @@ fn render_select_panel(
             }
         ));
         panel = panel.separator();
-        panel = panel.line(&format!("Filename scan would have chosen (cap {}):", limit));
+        panel = panel.line(&format!(
+            "Filename scan would have chosen (cap {}):",
+            selection.limit
+        ));
         // Same budget as this invocation. Comparing against the status-quo
         // cap of 5 while `--limit` is 10 (the default) or 20 would make the
         // two answers look different for a reason that is not the selector.
-        let scan = baseline::select(index, &query.text, limit);
+        let scan = baseline::select(index, &query.text, selection.limit);
         if scan.is_empty() {
             panel = panel.line("  nothing — no filename segment matched the plan");
         } else {
@@ -263,19 +372,34 @@ fn render_select_panel(
 
     panel = panel.separator().line(&format!(
         "{} of {} documents shown",
-        matches.len().min(limit),
+        selection.selected.len(),
         index.len()
     ));
     panel.render(width)
 }
 
+/// The index's own evidence for each selected rule, aligned with the selection.
+///
+/// Recomputed from the index rather than carried through the selection, because
+/// stage 2 may reorder and drop rules and the evidence has to follow the rule
+/// rather than the rank it originally had.
+fn index_evidence(index: &ScopeIndex, query: &Query, selection: &Selection) -> Vec<Match> {
+    // Searching the whole index, not the cap: a rule stage 2 promoted may sit
+    // below the cap in the raw ranking.
+    let ranked = index.search(query, index.len().max(1));
+    selection
+        .selected
+        .iter()
+        .filter_map(|rule| ranked.iter().find(|hit| hit.slug == rule.slug).cloned())
+        .collect()
+}
+
 #[derive(Serialize)]
 struct JsonSelection<'a> {
-    plan: &'a str,
-    paths: Vec<String>,
-    indexed_documents: usize,
-    limit: usize,
-    matches: &'a [Match],
+    #[serde(flatten)]
+    selection: &'a Selection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     explain: Option<JsonExplain<'a>>,
 }
@@ -283,6 +407,8 @@ struct JsonSelection<'a> {
 #[derive(Serialize)]
 struct JsonExplain<'a> {
     ubiquitous_terms: Vec<&'a str>,
+    /// The index's per-signal attribution for the rules that were selected.
+    evidence: Vec<Match>,
     filename_scan: Vec<JsonBaselineHit>,
 }
 
@@ -295,19 +421,16 @@ struct JsonBaselineHit {
 fn render_select_json(
     index: &ScopeIndex,
     query: &Query,
-    matches: &[Match],
-    limit: usize,
+    run: &SelectionRun,
     explain: bool,
 ) -> String {
     let payload = JsonSelection {
-        plan: &query.text,
-        paths: query.all_paths(),
-        indexed_documents: index.len(),
-        limit,
-        matches,
+        selection: &run.selection,
+        runner: run.runner.as_deref(),
         explain: explain.then(|| JsonExplain {
             ubiquitous_terms: index.ubiquitous_terms(),
-            filename_scan: baseline::select(index, &query.text, limit)
+            evidence: index_evidence(index, query, &run.selection),
+            filename_scan: baseline::select(index, &query.text, run.selection.limit)
                 .into_iter()
                 .map(|hit| JsonBaselineHit {
                     slug: hit.slug,
@@ -326,7 +449,10 @@ pub fn exec_eval(args: &RulesEvalArgs) -> Result<(), ActualError> {
     let cases = load_golden_set(&args.golden)?;
     let resolved = scope::resolve(&root, args.rebuild)?;
     let weights = ablated_weights(&args.ablate)?;
-    let comparison = run_evaluation(&resolved.index, &cases, args.limit, &weights);
+    let mut comparison = run_evaluation(&resolved.index, &cases, args.limit, &weights);
+    if args.rank {
+        comparison.two_stage = Some(evaluate_two_stage(&resolved.index, &cases, args)?);
+    }
 
     if args.json {
         println!("{}", to_json(&comparison));
@@ -387,6 +513,11 @@ pub(crate) struct Comparison {
     pub(crate) weights: Weights,
     pub(crate) scope_index: EvaluationReport,
     pub(crate) filename_scan: EvaluationReport,
+    /// The two-stage selector, present only under `--rank`. It costs one runner
+    /// call per case, so it is never scored by default: the offline comparison
+    /// is what CI can afford to run on every commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) two_stage: Option<EvaluationReport>,
 }
 
 impl Comparison {
@@ -443,7 +574,58 @@ pub(crate) fn run_evaluation(
         weights: *weights,
         scope_index: EvaluationReport::new("scope-index", index_cases),
         filename_scan: EvaluationReport::new("filename-scan", scan_cases),
+        two_stage: None,
     }
+}
+
+/// Score the two-stage selector on the same cases, at the same cap.
+///
+/// The cap is shared with the other two selectors for the same reason they
+/// share it with each other: a selector given a larger budget than the status
+/// quo would buy recall with an advantage the status quo never had.
+///
+/// A runner that cannot be resolved is an error here, unlike in `rules select`.
+/// Asking to measure the ranked selector and silently measuring the prefilter
+/// instead would report a number for something that never ran.
+fn evaluate_two_stage(
+    index: &ScopeIndex,
+    cases: &[GoldenCase],
+    args: &RulesEvalArgs,
+) -> Result<EvaluationReport, ActualError> {
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    let resolved = rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg)
+        .map_err(ActualError::ConfigError)?;
+
+    let mut results = Vec::with_capacity(cases.len());
+    for case in cases {
+        let query = Query::new(case.plan.clone()).with_paths(case.paths.clone());
+        let prefiltered = select::prefilter(index, &query, args.limit, args.candidates);
+        let selection = match rank_with(&resolved, &prefiltered) {
+            Ok(verdicts) => prefiltered.apply(&verdicts),
+            // One failed case degrades to the prefilter rather than aborting
+            // the run: a partial measurement across ten plans is worth more
+            // than no measurement because the ninth timed out. The status is
+            // still recorded in the selection.
+            Err(e) => {
+                tracing::warn!(case = %case.name, "rank failed, scoring the prefilter: {e}");
+                prefiltered.finish(Stage2::Failed {
+                    reason: e.to_string(),
+                })
+            }
+        };
+        let selected: Vec<String> = selection
+            .selected
+            .iter()
+            .map(|rule| rule.slug.clone())
+            .collect();
+        results.push(CaseResult {
+            name: case.name.clone(),
+            scores: Scores::measure(&selected, &case.expected),
+            selected,
+            expected: case.expected.clone(),
+        });
+    }
+    Ok(EvaluationReport::new("two-stage", results))
 }
 
 fn render_eval_panel(comparison: &Comparison, width: usize) -> String {
@@ -461,6 +643,9 @@ fn render_eval_panel(comparison: &Comparison, width: usize) -> String {
     panel = panel.separator();
     panel = panel.line(&comparison.scope_index.summary_line());
     panel = panel.line(&comparison.filename_scan.summary_line());
+    if let Some(two_stage) = &comparison.two_stage {
+        panel = panel.line(&two_stage.summary_line());
+    }
     panel = panel.separator();
     panel = panel.line(&format!(
         "Scope index {} the filename scan on pooled F1 ({:.2} vs {:.2}).",
@@ -598,13 +783,18 @@ mod tests {
         assert!(ubiquitous.is_empty(), "{ubiquitous:?}");
 
         let query = Query::new("widgets");
-        let matches = index.search(&query, 5);
-        let out = render_select_panel(&index, &query, &matches, true, 5, 100);
+        let run = SelectionRun {
+            selection: select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
+                .finish(Stage2::NotRequested),
+            runner: None,
+        };
+        let out = render_select_panel(&index, &query, &run, true, 100);
         assert!(
             out.contains("Terms carrying no signal in this corpus: none"),
             "{out}"
         );
     }
+
     const OAUTH: &str = "# Adopt RS256: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token issuance and token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n\n### Verify\n\n```bash\ngrep -r \"jwt.sign\" services/auth/oauth/ --include=\"*.ts\"\n```\n";
     const TERRAFORM: &str = "# Pin Terraform Providers\n\nThese rules are ALWAYS ACTIVE for Terraform configuration in `infra/terraform/`.\n\n### Rules\n\n- **R-B-001** MUST: pin providers.\n";
     const BAD: &str = "no rules section here\n";
@@ -767,12 +957,26 @@ mod tests {
 
     // ── rules select ─────────────────────────────────────────────────────
 
-    /// Helper: a select panel for `plan` over the sample corpus.
-    fn select_panel(root: &Path, plan: &str, files: Vec<String>, explain: bool) -> String {
+    /// Helper: a stage-1-only run over the sample corpus, and its index.
+    fn stage_one_run(
+        root: &Path,
+        plan: &str,
+        files: Vec<String>,
+    ) -> (ScopeIndex, Query, SelectionRun) {
         let index = resolved(root).index;
         let query = Query::new(plan).with_paths(files);
-        let matches = index.search(&query, 5);
-        render_select_panel(&index, &query, &matches, explain, 5, 110)
+        let run = SelectionRun {
+            selection: select::prefilter(&index, &query, 5, scope::DEFAULT_CANDIDATES)
+                .finish(Stage2::NotRequested),
+            runner: None,
+        };
+        (index, query, run)
+    }
+
+    /// Helper: a select panel for `plan` over the sample corpus.
+    fn select_panel(root: &Path, plan: &str, files: Vec<String>, explain: bool) -> String {
+        let (index, query, run) = stage_one_run(root, plan, files);
+        render_select_panel(&index, &query, &run, explain, 110)
     }
 
     #[test]
@@ -846,13 +1050,17 @@ mod tests {
         // of them. `token signing` keeps the index from returning no matches,
         // which would skip the explain block entirely.
         let query = Query::new("token signing cross-cutting");
-        let matches = index.search(&query, 1);
+        let run = SelectionRun {
+            selection: select::prefilter(&index, &query, 1, scope::DEFAULT_CANDIDATES)
+                .finish(Stage2::NotRequested),
+            runner: None,
+        };
 
-        let panel = render_select_panel(&index, &query, &matches, true, 1, 110);
+        let panel = render_select_panel(&index, &query, &run, true, 110);
         assert!(panel.contains("Filename scan would have chosen (cap 1):"));
 
         let value: serde_json::Value =
-            serde_json::from_str(&render_select_json(&index, &query, &matches, 1, true)).unwrap();
+            serde_json::from_str(&render_select_json(&index, &query, &run, true)).unwrap();
         assert_eq!(value["limit"], 1);
         assert_eq!(
             value["explain"]["filename_scan"].as_array().unwrap().len(),
@@ -897,24 +1105,122 @@ mod tests {
         let _guards = isolated_config(&home);
 
         let root = sample();
-        let index = resolved(root.path()).index;
-        let query = Query::new("rotate the OAuth signing key");
-        let matches = index.search(&query, 5);
+        let (index, query, run) =
+            stage_one_run(root.path(), "rotate the OAuth signing key", Vec::new());
 
         let value: serde_json::Value =
-            serde_json::from_str(&render_select_json(&index, &query, &matches, 5, true)).unwrap();
+            serde_json::from_str(&render_select_json(&index, &query, &run, true)).unwrap();
         assert_eq!(value["indexed_documents"], 2);
         assert_eq!(
-            value["matches"][0]["slug"],
+            value["selected"][0]["slug"],
             "cross-cutting-token-signing-e410"
         );
+        // Every selection carries a reason, whether or not `--explain` is on.
+        assert!(!value["selected"][0]["reason"].as_str().unwrap().is_empty());
+        assert_eq!(value["selected"][0]["stage"], "prefilter");
+        assert_eq!(value["stage2"]["status"], "not-needed");
         assert!(value["explain"]["ubiquitous_terms"].is_array());
         assert!(value["explain"]["filename_scan"].is_array());
+        // The index's own attribution is carried under `--explain`, aligned
+        // with the rules that were actually selected.
+        assert_eq!(
+            value["explain"]["evidence"][0]["slug"],
+            "cross-cutting-token-signing-e410"
+        );
 
         // Without `--explain` the diagnostic block is absent, not empty.
         let plain: serde_json::Value =
-            serde_json::from_str(&render_select_json(&index, &query, &matches, 5, false)).unwrap();
+            serde_json::from_str(&render_select_json(&index, &query, &run, false)).unwrap();
         assert!(plain.get("explain").is_none());
+        assert!(plain.get("runner").is_none());
+    }
+
+    /// The degraded path, end to end through the command layer: a rank is
+    /// warranted, no runner can be resolved, and the caller still gets the
+    /// deterministic answer with the reason recorded rather than an error.
+    #[test]
+    fn test_run_selection_degrades_when_no_runner_can_be_resolved() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        // Naming the backend explicitly keeps the test hermetic: the Anthropic
+        // probe reads an environment variable and nothing else, so no
+        // subprocess is spawned and no machine-local install is consulted.
+        let _no_key = EnvGuard::remove("ANTHROPIC_API_KEY");
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let query = Query::new("rotate the OAuth signing key and pin providers");
+        let args = RulesSelectArgs {
+            limit: 1,
+            no_rank: false,
+            runner: Some(crate::cli::args::RunnerChoice::AnthropicApi),
+            ..select_args(root.path(), 1)
+        };
+
+        let run = run_selection(&index, &query, &args).unwrap();
+        let Stage2::Unavailable { ref reason } = run.selection.stage2 else {
+            panic!(
+                "expected an unavailable runner, got {:?}",
+                run.selection.stage2
+            );
+        };
+        assert!(reason.contains("ANTHROPIC_API_KEY"));
+        assert!(run.runner.is_none());
+        assert_eq!(run.selection.selected.len(), 1);
+        assert!(!run.selection.selected[0].reason.is_empty());
+    }
+
+    /// `--no-rank` must not reach for a runner at all, even when the prefilter
+    /// leaves a surplus.
+    #[test]
+    fn test_run_selection_honours_no_rank() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let query = Query::new("rotate the OAuth signing key and pin providers");
+        let run = run_selection(&index, &query, &select_args(root.path(), 1)).unwrap();
+        assert_eq!(run.selection.stage2, Stage2::NotRequested);
+        assert!(run.runner.is_none());
+    }
+
+    /// A ranked selection prints the verdict and the ranker's own reason.
+    #[test]
+    fn test_select_panel_shows_the_verdict_and_the_ranker_reason() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let query = Query::new("rotate the OAuth signing key and pin providers");
+        let prefiltered = select::prefilter(&index, &query, 1, scope::DEFAULT_CANDIDATES);
+        let slug = prefiltered.candidates()[1].slug.clone();
+        let verdicts = rank::parse_verdicts(
+            &serde_json::json!({"verdicts": [
+                {"slug": slug, "verdict": "governs", "reason": "it pins the provider versions"}
+            ]}),
+            &prefiltered.candidates(),
+        )
+        .unwrap();
+
+        let run = SelectionRun {
+            selection: prefiltered.apply(&verdicts),
+            runner: Some("anthropic-api (claude-sonnet-4-6)".to_string()),
+        };
+        let out = render_select_panel(&index, &query, &run, false, 110);
+        assert!(out.contains("governs"));
+        assert!(out.contains("it pins the provider versions"));
+        assert!(out.contains("Runner: anthropic-api (claude-sonnet-4-6)"));
+        assert!(out.contains("1 governs"));
+
+        // The evidence under `--explain` follows the promoted rule, not the
+        // rank it originally had.
+        let explained = render_select_panel(&index, &query, &run, true, 110);
+        assert!(explained.contains(&slug));
     }
 
     #[test]
@@ -926,23 +1232,55 @@ mod tests {
         let root = sample();
         for (json, explain) in [(false, false), (false, true), (true, true)] {
             let args = RulesSelectArgs {
-                plan: vec![
-                    "rotate".to_string(),
-                    "signing".to_string(),
-                    "keys".to_string(),
-                ],
-                repo: Some(root.path().to_path_buf()),
                 files: vec!["services/auth/oauth/token.ts".to_string()],
-                limit: 5,
                 explain,
                 json,
                 rebuild: true,
+                ..select_args(root.path(), 5)
             };
             assert!(exec_select(&args).is_ok());
         }
     }
 
     // ── rules eval ───────────────────────────────────────────────────────
+
+    /// Helper: `rules select` arguments with stage 2 off, so a test that is
+    /// about rendering never reaches for a runner.
+    fn select_args(root: &Path, limit: usize) -> RulesSelectArgs {
+        RulesSelectArgs {
+            plan: vec![
+                "rotate".to_string(),
+                "signing".to_string(),
+                "keys".to_string(),
+            ],
+            repo: Some(root.to_path_buf()),
+            files: Vec::new(),
+            limit,
+            candidates: scope::DEFAULT_CANDIDATES,
+            no_rank: true,
+            runner: None,
+            model: None,
+            explain: false,
+            json: false,
+            rebuild: true,
+        }
+    }
+
+    /// Helper: `rules eval` arguments with the ranked column off.
+    fn eval_args(root: &Path, golden: PathBuf) -> RulesEvalArgs {
+        RulesEvalArgs {
+            golden,
+            repo: Some(root.to_path_buf()),
+            limit: 5,
+            ablate: Vec::new(),
+            rank: false,
+            candidates: scope::DEFAULT_CANDIDATES,
+            runner: None,
+            model: None,
+            json: false,
+            rebuild: false,
+        }
+    }
 
     /// Helper: a golden set written to a temp file, and its path.
     fn write_golden(dir: &TempDir, cases: &[GoldenCase]) -> PathBuf {
@@ -1077,12 +1415,9 @@ mod tests {
 
         for json in [false, true] {
             let args = RulesEvalArgs {
-                golden: golden.clone(),
-                repo: Some(root.path().to_path_buf()),
-                limit: 5,
                 ablate: vec!["slug".to_string()],
                 json,
-                rebuild: false,
+                ..eval_args(root.path(), golden.clone())
             };
             assert!(exec_eval(&args).is_ok());
         }
@@ -1099,12 +1434,8 @@ mod tests {
         let golden = write_golden(&golden_dir, &[oauth_case()]);
 
         let args = RulesEvalArgs {
-            golden,
-            repo: Some(root.path().to_path_buf()),
-            limit: 5,
             ablate: vec!["nope".to_string()],
-            json: false,
-            rebuild: false,
+            ..eval_args(root.path(), golden)
         };
         assert!(exec_eval(&args).is_err());
     }
@@ -1132,12 +1463,9 @@ mod tests {
 
         let golden_dir = tempdir().unwrap();
         let args = RulesEvalArgs {
-            golden: write_golden(&golden_dir, &[oauth_case()]),
-            repo: Some(root.path().to_path_buf()),
-            limit: 5,
-            ablate: Vec::new(),
             json: true,
             rebuild: true,
+            ..eval_args(root.path(), write_golden(&golden_dir, &[oauth_case()]))
         };
         assert!(exec_eval(&args).is_ok());
 

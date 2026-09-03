@@ -59,6 +59,26 @@ impl InvocationOptions {
         }
     }
 
+    /// Create options for stage-2 rule selection.
+    ///
+    /// The ranker is handed its candidates in the prompt and asked for a
+    /// verdict on each, so it needs no tools at all: one turn, no filesystem
+    /// access, nothing to grant permission for. A ranker that *could* read the
+    /// repository would be a ranker whose answer depended on whatever it
+    /// happened to open, which is the opposite of what a reproducible
+    /// selection is for.
+    pub fn for_selection(model_override: Option<&str>) -> Self {
+        Self {
+            model: model_override.unwrap_or(DEFAULT_MODEL).to_string(),
+            max_turns: 1,
+            tools: String::new(),
+            allowed_tools: Vec::new(),
+            json_schema: None,
+            max_budget_usd: None,
+            skip_permissions: true,
+        }
+    }
+
     /// Convert to CLI argument list for `ClaudeRunner::run()`.
     ///
     /// The `--print` flag is NOT included — it is added by

@@ -537,6 +537,51 @@ fn test_cli_parse_rules_select() {
     assert_eq!(select.files, vec!["lib/auth.ts"]);
     assert_eq!(select.limit, 3);
     assert!(select.explain);
+    // Stage 2 is on by default: the default answer should be the best one the
+    // environment can give, not the cheapest.
+    assert!(!select.no_rank);
+    assert_eq!(
+        select.candidates,
+        actual_cli::rules::scope::DEFAULT_CANDIDATES
+    );
+    assert!(select.runner.is_none());
+    assert!(select.model.is_none());
+}
+
+/// The stage-2 switches on `rules select`: skip it, size its candidate set,
+/// and name the backend and model it uses.
+#[test]
+fn test_cli_parse_rules_select_stage_two_flags() {
+    let cli = Cli::parse_from([
+        "actual",
+        "rules",
+        "select",
+        "add an endpoint",
+        "--candidates",
+        "12",
+        "--runner",
+        "anthropic-api",
+        "--model",
+        "claude-sonnet-4-6",
+    ]);
+    let Command::Rules(args) = cli.command else {
+        unreachable!()
+    };
+    let actual_cli::RulesAction::Select(select) = args.action else {
+        unreachable!("`rules select` must parse as the Select action")
+    };
+    assert_eq!(select.candidates, 12);
+    assert_eq!(select.runner, Some(actual_cli::RunnerChoice::AnthropicApi));
+    assert_eq!(select.model.as_deref(), Some("claude-sonnet-4-6"));
+
+    let offline = Cli::parse_from(["actual", "rules", "select", "plan", "--no-rank"]);
+    let Command::Rules(args) = offline.command else {
+        unreachable!()
+    };
+    let actual_cli::RulesAction::Select(select) = args.action else {
+        unreachable!()
+    };
+    assert!(select.no_rank);
 }
 
 #[test]
@@ -567,6 +612,38 @@ fn test_cli_parse_rules_eval() {
     assert_eq!(eval.ablate, vec!["title", "slug"]);
     assert!(eval.json);
     assert!(eval.rebuild);
+    // Scoring the two-stage selector costs a runner call per case, so it is
+    // opt-in: the default run is the offline comparison CI can afford.
+    assert!(!eval.rank);
+}
+
+/// `rules eval --rank` adds the two-stage selector to the comparison.
+#[test]
+fn test_cli_parse_rules_eval_rank() {
+    let cli = Cli::parse_from([
+        "actual",
+        "rules",
+        "eval",
+        "--golden",
+        "golden.json",
+        "--rank",
+        "--candidates",
+        "20",
+        "--runner",
+        "openai-api",
+        "--model",
+        "gpt-5.2",
+    ]);
+    let Command::Rules(args) = cli.command else {
+        unreachable!()
+    };
+    let actual_cli::RulesAction::Eval(eval) = args.action else {
+        unreachable!()
+    };
+    assert!(eval.rank);
+    assert_eq!(eval.candidates, 20);
+    assert_eq!(eval.runner, Some(actual_cli::RunnerChoice::OpenAiApi));
+    assert_eq!(eval.model.as_deref(), Some("gpt-5.2"));
 }
 
 /// `rules select` without a plan is a usage error, not an empty selection.

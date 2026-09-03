@@ -1,8 +1,14 @@
 # Local scope resolution
 
-`actual rules select` answers, offline and without a model, which committed rule
-documents govern a plan. This document records how it decides, what it was
-measured against, and where it is weak.
+This is the retrieval half of `actual rules select`: an offline, model-free
+ranking of every committed rule document against a plan. It records how the
+index decides, what it was measured against, and where it is weak.
+
+It is also stage 1 of the two-stage selector. When it retrieves more candidates
+than the caller may keep, a runner-backed rank judges the surplus; see
+[RULE_SELECTION.md](RULE_SELECTION.md). Everything below is the stage that needs
+no model and no network, and that stays the whole answer whenever a runner is
+absent.
 
 ## The problem
 
@@ -140,4 +146,6 @@ actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]... [
 `--explain` prints, per hit, which signal carried it and on which terms, the
 globs that matched a named path, the terms the corpus made worthless, and what
 the filename scan would have chosen instead at the same `--limit` — so a wrong
-selection is diagnosable rather than mysterious.
+selection is diagnosable rather than mysterious. `--no-rank` holds
+`rules select` to this stage alone; the stage-2 flags are documented in
+[RULE_SELECTION.md](RULE_SELECTION.md).

@@ -11,7 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local scope resolution over `.actual/rules/`: an offline, deterministic index that ranks rule documents against a plan using path globs extracted from `### Verify` operands, the prose scope sentence, the aspect slug and the title
 - `actual rules index` to build or refresh that index, `actual rules index --clear` to drop every cached index (including those left by other repositories) and rebuild this one, `actual rules select` to rank rule documents against a plan, and `actual rules eval` to score the index against the status-quo filename scan on a golden set (`--rebuild` forces a fresh index so the measurement is not silently cached)
 - `actual rules select --explain`, which attributes every hit to the signal and terms that carried it and prints what the filename scan would have chosen instead
-- Design notes and measurements for scope resolution in `docs/SCOPE_INDEX.md`
+- Two-stage rule selection: `actual rules select` now ranks the deterministic prefilter's surplus with a configured runner when it returns more candidates than the cap allows, and returns a verdict and a reason for every rule it selects
+- `--no-rank`, `--candidates`, `--runner` and `--model` on `actual rules select`, and `--rank` on `actual rules eval` to score the two-stage selector against the offline ones on the same golden set
+- `StructuredRunner`, which lets all five runners answer a schema other than the tailoring one; stage-2 selection reuses each runner's existing structured-output plumbing rather than duplicating it
+- A 90-second wall-clock deadline on the stage-2 rank, since a runner's own timeout is an inactivity timer and does not bound the call
+- Design notes and measurements for scope resolution in `docs/SCOPE_INDEX.md`, and for two-stage selection in `docs/RULE_SELECTION.md`
 - `actual advisor` command: ask the Advisor org-scoped architecture questions from the terminal and print the answer with any related ADRs (requires signing in with `actual login`)
 - Repository scoping for `actual advisor`: `--repo <name|owner/name|uuid>` to target a connected repository, automatic detection from the working tree's `origin` remote, a scope remembered per repository, the `none` and `auto` keywords to pin org-level or reset, and `--show-scope` to print the active scope
 - Documentation for the advisor command and repository scoping in the README and Getting Started guide

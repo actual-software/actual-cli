@@ -200,17 +200,21 @@ fn build_codex_args(
 /// Unlike the Claude Code runner which reads structured output from an envelope
 /// on stdout, Codex CLI writes the agent's final message to a file specified by
 /// `--output-last-message`. This function reads that file after the subprocess
-/// exits and parses it as `TailoringOutput`.
+/// exits and parses it as `T`.
 ///
 /// If the file contains markdown-fenced JSON (` ```json ... ``` `), the fences
 /// are stripped before parsing.
-async fn run_codex_subprocess(
+///
+/// Generic over the output type so a second caller with a different schema —
+/// the stage-2 rule ranker — reuses this subprocess plumbing rather than
+/// growing a parallel copy of it.
+async fn run_codex_subprocess<T: serde::de::DeserializeOwned>(
     binary_path: &std::path::Path,
     timeout: Duration,
     args: &[String],
     output_path: &std::path::Path,
     api_key: Option<&str>,
-) -> Result<TailoringOutput, ActualError> {
+) -> Result<T, ActualError> {
     let mut cmd = Command::new(binary_path);
     cmd.args(args);
     // Inject OPENAI_API_KEY if provided (from config fallback).
@@ -279,7 +283,7 @@ async fn run_codex_subprocess(
     // Strip markdown JSON fences if present (models sometimes wrap output).
     let json_str = strip_markdown_json_fences(&raw);
 
-    let parsed: TailoringOutput = serde_json::from_str(json_str)?;
+    let parsed: T = serde_json::from_str(json_str)?;
     Ok(parsed)
 }
 
@@ -330,19 +334,19 @@ fn extract_codex_error_detail(output: &str) -> Option<String> {
     None
 }
 
-impl TailoringRunner for CodexCliRunner {
-    async fn run_tailoring(
+impl CodexCliRunner {
+    /// One structured invocation, generic over what the schema describes.
+    ///
+    /// `_model_override` is not taken: it comes from
+    /// `ConcurrentTailoringConfig`, which resolves from `config.model` (a
+    /// Claude Code alias like "haiku"). The Codex runner's `self.model` was
+    /// already correctly resolved in `sync_wiring` from `--model` flag >
+    /// `config.model` > None (Codex CLI default), so we always use it here.
+    async fn run_structured<T: serde::de::DeserializeOwned>(
         &self,
         prompt: &str,
         schema: &str,
-        _model_override: Option<&str>,
-        _max_budget_usd: Option<f64>,
-    ) -> Result<TailoringOutput, ActualError> {
-        // Ignore `_model_override` — it comes from `ConcurrentTailoringConfig`
-        // which resolves from `config.model` (a Claude Code alias like "haiku").
-        // The Codex runner's `self.model` was already correctly resolved in
-        // `sync_wiring` from `--model` flag > `config.model` > None
-        // (Codex CLI default), so we always use it here.
+    ) -> Result<T, ActualError> {
         let model = self.model.as_deref();
 
         // Create a temp file for --output-last-message.  The file is
@@ -370,6 +374,30 @@ impl TailoringRunner for CodexCliRunner {
             self.api_key.as_deref(),
         )
         .await
+    }
+}
+
+impl TailoringRunner for CodexCliRunner {
+    async fn run_tailoring(
+        &self,
+        prompt: &str,
+        schema: &str,
+        _model_override: Option<&str>,
+        _max_budget_usd: Option<f64>,
+    ) -> Result<TailoringOutput, ActualError> {
+        self.run_structured(prompt, schema).await
+    }
+}
+
+impl crate::runner::structured::StructuredRunner for CodexCliRunner {
+    async fn run_structured_json(
+        &self,
+        prompt: &str,
+        schema: &str,
+        _model_override: Option<&str>,
+        _max_budget_usd: Option<f64>,
+    ) -> Result<serde_json::Value, ActualError> {
+        self.run_structured(prompt, schema).await
     }
 }
 

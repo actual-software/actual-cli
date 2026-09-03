@@ -167,16 +167,20 @@ struct CursorEnvelope {
 /// Unlike the Codex CLI runner which reads from a temp file, Cursor CLI writes
 /// a JSON envelope to stdout. This function reads stdout, deserializes the
 /// envelope, extracts the `result` field, strips any markdown fences, and
-/// parses it as `TailoringOutput`.
+/// parses it as `T`.
 ///
 /// Cursor CLI uses proper exit codes — non-zero on failure — so there is no
 /// need for empty-output detection like in the Codex runner.
-async fn run_cursor_subprocess(
+///
+/// Generic over the output type so a second caller with a different schema —
+/// the stage-2 rule ranker — reuses this subprocess plumbing rather than
+/// growing a parallel copy of it.
+async fn run_cursor_subprocess<T: serde::de::DeserializeOwned>(
     binary_path: &std::path::Path,
     timeout: Duration,
     args: &[String],
     api_key: Option<&str>,
-) -> Result<TailoringOutput, ActualError> {
+) -> Result<T, ActualError> {
     let mut cmd = Command::new(binary_path);
     cmd.args(args);
     // Inject CURSOR_API_KEY if provided (from config fallback).
@@ -246,23 +250,23 @@ async fn run_cursor_subprocess(
     // Strip markdown JSON fences if present (models sometimes wrap output).
     let json_str = strip_markdown_json_fences(&result_text);
 
-    let parsed: TailoringOutput = serde_json::from_str(json_str)?;
+    let parsed: T = serde_json::from_str(json_str)?;
     Ok(parsed)
 }
 
-impl TailoringRunner for CursorCliRunner {
-    async fn run_tailoring(
+impl CursorCliRunner {
+    /// One structured invocation, generic over what the schema describes.
+    ///
+    /// `_model_override` is not taken: it comes from
+    /// `ConcurrentTailoringConfig`, which resolves from `config.model` (a
+    /// Claude Code alias like "haiku"). The Cursor runner's `self.model` was
+    /// already correctly resolved in `sync_wiring` from `--model` flag >
+    /// `config.model` > None (Cursor CLI default), so we always use it here.
+    async fn run_structured<T: serde::de::DeserializeOwned>(
         &self,
         prompt: &str,
         schema: &str,
-        _model_override: Option<&str>,
-        _max_budget_usd: Option<f64>,
-    ) -> Result<TailoringOutput, ActualError> {
-        // Ignore `_model_override` — it comes from `ConcurrentTailoringConfig`
-        // which resolves from `config.model` (a Claude Code alias like "haiku").
-        // The Cursor runner's `self.model` was already correctly resolved in
-        // `sync_wiring` from `--model` flag > `config.model` > None
-        // (Cursor CLI default), so we always use it here.
+    ) -> Result<T, ActualError> {
         let model = self.model.as_deref();
 
         // Embed the JSON schema in the prompt since Cursor CLI does not
@@ -282,6 +286,30 @@ impl TailoringRunner for CursorCliRunner {
             self.api_key.as_deref(),
         )
         .await
+    }
+}
+
+impl TailoringRunner for CursorCliRunner {
+    async fn run_tailoring(
+        &self,
+        prompt: &str,
+        schema: &str,
+        _model_override: Option<&str>,
+        _max_budget_usd: Option<f64>,
+    ) -> Result<TailoringOutput, ActualError> {
+        self.run_structured(prompt, schema).await
+    }
+}
+
+impl crate::runner::structured::StructuredRunner for CursorCliRunner {
+    async fn run_structured_json(
+        &self,
+        prompt: &str,
+        schema: &str,
+        _model_override: Option<&str>,
+        _max_budget_usd: Option<f64>,
+    ) -> Result<serde_json::Value, ActualError> {
+        self.run_structured(prompt, schema).await
     }
 }
 

@@ -281,18 +281,22 @@ struct ContentBlock {
     input: Option<Value>,
 }
 
-impl TailoringRunner for AnthropicApiRunner {
-    fn set_event_tx(&self, tx: UnboundedSender<String>) {
-        *self.event_tx.lock().unwrap() = Some(tx);
-    }
-
-    async fn run_tailoring(
+impl AnthropicApiRunner {
+    /// One structured Messages-API call, generic over what the schema
+    /// describes.
+    ///
+    /// Extracted from `run_tailoring` unchanged so a second caller with a
+    /// different schema — the stage-2 rule ranker — reuses this request,
+    /// retry and tool-use extraction rather than growing a parallel copy.
+    /// `system_prompt` is the caller's because it is the one part of the call
+    /// that is genuinely about the task rather than about the transport.
+    async fn run_structured<T: serde::de::DeserializeOwned + Send>(
         &self,
+        system_prompt: &str,
         prompt: &str,
         schema: &str,
         model_override: Option<&str>,
-        _max_budget_usd: Option<f64>,
-    ) -> Result<TailoringOutput, ActualError> {
+    ) -> Result<T, ActualError> {
         let event_tx = self.event_tx.lock().unwrap().clone();
         let model = model_override.unwrap_or(&self.model);
         let schema_value: Value = serde_json::from_str(schema)?;
@@ -302,11 +306,6 @@ impl TailoringRunner for AnthropicApiRunner {
                 "Sending request to Anthropic API (model: {model})..."
             ));
         }
-
-        let system_prompt = "You are an expert software architect. Your task is to analyze \
-            Architecture Decision Records (ADRs) and generate tailored CLAUDE.md files for a \
-            repository. You must call the `return_result` tool with your structured output. \
-            Be precise and generate accurate, applicable guidance.";
 
         let request_body = serde_json::json!({
             "model": model,
@@ -401,8 +400,49 @@ impl TailoringRunner for AnthropicApiRunner {
             }
         };
 
-        let output: TailoringOutput = serde_json::from_value(tool_input)?;
+        let output: T = serde_json::from_value(tool_input)?;
         Ok(output)
+    }
+}
+
+/// The system prompt for the tailoring call.
+const TAILORING_SYSTEM_PROMPT: &str = "You are an expert software architect. Your task is to \
+    analyze Architecture Decision Records (ADRs) and generate tailored CLAUDE.md files for a \
+    repository. You must call the `return_result` tool with your structured output. \
+    Be precise and generate accurate, applicable guidance.";
+
+/// The system prompt for the stage-2 rule-selection call.
+const SELECTION_SYSTEM_PROMPT: &str = "You are a precise reviewer deciding which of a \
+    repository's committed rule documents govern a proposed change. You must call the \
+    `return_result` tool with your structured output.";
+
+impl TailoringRunner for AnthropicApiRunner {
+    fn set_event_tx(&self, tx: UnboundedSender<String>) {
+        *self.event_tx.lock().unwrap() = Some(tx);
+    }
+
+    async fn run_tailoring(
+        &self,
+        prompt: &str,
+        schema: &str,
+        model_override: Option<&str>,
+        _max_budget_usd: Option<f64>,
+    ) -> Result<TailoringOutput, ActualError> {
+        self.run_structured(TAILORING_SYSTEM_PROMPT, prompt, schema, model_override)
+            .await
+    }
+}
+
+impl crate::runner::structured::StructuredRunner for AnthropicApiRunner {
+    async fn run_structured_json(
+        &self,
+        prompt: &str,
+        schema: &str,
+        model_override: Option<&str>,
+        _max_budget_usd: Option<f64>,
+    ) -> Result<Value, ActualError> {
+        self.run_structured(SELECTION_SYSTEM_PROMPT, prompt, schema, model_override)
+            .await
     }
 }
 
