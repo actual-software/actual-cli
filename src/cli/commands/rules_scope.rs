@@ -243,10 +243,7 @@ fn render_select_panel(
             }
         ));
         panel = panel.separator();
-        panel = panel.line(&format!(
-            "Filename scan would have chosen (cap {}):",
-            limit
-        ));
+        panel = panel.line(&format!("Filename scan would have chosen (cap {}):", limit));
         // Same budget as this invocation. Comparing against the status-quo
         // cap of 5 while `--limit` is 10 (the default) or 20 would make the
         // two answers look different for a reason that is not the selector.
@@ -753,7 +750,10 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&render_select_json(&index, &query, &matches, 1, true)).unwrap();
         assert_eq!(value["limit"], 1);
-        assert_eq!(value["explain"]["filename_scan"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            value["explain"]["filename_scan"].as_array().unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -1022,11 +1022,9 @@ mod tests {
         tampered.documents.clear();
         tampered.document_frequency.clear();
         scope::cache::store(&dir, &tampered);
-        assert!(
-            scope::cache::load(&dir, &tampered.fingerprint)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(scope::cache::load(&dir, &tampered.fingerprint)
+            .unwrap()
+            .is_empty());
 
         let golden_dir = tempdir().unwrap();
         let args = RulesEvalArgs {
