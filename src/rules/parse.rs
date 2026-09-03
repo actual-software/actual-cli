@@ -98,8 +98,8 @@ pub fn parse_rule_document(path: &Path, text: &str) -> Result<RuleDocument, Rule
         // Fences first: their contents must never be able to move the scanner.
         // An unclosed fence is consumed through EOF, like `<enforcement>`, so
         // later headings cannot be mistaken for structure.
-        if let Some(lang) = fence_lang(trimmed) {
-            let (block, next) = capture_fence(&lines, i, lang, &mut doc);
+        if let Some(open) = fence_open(trimmed) {
+            let (block, next) = capture_fence(&lines, i, &open, &mut doc);
             if section == Section::Verify {
                 doc.verify.push(block);
             }
@@ -195,11 +195,41 @@ fn heading_of(trimmed: &str) -> Option<(usize, &str)> {
     Some((hashes, rest.trim()))
 }
 
-/// ```` ```bash ```` becomes `Some(Some("bash"))`; a bare fence becomes
-/// `Some(None)`.
-fn fence_lang(trimmed: &str) -> Option<Option<String>> {
-    let info = trimmed.strip_prefix("```")?.trim();
-    Some((!info.is_empty()).then(|| info.to_string()))
+/// A fence's opening delimiter: which character was used (`` ` `` or `~`) and
+/// how many of it — CommonMark requires a closing fence to use the same
+/// character and be at least as long, so both must be carried into capture.
+struct FenceOpen {
+    ch: char,
+    len: usize,
+    lang: Option<String>,
+}
+
+/// ```` ```bash ```` becomes a 3-backtick fence with `lang` `"bash"`; `~~~~`
+/// becomes a 4-tilde fence with no `lang`. Anything not opening with at least
+/// three `` ` `` or `~` is not a fence.
+fn fence_open(trimmed: &str) -> Option<FenceOpen> {
+    let ch = trimmed.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let len = trimmed.chars().take_while(|&c| c == ch).count();
+    if len < 3 {
+        return None;
+    }
+    let info = trimmed[len..].trim();
+    Some(FenceOpen {
+        ch,
+        len,
+        lang: (!info.is_empty()).then(|| info.to_string()),
+    })
+}
+
+/// True when `trimmed` is a closing fence for a fence opened with `ch`
+/// repeated `len` times: the same character, run through the whole line, at
+/// least as long as the opening run. A shorter or differently-charactered run
+/// — or one followed by trailing text — does not close it.
+fn is_closing_fence(trimmed: &str, ch: char, len: usize) -> bool {
+    trimmed.len() >= len && trimmed.chars().all(|c| c == ch)
 }
 
 /// True for a line that is entirely one bold span, such as `**Accept when:**`
@@ -244,15 +274,15 @@ fn strip_bullet(trimmed: &str) -> Option<&str> {
 fn capture_fence(
     lines: &[&str],
     start: usize,
-    lang: Option<String>,
+    open: &FenceOpen,
     doc: &mut RuleDocument,
 ) -> (VerifyBlock, usize) {
     let mut end = start + 1;
     while end < lines.len() {
-        if lines[end].trim().starts_with("```") {
+        if is_closing_fence(lines[end].trim(), open.ch, open.len) {
             return (
                 VerifyBlock {
-                    lang,
+                    lang: open.lang.clone(),
                     body: lines[start + 1..end].join("\n"),
                     line: start + 1,
                 },
@@ -268,7 +298,7 @@ fn capture_fence(
     ));
     (
         VerifyBlock {
-            lang,
+            lang: open.lang.clone(),
             body: lines[start + 1..end].join("\n"),
             line: start + 1,
         },
@@ -546,6 +576,35 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         assert_eq!(ids(&doc), vec!["R-A-001"]);
         assert_eq!(doc.accept_when, vec!["it holds".to_string()]);
         assert_eq!(doc.verify[0].body, "# Rules\n# Accept when:\ngrep -r foo .");
+    }
+
+    /// CommonMark permits tilde fences interchangeably with backtick fences.
+    /// A `### Rules` heading and rule-shaped line inside one must stay inert,
+    /// the same as inside a backtick fence — APR-001.
+    #[test]
+    fn test_parse_tilde_fence_is_inert() {
+        let doc = parse_ok(
+            "# Title\n\n### Rules\n\n- **R-REAL-001** MUST: keep going.\n\n### Verify\n\n~~~markdown\n### Rules\n- **R-CODE-999** MUST: this text is a fenced example, not governance.\n~~~\n",
+        );
+        assert_eq!(ids(&doc), vec!["R-REAL-001"]);
+        assert_eq!(doc.verify.len(), 1);
+        assert_eq!(doc.verify[0].lang.as_deref(), Some("markdown"));
+        assert!(doc.warnings.is_empty());
+    }
+
+    /// A closing fence must be at least as long as its opener and use the same
+    /// character. A four-backtick fence containing a nested three-backtick
+    /// example must not close on the shorter nested line — APR-001.
+    #[test]
+    fn test_parse_fence_requires_matching_delimiter_length() {
+        let doc = parse_ok(
+            "# Title\n\n### Rules\n\n- **R-REAL-001** MUST: keep going.\n\n### Verify\n\n````markdown\n### Rules\n- **R-CODE-999** MUST: this text is a fenced example, not governance.\n```\nstill inside the outer fence\n````\n",
+        );
+        assert_eq!(ids(&doc), vec!["R-REAL-001"]);
+        assert_eq!(doc.verify.len(), 1);
+        assert!(doc.verify[0].body.contains("R-CODE-999"));
+        assert!(doc.verify[0].body.contains("still inside the outer fence"));
+        assert!(doc.warnings.is_empty());
     }
 
     // ── levels ───────────────────────────────────────────────────────────
