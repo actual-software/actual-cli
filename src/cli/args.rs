@@ -698,6 +698,11 @@ pub struct RulesIndexArgs {
     #[arg(long)]
     pub rebuild: bool,
 
+    /// Remove every cached scope index, including those left by other
+    /// repositories, then rebuild this one.
+    #[arg(long)]
+    pub clear: bool,
+
     /// Print the index summary as JSON instead of a panel.
     #[arg(long)]
     pub json: bool,
@@ -763,6 +768,11 @@ pub struct RulesEvalArgs {
     /// Print the full comparison as JSON instead of a panel.
     #[arg(long)]
     pub json: bool,
+
+    /// Rebuild the index before evaluating, so the measurement is against
+    /// the files on disk rather than a cached index.
+    #[arg(long)]
+    pub rebuild: bool,
 }
 
 #[cfg(test)]
@@ -1681,5 +1691,20 @@ mod parse_tests {
     fn test_advisor_args_from_non_advisor_command_is_none() {
         // Covers the helper's non-advisor fallback arm.
         assert!(advisor_args_from(&["actual", "status"]).is_none());
+    }
+
+    #[test]
+    fn test_rules_index_clear_parses() {
+        let cli = Cli::try_parse_from(["actual", "rules", "index", "--clear"]).unwrap();
+        match cli.command {
+            Command::Rules(args) => match args.action {
+                RulesAction::Index(index) => {
+                    assert!(index.clear);
+                    assert!(!index.rebuild);
+                }
+                other => panic!("expected rules index, got {other:?}"),
+            },
+            other => panic!("expected rules, got {other:?}"),
+        }
     }
 }

@@ -10,8 +10,9 @@
 //! `select --explain` exists because a selector nobody can interrogate is a
 //! selector nobody can fix. It prints, for each hit, which field carried it and
 //! on which terms; the globs that matched a named path; the terms the corpus
-//! made worthless; and the filename scan's answer beside its own, so the two can
-//! be compared on the caller's real input rather than only on a golden set.
+//! made worthless; and the filename scan's answer beside its own at the same
+//! cap, so the two can be compared on the caller's real input rather than only
+//! on a golden set.
 
 use std::path::{Path, PathBuf};
 
@@ -38,7 +39,10 @@ fn repo_root(explicit: Option<&PathBuf>) -> PathBuf {
 
 pub fn exec_index(args: &RulesIndexArgs) -> Result<(), ActualError> {
     let root = repo_root(args.path.as_ref());
-    let resolved = scope::resolve(&root, args.rebuild)?;
+    if args.clear {
+        let _ = scope::cache::clear_all();
+    }
+    let resolved = scope::resolve(&root, args.rebuild || args.clear)?;
     if args.json {
         println!("{}", render_index_json(&resolved));
     } else {
@@ -241,9 +245,12 @@ fn render_select_panel(
         panel = panel.separator();
         panel = panel.line(&format!(
             "Filename scan would have chosen (cap {}):",
-            baseline::DEFAULT_LIMIT
+            limit
         ));
-        let scan = baseline::select(index, &query.text, baseline::DEFAULT_LIMIT);
+        // Same budget as this invocation. Comparing against the status-quo
+        // cap of 5 while `--limit` is 10 (the default) or 20 would make the
+        // two answers look different for a reason that is not the selector.
+        let scan = baseline::select(index, &query.text, limit);
         if scan.is_empty() {
             panel = panel.line("  nothing — no filename segment matched the plan");
         } else {
@@ -303,7 +310,7 @@ fn render_select_json(
         matches,
         explain: explain.then(|| JsonExplain {
             ubiquitous_terms: index.ubiquitous_terms(),
-            filename_scan: baseline::select(index, &query.text, baseline::DEFAULT_LIMIT)
+            filename_scan: baseline::select(index, &query.text, limit)
                 .into_iter()
                 .map(|hit| JsonBaselineHit {
                     slug: hit.slug,
@@ -320,7 +327,7 @@ fn render_select_json(
 pub fn exec_eval(args: &RulesEvalArgs) -> Result<(), ActualError> {
     let root = repo_root(args.repo.as_ref());
     let cases = load_golden_set(&args.golden)?;
-    let resolved = scope::resolve(&root, false)?;
+    let resolved = scope::resolve(&root, args.rebuild)?;
     let weights = ablated_weights(&args.ablate)?;
     let comparison = run_evaluation(&resolved.index, &cases, args.limit, &weights);
 
@@ -339,7 +346,7 @@ pub fn exec_eval(args: &RulesEvalArgs) -> Result<(), ActualError> {
 ///
 /// An unknown field name is an error rather than a silent no-op: an ablation
 /// that quietly measured nothing would be reported as a result.
-pub fn ablated_weights(ablate: &[String]) -> Result<Weights, ActualError> {
+pub(crate) fn ablated_weights(ablate: &[String]) -> Result<Weights, ActualError> {
     let mut weights = Weights::default();
     for name in ablate {
         let field = Field::ALL
@@ -363,7 +370,7 @@ pub fn ablated_weights(ablate: &[String]) -> Result<Weights, ActualError> {
 /// Read a golden set from JSON, reporting the file that failed rather than the
 /// bare serde message — a golden set is usually hand-written, and "which file"
 /// is half the fix.
-pub fn load_golden_set(path: &Path) -> Result<Vec<GoldenCase>, ActualError> {
+pub(crate) fn load_golden_set(path: &Path) -> Result<Vec<GoldenCase>, ActualError> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         ActualError::ConfigError(format!("failed to read golden set {}: {e}", path.display()))
     })?;
@@ -377,12 +384,12 @@ pub fn load_golden_set(path: &Path) -> Result<Vec<GoldenCase>, ActualError> {
 
 /// Both selectors, over the same cases, at the same cap.
 #[derive(Debug, Clone, Serialize)]
-pub struct Comparison {
-    pub limit: usize,
-    pub cases: usize,
-    pub weights: Weights,
-    pub scope_index: EvaluationReport,
-    pub filename_scan: EvaluationReport,
+pub(crate) struct Comparison {
+    pub(crate) limit: usize,
+    pub(crate) cases: usize,
+    pub(crate) weights: Weights,
+    pub(crate) scope_index: EvaluationReport,
+    pub(crate) filename_scan: EvaluationReport,
 }
 
 impl Comparison {
@@ -398,7 +405,7 @@ impl Comparison {
 /// The cap is shared deliberately. Giving the index a larger budget than the
 /// status quo would buy recall with an advantage the status quo never had, and
 /// the comparison would prove nothing.
-pub fn run_evaluation(
+pub(crate) fn run_evaluation(
     index: &ScopeIndex,
     cases: &[GoldenCase],
     limit: usize,
@@ -617,10 +624,44 @@ mod tests {
             let args = RulesIndexArgs {
                 path: Some(root.path().to_path_buf()),
                 rebuild: true,
+                clear: false,
                 json,
             };
             assert!(exec_index(&args).is_ok());
         }
+    }
+
+    /// `--clear` drops every cached index, including those left by other
+    /// repositories, then rebuilds this one.
+    #[test]
+    fn test_exec_index_clear_prunes_every_cached_index() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let other = sample();
+        scope::resolve(other.path(), true).unwrap();
+        let other_dir = crate::rules::rules_dir(other.path());
+        assert!(scope::cache::load(&other_dir, &scope::cache::fingerprint(&other_dir)).is_some());
+
+        let root = sample();
+        let args = RulesIndexArgs {
+            path: Some(root.path().to_path_buf()),
+            rebuild: false,
+            clear: true,
+            json: true,
+        };
+        assert!(exec_index(&args).is_ok());
+
+        assert!(
+            scope::cache::load(&other_dir, &scope::cache::fingerprint(&other_dir)).is_none(),
+            "indexes from other repositories must be pruned"
+        );
+        let dir = crate::rules::rules_dir(root.path());
+        assert!(
+            scope::cache::load(&dir, &scope::cache::fingerprint(&dir)).is_some(),
+            "this repository's index is rebuilt after the prune"
+        );
     }
 
     // ── rules select ─────────────────────────────────────────────────────
@@ -688,6 +729,31 @@ mod tests {
         assert!(out.contains("token"));
         assert!(out.contains("Terms carrying no signal in this corpus:"));
         assert!(out.contains("Filename scan would have chosen (cap 5):"));
+    }
+
+    /// The filename scan is capped at the same `--limit` as the index, so
+    /// `--explain` compares the two selectors on equal budget.
+    #[test]
+    fn test_select_explain_caps_the_filename_scan_at_the_selection_limit() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        // Both filenames carry `cross-cutting-`; a cap of 1 must keep only one
+        // of them. `token signing` keeps the index from returning no matches,
+        // which would skip the explain block entirely.
+        let query = Query::new("token signing cross-cutting");
+        let matches = index.search(&query, 1);
+
+        let panel = render_select_panel(&index, &query, &matches, true, 1, 110);
+        assert!(panel.contains("Filename scan would have chosen (cap 1):"));
+
+        let value: serde_json::Value =
+            serde_json::from_str(&render_select_json(&index, &query, &matches, 1, true)).unwrap();
+        assert_eq!(value["limit"], 1);
+        assert_eq!(value["explain"]["filename_scan"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -912,6 +978,7 @@ mod tests {
                 limit: 5,
                 ablate: vec!["slug".to_string()],
                 json,
+                rebuild: false,
             };
             assert!(exec_eval(&args).is_ok());
         }
@@ -933,8 +1000,47 @@ mod tests {
             limit: 5,
             ablate: vec!["nope".to_string()],
             json: false,
+            rebuild: false,
         };
         assert!(exec_eval(&args).is_err());
+    }
+
+    /// `--rebuild` skips a still-valid cache, so a measurement cannot silently
+    /// score against stale signal data.
+    #[test]
+    fn test_exec_eval_rebuild_ignores_a_cached_index() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let first = scope::resolve(root.path(), true).unwrap();
+        assert_eq!(first.index.len(), 2);
+
+        let dir = crate::rules::rules_dir(root.path());
+        let mut tampered = first.index.clone();
+        tampered.documents.clear();
+        tampered.document_frequency.clear();
+        scope::cache::store(&dir, &tampered);
+        assert!(
+            scope::cache::load(&dir, &tampered.fingerprint)
+                .unwrap()
+                .is_empty()
+        );
+
+        let golden_dir = tempdir().unwrap();
+        let args = RulesEvalArgs {
+            golden: write_golden(&golden_dir, &[oauth_case()]),
+            repo: Some(root.path().to_path_buf()),
+            limit: 5,
+            ablate: Vec::new(),
+            json: true,
+            rebuild: true,
+        };
+        assert!(exec_eval(&args).is_ok());
+
+        let rebuilt = scope::cache::load(&dir, &scope::cache::fingerprint(&dir)).unwrap();
+        assert_eq!(rebuilt.len(), 2);
     }
 
     // ── shared helpers ───────────────────────────────────────────────────

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Local scope resolution over `.actual/rules/`: an offline, deterministic index that ranks rule documents against a plan using path globs extracted from `### Verify` operands, the prose scope sentence, the aspect slug and the title
-- `actual rules index` to build or refresh that index, `actual rules select` to rank rule documents against a plan, and `actual rules eval` to score the index against the status-quo filename scan on a golden set
+- `actual rules index` to build or refresh that index, `actual rules index --clear` to drop every cached index (including those left by other repositories) and rebuild this one, `actual rules select` to rank rule documents against a plan, and `actual rules eval` to score the index against the status-quo filename scan on a golden set (`--rebuild` forces a fresh index so the measurement is not silently cached)
 - `actual rules select --explain`, which attributes every hit to the signal and terms that carried it and prints what the filename scan would have chosen instead
 - Design notes and measurements for scope resolution in `docs/SCOPE_INDEX.md`
 - `actual advisor` command: ask the Advisor org-scoped architecture questions from the terminal and print the answer with any related ADRs (requires signing in with `actual login`)

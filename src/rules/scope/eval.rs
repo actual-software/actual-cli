@@ -59,8 +59,12 @@ impl Scores {
     }
 
     fn from_counts(true_positives: usize, false_positives: usize, false_negatives: usize) -> Self {
-        // An empty selection against an empty expectation is perfect, not
-        // undefined: nothing was asked for and nothing was wrongly returned.
+        // Precision of an empty selection is 1.0 by convention: abstention is
+        // not punished, because nothing false was returned. That is not a
+        // claim of a perfect retrieval — when anything was expected, recall
+        // and F1 still fall to 0. The other 0/0, empty against empty, is
+        // genuinely perfect: nothing was asked for and nothing was wrongly
+        // returned.
         let precision = ratio(true_positives, true_positives + false_positives);
         let recall = ratio(true_positives, true_positives + false_negatives);
         let f1 = if precision + recall > 0.0 {
@@ -80,6 +84,8 @@ impl Scores {
 }
 
 fn ratio(numerator: usize, denominator: usize) -> f64 {
+    // 0/0 is 1.0 so an empty selection is not reported as precision 0. See
+    // `Scores::from_counts` for why that is a convention, not a real 1.0.
     if denominator == 0 {
         1.0
     } else {
@@ -240,6 +246,9 @@ mod tests {
         assert_eq!(scores.f1, 1.0);
     }
 
+    /// Abstention is not punished: returning nothing scores precision 1.0
+    /// because there were no false positives. That is a convention, not a
+    /// claim of a perfect retrieval — recall and F1 are still 0.
     #[test]
     fn test_measure_empty_selection_against_an_expectation() {
         let scores = Scores::measure(&[], &["a".to_string()]);
@@ -269,7 +278,8 @@ mod tests {
         assert_eq!(report.micro.false_negatives, 1);
         assert_eq!(report.micro.precision, 0.8);
         assert_eq!(report.micro.recall, 0.8);
-        // Macro halves the perfect case against the total miss.
+        // Two cases, equal weight: (1.0 + 0.0) / 2. A third case would
+        // change this; it is not a general "halve the perfect score" rule.
         assert_eq!(report.macro_precision, 0.5);
         assert_eq!(report.macro_recall, 0.5);
         assert_eq!(report.macro_f1, 0.5);
