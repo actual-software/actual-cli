@@ -592,6 +592,21 @@ Claude Code MUST NOT skip or defer verification of these rules. Pull requests us
         assert!(doc.warnings.is_empty());
     }
 
+    /// A run of fewer than three backticks or tildes — such as inline code —
+    /// is not a fence opener and must fall through to ordinary line handling
+    /// rather than being consumed as one.
+    #[test]
+    fn test_parse_short_delimiter_run_is_not_a_fence() {
+        let doc = parse_ok(
+            "# Title\n\n``inline code`` opens the scope sentence.\n\n### Rules\n\n- **R-A-001** MUST: a\n",
+        );
+        assert_eq!(
+            doc.scope.as_deref(),
+            Some("``inline code`` opens the scope sentence.")
+        );
+        assert_eq!(ids(&doc), vec!["R-A-001"]);
+    }
+
     /// A closing fence must be at least as long as its opener and use the same
     /// character. A four-backtick fence containing a nested three-backtick
     /// example must not close on the shorter nested line — APR-001.
