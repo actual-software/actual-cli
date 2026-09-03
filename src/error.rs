@@ -129,6 +129,15 @@ pub enum ActualError {
     /// is the wrong place to look for a key passed by flag or environment.
     #[error("{message}")]
     Sec1KeyUnsupported { message: String, hint: String },
+
+    /// `plan-check` (direct mode, not `--claude-hook`) found at least one
+    /// `conflicting` verdict. Not a technical failure — the check ran fine —
+    /// but a real finding, so direct-mode use as a linter/gate gets a nonzero
+    /// exit the way any other lint failure would. `--claude-hook` never
+    /// constructs this variant: its own contract encodes a deny as JSON on
+    /// stdout with a clean exit 0, never as a process error.
+    #[error("plan does not conform: {0}")]
+    PlanNotConforming(String),
 }
 
 impl ActualError {

@@ -12,18 +12,21 @@
 //!   and reads each file, isolating per-file failures.
 //! * [`scope`] indexes the parsed set so a plan can be matched against it
 //!   offline, which is the layer that replaces reading filenames by eye.
+//! * [`check`] is the conformance evaluation: it takes the rules `scope`
+//!   selected and asks whether a plan actually obeys them.
 
+pub mod check;
 pub mod discover;
 pub mod parse;
 pub mod scope;
 pub mod types;
 
 pub use discover::{
-    load_rule_set, parse_rule_sources, read_rule_sources, rules_dir, RuleSource, RuleSources,
-    MAX_RULE_FILE_SIZE, RULES_DIR_NAME,
+    load_rule_set, load_rule_set_in, parse_rule_sources, read_rule_sources, read_rule_sources_in,
+    rules_dir, RuleSource, RuleSources, MAX_RULE_FILE_SIZE, RULES_DIR_NAME,
 };
 pub use parse::parse_rule_document;
-pub use scope::{resolve, IndexSource, Match, Query, ResolvedIndex, ScopeIndex};
+pub use scope::{resolve, resolve_in, IndexSource, Match, Query, ResolvedIndex, ScopeIndex};
 pub use types::{
     Rule, RuleDocument, RuleFileError, RuleIssue, RuleIssueKind, RuleLevel, RuleSetLoadReport,
     VerifyBlock,
