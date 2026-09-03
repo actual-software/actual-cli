@@ -1693,18 +1693,34 @@ mod parse_tests {
         assert!(advisor_args_from(&["actual", "status"]).is_none());
     }
 
+    /// Extract `rules index` arguments from a parsed command.
+    ///
+    /// A helper returning `Option` rather than a `match` with `panic!` arms,
+    /// matching `advisor_args_from` above: the fallback is then an ordinary
+    /// value a test can assert on, instead of an unreachable arm that no test
+    /// can execute.
+    fn rules_index_args_from(argv: &[&str]) -> Option<RulesIndexArgs> {
+        match Cli::try_parse_from(argv).ok()?.command {
+            Command::Rules(args) => match args.action {
+                RulesAction::Index(index) => Some(index),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     #[test]
     fn test_rules_index_clear_parses() {
-        let cli = Cli::try_parse_from(["actual", "rules", "index", "--clear"]).unwrap();
-        match cli.command {
-            Command::Rules(args) => match args.action {
-                RulesAction::Index(index) => {
-                    assert!(index.clear);
-                    assert!(!index.rebuild);
-                }
-                other => panic!("expected rules index, got {other:?}"),
-            },
-            other => panic!("expected rules, got {other:?}"),
-        }
+        let index = rules_index_args_from(["actual", "rules", "index", "--clear"].as_slice())
+            .expect("expected rules index command");
+        assert!(index.clear);
+        assert!(!index.rebuild);
+    }
+
+    /// Covers the helper's two non-index fallback arms.
+    #[test]
+    fn test_rules_index_args_from_other_commands_is_none() {
+        assert!(rules_index_args_from(["actual", "rules", "ls"].as_slice()).is_none());
+        assert!(rules_index_args_from(["actual", "status"].as_slice()).is_none());
     }
 }
