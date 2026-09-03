@@ -664,6 +664,15 @@ pub struct RulesArgs {
 pub enum RulesAction {
     /// List the rule documents under `.actual/rules/`
     Ls(RulesLsArgs),
+
+    /// Build or refresh the scope index over `.actual/rules/`
+    Index(RulesIndexArgs),
+
+    /// Select the rule documents that govern a plan
+    Select(RulesSelectArgs),
+
+    /// Score the scope index against the filename scan on a golden set
+    Eval(RulesEvalArgs),
 }
 
 /// Arguments for `rules ls`
@@ -674,6 +683,84 @@ pub struct RulesLsArgs {
     pub path: Option<std::path::PathBuf>,
 
     /// Print the parsed rule set as JSON instead of a panel.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `rules index`
+#[derive(Parser, Debug)]
+pub struct RulesIndexArgs {
+    /// Repository root to scan. Defaults to the current directory.
+    #[arg(value_name = "PATH")]
+    pub path: Option<std::path::PathBuf>,
+
+    /// Rebuild the index even when the cached one is still valid.
+    #[arg(long)]
+    pub rebuild: bool,
+
+    /// Print the index summary as JSON instead of a panel.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `rules select`
+///
+/// The plan text is the positional argument here, rather than the repository
+/// root as in `rules ls`, because it is this command's subject. The root moves
+/// to `--repo`.
+#[derive(Parser, Debug)]
+pub struct RulesSelectArgs {
+    /// The plan to match against the rule set.
+    #[arg(value_name = "PLAN", required = true)]
+    pub plan: Vec<String>,
+
+    /// Repository root to scan. Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<std::path::PathBuf>,
+
+    /// A file or directory the plan touches. Repeatable.
+    #[arg(long = "file", value_name = "PATH")]
+    pub files: Vec<String>,
+
+    /// Maximum number of rule documents to return.
+    #[arg(long, default_value_t = 10)]
+    pub limit: usize,
+
+    /// Show the signal behind every hit, and what the filename scan would have
+    /// chosen instead.
+    #[arg(long)]
+    pub explain: bool,
+
+    /// Print the selection as JSON instead of a panel.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Rebuild the index before selecting.
+    #[arg(long)]
+    pub rebuild: bool,
+}
+
+/// Arguments for `rules eval`
+#[derive(Parser, Debug)]
+pub struct RulesEvalArgs {
+    /// Golden set: JSON array of `{name, plan, paths, expected}` cases.
+    #[arg(long, value_name = "FILE")]
+    pub golden: std::path::PathBuf,
+
+    /// Repository root holding the rule set the golden set refers to.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<std::path::PathBuf>,
+
+    /// Number of documents each selector may return.
+    #[arg(long, default_value_t = 5)]
+    pub limit: usize,
+
+    /// Score the index with one signal switched off, to measure what that
+    /// signal is worth. Repeatable.
+    #[arg(long = "ablate", value_name = "FIELD")]
+    pub ablate: Vec<String>,
+
+    /// Print the full comparison as JSON instead of a panel.
     #[arg(long)]
     pub json: bool,
 }

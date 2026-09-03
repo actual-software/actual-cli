@@ -1,0 +1,169 @@
+[
+  {
+    "name": "refresh-token-rotation",
+    "plan": "Rotate refresh tokens on every use and revoke the one they replace, so a stolen token stops working once it has been redeemed.",
+    "expected": [
+      "cross-cutting-access-tokens-carry-standard-claims-609e",
+      "cross-cutting-token-signing-uses-asymmetric-keys-1c57",
+      "cross-cutting-token-verification-checks-revocation-963a",
+      "cross-cutting-token-expiration-is-bounded-b555"
+    ]
+  },
+  {
+    "name": "jwks-key-rollover",
+    "plan": "Roll the JWKS signing keypair for the public API. Publish the new public key before anything signs with the new private key, and keep verification working for tokens signed by the outgoing key.",
+    "expected": [
+      "cross-cutting-access-tokens-carry-standard-claims-609e",
+      "cross-cutting-token-signing-uses-asymmetric-keys-1c57",
+      "cross-cutting-token-verification-checks-revocation-963a",
+      "cross-cutting-token-expiration-is-bounded-b555"
+    ]
+  },
+  {
+    "name": "new-temporal-activity",
+    "plan": "Add a Temporal activity that reconciles invoices. It runs under the existing worker, takes a typed input, and returns something the workflow can serialise.",
+    "paths": [
+      "backend/workers/activities/reconcile.py"
+    ],
+    "expected": [
+      "cross-cutting-activity-inputs-are-pydantic-models-0aee",
+      "cross-cutting-activity-retries-are-declared-fb06",
+      "cross-cutting-workflow-determinism-is-preserved-940b",
+      "cross-cutting-activity-results-are-serialisable-7cd5"
+    ]
+  },
+  {
+    "name": "workflow-branch-change",
+    "plan": "Reorder the steps in the onboarding workflow so the welcome email is sent before provisioning, without breaking executions already in flight.",
+    "expected": [
+      "cross-cutting-activity-inputs-are-pydantic-models-0aee",
+      "cross-cutting-activity-retries-are-declared-fb06",
+      "cross-cutting-workflow-determinism-is-preserved-940b",
+      "cross-cutting-activity-results-are-serialisable-7cd5"
+    ]
+  },
+  {
+    "name": "pin-cloud-provider",
+    "plan": "Upgrade the AWS Terraform provider from 5.31 to 5.44 and refresh the lock file so every engineer plans against the same version.",
+    "expected": [
+      "cross-cutting-provider-versions-are-pinned-c340",
+      "cross-cutting-remote-state-is-encrypted-7f8d",
+      "cross-cutting-module-inputs-are-validated-b5f2"
+    ]
+  },
+  {
+    "name": "lambda-timeout-increase",
+    "plan": "The report generator Lambda keeps being cut off because the downstream export call is slow. Raise its timeout and memory, and give the async invocations somewhere to land when they fail.",
+    "paths": [
+      "infra/terraform/lambda/reports.tf"
+    ],
+    "expected": [
+      "cross-cutting-function-timeout-exceeds-dependency-budget-06df",
+      "cross-cutting-memory-is-sized-from-measurement-289c",
+      "cross-cutting-dead-letter-queues-are-configured-f249",
+      "cross-cutting-provider-versions-are-pinned-c340",
+      "cross-cutting-remote-state-is-encrypted-7f8d",
+      "cross-cutting-module-inputs-are-validated-b5f2"
+    ]
+  },
+  {
+    "name": "login-form-server-action",
+    "plan": "Move the credential form submit off the browser into a server action, set the session cookie there, and make the failure message say nothing useful to an attacker.",
+    "expected": [
+      "cross-cutting-sign-in-runs-on-the-server-38eb",
+      "cross-cutting-session-refresh-is-idempotent-aa7c",
+      "cross-cutting-protected-routes-check-session-ebcc"
+    ]
+  },
+  {
+    "name": "component-story-keyboard",
+    "plan": "Write Storybook stories for the new combobox covering keyboard traversal, the empty result state, and the failed fetch state, and assert the announced label of each option.",
+    "expected": [
+      "cross-cutting-stories-assert-accessible-names-3c7b",
+      "cross-cutting-interaction-tests-use-play-functions-85bd",
+      "cross-cutting-stories-cover-loading-and-error-states-056a"
+    ]
+  },
+  {
+    "name": "latency-histogram",
+    "plan": "Record request duration as an OpenTelemetry histogram with buckets we choose ourselves, and keep the attribute set small enough that the time series count does not explode.",
+    "expected": [
+      "cross-cutting-meters-are-created-once-88b5",
+      "cross-cutting-histograms-declare-buckets-35ed",
+      "cross-cutting-span-attributes-are-bounded-eb55"
+    ]
+  },
+  {
+    "name": "gateway-graceful-shutdown",
+    "plan": "Make the gateway service registry shut down cleanly: cancel routing work in flight, wait for it, and make a second stop call harmless.",
+    "expected": [
+      "cross-cutting-registry-exposes-start-and-stop-6f29",
+      "cross-cutting-routing-tables-are-immutable-snapshots-4b99",
+      "cross-cutting-registry-entries-are-dataclasses-c876"
+    ]
+  },
+  {
+    "name": "redact-log-fields",
+    "plan": "Stop personal data reaching our log sink. Move field redaction into the shared logger so no call site has to remember it, and drop any field the redaction table does not recognise.",
+    "expected": [
+      "cross-cutting-log-events-are-named-not-formatted-b877",
+      "cross-cutting-sensitive-fields-are-redacted-e4bb",
+      "cross-cutting-errors-log-cause-chains-154e"
+    ]
+  },
+  {
+    "name": "tighten-row-policies",
+    "plan": "Tighten the per-tenant row level security policies on the invoices table, and make the reporting query name its columns instead of selecting every one.",
+    "paths": [
+      "backend/db/policies/invoices.py"
+    ],
+    "expected": [
+      "cross-cutting-server-client-is-used-server-side-320a",
+      "cross-cutting-row-level-security-is-assumed-on-3d5e",
+      "cross-cutting-queries-select-explicit-columns-d4e2"
+    ]
+  },
+  {
+    "name": "retire-graphql-field",
+    "plan": "Deprecate the legacy customerName field on the Order type in the GraphQL schema, point callers at its replacement, and only remove it once usage reaches zero.",
+    "expected": [
+      "cross-cutting-schema-changes-are-additive-a36a",
+      "cross-cutting-resolvers-batch-their-loads-3bf5",
+      "cross-cutting-deprecations-carry-a-reason-8bd0"
+    ]
+  },
+  {
+    "name": "ci-credential-handling",
+    "plan": "Our CI workflows read a deploy credential from a file in the repository. Move it into the encrypted secret store, mask it before any third-party step sees it, and cut the permissions the job is granted.",
+    "expected": [
+      "cross-cutting-secrets-are-injected-at-runtime-5bfa",
+      "cross-cutting-workflow-permissions-are-least-privilege-f644",
+      "cross-cutting-third-party-actions-are-pinned-d07c"
+    ]
+  },
+  {
+    "name": "trace-the-router",
+    "plan": "Instrument the gateway routing path so every dispatch produces a span with bounded attributes, and count dispatches per destination.",
+    "expected": [
+      "cross-cutting-meters-are-created-once-88b5",
+      "cross-cutting-histograms-declare-buckets-35ed",
+      "cross-cutting-span-attributes-are-bounded-eb55",
+      "cross-cutting-registry-exposes-start-and-stop-6f29",
+      "cross-cutting-routing-tables-are-immutable-snapshots-4b99",
+      "cross-cutting-registry-entries-are-dataclasses-c876"
+    ]
+  },
+  {
+    "name": "activity-failure-logging",
+    "plan": "When a Temporal activity raises, emit one structured log record carrying the whole cause chain, and make sure the retry policy does not turn one failure into five identical records.",
+    "expected": [
+      "cross-cutting-log-events-are-named-not-formatted-b877",
+      "cross-cutting-sensitive-fields-are-redacted-e4bb",
+      "cross-cutting-errors-log-cause-chains-154e",
+      "cross-cutting-activity-inputs-are-pydantic-models-0aee",
+      "cross-cutting-activity-retries-are-declared-fb06",
+      "cross-cutting-workflow-determinism-is-preserved-940b",
+      "cross-cutting-activity-results-are-serialisable-7cd5"
+    ]
+  }
+]

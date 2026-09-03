@@ -479,9 +479,105 @@ fn test_cli_parse_rules_ls_with_path_and_json() {
     let Command::Rules(args) = cli.command else {
         unreachable!()
     };
-    let actual_cli::RulesAction::Ls(ls) = args.action;
+    let actual_cli::RulesAction::Ls(ls) = args.action else {
+        unreachable!("`rules ls` must parse as the Ls action")
+    };
     assert_eq!(ls.path.as_deref(), Some(std::path::Path::new("/some/repo")));
     assert!(ls.json);
+}
+
+#[test]
+fn test_cli_parse_rules_index() {
+    let cli = Cli::parse_from(["actual", "rules", "index", "/some/repo", "--rebuild"]);
+    let Command::Rules(args) = cli.command else {
+        unreachable!()
+    };
+    let actual_cli::RulesAction::Index(index) = args.action else {
+        unreachable!("`rules index` must parse as the Index action")
+    };
+    assert_eq!(
+        index.path.as_deref(),
+        Some(std::path::Path::new("/some/repo"))
+    );
+    assert!(index.rebuild);
+    assert!(!index.json);
+}
+
+/// The plan is the positional argument for `rules select`, and it may run to
+/// several words without quoting.
+#[test]
+fn test_cli_parse_rules_select() {
+    let cli = Cli::parse_from([
+        "actual",
+        "rules",
+        "select",
+        "rotate",
+        "the",
+        "signing",
+        "key",
+        "--repo",
+        "/some/repo",
+        "--file",
+        "lib/auth.ts",
+        "--limit",
+        "3",
+        "--explain",
+    ]);
+    let Command::Rules(args) = cli.command else {
+        unreachable!()
+    };
+    let actual_cli::RulesAction::Select(select) = args.action else {
+        unreachable!("`rules select` must parse as the Select action")
+    };
+    assert_eq!(select.plan.join(" "), "rotate the signing key");
+    assert_eq!(
+        select.repo.as_deref(),
+        Some(std::path::Path::new("/some/repo"))
+    );
+    assert_eq!(select.files, vec!["lib/auth.ts"]);
+    assert_eq!(select.limit, 3);
+    assert!(select.explain);
+}
+
+#[test]
+fn test_cli_parse_rules_eval() {
+    let cli = Cli::parse_from([
+        "actual",
+        "rules",
+        "eval",
+        "--golden",
+        "golden.json",
+        "--limit",
+        "10",
+        "--ablate",
+        "title",
+        "--ablate",
+        "slug",
+        "--json",
+    ]);
+    let Command::Rules(args) = cli.command else {
+        unreachable!()
+    };
+    let actual_cli::RulesAction::Eval(eval) = args.action else {
+        unreachable!("`rules eval` must parse as the Eval action")
+    };
+    assert_eq!(eval.golden, std::path::PathBuf::from("golden.json"));
+    assert_eq!(eval.limit, 10);
+    assert_eq!(eval.ablate, vec!["title", "slug"]);
+    assert!(eval.json);
+}
+
+/// `rules select` without a plan is a usage error, not an empty selection.
+#[test]
+fn test_cli_parse_rules_select_requires_a_plan() {
+    assert!(Cli::try_parse_from(["actual", "rules", "select"]).is_err());
+}
+
+/// `rules eval` without a golden set is a usage error: there is nothing to
+/// measure against.
+#[test]
+fn test_cli_parse_rules_eval_requires_a_golden_set() {
+    assert!(Cli::try_parse_from(["actual", "rules", "eval"]).is_err());
 }
 
 /// `rules ls` in a directory with no `.actual/rules/` is a successful empty

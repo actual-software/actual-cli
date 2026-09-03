@@ -25,7 +25,8 @@ pub use error::ActualError;
 pub use cli::args::{
     AdvisorArgs, AuthArgs, AuthCommand, CacheAction, CacheArgs, Cli, Command, ConfigAction,
     ConfigArgs, ConfigSetArgs, CreateTokenArgs, LoginArgs, ModelsArgs, RulesAction, RulesArgs,
-    RulesLsArgs, RunnerChoice, StatusArgs, SyncArgs,
+    RulesEvalArgs, RulesIndexArgs, RulesLsArgs, RulesSelectArgs, RunnerChoice, StatusArgs,
+    SyncArgs,
 };
 
 pub fn run(cli: Cli) -> Result<(), ActualError> {
