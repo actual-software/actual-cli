@@ -24,8 +24,12 @@ use crate::rules::{
 };
 
 pub fn exec(args: &RulesArgs) -> Result<(), ActualError> {
+    use crate::cli::commands::rules_scope;
     match &args.action {
         RulesAction::Ls(ls) => exec_ls(ls),
+        RulesAction::Index(index) => rules_scope::exec_index(index),
+        RulesAction::Select(select) => rules_scope::exec_select(select),
+        RulesAction::Eval(eval) => rules_scope::exec_eval(eval),
     }
 }
 
