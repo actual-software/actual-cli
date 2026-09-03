@@ -76,7 +76,23 @@ const DIGEST_VERSION: u32 = 1;
 /// cannot be listed at all.
 pub fn read_rule_sources(root_dir: &Path) -> Result<RuleSources, ActualError> {
     validate_root(root_dir)?;
-    let dir = rules_dir(root_dir);
+    read_rule_sources_in(&rules_dir(root_dir))
+}
+
+/// Read every rule file directly out of `dir`, without parsing it and without
+/// deriving `dir` from a repository root.
+///
+/// [`read_rule_sources`] is the convention-based entry point most callers
+/// want, and it validates that the repository root itself is real before
+/// deriving `<root>/.actual/rules` from it. This one exists because the
+/// plan-stage hook resolves the rules directory itself — it honors
+/// `ACTUAL_RULES_DIR` so a monorepo can point the gate at a subproject — and
+/// passes the resolved path straight in; rediscovering it from a root here
+/// would make that override a no-op. There is no root to validate on this
+/// path, so a `dir` that does not exist reads the same as an empty one, the
+/// same way a never-synced repository does under the convention path.
+pub fn read_rule_sources_in(dir: &Path) -> Result<RuleSources, ActualError> {
+    let dir = dir.to_path_buf();
     let mut listing_errors: Vec<RuleFileError> = Vec::new();
 
     let entries = match std::fs::read_dir(&dir) {
@@ -197,6 +213,16 @@ pub fn parse_rule_sources(sources: RuleSources) -> RuleSetLoadReport {
 /// stop the scan.
 pub fn load_rule_set(root_dir: &Path) -> Result<RuleSetLoadReport, ActualError> {
     Ok(parse_rule_sources(read_rule_sources(root_dir)?))
+}
+
+/// Load every rule document directly out of `dir`.
+///
+/// The convention-based [`load_rule_set`] is the usual entry point. This one
+/// exists for the same reason [`read_rule_sources_in`] does: the plan-stage
+/// hook resolves the rules directory itself and forwards the resolved path
+/// in, rather than a repository root for this command to rediscover it from.
+pub fn load_rule_set_in(dir: &Path) -> Result<RuleSetLoadReport, ActualError> {
+    Ok(parse_rule_sources(read_rule_sources_in(dir)?))
 }
 
 /// Reject a repository root that does not exist or is not a directory.

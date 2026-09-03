@@ -345,6 +345,8 @@ pub enum Command {
     Cache(CacheArgs),
     /// Inspect the rule documents under `.actual/rules/`
     Rules(RulesArgs),
+    /// Check an implementation plan against the selected `.actual/rules/`
+    PlanCheck(PlanCheckArgs),
 }
 
 /// Arguments for the `advisor` command
@@ -805,6 +807,73 @@ pub struct RulesEvalArgs {
 
     /// Rebuild the index before evaluating, so the measurement is against
     /// the files on disk rather than a cached index.
+    #[arg(long)]
+    pub rebuild: bool,
+}
+
+/// Arguments for the `plan-check` command.
+///
+/// Two callers, two shapes. A human runs this directly: the plan is a
+/// positional argument, a `--plan-file`, or stdin, and the result is a panel
+/// or `--json`. `hooks/plan-gate.sh` runs it with `--claude-hook`: the plan
+/// comes from a Claude Code `PreToolUse` hook envelope on stdin instead, and
+/// the result is the hook's own JSON contract — see
+/// `crate::cli::commands::plan_check` for what that contract requires.
+#[derive(Parser, Debug)]
+pub struct PlanCheckArgs {
+    /// The plan to check. Omit to read from `--plan-file` or stdin. Ignored
+    /// under `--claude-hook`, which resolves the plan from the hook envelope.
+    #[arg(value_name = "PLAN")]
+    pub plan: Vec<String>,
+
+    /// Read the plan from this file instead of the positional argument or
+    /// stdin. Ignored under `--claude-hook`.
+    #[arg(long, value_name = "PATH", conflicts_with = "claude_hook")]
+    pub plan_file: Option<std::path::PathBuf>,
+
+    /// Repository root to resolve rules and paths against. Defaults to the
+    /// current directory.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<std::path::PathBuf>,
+
+    /// Rules directory to score against, overriding `<repo>/.actual/rules`.
+    /// This is what `ACTUAL_RULES_DIR` becomes on the way into the CLI: the
+    /// hook resolves the override itself and forwards the resolved path here
+    /// rather than leaving this command to rediscover it from `--repo`.
+    #[arg(long, value_name = "PATH")]
+    pub rules_dir: Option<std::path::PathBuf>,
+
+    /// Parse a Claude Code `PreToolUse` hook envelope from stdin and emit the
+    /// hook's JSON contract on stdout instead of a panel. This is the mode
+    /// `hooks/plan-gate.sh` drives; every failure degrades to fail-open rather
+    /// than an error exit, per that contract.
+    #[arg(long)]
+    pub claude_hook: bool,
+
+    /// Maximum number of rule documents to judge the plan against.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+
+    /// How many candidates the deterministic prefilter retrieves before the
+    /// limit is applied. Raised to `--limit` when smaller.
+    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
+    pub candidates: usize,
+
+    /// Runner to use for the conformance judge. Probed automatically when
+    /// omitted.
+    #[arg(long, value_enum)]
+    pub runner: Option<RunnerChoice>,
+
+    /// Model for the judge, overriding the configured one.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Print the result as JSON instead of a panel. Ignored under
+    /// `--claude-hook`, which always emits the hook's own JSON contract.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Rebuild the scope index before selecting.
     #[arg(long)]
     pub rebuild: bool,
 }

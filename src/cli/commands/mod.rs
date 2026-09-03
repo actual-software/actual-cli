@@ -16,6 +16,8 @@ pub mod login;
 pub mod logout;
 pub mod mint_token;
 pub mod models;
+pub mod plan_check;
+mod plan_check_hook;
 pub mod rules;
 pub mod rules_rank;
 pub mod rules_scope;

@@ -46,7 +46,9 @@ pub mod signals;
 use std::path::Path;
 
 use crate::error::ActualError;
-use crate::rules::{parse_rule_sources, read_rule_sources, rules_dir, RuleSetLoadReport};
+use crate::rules::{
+    parse_rule_sources, read_rule_sources, read_rule_sources_in, rules_dir, RuleSetLoadReport,
+};
 
 pub use eval::{CaseResult, EvaluationReport, GoldenCase, Scores};
 pub use index::{Field, GlobMatch, IndexedDocument, Match, Query, ScopeIndex, Weights};
@@ -111,6 +113,53 @@ pub fn resolve(root: &Path, force_rebuild: bool) -> Result<ResolvedIndex, Actual
     let report = parse_rule_sources(sources);
     let index = ScopeIndex::build(&report, root, report.digest.clone());
     cache::store(&dir, &index);
+    Ok(ResolvedIndex {
+        index,
+        source: if force_rebuild {
+            IndexSource::Rebuilt
+        } else {
+            IndexSource::Built
+        },
+        report: Some(report),
+    })
+}
+
+/// Resolve the index for an explicitly named rules directory.
+///
+/// [`resolve`] is the convention-based entry point and the one most callers
+/// want, and it validates that the repository root itself is real before
+/// deriving `<root>/.actual/rules` from it. This one takes the rules
+/// directory directly, because the plan-stage hook has already resolved it —
+/// `ACTUAL_RULES_DIR`, then `<repo>/.actual/rules` — and forwards the answer
+/// as `--rules-dir`. Deriving the directory again from `root` here would
+/// silently ignore that override, and re-validating `root` would reject the
+/// legitimate case of a rules directory that lives outside this checkout.
+///
+/// `root` is used only to shorten the paths stored in the index. A rules
+/// directory outside `root` keeps its absolute paths, which is the honest
+/// rendering for a directory that is not part of this checkout.
+pub fn resolve_in(
+    dir: &Path,
+    root: &Path,
+    force_rebuild: bool,
+) -> Result<ResolvedIndex, ActualError> {
+    // Same one-read-per-invocation shape as `resolve`: the digest requires the
+    // bytes in hand, so there is nothing cheaper to check first.
+    let sources = read_rule_sources_in(dir)?;
+
+    if !force_rebuild {
+        if let Some(index) = cache::load(dir, &sources.digest) {
+            return Ok(ResolvedIndex {
+                index,
+                source: IndexSource::Cached,
+                report: None,
+            });
+        }
+    }
+
+    let report = parse_rule_sources(sources);
+    let index = ScopeIndex::build(&report, root, report.digest.clone());
+    cache::store(dir, &index);
     Ok(ResolvedIndex {
         index,
         source: if force_rebuild {
