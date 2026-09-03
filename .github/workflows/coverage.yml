@@ -68,6 +68,7 @@ jobs:
             --test integration_http_runners \
             --test integration_no_tailor \
             --test integration_smoke \
+            --test integration_scope_index \
             --test integration_static_analyzer \
             --test integration_sync_modes \
             --test integration_tailor \

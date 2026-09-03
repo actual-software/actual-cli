@@ -68,12 +68,14 @@ pub fn fingerprint(rules_dir: &Path) -> String {
             {
                 continue;
             }
-            let Ok(metadata) = entry.metadata() else {
+            // One skip for both "cannot be measured" and "is not a regular
+            // file". They are the same outcome, and separating them would leave
+            // an error arm no portable test can reach: `DirEntry::metadata` does
+            // not follow symlinks on every platform, so a dangling link fails
+            // the is-a-file check rather than the stat.
+            let Some(metadata) = entry.metadata().ok().filter(|m| m.is_file()) else {
                 continue;
             };
-            if !metadata.is_file() {
-                continue;
-            }
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -112,13 +114,18 @@ pub fn store(rules_dir: &Path, index: &ScopeIndex) {
     let Some(path) = cache_path(rules_dir) else {
         return;
     };
-    let Ok(json) = serde_json::to_string(index) else {
+    // `ScopeIndex` is plain owned data with no map keys that can fail to
+    // serialize, so this cannot return `Err`. Asserting that is honest about
+    // the contract, and leaves no dead error arm pretending to be reachable.
+    let json = serde_json::to_string(index)
+        .expect("scope index is serializable — this is a programmer error");
+    // `cache_path` builds `<config>/scope-index/<key>.json`, so a parent always
+    // exists. Naming that is honest about the contract and leaves no dead arm.
+    let parent = path
+        .parent()
+        .expect("cache path always has a parent — this is a programmer error");
+    if std::fs::create_dir_all(parent).is_err() {
         return;
-    };
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
     }
     let _ = std::fs::write(&path, json);
     // 0600, consistent with everything else the CLI writes into the config
@@ -251,6 +258,58 @@ mod tests {
         // filesystem's modification time has coarse resolution.
         std::fs::write(dir.join("a.md"), format!("{DOC}\n- **R-A-002** MAY: b.\n")).unwrap();
         assert_ne!(fingerprint(&dir), before);
+    }
+
+    /// A directory whose name ends in `.md` survives the extension filter and
+    /// must then be skipped by the is-a-file check, or a stray directory would
+    /// change the fingerprint of an otherwise untouched rule set.
+    #[test]
+    fn test_fingerprint_skips_a_directory_named_like_a_rule_file() {
+        let repo = seed(&[("a.md", DOC)]);
+        let dir = rules_dir(repo.path());
+        let before = fingerprint(&dir);
+
+        std::fs::create_dir(dir.join("b-dir.md")).unwrap();
+        assert_eq!(fingerprint(&dir), before);
+    }
+
+    /// A symlink named like a rule file is not a regular file, so it must be
+    /// skipped rather than counted. Both a dangling link and a self-referential
+    /// one are covered, since neither resolves to something measurable and the
+    /// walk has to survive both.
+    #[cfg(unix)]
+    #[test]
+    fn test_fingerprint_skips_a_symlink_named_like_a_rule_file() {
+        let repo = seed(&[("a.md", DOC)]);
+        let dir = rules_dir(repo.path());
+        let before = fingerprint(&dir);
+
+        std::os::unix::fs::symlink("loop.md", dir.join("loop.md")).unwrap();
+        std::os::unix::fs::symlink(dir.join("nowhere.md"), dir.join("dangling.md")).unwrap();
+        assert_eq!(fingerprint(&dir), before);
+    }
+
+    /// With no resolvable config directory there is nowhere to cache. Both the
+    /// single-entry write and the prune must degrade quietly rather than fail:
+    /// the only cost is a rebuild.
+    #[test]
+    fn test_cache_is_inert_without_a_resolvable_config_directory() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        // A relative `ACTUAL_CONFIG` is rejected by the config loader, so
+        // `config_dir()` errors and every cache path resolves to `None`.
+        let _guard = EnvGuard::set("ACTUAL_CONFIG", "relative/config.yaml");
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG_DIR");
+
+        let repo = seed(&[("a.md", DOC)]);
+        let dir = rules_dir(repo.path());
+
+        assert!(cache_dir().is_none());
+        assert!(cache_path(&dir).is_none());
+        // Must not panic, and must report nothing pruned.
+        store(&dir, &build(repo.path()));
+        clear(&dir);
+        assert_eq!(clear_all(), 0);
+        assert!(load(&dir, "anything").is_none());
     }
 
     #[test]

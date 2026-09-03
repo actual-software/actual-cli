@@ -402,6 +402,58 @@ mod tests {
         assert!(exec(&ls_args(root.path(), true)).is_ok());
     }
 
+    /// `exec` is the only dispatch point for the four rule subcommands, so each
+    /// arm needs to be reached at least once or a mis-wired subcommand ships
+    /// silently.
+    #[test]
+    fn test_exec_dispatches_every_rules_action() {
+        use crate::cli::args::{RulesEvalArgs, RulesIndexArgs, RulesSelectArgs};
+
+        let root = seed(&[("a.md", DOC)]);
+        let home = tempdir().unwrap();
+        let _lock = crate::testutil::ENV_MUTEX.lock().unwrap();
+        let _guard =
+            crate::testutil::EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = crate::testutil::EnvGuard::remove("ACTUAL_CONFIG");
+
+        let index = RulesArgs {
+            action: RulesAction::Index(RulesIndexArgs {
+                path: Some(root.path().to_path_buf()),
+                rebuild: true,
+                clear: false,
+                json: false,
+            }),
+        };
+        assert!(exec(&index).is_ok());
+
+        let select = RulesArgs {
+            action: RulesAction::Select(RulesSelectArgs {
+                plan: vec!["a".to_string(), "rule".to_string()],
+                repo: Some(root.path().to_path_buf()),
+                files: Vec::new(),
+                limit: 5,
+                explain: false,
+                json: false,
+                rebuild: false,
+            }),
+        };
+        assert!(exec(&select).is_ok());
+
+        let golden = home.path().join("golden.json");
+        std::fs::write(&golden, "[]").unwrap();
+        let eval = RulesArgs {
+            action: RulesAction::Eval(RulesEvalArgs {
+                golden,
+                repo: Some(root.path().to_path_buf()),
+                limit: 5,
+                ablate: Vec::new(),
+                json: false,
+                rebuild: false,
+            }),
+        };
+        assert!(exec(&eval).is_ok());
+    }
+
     #[test]
     fn test_exec_ls_propagates_a_load_failure() {
         let root = tempdir().unwrap();

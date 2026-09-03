@@ -616,6 +616,17 @@ fn dedup(terms: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// A field absent from a document's term map scores zero rather than
+    /// panicking. An index deserialized from an older cache entry can be
+    /// missing a field the current build knows about.
+    #[test]
+    fn test_term_coverage_of_an_absent_field_is_zero() {
+        let idf: HashMap<&str, f64> = HashMap::from([("token", 1.0)]);
+        let (coverage, matched) = term_coverage(None, &["token".to_string()], &idf, 1.0);
+        assert_eq!(coverage, 0.0);
+        assert!(matched.is_empty());
+    }
+
     use std::path::{Path, PathBuf};
 
     use crate::rules::{parse_rule_document, RuleSetLoadReport};

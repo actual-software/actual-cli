@@ -511,6 +511,100 @@ mod tests {
     use crate::rules::scope::eval::GoldenCase;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
+    /// A cache hit carries no load report, because it never reads the rule
+    /// files. The panel must still render, and must omit the parse-failure line
+    /// it can no longer know about.
+    #[test]
+    fn test_index_panel_renders_a_cache_hit_without_a_load_report() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = sample();
+
+        scope::resolve(root.path(), true).unwrap();
+        let cached = scope::resolve(root.path(), false).unwrap();
+        assert!(cached.report.is_none(), "expected a cache hit");
+
+        let out = render_index_panel(&cached, root.path(), 100);
+        assert!(out.contains("(cached)"), "{out}");
+        assert!(!out.contains("failed to parse"), "{out}");
+    }
+
+    /// The eval panel states a verdict either way. Only the losing wording was
+    /// ever rendered, so the winning sentence went out unchecked.
+    #[test]
+    fn test_eval_panel_states_that_the_index_beats_the_scan() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = sample();
+        let index = resolved(root.path()).index;
+
+        // Phrased to avoid every filename segment, so the scan finds nothing
+        // while the prose and title signals still reach the right document.
+        let cases = vec![GoldenCase {
+            name: "rs256-key-rotation".to_string(),
+            plan: "rotate RS256 keys used by the public API".to_string(),
+            paths: Vec::new(),
+            expected: vec!["cross-cutting-token-signing-e410".to_string()],
+        }];
+
+        let comparison = run_evaluation(&index, &cases, 5, &Weights::default());
+        assert!(comparison.index_wins(), "{comparison:?}");
+        let out = render_eval_panel(&comparison, 100);
+        assert!(out.contains("Scope index beats the filename scan"), "{out}");
+    }
+
+    /// The JSON `source` field must report each of the three ways an index can
+    /// be obtained. Only the forced rebuild was ever exercised, so a mislabelled
+    /// cache hit would have shipped unnoticed.
+    #[test]
+    fn test_index_json_reports_built_then_cached_then_rebuilt() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = sample();
+
+        for expected in ["built", "cached"] {
+            let outcome = scope::resolve(root.path(), false).unwrap();
+            let value: serde_json::Value =
+                serde_json::from_str(&render_index_json(&outcome)).unwrap();
+            assert_eq!(value["source"], expected);
+        }
+
+        let outcome = scope::resolve(root.path(), true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&render_index_json(&outcome)).unwrap();
+        assert_eq!(value["source"], "rebuilt");
+    }
+
+    /// When no term is shared by every document there is nothing to retire, and
+    /// `--explain` must say "none" rather than printing an empty list.
+    #[test]
+    fn test_select_explain_reports_no_worthless_terms_when_none_are_shared() {
+        const WIDGETS: &str =
+            "# Widgets\n\nGoverns widgets.\n\n### Rules\n\n- **R-W-001** MUST: w.\n";
+        const GADGETS: &str =
+            "# Gadgets\n\nConcerns gadgets.\n\n### Rules\n\n- **R-G-001** MUST: g.\n";
+
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        // Two documents with disjoint vocabulary and no shared filename
+        // segment, so the ubiquitous set is genuinely empty.
+        let root = seed(&[("widgets.md", WIDGETS), ("gadgets.md", GADGETS)]);
+        let index = resolved(root.path()).index;
+        let ubiquitous = index.ubiquitous_terms();
+        assert!(ubiquitous.is_empty(), "{ubiquitous:?}");
+
+        let query = Query::new("widgets");
+        let matches = index.search(&query, 5);
+        let out = render_select_panel(&index, &query, &matches, true, 5, 100);
+        assert!(
+            out.contains("Terms carrying no signal in this corpus: none"),
+            "{out}"
+        );
+    }
     const OAUTH: &str = "# Adopt RS256: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token issuance and token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n\n### Verify\n\n```bash\ngrep -r \"jwt.sign\" services/auth/oauth/ --include=\"*.ts\"\n```\n";
     const TERRAFORM: &str = "# Pin Terraform Providers\n\nThese rules are ALWAYS ACTIVE for Terraform configuration in `infra/terraform/`.\n\n### Rules\n\n- **R-B-001** MUST: pin providers.\n";
     const BAD: &str = "no rules section here\n";
