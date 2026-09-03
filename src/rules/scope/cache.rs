@@ -3,15 +3,23 @@
 //! # Design
 //!
 //! The index must be cheap enough to sit in front of an interactive command, so
-//! it is cached; it must never be *stale*, so the cache is keyed by a
-//! fingerprint of the rule files themselves rather than by a timestamp or a TTL.
+//! it is cached; it must never be *stale*, so the cache is keyed by a digest of
+//! the rule files' **contents** rather than by a timestamp or a TTL.
 //!
-//! The fingerprint is a SHA-256 over each rule file's repository-relative path,
-//! byte length and modification time, taken in sorted order, plus the index
-//! format version. Computing it costs one `stat` per file and no reads, so the
-//! validity check stays far cheaper than the build it guards. Any edit, add,
-//! remove or rename changes it; a format-version bump invalidates every cached
-//! index written by an older build.
+//! An earlier version keyed on each file's path, byte length and modification
+//! time. That is not a content identity: a rewrite that preserves both size and
+//! mtime — `cp -p`, `rsync -t`, an unpacked archive, or any edit at all on a
+//! filesystem with coarse mtime granularity, such as a network mount — reused an
+//! index built from text that no longer existed. For a governance tool, silently
+//! selecting rules from deleted text is the worst available failure, and the
+//! measured cost of reading 425 files to hash them is a few milliseconds against
+//! a build of roughly 130.
+//!
+//! So [`crate::rules::read_rule_sources`] reads the files once and hands back
+//! both their text and a digest of it. On a hit the parse and the index build
+//! are skipped, which is where the time actually goes; on a miss the bytes are
+//! already in hand. Hashing and parsing therefore see one snapshot, so the cache
+//! can never be keyed to bytes that were not the ones indexed.
 //!
 //! The cache lives under the user's config directory, **never** inside the
 //! repository. `.actual/rules/` is committed, and writing a derived artifact
@@ -52,57 +60,16 @@ pub fn cache_path(rules_dir: &Path) -> Option<PathBuf> {
     cache_dir().map(|dir| dir.join(format!("{key}.json")))
 }
 
-/// Fingerprint the rule files under `rules_dir`.
-///
-/// Stat-only: no file contents are read, so this stays cheap enough to run on
-/// every invocation. A missing directory fingerprints as the empty rule set
-/// rather than failing, matching [`crate::rules::load_rule_set`].
-pub fn fingerprint(rules_dir: &Path) -> String {
-    let mut entries: Vec<(String, u64, Option<u128>)> = Vec::new();
-    if let Ok(dir) = std::fs::read_dir(rules_dir) {
-        for entry in dir.flatten() {
-            let path = entry.path();
-            if !path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-            {
-                continue;
-            }
-            // One skip for both "cannot be measured" and "is not a regular
-            // file". They are the same outcome, and separating them would leave
-            // an error arm no portable test can reach: `DirEntry::metadata` does
-            // not follow symlinks on every platform, so a dangling link fails
-            // the is-a-file check rather than the stat.
-            let Some(metadata) = entry.metadata().ok().filter(|m| m.is_file()) else {
-                continue;
-            };
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            entries.push((name, metadata.len(), mtime_nanos(&metadata)));
-        }
-    }
-    entries.sort();
-
-    let mut hasher = Sha256::new();
-    hasher.update(format!("v{INDEX_FORMAT_VERSION}\n").as_bytes());
-    for (name, len, mtime) in &entries {
-        hasher.update(format!("{name}\0{len}\0{}\n", encode_mtime(*mtime)).as_bytes());
-    }
-    hex(&hasher.finalize())
-}
-
-/// Load a cached index, if one exists and still matches `fingerprint`.
+/// Load a cached index, if one exists and still matches `content_digest`.
 ///
 /// Returns `None` for every failure mode — absent, unreadable, unparseable,
 /// written by an older format, or stale — because all of them have the same
 /// remedy: rebuild.
-pub fn load(rules_dir: &Path, fingerprint: &str) -> Option<ScopeIndex> {
+pub fn load(rules_dir: &Path, content_digest: &str) -> Option<ScopeIndex> {
     let path = cache_path(rules_dir)?;
     let text = std::fs::read_to_string(path).ok()?;
     let index: ScopeIndex = serde_json::from_str(&text).ok()?;
-    if index.format_version != INDEX_FORMAT_VERSION || index.fingerprint != fingerprint {
+    if index.format_version != INDEX_FORMAT_VERSION || index.content_digest != content_digest {
         return None;
     }
     Some(index)
@@ -175,26 +142,6 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Nanoseconds since the Unix epoch, or `None` when the filesystem has no
-/// mtime or the timestamp is before the epoch.
-fn mtime_nanos(metadata: &std::fs::Metadata) -> Option<u128> {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-}
-
-/// Encode one file's mtime for the fingerprint hash.
-///
-/// `None` contributes the constant `-1`, which weakens the fingerprint to
-/// path+size rather than breaking it. Nanos stay `u128` so a far-future
-/// mtime cannot wrap through an `i128` cast (year ~2262).
-fn encode_mtime(mtime_nanos: Option<u128>) -> String {
-    mtime_nanos
-        .map(|ns| ns.to_string())
-        .unwrap_or_else(|| "-1".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,7 +149,7 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use crate::rules::scope::index::ScopeIndex;
-    use crate::rules::{load_rule_set, rules_dir};
+    use crate::rules::{parse_rule_sources, read_rule_sources, rules_dir};
     use crate::testutil::{EnvGuard, ENV_MUTEX};
 
     const DOC: &str = "# T\n\nScope.\n\n### Rules\n\n- **R-A-001** MUST: a.\n";
@@ -220,73 +167,9 @@ mod tests {
 
     /// Helper: an index built from the rule set at `root`.
     fn build(root: &Path) -> ScopeIndex {
-        let report = load_rule_set(root).unwrap();
-        ScopeIndex::build(&report, root, fingerprint(&rules_dir(root)))
-    }
-
-    // ── fingerprinting ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_fingerprint_is_stable_for_an_unchanged_directory() {
-        let root = seed(&[("a.md", DOC), ("b.md", DOC)]);
-        let dir = rules_dir(root.path());
-        assert_eq!(fingerprint(&dir), fingerprint(&dir));
-    }
-
-    #[test]
-    fn test_fingerprint_changes_when_a_file_is_added_or_removed() {
-        let root = seed(&[("a.md", DOC)]);
-        let dir = rules_dir(root.path());
-        let before = fingerprint(&dir);
-
-        std::fs::write(dir.join("b.md"), DOC).unwrap();
-        let added = fingerprint(&dir);
-        assert_ne!(before, added);
-
-        std::fs::remove_file(dir.join("b.md")).unwrap();
-        assert_eq!(fingerprint(&dir), before);
-    }
-
-    /// The case a timestamp-only or TTL cache gets wrong: an edit that keeps
-    /// the file the same length must still invalidate.
-    #[test]
-    fn test_fingerprint_changes_when_a_file_is_edited() {
-        let root = seed(&[("a.md", DOC)]);
-        let dir = rules_dir(root.path());
-        let before = fingerprint(&dir);
-        // A longer body, so the change is caught by size even where the
-        // filesystem's modification time has coarse resolution.
-        std::fs::write(dir.join("a.md"), format!("{DOC}\n- **R-A-002** MAY: b.\n")).unwrap();
-        assert_ne!(fingerprint(&dir), before);
-    }
-
-    /// A directory whose name ends in `.md` survives the extension filter and
-    /// must then be skipped by the is-a-file check, or a stray directory would
-    /// change the fingerprint of an otherwise untouched rule set.
-    #[test]
-    fn test_fingerprint_skips_a_directory_named_like_a_rule_file() {
-        let repo = seed(&[("a.md", DOC)]);
-        let dir = rules_dir(repo.path());
-        let before = fingerprint(&dir);
-
-        std::fs::create_dir(dir.join("b-dir.md")).unwrap();
-        assert_eq!(fingerprint(&dir), before);
-    }
-
-    /// A symlink named like a rule file is not a regular file, so it must be
-    /// skipped rather than counted. Both a dangling link and a self-referential
-    /// one are covered, since neither resolves to something measurable and the
-    /// walk has to survive both.
-    #[cfg(unix)]
-    #[test]
-    fn test_fingerprint_skips_a_symlink_named_like_a_rule_file() {
-        let repo = seed(&[("a.md", DOC)]);
-        let dir = rules_dir(repo.path());
-        let before = fingerprint(&dir);
-
-        std::os::unix::fs::symlink("loop.md", dir.join("loop.md")).unwrap();
-        std::os::unix::fs::symlink(dir.join("nowhere.md"), dir.join("dangling.md")).unwrap();
-        assert_eq!(fingerprint(&dir), before);
+        let report = parse_rule_sources(read_rule_sources(root).unwrap());
+        let key = report.digest.clone();
+        ScopeIndex::build(&report, root, key)
     }
 
     /// With no resolvable config directory there is nowhere to cache. Both the
@@ -310,47 +193,6 @@ mod tests {
         clear(&dir);
         assert_eq!(clear_all(), 0);
         assert!(load(&dir, "anything").is_none());
-    }
-
-    #[test]
-    fn test_fingerprint_ignores_non_markdown_files() {
-        let root = seed(&[("a.md", DOC)]);
-        let dir = rules_dir(root.path());
-        let before = fingerprint(&dir);
-        std::fs::write(dir.join("notes.txt"), "irrelevant").unwrap();
-        assert_eq!(fingerprint(&dir), before);
-    }
-
-    #[test]
-    fn test_fingerprint_of_a_missing_directory_is_stable() {
-        let root = tempdir().unwrap();
-        let dir = rules_dir(root.path());
-        assert_eq!(fingerprint(&dir), fingerprint(&dir));
-        // An empty directory fingerprints the same as an absent one: both are
-        // the empty rule set.
-        std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(fingerprint(&dir), fingerprint(Path::new("/no/such/dir")));
-    }
-
-    #[test]
-    fn test_fingerprint_distinguishes_two_directories_with_different_names() {
-        let a = seed(&[("a.md", DOC)]);
-        let b = seed(&[("b.md", DOC)]);
-        assert_ne!(
-            fingerprint(&rules_dir(a.path())),
-            fingerprint(&rules_dir(b.path()))
-        );
-    }
-
-    /// A far-future mtime must hash as its full u128 nanos, not wrap through
-    /// an i128 cast. Missing mtime still encodes as `-1`.
-    #[test]
-    fn test_encode_mtime_does_not_truncate_past_i128_max() {
-        assert_eq!(encode_mtime(None), "-1");
-        assert_eq!(encode_mtime(Some(0)), "0");
-        let beyond_i128 = i128::MAX as u128 + 1;
-        assert_eq!(encode_mtime(Some(beyond_i128)), beyond_i128.to_string());
-        assert!(!encode_mtime(Some(beyond_i128)).starts_with('-'));
     }
 
     // ── cache location ───────────────────────────────────────────────────
@@ -398,12 +240,12 @@ mod tests {
         let index = build(repo.path());
         store(&dir, &index);
 
-        let loaded = load(&dir, &index.fingerprint).expect("cache hit");
+        let loaded = load(&dir, &index.content_digest).expect("cache hit");
         assert_eq!(loaded, index);
     }
 
     #[test]
-    fn test_load_misses_when_the_fingerprint_no_longer_matches() {
+    fn test_load_misses_when_the_digest_no_longer_matches() {
         let _lock = ENV_MUTEX.lock().unwrap();
         let home = tempdir().unwrap();
         let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
@@ -413,7 +255,7 @@ mod tests {
         let dir = rules_dir(repo.path());
         store(&dir, &build(repo.path()));
 
-        assert!(load(&dir, "some-other-fingerprint").is_none());
+        assert!(load(&dir, "some-other-digest").is_none());
     }
 
     #[test]
@@ -429,7 +271,7 @@ mod tests {
         index.format_version = INDEX_FORMAT_VERSION + 1;
         store(&dir, &index);
 
-        assert!(load(&dir, &index.fingerprint).is_none());
+        assert!(load(&dir, &index.content_digest).is_none());
     }
 
     #[test]
@@ -460,10 +302,10 @@ mod tests {
         let dir = rules_dir(repo.path());
         let index = build(repo.path());
         store(&dir, &index);
-        assert!(load(&dir, &index.fingerprint).is_some());
+        assert!(load(&dir, &index.content_digest).is_some());
 
         clear(&dir);
-        assert!(load(&dir, &index.fingerprint).is_none());
+        assert!(load(&dir, &index.content_digest).is_none());
         // Clearing an absent entry is a no-op, not a failure.
         clear(&dir);
     }
@@ -485,12 +327,12 @@ mod tests {
         let index_b = build(b.path());
         store(&dir_a, &index_a);
         store(&dir_b, &index_b);
-        assert!(load(&dir_a, &index_a.fingerprint).is_some());
-        assert!(load(&dir_b, &index_b.fingerprint).is_some());
+        assert!(load(&dir_a, &index_a.content_digest).is_some());
+        assert!(load(&dir_b, &index_b.content_digest).is_some());
 
         assert_eq!(clear_all(), 2);
-        assert!(load(&dir_a, &index_a.fingerprint).is_none());
-        assert!(load(&dir_b, &index_b.fingerprint).is_none());
+        assert!(load(&dir_a, &index_a.content_digest).is_none());
+        assert!(load(&dir_b, &index_b.content_digest).is_none());
         // Clearing an empty cache is a no-op, not a failure.
         assert_eq!(clear_all(), 0);
     }

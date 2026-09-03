@@ -275,6 +275,10 @@ pub struct RuleSetLoadReport {
     pub rules_dir: PathBuf,
     pub documents: Vec<RuleDocument>,
     pub errors: Vec<RuleFileError>,
+    /// SHA-256 over the exact bytes these documents were parsed from. This is
+    /// the scope-index cache key: it changes whenever any rule file's content
+    /// changes, which a size-and-timestamp fingerprint cannot promise.
+    pub digest: String,
 }
 
 impl RuleSetLoadReport {
@@ -579,6 +583,7 @@ mod tests {
             rules_dir: PathBuf::from("/x/.actual/rules"),
             documents: vec![make_doc("/x/a.md", 3, 1), make_doc("/x/b.md", 2, 0)],
             errors: Vec::new(),
+            digest: String::new(),
         };
         assert_eq!(report.rule_count(), 5);
         assert_eq!(report.warning_count(), 1);
@@ -601,6 +606,7 @@ mod tests {
                 None,
                 "not utf-8",
             )],
+            digest: String::new(),
         };
         assert!(!only_errors.is_empty());
         assert_eq!(only_errors.clone(), only_errors);

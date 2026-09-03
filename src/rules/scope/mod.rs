@@ -19,8 +19,9 @@
 //! * [`signals`] extracts globs and terms from one document's text. Pure.
 //! * [`index`] builds the searchable index and scores a plan against it. Pure,
 //!   deterministic, and the ranking half of the answer — no model, no network.
-//! * [`cache`] fingerprints the rule directory and persists a built index, so
-//!   the cost is paid once per rule-set change rather than once per command.
+//! * [`cache`] keys a persisted index on a digest of the rule files' contents,
+//!   so the build cost is paid once per rule-set change rather than once per
+//!   command, and never reuses an index built from text that has changed.
 //! * [`baseline`] mechanizes the filename scan, so the claim that this is
 //!   better than the status quo is a measurement rather than an assertion.
 //! * [`eval`] is the metric both selectors are scored with.
@@ -37,7 +38,7 @@ pub mod signals;
 use std::path::Path;
 
 use crate::error::ActualError;
-use crate::rules::{load_rule_set, rules_dir, RuleSetLoadReport};
+use crate::rules::{parse_rule_sources, read_rule_sources, rules_dir, RuleSetLoadReport};
 
 pub use eval::{CaseResult, EvaluationReport, GoldenCase, Scores};
 pub use index::{Field, GlobMatch, IndexedDocument, Match, Query, ScopeIndex, Weights};
@@ -68,8 +69,9 @@ impl IndexSource {
 pub struct ResolvedIndex {
     pub index: ScopeIndex,
     pub source: IndexSource,
-    /// The load report, present only when the rule files were actually read.
-    /// A cache hit does not read them, which is the point of the cache.
+    /// The load report, present only when the rule files were actually parsed.
+    /// A cache hit reads them — that is how the digest is checked — but skips
+    /// the parse and the index build, which is where the time goes.
     pub report: Option<RuleSetLoadReport>,
 }
 
@@ -80,10 +82,12 @@ pub struct ResolvedIndex {
 /// index back, so a forced rebuild repairs the cache rather than bypassing it.
 pub fn resolve(root: &Path, force_rebuild: bool) -> Result<ResolvedIndex, ActualError> {
     let dir = rules_dir(root);
-    let fingerprint = cache::fingerprint(&dir);
+    // One read per invocation. The digest covers exactly these bytes, so a hit
+    // can never be keyed to text other than the text that was indexed.
+    let sources = read_rule_sources(root)?;
 
     if !force_rebuild {
-        if let Some(index) = cache::load(&dir, &fingerprint) {
+        if let Some(index) = cache::load(&dir, &sources.digest) {
             return Ok(ResolvedIndex {
                 index,
                 source: IndexSource::Cached,
@@ -92,8 +96,8 @@ pub fn resolve(root: &Path, force_rebuild: bool) -> Result<ResolvedIndex, Actual
         }
     }
 
-    let report = load_rule_set(root)?;
-    let index = ScopeIndex::build(&report, root, fingerprint);
+    let report = parse_rule_sources(sources);
+    let index = ScopeIndex::build(&report, root, report.digest.clone());
     cache::store(&dir, &index);
     Ok(ResolvedIndex {
         index,

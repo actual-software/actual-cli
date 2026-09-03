@@ -20,6 +20,8 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::error::ActualError;
 use crate::rules::parse::parse_rule_document;
 use crate::rules::types::{RuleFileError, RuleIssueKind, RuleSetLoadReport};
@@ -38,24 +40,55 @@ pub fn rules_dir(root_dir: &Path) -> PathBuf {
     root_dir.join(RULES_DIR_NAME)
 }
 
-/// Load every rule document under `<root_dir>/.actual/rules/`.
+/// One rule file as read from disk, before parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleSource {
+    pub path: PathBuf,
+    /// The file's text, or the failure that stopped it being read.
+    pub text: Result<String, RuleFileError>,
+}
+
+/// Everything under `.actual/rules/`, read but not yet parsed, with a digest of
+/// exactly those bytes.
 ///
-/// Returns `Err` when the supplied repository root does not exist or is not a
-/// directory, and when the rules directory exists but cannot be listed at all.
-/// Per-file failures are collected in [`RuleSetLoadReport::errors`] and do not
-/// stop the scan.
-pub fn load_rule_set(root_dir: &Path) -> Result<RuleSetLoadReport, ActualError> {
+/// Reading and parsing are separate steps so the scope-index cache can hash
+/// what it is about to parse and then skip the parse on a hit. Hashing one
+/// snapshot and parsing another would leave the cache keyed to bytes that were
+/// never indexed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleSources {
+    pub rules_dir: PathBuf,
+    pub sources: Vec<RuleSource>,
+    /// Directory-listing failures, which belong to no single file.
+    pub errors: Vec<RuleFileError>,
+    /// SHA-256 over every rule file's name and content, in path order.
+    pub digest: String,
+}
+
+/// Bump when the digest's construction changes, so a digest computed by an
+/// older build can never compare equal to a new one.
+const DIGEST_VERSION: u32 = 1;
+
+/// Read every rule file under `<root_dir>/.actual/rules/` without parsing it.
+///
+/// Returns `Err` on the same two conditions as [`load_rule_set`]: a repository
+/// root that does not exist or is not a directory, and a rules directory that
+/// cannot be listed at all.
+pub fn read_rule_sources(root_dir: &Path) -> Result<RuleSources, ActualError> {
     validate_root(root_dir)?;
     let dir = rules_dir(root_dir);
-    let mut report = RuleSetLoadReport {
-        rules_dir: dir.clone(),
-        documents: Vec::new(),
-        errors: Vec::new(),
-    };
+    let mut listing_errors: Vec<RuleFileError> = Vec::new();
 
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RuleSources {
+                digest: digest_of(&[]),
+                rules_dir: dir,
+                sources: Vec::new(),
+                errors: listing_errors,
+            })
+        }
         Err(e) => {
             return Err(ActualError::IoError(std::io::Error::new(
                 e.kind(),
@@ -64,41 +97,106 @@ pub fn load_rule_set(root_dir: &Path) -> Result<RuleSetLoadReport, ActualError> 
         }
     };
 
-    // Collect first, then sort, so both `documents` and `errors` come back in a
-    // stable order regardless of what the filesystem hands back. Listing errors
-    // are recorded, not dropped: `flatten()` would hide a vanished entry.
-    let files = collect_rule_files(&dir, entries, &mut report);
+    // Collect first, then sort, so the digest and both result lists come back in
+    // a stable order regardless of what the filesystem hands back. Listing
+    // errors are recorded, not dropped: `flatten()` would hide a vanished entry.
+    let files = collect_rule_files(&dir, entries, &mut listing_errors);
 
+    let mut sources = Vec::with_capacity(files.len());
     for path in files {
         // INVARIANT: no `?` below this line. Every failure becomes a
-        // `RuleFileError` in `report.errors` and the loop moves to the next
-        // file, so one unreadable or malformed document never costs the set.
-        let bytes = match read_rule_file(&path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                report.errors.push(err);
-                continue;
-            }
-        };
-        let text = match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(e) => {
-                report.errors.push(RuleFileError::new(
+        // `RuleFileError` carried on the source, so one unreadable document
+        // never costs the set.
+        let text = match read_rule_file(&path) {
+            Ok(bytes) => String::from_utf8(bytes).map_err(|e| {
+                RuleFileError::new(
                     &path,
                     RuleIssueKind::NotUtf8,
                     None,
                     format!("file is not valid UTF-8: {e}"),
-                ));
-                continue;
-            }
+                )
+            }),
+            Err(err) => Err(err),
         };
-        match parse_rule_document(&path, &text) {
-            Ok(doc) => report.documents.push(doc),
+        sources.push(RuleSource { path, text });
+    }
+
+    Ok(RuleSources {
+        digest: digest_of(&sources),
+        rules_dir: dir,
+        sources,
+        errors: listing_errors,
+    })
+}
+
+/// A content digest over the rule files, in path order.
+///
+/// Every component is length-prefixed, so no rearrangement of names and bodies
+/// can produce the same byte stream. A file that could not be read contributes
+/// its failure *kind* rather than the error text, which keeps the digest stable
+/// across runs while still changing when a file becomes readable.
+fn digest_of(sources: &[RuleSource]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("digest-v{DIGEST_VERSION}\n").as_bytes());
+    for source in sources {
+        let name = source
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        update_field(&mut hasher, name.as_bytes());
+        match &source.text {
+            Ok(text) => {
+                update_field(&mut hasher, b"ok");
+                update_field(&mut hasher, text.as_bytes());
+            }
+            Err(err) => {
+                update_field(&mut hasher, b"err");
+                update_field(&mut hasher, format!("{:?}", err.issue.kind).as_bytes());
+            }
+        }
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Feed one length-prefixed field into the digest.
+fn update_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Parse sources that have already been read.
+pub fn parse_rule_sources(sources: RuleSources) -> RuleSetLoadReport {
+    let mut report = RuleSetLoadReport {
+        rules_dir: sources.rules_dir,
+        documents: Vec::new(),
+        errors: sources.errors,
+        digest: sources.digest,
+    };
+    for source in sources.sources {
+        match source.text {
+            Ok(text) => match parse_rule_document(&source.path, &text) {
+                Ok(doc) => report.documents.push(doc),
+                Err(err) => report.errors.push(err),
+            },
             Err(err) => report.errors.push(err),
         }
     }
+    report
+}
 
-    Ok(report)
+/// Load every rule document under `<root_dir>/.actual/rules/`.
+///
+/// Returns `Err` when the supplied repository root does not exist or is not a
+/// directory, and when the rules directory exists but cannot be listed at all.
+/// Per-file failures are collected in [`RuleSetLoadReport::errors`] and do not
+/// stop the scan.
+pub fn load_rule_set(root_dir: &Path) -> Result<RuleSetLoadReport, ActualError> {
+    Ok(parse_rule_sources(read_rule_sources(root_dir)?))
 }
 
 /// Reject a repository root that does not exist or is not a directory.
@@ -133,14 +231,14 @@ fn validate_root(root_dir: &Path) -> Result<(), ActualError> {
 fn collect_rule_files(
     dir: &Path,
     entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,
-    report: &mut RuleSetLoadReport,
+    errors: &mut Vec<RuleFileError>,
 ) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                report.errors.push(RuleFileError::new(
+                errors.push(RuleFileError::new(
                     dir,
                     RuleIssueKind::Io,
                     None,
@@ -227,6 +325,139 @@ mod tests {
             PathBuf::from("/repo/.actual/rules")
         );
         assert_eq!(RULES_DIR_NAME, ".actual/rules");
+    }
+
+    // ── content digest ───────────────────────────────────────────────────
+
+    /// Helper: the content digest of the rule set at `root`.
+    fn digest(root: &Path) -> String {
+        read_rule_sources(root).unwrap().digest
+    }
+
+    #[test]
+    fn test_digest_is_stable_for_an_unchanged_directory() {
+        let root = seed(&[("a.md", DOC_A), ("b.md", DOC_B)]);
+        assert_eq!(digest(root.path()), digest(root.path()));
+    }
+
+    /// The defect this digest exists to prevent, and the case a
+    /// size-and-timestamp fingerprint gets wrong: content is replaced with
+    /// **different bytes of the same length** and the modification time is put
+    /// back. Nothing observable about the file's metadata changed, so a stat
+    /// key would reuse an index built from text that is no longer on disk.
+    #[test]
+    fn test_digest_changes_when_content_changes_at_constant_size_and_mtime() {
+        let original =
+            "# Alpha\n\nGoverns oauth token signing.\n\n### Rules\n\n- **R-A-001** MUST: a.\n";
+        let rewritten =
+            "# Alpha\n\nGoverns terraform provider pins.\n\n### Rules\n\n- **R-A-001** MUST: a.\n";
+        // Pad to equal length so size cannot be what distinguishes them.
+        let width = original.len().max(rewritten.len());
+        let original = format!("{original:width$}");
+        let rewritten = format!("{rewritten:width$}");
+        assert_eq!(original.len(), rewritten.len());
+
+        let root = seed(&[("a.md", &original)]);
+        let path = rules_dir(root.path()).join("a.md");
+        let before = digest(root.path());
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        std::fs::write(&path, &rewritten).unwrap();
+        // Restore the timestamp, exactly as `cp -p`, `rsync -t` or an unpacked
+        // archive would.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(after.len() as usize, original.len(), "size must be equal");
+        assert_eq!(after.modified().unwrap(), mtime, "mtime must be restored");
+        assert_ne!(
+            digest(root.path()),
+            before,
+            "digest must follow content, not metadata"
+        );
+    }
+
+    #[test]
+    fn test_digest_changes_when_a_file_is_added_or_removed() {
+        let root = seed(&[("a.md", DOC_A)]);
+        let before = digest(root.path());
+
+        let extra = rules_dir(root.path()).join("b.md");
+        std::fs::write(&extra, DOC_B).unwrap();
+        assert_ne!(digest(root.path()), before);
+
+        std::fs::remove_file(&extra).unwrap();
+        assert_eq!(digest(root.path()), before);
+    }
+
+    /// Identical content under a different name must digest differently, or a
+    /// rename would go unnoticed.
+    #[test]
+    fn test_digest_covers_file_names_not_only_content() {
+        let a = seed(&[("a.md", DOC_A)]);
+        let b = seed(&[("b.md", DOC_A)]);
+        assert_ne!(digest(a.path()), digest(b.path()));
+    }
+
+    #[test]
+    fn test_digest_ignores_non_markdown_files() {
+        let root = seed(&[("a.md", DOC_A)]);
+        let before = digest(root.path());
+        std::fs::write(rules_dir(root.path()).join("notes.txt"), "irrelevant").unwrap();
+        assert_eq!(digest(root.path()), before);
+    }
+
+    /// A directory named like a rule file is a read failure that
+    /// [`load_rule_set`] reports, so the digest must cover it too. Otherwise the
+    /// cached index and the reported errors could disagree.
+    #[test]
+    fn test_digest_covers_a_directory_named_like_a_rule_file() {
+        let root = seed(&[("a.md", DOC_A)]);
+        let before = digest(root.path());
+        std::fs::create_dir(rules_dir(root.path()).join("b-dir.md")).unwrap();
+        assert_ne!(digest(root.path()), before);
+        assert_eq!(load_rule_set(root.path()).unwrap().errors.len(), 1);
+    }
+
+    /// An absent rules directory and an empty one are the same rule set, so
+    /// they must digest alike.
+    #[test]
+    fn test_digest_of_an_absent_directory_matches_an_empty_one() {
+        let missing = tempdir().unwrap();
+        let empty = seed(&[]);
+        assert_eq!(digest(missing.path()), digest(empty.path()));
+    }
+
+    /// A file that cannot be read contributes its failure kind, so the digest
+    /// still changes when it becomes readable.
+    #[test]
+    fn test_digest_covers_files_that_could_not_be_read() {
+        let root = seed(&[("a.md", DOC_A)]);
+        let dir = rules_dir(root.path());
+        let before = digest(root.path());
+
+        let big = "x".repeat((MAX_RULE_FILE_SIZE + 1) as usize);
+        std::fs::write(dir.join("b.md"), &big).unwrap();
+        let with_unreadable = digest(root.path());
+        assert_ne!(with_unreadable, before);
+
+        std::fs::write(dir.join("b.md"), DOC_B).unwrap();
+        assert_ne!(digest(root.path()), with_unreadable);
+    }
+
+    #[test]
+    fn test_parse_rule_sources_carries_the_digest_onto_the_report() {
+        let root = seed(&[("a.md", DOC_A)]);
+        let sources = read_rule_sources(root.path()).unwrap();
+        let expected = sources.digest.clone();
+        let report = parse_rule_sources(sources);
+        assert_eq!(report.digest, expected);
+        assert_eq!(report.documents.len(), 1);
     }
 
     #[test]
@@ -357,24 +588,20 @@ mod tests {
     /// `flatten()`, so a vanished entry cannot hide the rest of the set.
     #[test]
     fn test_collect_rule_files_records_a_listing_error() {
-        let mut report = RuleSetLoadReport {
-            rules_dir: PathBuf::from("/x/.actual/rules"),
-            documents: Vec::new(),
-            errors: Vec::new(),
-        };
+        let mut errors: Vec<RuleFileError> = Vec::new();
         let files = collect_rule_files(
             Path::new("/x/.actual/rules"),
             std::iter::once(Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "entry vanished",
             ))),
-            &mut report,
+            &mut errors,
         );
         assert!(files.is_empty());
-        assert_eq!(report.errors.len(), 1);
-        assert_eq!(report.errors[0].issue.kind, RuleIssueKind::Io);
-        assert!(report.errors[0].to_string().contains("directory entry"));
-        assert!(report.errors[0].to_string().contains("entry vanished"));
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].issue.kind, RuleIssueKind::Io);
+        assert!(errors[0].to_string().contains("directory entry"));
+        assert!(errors[0].to_string().contains("entry vanished"));
     }
 
     #[test]

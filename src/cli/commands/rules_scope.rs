@@ -112,7 +112,7 @@ fn render_index_panel(resolved: &ResolvedIndex, root: &Path, width: usize) -> St
 #[derive(Serialize)]
 struct JsonIndexSummary<'a> {
     source: &'a str,
-    fingerprint: &'a str,
+    content_digest: &'a str,
     format_version: u32,
     documents: usize,
     path_globs: usize,
@@ -129,7 +129,7 @@ fn render_index_json(resolved: &ResolvedIndex) -> String {
             IndexSource::Built => "built",
             IndexSource::Rebuilt => "rebuilt",
         },
-        fingerprint: &index.fingerprint,
+        content_digest: &index.content_digest,
         format_version: index.format_version,
         documents: index.len(),
         path_globs: index.documents.iter().map(|d| d.globs.len()).sum(),
@@ -618,6 +618,12 @@ mod tests {
         )
     }
 
+    /// Helper: the content digest of a repository's rule files, which is the
+    /// cache key.
+    fn digest_of(root: &Path) -> String {
+        crate::rules::read_rule_sources(root).unwrap().digest
+    }
+
     /// Helper: a repository root whose `.actual/rules/` holds `files`.
     fn seed(files: &[(&str, &str)]) -> TempDir {
         let root = tempdir().unwrap();
@@ -697,9 +703,12 @@ mod tests {
 
         assert_eq!(value["documents"], 2);
         assert_eq!(value["source"], "rebuilt");
-        assert_eq!(value["format_version"], 1);
+        assert_eq!(
+            value["format_version"],
+            crate::rules::scope::index::INDEX_FORMAT_VERSION
+        );
         assert!(value["path_globs"].as_u64().unwrap() >= 1);
-        assert!(value["fingerprint"].as_str().unwrap().len() > 16);
+        assert!(value["content_digest"].as_str().unwrap().len() > 16);
         let ubiquitous = value["ubiquitous_terms"].as_array().unwrap();
         assert!(ubiquitous.iter().any(|t| t == "cross"));
     }
@@ -733,7 +742,8 @@ mod tests {
         let other = sample();
         scope::resolve(other.path(), true).unwrap();
         let other_dir = crate::rules::rules_dir(other.path());
-        assert!(scope::cache::load(&other_dir, &scope::cache::fingerprint(&other_dir)).is_some());
+        let other_digest = digest_of(other.path());
+        assert!(scope::cache::load(&other_dir, &other_digest).is_some());
 
         let root = sample();
         let args = RulesIndexArgs {
@@ -745,12 +755,12 @@ mod tests {
         assert!(exec_index(&args).is_ok());
 
         assert!(
-            scope::cache::load(&other_dir, &scope::cache::fingerprint(&other_dir)).is_none(),
+            scope::cache::load(&other_dir, &other_digest).is_none(),
             "indexes from other repositories must be pruned"
         );
         let dir = crate::rules::rules_dir(root.path());
         assert!(
-            scope::cache::load(&dir, &scope::cache::fingerprint(&dir)).is_some(),
+            scope::cache::load(&dir, &digest_of(root.path())).is_some(),
             "this repository's index is rebuilt after the prune"
         );
     }
@@ -1116,7 +1126,7 @@ mod tests {
         tampered.documents.clear();
         tampered.document_frequency.clear();
         scope::cache::store(&dir, &tampered);
-        assert!(scope::cache::load(&dir, &tampered.fingerprint)
+        assert!(scope::cache::load(&dir, &tampered.content_digest)
             .unwrap()
             .is_empty());
 
@@ -1131,7 +1141,7 @@ mod tests {
         };
         assert!(exec_eval(&args).is_ok());
 
-        let rebuilt = scope::cache::load(&dir, &scope::cache::fingerprint(&dir)).unwrap();
+        let rebuilt = scope::cache::load(&dir, &digest_of(root.path())).unwrap();
         assert_eq!(rebuilt.len(), 2);
     }
 

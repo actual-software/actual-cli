@@ -43,7 +43,7 @@ use crate::rules::{RuleDocument, RuleSetLoadReport};
 
 /// Bump when the stored shape or the scoring inputs change, so a cached index
 /// written by an older build is discarded rather than misread.
-pub const INDEX_FORMAT_VERSION: u32 = 1;
+pub const INDEX_FORMAT_VERSION: u32 = 2;
 
 /// Which signal a match came from. Ordered as the fields are documented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -168,9 +168,9 @@ impl IndexedDocument {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScopeIndex {
     pub format_version: u32,
-    /// Fingerprint of the rule files the index was built from. A cached index
-    /// whose fingerprint no longer matches the directory is discarded.
-    pub fingerprint: String,
+    /// Digest of the exact rule-file bytes this index was built from. A cached
+    /// index whose digest no longer matches the files on disk is discarded.
+    pub content_digest: String,
     pub documents: Vec<IndexedDocument>,
     /// term → number of documents containing it, in any field.
     pub document_frequency: BTreeMap<String, usize>,
@@ -277,7 +277,11 @@ impl ScopeIndex {
     /// `root` is the repository root the documents were discovered under; paths
     /// are stored relative to it so the index is machine-independent.
     /// `fingerprint` identifies the rule files the index was built from.
-    pub fn build(report: &RuleSetLoadReport, root: &std::path::Path, fingerprint: String) -> Self {
+    pub fn build(
+        report: &RuleSetLoadReport,
+        root: &std::path::Path,
+        content_digest: String,
+    ) -> Self {
         let mut documents: Vec<IndexedDocument> = report
             .documents
             .iter()
@@ -300,7 +304,7 @@ impl ScopeIndex {
 
         Self {
             format_version: INDEX_FORMAT_VERSION,
-            fingerprint,
+            content_digest,
             documents,
             document_frequency,
         }
@@ -650,6 +654,7 @@ mod tests {
             rules_dir: PathBuf::from("/repo/.actual/rules"),
             documents,
             errors: Vec::new(),
+            digest: String::new(),
         };
         ScopeIndex::build(&report, Path::new("/repo"), "fp".to_string())
     }
@@ -692,7 +697,7 @@ mod tests {
         assert_eq!(index.len(), 3);
         assert!(!index.is_empty());
         assert_eq!(index.format_version, INDEX_FORMAT_VERSION);
-        assert_eq!(index.fingerprint, "fp");
+        assert_eq!(index.content_digest, "fp");
         assert_eq!(
             index
                 .documents
