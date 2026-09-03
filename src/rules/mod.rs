@@ -18,7 +18,10 @@ pub mod parse;
 pub mod scope;
 pub mod types;
 
-pub use discover::{load_rule_set, rules_dir, MAX_RULE_FILE_SIZE, RULES_DIR_NAME};
+pub use discover::{
+    load_rule_set, parse_rule_sources, read_rule_sources, rules_dir, RuleSource, RuleSources,
+    MAX_RULE_FILE_SIZE, RULES_DIR_NAME,
+};
 pub use parse::parse_rule_document;
 pub use scope::{resolve, IndexSource, Match, Query, ResolvedIndex, ScopeIndex};
 pub use types::{

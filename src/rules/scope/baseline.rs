@@ -92,6 +92,7 @@ mod tests {
                 rules_dir: PathBuf::from("/repo/.actual/rules"),
                 documents,
                 errors: Vec::new(),
+                digest: String::new(),
             },
             Path::new("/repo"),
             "fp".to_string(),
