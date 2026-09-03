@@ -164,12 +164,47 @@ pub struct DocumentSignals {
     pub path_terms: Vec<String>,
 }
 
+/// Characters a shell operand may escape that are still legal inside a path.
+const SHELL_ESCAPABLE_IN_PATH: &[char] = &['(', ')', '[', ']', '{', '}', ' ', '&', ',', '\''];
+
+/// Strip shell escaping from a token, but only where the escaped character is
+/// legal in a path.
+///
+/// The corpus writes route groups as `apps/actual/app/\(public\)`: the
+/// parentheses are escaped because the *shell* would otherwise read them as
+/// syntax, and the escape is no part of the path. Those come off.
+///
+/// Escapes of characters that are not path syntax are deliberately left alone.
+/// `jwt\.sign` and `\d` keep their backslash, so [`is_path_like`] still
+/// rejects them on it, which is the check that keeps grep patterns out of the
+/// path index.
+fn unescape_shell_path(token: &str) -> String {
+    let mut out = String::with_capacity(token.len());
+    let mut chars = token.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.peek().copied() {
+                if SHELL_ESCAPABLE_IN_PATH.contains(&next) {
+                    out.push(next);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// True for a token that looks like a repository path rather than a flag, a
 /// URL, a regex, or a bare word.
 ///
 /// Requires either a `/` or a known source-file extension, which is what keeps
 /// grep patterns such as `signInWithPassword` and `@dataclass` out.
 fn is_path_like(token: &str) -> bool {
+    // Judged on the unescaped form: a shell escape of a path-legal character
+    // says nothing about whether the operand is a path.
+    let token = &unescape_shell_path(token);
     if token.is_empty() || token.starts_with('-') || token.contains("://") {
         return false;
     }
@@ -208,7 +243,7 @@ fn is_source_extension(ext: &str) -> bool {
 /// bare directory into a recursive glob. A token that already carries a
 /// wildcard is left alone.
 fn normalize_path(token: &str) -> Option<PathGlob> {
-    let unescaped = token.replace('\\', "");
+    let unescaped = unescape_shell_path(token);
     let trimmed = unescaped.trim_start_matches("./").trim_end_matches('/');
     if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
         return None;
@@ -593,6 +628,92 @@ mod tests {
             .into_iter()
             .map(|g| g.pattern)
             .collect()
+    }
+
+    // ── shell tokenizer edge shapes ──────────────────────────────────────
+
+    /// The reference corpus contains `apps/actual/app/\(public\)`: a path
+    /// whose parentheses are shell-escaped. The escape must survive tokenizing
+    /// so `normalize_path` can strip it, or the whole operand is lost.
+    #[test]
+    fn test_verify_reads_a_path_with_shell_escaped_characters() {
+        let found = patterns(r#"grep -r "useRouter" apps/actual/app/\(public\)"#);
+        assert_eq!(found, vec!["apps/actual/app/(public)/**"]);
+    }
+
+    /// Unescaping must not turn a grep pattern into a path. The corpus contains
+    /// `class.*\(BaseModel\)`, `status\(\)` and `.accept\(\)`; none carries a
+    /// separator, so each still fails the path-shape check after its escapes
+    /// come off.
+    #[test]
+    fn test_escaped_parens_in_a_regex_are_still_not_a_path() {
+        for pattern in [
+            r"class.*\(BaseModel\)",
+            r"status\(\)",
+            r".accept\(\)",
+            r"jwt\.sign",
+        ] {
+            assert!(!is_path_like(pattern), "wrongly read as a path: {pattern}");
+        }
+        // The escape only comes off where the result is still path-shaped.
+        assert!(is_path_like(r"apps/actual/app/\(public\)"));
+    }
+
+    /// A trailing backslash with nothing after it must not run off the end of
+    /// the input.
+    #[test]
+    fn test_verify_tolerates_a_trailing_backslash() {
+        assert!(patterns(r#"grep -r x lib/ \"#).contains(&"lib/**".to_string()));
+    }
+
+    /// Everything after a redirection is a stream rather than an operand, but a
+    /// separator ends the redirection and the next command is read normally.
+    #[test]
+    fn test_verify_resumes_reading_after_a_redirection() {
+        let found = patterns("grep -r x lib/ > /dev/null; grep -r y services/api/");
+        assert!(found.contains(&"lib/**".to_string()), "{found:?}");
+        assert!(found.contains(&"services/api/**".to_string()), "{found:?}");
+    }
+
+    /// A command with no tokens at all yields nothing and must not panic.
+    #[test]
+    fn test_extract_from_an_empty_command_is_a_no_op() {
+        let (mut globs, mut extensions) = (Vec::new(), Vec::new());
+        extract_from_command(&[], &mut globs, &mut extensions);
+        assert!(globs.is_empty());
+        assert!(extensions.is_empty());
+    }
+
+    /// `find -path` takes a glob rather than a bare name, and a glob carrying a
+    /// separator is a path worth indexing.
+    #[test]
+    fn test_verify_reads_a_find_path_predicate_as_a_path() {
+        let found = patterns("find . -path 'packages/*/src' -name '*.ts'");
+        assert!(found.contains(&"packages/*/src".to_string()), "{found:?}");
+    }
+
+    /// A repeated `--include` must not be recorded twice, and the duplicate
+    /// path must fall through the containment check rather than being pushed.
+    #[test]
+    fn test_verify_deduplicates_repeated_extensions_and_paths() {
+        let body = "grep -r x lib/ --include=\"*.ts\"\ngrep -r y lib/ --include=\"*.ts\"";
+        let (globs, extensions) = globs_from_verify(body);
+        assert_eq!(extensions, vec!["*.ts"]);
+        assert_eq!(
+            globs.iter().filter(|g| g.pattern == "lib/**").count(),
+            1,
+            "{globs:?}"
+        );
+    }
+
+    /// A token that survives the path-shape check but normalizes to nothing —
+    /// a bare `./` — is dropped without being recorded.
+    #[test]
+    fn test_verify_drops_a_token_that_normalizes_to_nothing() {
+        let mut globs = Vec::new();
+        record_path("./", &mut globs);
+        record_path(".", &mut globs);
+        assert!(globs.is_empty(), "{globs:?}");
     }
 
     // ── terms ────────────────────────────────────────────────────────────
