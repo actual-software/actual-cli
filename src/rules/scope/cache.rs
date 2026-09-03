@@ -15,7 +15,9 @@
 //!
 //! The cache lives under the user's config directory, **never** inside the
 //! repository. `.actual/rules/` is committed, and writing a derived artifact
-//! next to committed source invites it into a commit.
+//! next to committed source invites it into a commit. One file is stored per
+//! `rules_dir`, so [`clear_all`] is the prune for entries left by repositories
+//! that are no longer in play.
 //!
 //! Every cache operation is best-effort. A cache that cannot be read, written
 //! or parsed degrades to a rebuild, which is slower and always correct. Cache
@@ -31,6 +33,13 @@ use crate::rules::scope::index::{ScopeIndex, INDEX_FORMAT_VERSION};
 /// Subdirectory of the config directory holding cached indexes.
 pub const CACHE_DIR_NAME: &str = "scope-index";
 
+/// Directory holding cached indexes, under the user's config directory.
+pub fn cache_dir() -> Option<PathBuf> {
+    crate::config::paths::config_dir()
+        .ok()
+        .map(|dir| dir.join(CACHE_DIR_NAME))
+}
+
 /// Where the cache entry for the rule set under `rules_dir` lives.
 ///
 /// The file is named for a hash of the absolute rules directory, so two
@@ -40,9 +49,7 @@ pub fn cache_path(rules_dir: &Path) -> Option<PathBuf> {
     let mut hasher = Sha256::new();
     hasher.update(rules_dir.as_os_str().as_encoded_bytes());
     let key = hex(&hasher.finalize());
-    crate::config::paths::config_dir()
-        .ok()
-        .map(|dir| dir.join(CACHE_DIR_NAME).join(format!("{key}.json")))
+    cache_dir().map(|dir| dir.join(format!("{key}.json")))
 }
 
 /// Fingerprint the rule files under `rules_dir`.
@@ -51,7 +58,7 @@ pub fn cache_path(rules_dir: &Path) -> Option<PathBuf> {
 /// every invocation. A missing directory fingerprints as the empty rule set
 /// rather than failing, matching [`crate::rules::load_rule_set`].
 pub fn fingerprint(rules_dir: &Path) -> String {
-    let mut entries: Vec<(String, u64, i128)> = Vec::new();
+    let mut entries: Vec<(String, u64, Option<u128>)> = Vec::new();
     if let Ok(dir) = std::fs::read_dir(rules_dir) {
         for entry in dir.flatten() {
             let path = entry.path();
@@ -71,15 +78,7 @@ pub fn fingerprint(rules_dir: &Path) -> String {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            // A filesystem without mtime support contributes a constant, which
-            // weakens the fingerprint to path+size rather than breaking it.
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_nanos() as i128)
-                .unwrap_or(-1);
-            entries.push((name, metadata.len(), mtime));
+            entries.push((name, metadata.len(), mtime_nanos(&metadata)));
         }
     }
     entries.sort();
@@ -87,7 +86,7 @@ pub fn fingerprint(rules_dir: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("v{INDEX_FORMAT_VERSION}\n").as_bytes());
     for (name, len, mtime) in &entries {
-        hasher.update(format!("{name}\0{len}\0{mtime}\n").as_bytes());
+        hasher.update(format!("{name}\0{len}\0{}\n", encode_mtime(*mtime)).as_bytes());
     }
     hex(&hasher.finalize())
 }
@@ -138,8 +137,55 @@ pub fn clear(rules_dir: &Path) {
     }
 }
 
+/// Remove every cached index. Best-effort.
+///
+/// One file is stored per `rules_dir` ever seen, so a machine that works in
+/// many repositories accumulates stale entries. This is the prune. Returns
+/// how many entries were present; an absent or unreadable cache is zero, not
+/// an error.
+pub fn clear_all() -> usize {
+    let Some(dir) = cache_dir() else {
+        return 0;
+    };
+    let count = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            })
+            .count(),
+        Err(_) => 0,
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    count
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Nanoseconds since the Unix epoch, or `None` when the filesystem has no
+/// mtime or the timestamp is before the epoch.
+fn mtime_nanos(metadata: &std::fs::Metadata) -> Option<u128> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+}
+
+/// Encode one file's mtime for the fingerprint hash.
+///
+/// `None` contributes the constant `-1`, which weakens the fingerprint to
+/// path+size rather than breaking it. Nanos stay `u128` so a far-future
+/// mtime cannot wrap through an `i128` cast (year ~2262).
+fn encode_mtime(mtime_nanos: Option<u128>) -> String {
+    mtime_nanos
+        .map(|ns| ns.to_string())
+        .unwrap_or_else(|| "-1".to_string())
 }
 
 #[cfg(test)]
@@ -235,6 +281,17 @@ mod tests {
             fingerprint(&rules_dir(a.path())),
             fingerprint(&rules_dir(b.path()))
         );
+    }
+
+    /// A far-future mtime must hash as its full u128 nanos, not wrap through
+    /// an i128 cast. Missing mtime still encodes as `-1`.
+    #[test]
+    fn test_encode_mtime_does_not_truncate_past_i128_max() {
+        assert_eq!(encode_mtime(None), "-1");
+        assert_eq!(encode_mtime(Some(0)), "0");
+        let beyond_i128 = i128::MAX as u128 + 1;
+        assert_eq!(encode_mtime(Some(beyond_i128)), beyond_i128.to_string());
+        assert!(!encode_mtime(Some(beyond_i128)).starts_with('-'));
     }
 
     // ── cache location ───────────────────────────────────────────────────
@@ -350,6 +407,33 @@ mod tests {
         assert!(load(&dir, &index.fingerprint).is_none());
         // Clearing an absent entry is a no-op, not a failure.
         clear(&dir);
+    }
+
+    /// One file per rules directory, so a machine that works in many
+    /// repositories accumulates stale entries. `clear_all` is the prune.
+    #[test]
+    fn test_clear_all_removes_every_entry() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let a = seed(&[("a.md", DOC)]);
+        let b = seed(&[("b.md", DOC)]);
+        let dir_a = rules_dir(a.path());
+        let dir_b = rules_dir(b.path());
+        let index_a = build(a.path());
+        let index_b = build(b.path());
+        store(&dir_a, &index_a);
+        store(&dir_b, &index_b);
+        assert!(load(&dir_a, &index_a.fingerprint).is_some());
+        assert!(load(&dir_b, &index_b.fingerprint).is_some());
+
+        assert_eq!(clear_all(), 2);
+        assert!(load(&dir_a, &index_a.fingerprint).is_none());
+        assert!(load(&dir_b, &index_b.fingerprint).is_none());
+        // Clearing an empty cache is a no-op, not a failure.
+        assert_eq!(clear_all(), 0);
     }
 
     /// Every cache operation is best-effort: an unwritable location degrades to

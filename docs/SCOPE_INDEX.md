@@ -125,17 +125,19 @@ never inside the repository, where a derived artifact beside committed source
 would get committed with it — and keyed by a stat-only fingerprint of every rule
 file's name, size and modification time. Any edit, add, remove or rename
 invalidates it. Every cache operation is best-effort: an unreadable or
-unwritable cache degrades to a rebuild.
+unwritable cache degrades to a rebuild. `actual rules index --clear` removes
+every cached index — including those left by other repositories — and rebuilds
+this one.
 
 ## Commands
 
 ```bash
-actual rules index [PATH] [--rebuild] [--json]
+actual rules index [PATH] [--rebuild] [--clear] [--json]
 actual rules select <PLAN>... [--repo PATH] [--file PATH]... [--limit N] [--explain] [--json]
-actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]... [--json]
+actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]... [--rebuild] [--json]
 ```
 
 `--explain` prints, per hit, which signal carried it and on which terms, the
 globs that matched a named path, the terms the corpus made worthless, and what
-the filename scan would have chosen instead — so a wrong selection is
-diagnosable rather than mysterious.
+the filename scan would have chosen instead at the same `--limit` — so a wrong
+selection is diagnosable rather than mysterious.

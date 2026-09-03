@@ -554,6 +554,7 @@ fn test_cli_parse_rules_eval() {
         "--ablate",
         "slug",
         "--json",
+        "--rebuild",
     ]);
     let Command::Rules(args) = cli.command else {
         unreachable!()
@@ -565,6 +566,7 @@ fn test_cli_parse_rules_eval() {
     assert_eq!(eval.limit, 10);
     assert_eq!(eval.ablate, vec!["title", "slug"]);
     assert!(eval.json);
+    assert!(eval.rebuild);
 }
 
 /// `rules select` without a plan is a usage error, not an empty selection.
