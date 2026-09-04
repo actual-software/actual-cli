@@ -573,18 +573,21 @@ fn emit(json: String) {
     println!("{json}");
 }
 
-/// The deny reason: every conflicting rule id, its reason, and the quoted
-/// span, one per line — so a reader (or the agent revising the plan) sees
-/// every violation at once rather than only the first.
+/// The deny reason: every conflicting rule id, the rule's own statement
+/// verbatim, the judge's reason, and the quoted plan span, one per line — so
+/// a reader (or the agent revising the plan) sees every violation at once
+/// rather than only the first, and can revise against the rule's actual text
+/// rather than the judge's paraphrase of it.
 fn hook_deny_reason(conflicts: &[&CheckedRule]) -> String {
     conflicts
         .iter()
         .map(|c| {
             format!(
-                "{} ({}): {} — \"{}\"",
+                "{} ({}): {} — rule: \"{}\" — plan: \"{}\"",
                 c.rule_id,
                 c.level.as_str(),
                 non_empty_or(&c.reason, "conflicts with the plan"),
+                truncate(&c.statement, 240),
                 truncate(&c.span, 240)
             )
         })
@@ -754,6 +757,21 @@ mod tests {
         let a = checked("R-A-002", Verdict::Conflicting, "some span", "");
         let reason = hook_deny_reason(&[&a]);
         assert!(reason.contains("conflicts with the plan"));
+    }
+
+    /// The gap this guards: the deny reason must carry the rule's own
+    /// statement verbatim, not just the judge's paraphrase in `reason` — an
+    /// agent revising the plan needs the actual rule text to revise against.
+    #[test]
+    fn test_hook_deny_reason_includes_the_rule_statement_verbatim() {
+        let a = checked(
+            "R-A-002",
+            Verdict::Conflicting,
+            "log the signing key for debugging",
+            "R-A-002 forbids logging the key",
+        );
+        let reason = hook_deny_reason(&[&a]);
+        assert!(reason.contains(&a.statement));
     }
 
     #[test]
