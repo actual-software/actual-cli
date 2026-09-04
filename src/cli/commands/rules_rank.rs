@@ -120,33 +120,63 @@ impl ResolvedRunner {
     }
 }
 
+/// Where a candidate list came from, so a failure can say why nothing else was
+/// tried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// `--runner` named a backend for this run.
+    Flag,
+    /// `runner:` in the config pins one. Invisible at the call site, which is
+    /// why a failure has to name it.
+    Config,
+    /// Derived from a model name: an ordered list, not a pin.
+    Model,
+    /// Nothing was expressed, so the default order.
+    Default,
+}
+
 /// Which runners to try, in order.
 ///
-/// An explicit `--runner` is the whole list: asking for a backend that is not
-/// there should say so, not silently succeed with another one. Otherwise the
-/// configured runner leads, then the model's own candidates, and failing both
-/// the same default order `adr-bot` uses.
+/// Fallback happens where the caller expressed a preference loosely, and not
+/// where they expressed it precisely. A model name is loose, so it yields an
+/// ordered list of backends that can serve it. `--runner` and the config's
+/// `runner:` name a backend outright, so each is the whole list: asking for a
+/// backend that is not there should say so rather than silently succeeding with
+/// another one, which would also mean stage 2 ran on a different model than the
+/// caller asked for.
+///
+/// Treating `runner:` as a pin is what `actual adr-bot` already does — it uses
+/// the configured runner as-is and only auto-detects when neither the flag nor
+/// the config field is set. One config key has to mean one thing in both
+/// commands; a `rules select` that quietly fell back would disagree with an
+/// `adr-bot` that failed, from the same line of YAML on the same machine.
 fn candidates(
     explicit: Option<&RunnerChoice>,
     model: Option<&str>,
     cfg: &Config,
-) -> Vec<RunnerChoice> {
+) -> (Vec<RunnerChoice>, Origin) {
     use clap::ValueEnum as _;
 
     if let Some(choice) = explicit {
-        return vec![choice.clone()];
+        return (vec![choice.clone()], Origin::Flag);
     }
     if let Some(configured) = cfg
         .runner
         .as_deref()
         .and_then(|name| RunnerChoice::from_str(name, true).ok())
     {
-        return vec![configured];
+        return (vec![configured], Origin::Config);
     }
     if let Some(model) = model {
-        return crate::cli::args::runner_candidates(&model.to_ascii_lowercase());
+        return (
+            crate::cli::args::runner_candidates(&model.to_ascii_lowercase()),
+            Origin::Model,
+        );
     }
-    vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi]
+    (
+        vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi],
+        Origin::Default,
+    )
 }
 
 /// Is this backend usable right now?
@@ -253,14 +283,43 @@ pub fn resolve(
             .min(RANK_TIMEOUT_SECS),
     );
 
+    let (choices, origin) = candidates(explicit, model.or(cfg.model.as_deref()), cfg);
     let mut tried: Vec<String> = Vec::new();
-    for choice in candidates(explicit, model.or(cfg.model.as_deref()), cfg) {
+    for choice in choices {
         match probe(&choice, cfg).and_then(|()| build(&choice, model, cfg, timeout)) {
             Ok(resolved) => return Ok(resolved),
             Err(reason) => tried.push(reason),
         }
     }
-    Err(format!("no runner available: {}", tried.join("; ")))
+    Err(unavailable(origin, &tried, cfg))
+}
+
+/// What a config-pinned runner adds to an unavailability message.
+///
+/// Assembled with `concat!` rather than a `\`-continued literal: rustfmt
+/// rewrites those into one line and turns the continuation indent into runs of
+/// literal spaces, which then show up verbatim in the panel.
+const PIN_HINT: &str = concat!(
+    " in the config pins stage 2 to that backend, so no other was tried",
+    " — pass --runner to override it for this run, or unset it to let the model choose."
+);
+
+/// Why stage 2 has no runner, in a sentence a reader can act on.
+///
+/// A config-pinned runner gets its own wording. The pin is the reason no second
+/// backend was probed, and unlike `--runner` it is nowhere in the command the
+/// caller just typed — without naming it, a machine that is missing one binary
+/// but holds a perfectly good API key looks like a machine with no runner at
+/// all.
+fn unavailable(origin: Origin, tried: &[String], cfg: &Config) -> String {
+    let tried = tried.join("; ");
+    match origin {
+        Origin::Config => {
+            let name = cfg.runner.as_deref().unwrap_or("?");
+            format!("no runner available: {tried}. `runner: {name}`{PIN_HINT}")
+        }
+        _ => format!("no runner available: {tried}"),
+    }
 }
 
 #[cfg(test)]
@@ -278,16 +337,19 @@ mod tests {
         // Asking for a backend that is not installed must report that, rather
         // than quietly succeeding with a different one.
         let got = candidates(Some(&RunnerChoice::CursorCli), Some("sonnet"), &config());
-        assert_eq!(got, vec![RunnerChoice::CursorCli]);
+        assert_eq!(got, (vec![RunnerChoice::CursorCli], Origin::Flag));
     }
 
+    /// `runner:` in the config is a pin, not the head of a fallback list —
+    /// the same meaning `actual adr-bot` gives it. A model that would have
+    /// suggested other backends does not widen it.
     #[test]
-    fn test_the_configured_runner_leads_when_no_flag_is_given() {
+    fn test_the_configured_runner_is_a_pin_not_a_fallback_list() {
         let mut cfg = config();
         cfg.runner = Some("openai-api".to_string());
         assert_eq!(
             candidates(None, Some("sonnet"), &cfg),
-            vec![RunnerChoice::OpenAiApi]
+            (vec![RunnerChoice::OpenAiApi], Origin::Config)
         );
     }
 
@@ -297,23 +359,76 @@ mod tests {
         cfg.runner = Some("not-a-runner".to_string());
         assert_eq!(
             candidates(None, Some("sonnet"), &cfg),
-            vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi]
+            (
+                vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi],
+                Origin::Model
+            )
         );
     }
 
+    /// A model is a loose preference, so it yields a list rather than a pin.
     #[test]
     fn test_the_model_picks_the_candidates_when_nothing_else_does() {
-        let got = candidates(None, Some("gpt-5.2"), &config());
+        let (got, origin) = candidates(None, Some("gpt-5.2"), &config());
+        assert!(got.len() > 1, "a model should widen, not pin: {got:?}");
         assert!(got.contains(&RunnerChoice::OpenAiApi));
         assert!(!got.contains(&RunnerChoice::ClaudeCli));
+        assert_eq!(origin, Origin::Model);
     }
 
     #[test]
     fn test_the_default_candidates_with_no_model_at_all() {
         assert_eq!(
             candidates(None, None, &config()),
-            vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi]
+            (
+                vec![RunnerChoice::ClaudeCli, RunnerChoice::AnthropicApi],
+                Origin::Default
+            )
         );
+    }
+
+    /// A config pin is nowhere in the command the caller typed, so the failure
+    /// has to name it. Without this, a machine missing one binary but holding a
+    /// usable API key reads as a machine with no runner at all.
+    #[test]
+    fn test_a_config_pin_explains_itself_when_nothing_resolves() {
+        let mut cfg = config();
+        cfg.runner = Some("claude-cli".to_string());
+        let message = unavailable(
+            Origin::Config,
+            &["claude-cli: binary not found".to_string()],
+            &cfg,
+        );
+        assert!(message.contains("claude-cli: binary not found"));
+        assert!(message.contains("`runner: claude-cli` in the config pins stage 2"));
+        assert!(message.contains("--runner"));
+        // The message is wrapped into a panel, so a run of literal spaces from
+        // a line-continued source literal would show up verbatim on screen.
+        assert!(
+            !message.contains("  "),
+            "message has a double space: {message}"
+        );
+    }
+
+    /// Every other origin says only what it tried: an explicit `--runner` is in
+    /// the caller's own command line, and a model-derived list has no pin to
+    /// blame.
+    #[test]
+    fn test_other_origins_report_only_what_was_tried() {
+        let tried = ["claude-cli: binary not found".to_string()];
+        for origin in [Origin::Flag, Origin::Model, Origin::Default] {
+            let message = unavailable(origin, &tried, &config());
+            assert_eq!(message, "no runner available: claude-cli: binary not found");
+        }
+    }
+
+    /// The pin wording survives a config whose `runner:` cannot be parsed —
+    /// that combination never reaches `Origin::Config`, but the formatter must
+    /// not panic if it ever does.
+    #[test]
+    fn test_the_pin_message_tolerates_a_missing_config_value() {
+        let message = unavailable(Origin::Config, &["nothing".to_string()], &config());
+        assert!(message.contains("`runner: ?`"));
     }
 
     #[test]

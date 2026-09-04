@@ -179,7 +179,30 @@ actual rules eval --golden FILE [--repo PATH] [--limit N] [--ablate SIGNAL]...
                                 [--model NAME] [--json]
 ```
 
-`--runner` and `--model` steer stage 2 only; both fall back to the same config
-fields `actual adr-bot` uses. Naming a runner explicitly disables the fallback
-search, so asking for a backend that is not installed says so rather than quietly
-using another one.
+`--runner` and `--model` steer stage 2 only, and both fall back to the same
+config fields `actual adr-bot` uses.
+
+Which of them widens the search and which narrows it follows one rule: a loose
+preference yields a list, a named backend is a pin.
+
+- **`--model`, or `model:` in the config**, is loose. It yields an ordered list
+  of the backends that can serve that model, tried until one works.
+- **`--runner`, or `runner:` in the config**, names a backend. Either one is the
+  whole list. Asking for a backend that is not installed says so rather than
+  quietly using another one — which would also mean stage 2 ran on a model you
+  did not choose.
+- **Neither set** falls back to the default order `adr-bot` uses: claude-cli,
+  then anthropic-api.
+
+`runner:` being a pin is deliberate, and it matches `adr-bot`, which uses the
+configured runner as-is and auto-detects only when neither the flag nor the
+config field is set. One config key has to mean one thing in both commands. The
+cost is that a pinned backend which is missing yields no stage 2 even when
+another is available, so the message says as much and names the config key:
+
+```
+Stage 2: unavailable — no runner available: claude-cli: binary not found …
+`runner: claude-cli` in the config pins stage 2 to that backend, so no other
+was tried — pass --runner to override it for this run, or unset it to let the
+model choose.
+```

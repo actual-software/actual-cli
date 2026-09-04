@@ -265,7 +265,11 @@ fn render_select_panel(
         panel = panel.kv("Paths", &paths.join(", "));
     }
     panel = panel.kv("Indexed documents", &index.len().to_string());
-    panel = panel.kv("Stage 2", &selection.stage2.summary());
+    let (headline, rest) = stage2_rows(&selection.stage2.summary(), width);
+    panel = panel.kv("Stage 2", &headline);
+    for line in rest {
+        panel = panel.line(&format!("{STAGE2_INDENT}{line}"));
+    }
     if let Some(runner) = &run.runner {
         panel = panel.kv("Runner", runner);
     }
@@ -361,6 +365,25 @@ fn render_select_panel(
         index.len()
     ));
     panel.render(width)
+}
+
+/// Aligns a wrapped stage-2 line under the `Stage 2: ` label.
+const STAGE2_INDENT: &str = "         ";
+
+/// Split the stage-2 status into the `Stage 2:` row and any continuation lines.
+///
+/// The panel truncates a row that does not fit, and the stage-2 status is the
+/// one row here that can legitimately run long: it carries the reason a runner
+/// was unavailable, which is the only thing telling a reader why they got a
+/// degraded answer. Truncating that turns an actionable message into a mystery,
+/// so it wraps instead.
+fn stage2_rows(summary: &str, width: usize) -> (String, Vec<String>) {
+    // The panel's own frame and padding take four columns, and the `Stage 2: `
+    // label takes the indent's worth on top of that.
+    let available = width.saturating_sub(4).saturating_sub(STAGE2_INDENT.len());
+    let mut lines = crate::cli::ui::tui::log::wrap_line(summary, available).into_iter();
+    let headline = lines.next().unwrap_or_default();
+    (headline, lines.collect())
 }
 
 /// The index's own evidence for each selected rule, aligned with the selection.
@@ -1176,6 +1199,41 @@ mod tests {
     }
 
     /// A ranked selection prints the verdict and the ranker's own reason.
+    /// A long stage-2 reason wraps rather than being truncated. It carries the
+    /// only explanation of why the answer is degraded, so losing its tail to an
+    /// ellipsis would defeat the point of writing it.
+    #[test]
+    fn test_stage2_rows_wrap_a_long_reason_instead_of_dropping_it() {
+        let summary = Stage2::Unavailable {
+            reason: "no runner available: openai-api: OPENAI_API_KEY not set.                      `runner: openai-api` in the config pins stage 2 to that backend,                      so no other was tried."
+                .to_string(),
+        }
+        .summary();
+
+        let (headline, rest) = stage2_rows(&summary, 80);
+        assert!(!rest.is_empty(), "a long reason should wrap");
+        assert!(headline.len() <= 80 - 4 - STAGE2_INDENT.len());
+        for line in &rest {
+            assert!(line.len() <= 80 - 4 - STAGE2_INDENT.len(), "{line}");
+        }
+        // Nothing is lost: every word of the reason survives the split.
+        let rejoined = std::iter::once(headline)
+            .chain(rest)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            rejoined.split_whitespace().collect::<Vec<_>>(),
+            summary.split_whitespace().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_stage2_rows_leave_a_short_status_on_one_line() {
+        let (headline, rest) = stage2_rows(&Stage2::NotRequested.summary(), 80);
+        assert_eq!(headline, "not requested");
+        assert!(rest.is_empty());
+    }
+
     #[test]
     fn test_select_panel_shows_the_verdict_and_the_ranker_reason() {
         let _lock = ENV_MUTEX.lock().unwrap();
