@@ -303,9 +303,7 @@ fn render_select_panel(
         if let Some(title) = &rule.title {
             panel = panel.line(&format!("      {}", truncate(title, 68)));
         }
-        let Some(hit) = evidence.get(position) else {
-            continue;
-        };
+        let hit = &evidence[position];
         for contribution in &hit.contributions {
             let detail = if contribution.matched.is_empty() {
                 String::new()
@@ -402,7 +400,16 @@ fn index_evidence(index: &ScopeIndex, query: &Query, selection: &Selection) -> V
     selection
         .selected
         .iter()
-        .filter_map(|rule| ranked.iter().find(|hit| hit.slug == rule.slug).cloned())
+        // One entry per selected rule, so the result is positionally aligned
+        // with the selection. Every selected rule came from this same index, so
+        // a miss would mean the two disagreed about their own contents.
+        .map(|rule| {
+            ranked
+                .iter()
+                .find(|hit| hit.slug == rule.slug)
+                .cloned()
+                .expect("a selected rule is always present in the index that ranked it")
+        })
         .collect()
 }
 
@@ -1153,6 +1160,254 @@ mod tests {
     /// The degraded path, end to end through the command layer: a rank is
     /// warranted, no runner can be resolved, and the caller still gets the
     /// deterministic answer with the reason recorded rather than an error.
+    /// A fake Claude backend on disk: answers the auth probe as logged in, and
+    /// every other invocation with a rank verdict for `slug`.
+    ///
+    /// This is what lets the stage-2 command paths run end to end — the runner
+    /// resolution, the runtime bridge, and the verdict application — without a
+    /// model, a key or a network.
+    #[cfg(unix)]
+    fn fake_claude(dir: &Path, slug: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "structured_output": {
+                "verdicts": [{
+                    "slug": slug,
+                    "verdict": "governs",
+                    "reason": "it governs the change",
+                }],
+            },
+        })
+        .to_string();
+        let script = dir.join("fake-claude.sh");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{envelope}'\n"
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// Stage 2 end to end through the command: a runner is resolved, the rank
+    /// runs on the blocking bridge, and its verdict shapes the answer.
+    #[test]
+    #[cfg(unix)]
+    fn test_run_selection_applies_a_rank_from_a_resolved_runner() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let query = Query::new("rotate the OAuth signing key and pin providers");
+        // The rule the ranker will affirm is the one stage 1 ranked second, so
+        // a promotion is visible rather than a coincidence.
+        let prefiltered = select::prefilter(&index, &query, 1, scope::DEFAULT_CANDIDATES);
+        let promoted = prefiltered.candidates()[1].slug.clone();
+
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &promoted).to_str().unwrap(),
+        );
+
+        let args = RulesSelectArgs {
+            limit: 1,
+            no_rank: false,
+            runner: Some(crate::cli::args::RunnerChoice::ClaudeCli),
+            ..select_args(root.path(), 1)
+        };
+        let run = run_selection(&index, &query, &args).unwrap();
+
+        assert!(
+            run.selection.stage2.is_applied(),
+            "{:?}",
+            run.selection.stage2
+        );
+        // The model comes from config, so only the backend is pinned here.
+        let label = run.runner.as_deref().expect("a runner answered");
+        assert!(label.starts_with("claude-cli ("), "{label}");
+        assert_eq!(run.selection.selected.len(), 1);
+        assert_eq!(run.selection.selected[0].slug, promoted);
+        assert_eq!(run.selection.selected[0].reason, "it governs the change");
+    }
+
+    /// A long stage-2 status reaches the panel across several lines. The
+    /// wrapping helper has its own test; this is the row actually using it,
+    /// and the row is where a truncation would hide the reason.
+    #[test]
+    fn test_select_panel_wraps_a_long_stage_two_status() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        // Both documents must match, or the prefilter fits the cap and the
+        // status becomes `not needed` instead of the long one under test.
+        let query = Query::new("rotate the OAuth signing key and pin providers");
+        let long = "no runner available: claude-cli: binary not found (install: \
+                    npm install -g @anthropic-ai/claude-code); anthropic-api: \
+                    ANTHROPIC_API_KEY not set";
+        let run = SelectionRun {
+            selection: select::prefilter(&index, &query, 1, scope::DEFAULT_CANDIDATES).finish(
+                Stage2::Unavailable {
+                    reason: long.to_string(),
+                },
+            ),
+            runner: None,
+        };
+
+        let panel = render_select_panel(&index, &query, &run, false, 90);
+        assert!(panel.contains("Stage 2: unavailable"));
+        // The reason spans several rows, so it is reassembled before checking:
+        // the property is that nothing was dropped, not where the breaks fell.
+        let rejoined: String = panel
+            .lines()
+            .map(|l| l.trim_matches(|c| c == '│' || c == ' '))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let flattened: Vec<&str> = rejoined.split_whitespace().collect();
+        for word in long.split_whitespace() {
+            assert!(flattened.contains(&word), "lost `{word}` from:\n{panel}");
+        }
+        // And it really did wrap, rather than fitting on the one row.
+        assert!(
+            panel.lines().filter(|l| l.contains("ANTHROPIC_API_KEY")).count() == 1
+                && !panel.contains("Stage 2: unavailable — no runner available: claude-cli: binary not found (install: npm install"),
+            "{panel}"
+        );
+    }
+
+    /// A case whose rank fails is scored as a prefilter result rather than
+    /// aborting the run, so one timeout does not throw away the other cases.
+    #[test]
+    #[cfg(unix)]
+    fn test_evaluate_two_stage_degrades_a_failed_case() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        // A backend that authenticates and then answers with the wrong shape,
+        // so the rank fails validation rather than the transport.
+        let bin = tempdir().unwrap();
+        let script = bin.path().join("fake-claude.sh");
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "structured_output": {"nonsense": true},
+        })
+        .to_string();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{envelope}'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _binary = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let golden_dir = tempdir().unwrap();
+        // The plan must match both documents, or the prefilter fits the cap and
+        // no rank is attempted — there would be no failure to degrade from.
+        let case = GoldenCase {
+            plan: "rotate the OAuth signing key and pin providers".to_string(),
+            ..oauth_case()
+        };
+        let args = RulesEvalArgs {
+            limit: 1,
+            rank: true,
+            runner: Some(crate::cli::args::RunnerChoice::ClaudeCli),
+            ..eval_args(
+                root.path(),
+                write_golden(&golden_dir, std::slice::from_ref(&case)),
+            )
+        };
+
+        let report = evaluate_two_stage(&index, &[case], &args).expect("the run survives");
+        assert_eq!(report.cases.len(), 1);
+        // The prefilter's answer was scored, so the case still counts.
+        assert_eq!(report.cases[0].selected.len(), 1);
+    }
+
+    /// `rules eval --rank` end to end: the ranked column is scored through the
+    /// same call `rules select` makes.
+    #[test]
+    #[cfg(unix)]
+    fn test_exec_eval_rank_scores_the_two_stage_selector() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = sample();
+        let index = resolved(root.path()).index;
+        let case = oauth_case();
+        let query = Query::new(case.plan.clone());
+        let prefiltered = select::prefilter(&index, &query, 1, scope::DEFAULT_CANDIDATES);
+        let promoted = prefiltered.candidates()[0].slug.clone();
+
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &promoted).to_str().unwrap(),
+        );
+
+        let golden_dir = tempdir().unwrap();
+        let args = RulesEvalArgs {
+            limit: 1,
+            rank: true,
+            runner: Some(crate::cli::args::RunnerChoice::ClaudeCli),
+            ..eval_args(root.path(), write_golden(&golden_dir, &[case]))
+        };
+        let comparison = {
+            let cases = load_golden_set(&args.golden).unwrap();
+            let mut c = run_evaluation(&index, &cases, args.limit, &Weights::default());
+            c.two_stage = Some(evaluate_two_stage(&index, &cases, &args).unwrap());
+            c
+        };
+
+        let two_stage = comparison.two_stage.as_ref().expect("scored");
+        assert_eq!(two_stage.selector, "two-stage");
+        assert_eq!(two_stage.cases.len(), 1);
+        assert_eq!(two_stage.cases[0].selected, vec![promoted]);
+        // The panel gains a third line when the column is present.
+        let panel = render_eval_panel(&comparison, 110);
+        assert!(panel.contains("two-stage"), "{panel}");
+
+        assert!(exec_eval(&args).is_ok());
+    }
+
+    /// A runner that cannot be resolved is an error for `--rank`, unlike for
+    /// `rules select`: silently scoring the prefilter would report a number for
+    /// something that never ran.
+    #[test]
+    fn test_exec_eval_rank_fails_when_no_runner_resolves() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_key = EnvGuard::remove("ANTHROPIC_API_KEY");
+
+        let root = sample();
+        let golden_dir = tempdir().unwrap();
+        let args = RulesEvalArgs {
+            rank: true,
+            runner: Some(crate::cli::args::RunnerChoice::AnthropicApi),
+            ..eval_args(root.path(), write_golden(&golden_dir, &[oauth_case()]))
+        };
+        let err = exec_eval(&args).unwrap_err();
+        assert!(err.to_string().contains("ANTHROPIC_API_KEY"), "{err}");
+    }
+
     #[test]
     fn test_run_selection_degrades_when_no_runner_can_be_resolved() {
         let _lock = ENV_MUTEX.lock().unwrap();
@@ -1174,12 +1429,8 @@ mod tests {
         };
 
         let run = run_selection(&index, &query, &args).unwrap();
-        let Stage2::Unavailable { ref reason } = run.selection.stage2 else {
-            panic!(
-                "expected an unavailable runner, got {:?}",
-                run.selection.stage2
-            );
-        };
+        #[rustfmt::skip]
+        let Stage2::Unavailable { ref reason } = run.selection.stage2 else { unreachable!("expected an unavailable runner") };
         assert!(reason.contains("ANTHROPIC_API_KEY"));
         assert!(run.runner.is_none());
         assert_eq!(run.selection.selected.len(), 1);

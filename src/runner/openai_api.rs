@@ -494,6 +494,57 @@ mod tests {
         runner
     }
 
+    /// The second caller of the same request path: any schema, returned
+    /// unparsed. The strict-mode schema name differs from the tailoring one, so
+    /// this also pins that the selection call is not announcing itself as a
+    /// tailoring call.
+    #[tokio::test]
+    async fn test_run_structured_json_returns_the_payload_verbatim() {
+        use crate::runner::structured::StructuredRunner;
+
+        let mut server = Server::new_async().await;
+        let payload = r#"{"verdicts":[{"slug":"a-rule","verdict":"governs","reason":"because"}]}"#;
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"text": {"format": {"name": "rule_selection"}}}),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(responses_body(payload))
+            .create_async()
+            .await;
+
+        let value = make_runner(&server)
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .await
+            .expect("expected Ok");
+
+        mock.assert_async().await;
+        assert_eq!(value, serde_json::from_str::<Value>(payload).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_run_structured_json_propagates_a_server_error() {
+        use crate::runner::structured::StructuredRunner;
+
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .with_status(500)
+            .with_body("boom")
+            .create_async()
+            .await;
+
+        let err = make_runner(&server)
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .await
+            .expect_err("expected Err");
+
+        mock.assert_async().await;
+        assert!(err.to_string().contains("500"), "{err}");
+    }
+
     // Test 1: valid response is parsed correctly into TailoringOutput
     #[tokio::test]
     async fn test_valid_response_parsed_correctly() {

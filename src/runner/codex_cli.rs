@@ -435,6 +435,10 @@ mod tests {
         .to_string()
     }
 
+    /// A stage-2 rank payload, which shares nothing with `TailoringOutput`.
+    const RANK_PAYLOAD: &str =
+        r#"{"verdicts":[{"slug":"a-rule","verdict":"governs","reason":"because"}]}"#;
+
     // ---- Test 1: valid JSON output is parsed correctly ----
     //
     // The fake script writes valid TailoringOutput JSON to the file specified
@@ -479,6 +483,87 @@ echo '{}' > "$OUTPUT_FILE"
 
         assert_eq!(result.files.len(), 0);
         assert_eq!(result.summary.total_input, 0);
+    }
+
+    /// The second caller of the same subprocess path: any schema, returned
+    /// unparsed. Codex embeds the schema in the prompt rather than passing a
+    /// flag, so this also pins that the selection schema reaches the model.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_structured_json_returns_the_payload_verbatim() {
+        use crate::runner::structured::StructuredRunner;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-codex.sh");
+        let prompt_file = dir.path().join("captured-prompt.txt");
+        let script_content = format!(
+            r#"#!/bin/sh
+OUTPUT_FILE=""
+NEXT_IS_OUTPUT=false
+for arg in "$@"; do
+    if $NEXT_IS_OUTPUT; then
+        OUTPUT_FILE="$arg"
+        NEXT_IS_OUTPUT=false
+    elif [ "$arg" = "--output-last-message" ]; then
+        NEXT_IS_OUTPUT=true
+    else
+        echo "$arg" >> "{}"
+    fi
+done
+echo '{}' > "$OUTPUT_FILE"
+"#,
+            prompt_file.display(),
+            RANK_PAYLOAD
+        );
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runner = CodexCliRunner::new(script, None, Duration::from_secs(10));
+        let value = runner
+            .run_structured_json(
+                "rank these",
+                r#"{"type":"object","title":"rank"}"#,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::from_str::<serde_json::Value>(RANK_PAYLOAD).unwrap()
+        );
+        // The schema rides in the prompt on this backend, so its absence would
+        // be a silent loss of structure rather than an error.
+        let captured = std::fs::read_to_string(&prompt_file).unwrap();
+        assert!(captured.contains("rank these"), "{captured}");
+        assert!(captured.contains(r#""title":"rank""#), "{captured}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_structured_json_propagates_a_subprocess_failure() {
+        use crate::runner::structured::StructuredRunner;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-codex.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh
+echo 'nope' >&2
+exit 3
+",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = CodexCliRunner::new(script, None, Duration::from_secs(10))
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .await
+            .expect_err("expected Err");
+        assert!(err.to_string().to_lowercase().contains("codex"), "{err}");
     }
 
     // ---- Test 2: non-zero exit maps to RunnerFailed ----

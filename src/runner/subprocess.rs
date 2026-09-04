@@ -876,6 +876,104 @@ mod tests {
         assert_eq!(lines[prompt_pos + 1], prompt);
     }
 
+    /// The second caller of the same subprocess path: any schema, returned
+    /// unparsed, and under the selection profile rather than the tailoring one.
+    ///
+    /// The flags are asserted here because the profile is the security-relevant
+    /// half: a ranker runs with permissions bypassed, so it must reach the
+    /// subprocess with one turn and no tools.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_run_structured_json_uses_the_selection_profile() {
+        use crate::runner::structured::StructuredRunner;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let args_file = dir.path().join("captured-args.txt");
+        let payload = serde_json::json!({
+            "verdicts": [{"slug": "a-rule", "verdict": "governs", "reason": "because"}]
+        });
+        let script_content = format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{}'\n",
+            args_file.display(),
+            stream_result_line(payload.clone())
+        );
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let value = CliClaudeRunner::new(script, Duration::from_secs(10))
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .await
+            .unwrap();
+        assert_eq!(value, payload);
+
+        let captured = std::fs::read_to_string(&args_file).unwrap();
+        let args: Vec<&str> = captured.lines().collect();
+        assert!(args.contains(&"rank these"));
+        assert!(args.contains(&r#"{"type":"object"}"#));
+        // One turn, no tools: the ranker has everything it needs in the prompt.
+        let turns = args.iter().position(|a| *a == "--max-turns").unwrap();
+        assert_eq!(args[turns + 1], "1");
+        let tools = args.iter().position(|a| *a == "--tools").unwrap();
+        assert_eq!(args[tools + 1], "");
+        assert!(!args.contains(&"--allowedTools"));
+    }
+
+    /// A budget reaches the subprocess. This is the one backend that enforces
+    /// it, so if the flag were dropped here nothing would cap a rank at all.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_run_structured_json_passes_a_budget() {
+        use crate::runner::structured::StructuredRunner;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let args_file = dir.path().join("captured-args.txt");
+        let script_content = format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{}'\n",
+            args_file.display(),
+            stream_result_line(serde_json::json!({"verdicts": []}))
+        );
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        CliClaudeRunner::new(script, Duration::from_secs(10))
+            .run_structured_json(
+                "rank these",
+                r#"{"type":"object"}"#,
+                Some("haiku"),
+                Some(0.25),
+            )
+            .await
+            .unwrap();
+
+        let captured = std::fs::read_to_string(&args_file).unwrap();
+        let args: Vec<&str> = captured.lines().collect();
+        let budget = args.iter().position(|a| *a == "--max-budget-usd").unwrap();
+        assert_eq!(args[budget + 1], "0.25");
+        let model = args.iter().position(|a| *a == "--model").unwrap();
+        assert_eq!(args[model + 1], "haiku");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_run_structured_json_propagates_a_subprocess_failure() {
+        use crate::runner::structured::StructuredRunner;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, "#!/bin/sh\necho 'nope' >&2\nexit 3\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(CliClaudeRunner::new(script, Duration::from_secs(10))
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .await
+            .is_err());
+    }
+
     /// Verify that `with_max_turns` overrides the `--max-turns` arg passed to the subprocess.
     #[tokio::test]
     #[cfg(unix)]
