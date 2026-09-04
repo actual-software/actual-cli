@@ -37,14 +37,48 @@
 //! getting its turn, which is a worse failure than an imprecise selection
 //! (see AK-734). Direct mode has no such deadline, so it runs stage 2 by
 //! default, the same way `rules select` does, with `--no-rank` opting out.
+//!
+//! # The revision loop (AK-677)
+//!
+//! `--claude-hook` fires again every time the agent revises a denied plan and
+//! calls `ExitPlanMode` once more. Three things follow from that, all keyed
+//! on the hook envelope's `session_id` (stable for one Claude Code
+//! conversation) via [`plan_check_session`]:
+//!
+//! 1. **Never re-litigate a cleared rule.** Every rule the judge has already
+//!    called [`Verdict::Conforming`] for this session is excluded from every
+//!    later judge call outright — not merely re-asked and hoped to agree. A
+//!    judge is a model call, not a deterministic function; without this, a
+//!    borderline rule could flip from cleared to conflicting on a later round
+//!    for no reason the agent caused. An explicit override (below) is
+//!    excluded the same way.
+//! 2. **An explicit, recorded override.** A human — never the agent, which
+//!    has no channel to invoke this — runs `actual plan-check-override`
+//!    directly. It is excluded from judging from that point on, exactly like
+//!    a cleared rule, but every subsequent round says so out loud in a
+//!    non-blocking notice: an override is deliberately visible, not a silent
+//!    bypass. See [`plan_check_session::record_override`].
+//! 3. **A bounded number of rounds.** [`DEFAULT_MAX_ROUNDS`] real judge calls
+//!    (`--max-rounds` / `ACTUAL_PLAN_CHECK_MAX_ROUNDS` to change it) may deny
+//!    the same session before the gate stops blocking regardless of the
+//!    verdict — a hard block with no exit gets the hook uninstalled, which
+//!    governs nothing. The round-limit pass is recorded exactly like an
+//!    override (see [`plan_check_session::record_round_limit`]), never
+//!    silent, just triggered by the cap instead of a human action.
+//!
+//! Direct mode never reads or writes session state (there is no
+//! `session_id` outside a hook envelope), so none of this changes its
+//! behavior: `run_pipeline`'s `exclude` set is simply empty.
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::cli::args::PlanCheckArgs;
+use crate::cli::args::{PlanCheckArgs, PlanCheckOverrideArgs};
 use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
+use crate::cli::commands::plan_check_session::{self, PlanCheckSession};
 use crate::cli::commands::rules_rank;
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
@@ -116,9 +150,25 @@ enum Outcome {
 /// Run the whole pipeline: resolve the index, select documents, gather their
 /// rules, resolve a runner, and judge.
 ///
+/// A runner is resolved up front only when stage 2's rank needs one before
+/// selection can even be computed (`use_rank`); otherwise resolution is
+/// deferred until immediately before the judge call, so a round that turns
+/// out to need no judging at all — every applicable rule already excluded —
+/// never probes for a runner it will not use.
+///
 /// `use_rank` gates selection's stage 2. `--claude-hook` always passes
 /// `false`, unconditionally, regardless of any flag — see the module doc for
 /// why. Direct mode passes `!args.no_rank`.
+///
+/// `exclude` names every `"{doc_slug}::{rule_id}"` (see
+/// [`plan_check_session::key`]) that must never reach the judge — a rule
+/// already cleared or overridden earlier in this session. Direct mode always
+/// passes an empty set: there is no session outside a hook envelope. When
+/// every rule a selection would otherwise judge is excluded, this returns
+/// `Outcome::Verdicts` with an empty `verdicts` and no runner ever resolved —
+/// there is nothing new to check, which is exactly the fully-conforming,
+/// silent-in-hook-mode case, not "nothing applies" (which would misreport
+/// that no rule governs this plan at all).
 ///
 /// Returns `Err` only when the rules directory itself could not be read at
 /// all — the one condition serious enough that a direct-mode caller should
@@ -130,6 +180,7 @@ fn run_pipeline(
     rules_dir: &Path,
     args: &PlanCheckArgs,
     use_rank: bool,
+    exclude: &BTreeSet<String>,
 ) -> Result<Outcome, ActualError> {
     let resolved = scope::resolve_in(rules_dir, root, args.rebuild)?;
     let query = Query::new(plan_text.to_string());
@@ -139,32 +190,39 @@ fn run_pipeline(
         return Ok(Outcome::NothingApplies);
     }
 
-    // One runner resolution serves both stage 2's rank (when `use_rank`) and
-    // the judge call that always follows it — there is never a reason to
-    // probe the environment twice for one invocation.
     let cfg = crate::config::paths::load().unwrap_or_default();
-    let resolved_runner =
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
+
+    // A runner is only resolved up front when stage 2's rank needs one to
+    // produce a selection at all. Otherwise resolution is deferred until
+    // just before the judge call, below — so a round whose every applicable
+    // rule turns out to already be excluded (see `gathered.excluded` below)
+    // never has to resolve a runner it will not use.
+    let early_runner = if use_rank {
         match rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg) {
-            Ok(runner) => runner,
+            Ok(runner) => Some(runner),
             Err(reason) => {
                 return Ok(Outcome::NoRunner {
                     documents_selected: prefiltered.len(),
                     reason,
                 })
             }
-        };
-    let label = resolved_runner.label();
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
+        }
+    } else {
+        None
+    };
 
     let selection = if use_rank {
+        let runner = early_runner
+            .as_ref()
+            .expect("early_runner is always Some when use_rank is true");
         runtime.block_on(prefiltered.rank_with(
-            &resolved_runner.runner,
-            resolved_runner.model.as_deref(),
-            resolved_runner.max_budget_usd,
+            &runner.runner,
+            runner.model.as_deref(),
+            runner.max_budget_usd,
         ))
     } else {
         prefiltered.finish(Stage2::NotRequested)
@@ -174,9 +232,21 @@ fn run_pipeline(
         return Ok(Outcome::NothingApplies);
     }
 
-    let gathered = gather_rules(&selection, root);
+    let gathered = gather_rules(&selection, root, exclude);
     if gathered.rules.is_empty() {
-        return Ok(Outcome::NothingApplies);
+        return Ok(if gathered.excluded > 0 {
+            // Every applicable rule was already settled this session: there
+            // is nothing new to judge, which is the fully-conforming case,
+            // not "no rule applies" (this plan does have applicable rules —
+            // they were just already cleared or overridden).
+            Outcome::Verdicts {
+                selection,
+                verdicts: Vec::new(),
+                runner_label: None,
+            }
+        } else {
+            Outcome::NothingApplies
+        });
     }
     if gathered.truncated {
         return Ok(Outcome::CheckFailed {
@@ -188,6 +258,20 @@ fn run_pipeline(
             ),
         });
     }
+
+    let resolved_runner = match early_runner {
+        Some(runner) => runner,
+        None => match rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg) {
+            Ok(runner) => runner,
+            Err(reason) => {
+                return Ok(Outcome::NoRunner {
+                    documents_selected: selection.selected.len(),
+                    reason,
+                })
+            }
+        },
+    };
+    let label = resolved_runner.label();
 
     match runtime.block_on(check::check(
         &resolved_runner.runner,
@@ -213,25 +297,34 @@ fn run_pipeline(
 struct GatheredRules {
     rules: Vec<RuleForJudging>,
     /// Total individual rules found across every selected document,
-    /// including any past the cap. Equal to `rules.len()` unless `truncated`.
+    /// including any past the cap or removed by `exclude`. Equal to
+    /// `rules.len() + excluded` unless `truncated`.
     considered: usize,
     /// True when `considered` exceeds [`MAX_RULES_JUDGED`] — some of the
     /// selected documents' rules were never gathered at all. The caller must
     /// treat this as "could not check", not as license to judge `rules` alone
     /// and call the result complete.
     truncated: bool,
+    /// How many rules were dropped because they matched `exclude` (already
+    /// settled this session) — distinct from `truncated`, and from a
+    /// genuinely empty selection: it is the caller's signal that `rules`
+    /// being empty means "nothing new," not "nothing applies."
+    excluded: usize,
 }
 
 /// Read the individual rules out of every selected document, in selection
-/// order.
+/// order, dropping any rule whose `"{doc_slug}::{rule_id}"` key is in
+/// `exclude` before the [`MAX_RULES_JUDGED`] cap is applied — an excluded
+/// rule must never consume cap budget that a rule still worth judging needs.
 ///
 /// A document that no longer parses (removed, edited to something invalid,
 /// between selection and this read) is skipped rather than failing the whole
 /// batch — one bad file never costs the rest, the same invariant
 /// `crate::rules::discover` enforces on the original scan.
-fn gather_rules(selection: &Selection, root: &Path) -> GatheredRules {
+fn gather_rules(selection: &Selection, root: &Path, exclude: &BTreeSet<String>) -> GatheredRules {
     let mut rules = Vec::new();
     let mut considered = 0usize;
+    let mut excluded = 0usize;
     for selected in &selection.selected {
         let path = root.join(&selected.relative_path);
         let Ok(bytes) = std::fs::read(&path) else {
@@ -244,6 +337,10 @@ fn gather_rules(selection: &Selection, root: &Path) -> GatheredRules {
             continue;
         };
         for rule in doc.rules {
+            if exclude.contains(&plan_check_session::key(&selected.slug, &rule.id)) {
+                excluded += 1;
+                continue;
+            }
             considered += 1;
             if rules.len() < MAX_RULES_JUDGED {
                 rules.push(RuleForJudging::new(
@@ -259,6 +356,7 @@ fn gather_rules(selection: &Selection, root: &Path) -> GatheredRules {
         truncated: considered > MAX_RULES_JUDGED,
         rules,
         considered,
+        excluded,
     }
 }
 
@@ -272,7 +370,14 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
 
-    let outcome = run_pipeline(&plan_text, &root, &rules_dir, args, !args.no_rank)?;
+    let outcome = run_pipeline(
+        &plan_text,
+        &root,
+        &rules_dir,
+        args,
+        !args.no_rank,
+        &BTreeSet::new(),
+    )?;
 
     let width = term_size::terminal_width();
     if args.json {
@@ -528,9 +633,17 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
 
+    // The revision loop keys entirely on `session_id`: absent (an older
+    // Claude Code build), this call behaves exactly as it did before AK-677
+    // — no state read, no state written, no round/override language in the
+    // output. See the module doc's "revision loop" section.
+    let session_id = envelope.session_id.as_deref();
+    let mut session = session_id.map(plan_check_session::load).unwrap_or_default();
+    let exclude = session.settled();
+
     // `use_rank: false`, unconditionally, regardless of `args.no_rank`: the
     // hook's one model call stays reserved for the judge. See the module doc.
-    let outcome = match run_pipeline(&plan_text, &root, &rules_dir, args, false) {
+    let outcome = match run_pipeline(&plan_text, &root, &rules_dir, args, false, &exclude) {
         Ok(outcome) => outcome,
         Err(e) => {
             emit(plan_check_hook::render_notice(&format!(
@@ -557,13 +670,65 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                 "Actual plan governance did not run: {reason}"
             )));
         }
-        Outcome::Verdicts { verdicts, .. } => {
+        Outcome::Verdicts {
+            verdicts,
+            runner_label,
+            ..
+        } => {
+            // A round is one *completed judge call* — `runner_label` is only
+            // ever `Some` when `check::check` actually ran (never for the
+            // "everything was already excluded" shortcut in `run_pipeline`).
+            let judge_ran = runner_label.is_some();
+            if session_id.is_some() {
+                for v in &verdicts {
+                    if v.verdict == Verdict::Conforming {
+                        session
+                            .cleared
+                            .insert(plan_check_session::key(&v.doc_slug, &v.rule_id));
+                    }
+                }
+                if judge_ran {
+                    session.rounds += 1;
+                }
+            }
+
             let conflicts: Vec<&CheckedRule> =
                 verdicts.iter().filter(|v| v.verdict.blocks()).collect();
+
             if !conflicts.is_empty() {
-                emit(plan_check_hook::render_deny(&hook_deny_reason(&conflicts)));
+                if let Some(session_id) = session_id {
+                    if session.rounds > args.max_rounds {
+                        let keys: Vec<String> = conflicts
+                            .iter()
+                            .map(|c| plan_check_session::key(&c.doc_slug, &c.rule_id))
+                            .collect();
+                        let message =
+                            round_limit_message(&conflicts, session.rounds, args.max_rounds);
+                        plan_check_session::record_round_limit(
+                            session_id,
+                            session.rounds,
+                            &keys,
+                            &message,
+                        );
+                        plan_check_session::store(session_id, &session);
+                        emit(plan_check_hook::render_notice(&message));
+                        return;
+                    }
+                    plan_check_session::store(session_id, &session);
+                }
+                emit(plan_check_hook::render_deny(&hook_deny_reason(
+                    &conflicts,
+                    session_id,
+                    session.rounds,
+                    args.max_rounds,
+                )));
                 return;
             }
+
+            if let Some(session_id) = session_id {
+                plan_check_session::store(session_id, &session);
+            }
+
             let decisions: Vec<&CheckedRule> = verdicts
                 .iter()
                 .filter(|v| v.verdict == Verdict::RequiresDecision)
@@ -572,11 +737,41 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                 emit(plan_check_hook::render_notice(&requires_decision_message(
                     &decisions,
                 )));
+                return;
             }
             // Fully conforming (no conflicts, no decisions): the contract is
-            // silence. No `emit` call.
+            // silence — UNLESS this session carries an active override, which
+            // must stay visible on every round rather than being silently
+            // absorbed once granted.
+            if let Some(reminder) = override_reminder(&session) {
+                emit(plan_check_hook::render_notice(&reminder));
+            }
         }
     }
+}
+
+/// Run `actual plan-check-override`: a human explicitly clearing one or more
+/// rules for a specific session. Always succeeds — there is no invalid state
+/// this can observe (an unknown `session_id` just starts a fresh session),
+/// so there is nothing for a caller to react to beyond "it ran."
+pub fn exec_override(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
+    plan_check_session::record_override(&args.session, &args.rules, &args.reason);
+    let width = term_size::terminal_width();
+    let mut panel = Panel::titled("Plan check override recorded");
+    panel = panel.kv("Session", &args.session);
+    panel = panel.kv("Reason", &args.reason);
+    for rule in &args.rules {
+        panel = panel.kv("Rule", rule);
+    }
+    println!(
+        "{}",
+        panel
+            .separator()
+            .line("This rule will not be re-checked for this session, and every round from")
+            .line("now on will say so — an override is recorded, not silent.")
+            .render(width)
+    );
+    Ok(())
 }
 
 /// Print exactly one line: [`emit`] is the single call site that writes to
@@ -591,8 +786,21 @@ fn emit(json: String) {
 /// a reader (or the agent revising the plan) sees every violation at once
 /// rather than only the first, and can revise against the rule's actual text
 /// rather than the judge's paraphrase of it.
-fn hook_deny_reason(conflicts: &[&CheckedRule]) -> String {
-    conflicts
+///
+/// When `session_id` is present (a `--claude-hook` call whose envelope named
+/// one), a final line names the round and gives the exact
+/// `plan-check-override` invocation to clear these rules explicitly — the
+/// session id printed here is the only place a human learns it, since
+/// `hooks/plan-gate.sh` never surfaces the raw envelope. Absent (no session,
+/// or direct mode's own `deny_summary` instead), the message is unchanged
+/// from before the revision loop existed.
+fn hook_deny_reason(
+    conflicts: &[&CheckedRule],
+    session_id: Option<&str>,
+    round: u32,
+    max_rounds: u32,
+) -> String {
+    let mut lines: Vec<String> = conflicts
         .iter()
         .map(|c| {
             format!(
@@ -604,8 +812,25 @@ fn hook_deny_reason(conflicts: &[&CheckedRule]) -> String {
                 truncate(&c.span, 240)
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect();
+    if let Some(session_id) = session_id {
+        let rule_flags: String = conflicts
+            .iter()
+            .map(|c| {
+                format!(
+                    "--rule {}",
+                    plan_check_session::key(&c.doc_slug, &c.rule_id)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!(
+            "Round {round}/{max_rounds}. A revised plan is re-checked automatically. To \
+             override explicitly instead, run: actual plan-check-override --session \
+             {session_id} {rule_flags} --reason \"<why>\""
+        ));
+    }
+    lines.join("\n")
 }
 
 fn requires_decision_message(decisions: &[&CheckedRule]) -> String {
@@ -615,6 +840,43 @@ fn requires_decision_message(decisions: &[&CheckedRule]) -> String {
          violate it. Not blocked automatically in this MVP — review before proceeding.",
         ids.join(", ")
     )
+}
+
+/// The non-blocking notice emitted when the round limit is hit with a rule
+/// still conflicting: the gate stops denying, but says exactly why, and
+/// names every rule still unresolved, so this is a loud pass, not a silent
+/// one. Paired with [`plan_check_session::record_round_limit`], which writes
+/// the durable side of the same event.
+fn round_limit_message(conflicts: &[&CheckedRule], round: u32, max_rounds: u32) -> String {
+    let ids: Vec<&str> = conflicts.iter().map(|c| c.rule_id.as_str()).collect();
+    format!(
+        "Actual plan governance hit its round limit ({max_rounds}) for this session with \
+         unresolved conflict(s) on {}: proceeding without blocking further. This is not a \
+         silent pass — round {round} is recorded in plan-check-overrides.log.",
+        ids.join(", ")
+    )
+}
+
+/// A non-blocking reminder naming every active override on `session`, for a
+/// round that would otherwise be completely silent (fully conforming, no
+/// decisions). An override must stay visible on every round it applies to —
+/// never silently absorbed once granted. `None` when the session has no
+/// overrides at all.
+fn override_reminder(session: &PlanCheckSession) -> Option<String> {
+    if session.overrides.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = session
+        .overrides
+        .iter()
+        .map(|o| {
+            format!(
+                "{}: manually overridden ({}) at {}; not re-checked.",
+                o.key, o.reason, o.at
+            )
+        })
+        .collect();
+    Some(lines.join("\n"))
 }
 
 fn non_empty_or<'a>(s: &'a str, fallback: &'a str) -> &'a str {
@@ -639,6 +901,7 @@ fn truncate(text: &str, width: usize) -> String {
 mod tests {
     use super::*;
 
+    use crate::cli::args::DEFAULT_MAX_ROUNDS;
     use tempfile::{tempdir, TempDir};
 
     use crate::rules::types::RuleLevel;
@@ -684,7 +947,7 @@ mod tests {
         let selection = prefiltered.finish(Stage2::NotRequested);
         assert!(!selection.selected.is_empty());
 
-        let gathered = gather_rules(&selection, root.path());
+        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
         assert!(!gathered.truncated);
         let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
         assert!(ids.contains(&"R-A-001"));
@@ -705,7 +968,7 @@ mod tests {
         )
         .unwrap();
 
-        let gathered = gather_rules(&selection, root.path());
+        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
         assert!(gathered.rules.is_empty());
         assert_eq!(gathered.considered, 0);
         assert!(!gathered.truncated);
@@ -727,7 +990,7 @@ mod tests {
         let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
         assert!(!selection.selected.is_empty());
 
-        let gathered = gather_rules(&selection, root.path());
+        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
         assert_eq!(gathered.considered, MAX_RULES_JUDGED + 10);
         assert!(gathered.truncated);
@@ -745,7 +1008,7 @@ mod tests {
         let query = Query::new("Add a new widget in services/widgets".to_string());
         let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
 
-        let gathered = gather_rules(&selection, root.path());
+        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
         assert_eq!(gathered.considered, MAX_RULES_JUDGED);
         assert!(!gathered.truncated);
@@ -761,7 +1024,7 @@ mod tests {
             "log the signing key for debugging",
             "R-A-002 forbids logging the key",
         );
-        let reason = hook_deny_reason(&[&a]);
+        let reason = hook_deny_reason(&[&a], None, 1, DEFAULT_MAX_ROUNDS);
         assert!(reason.contains("R-A-002"));
         assert!(reason.contains("log the signing key for debugging"));
     }
@@ -769,7 +1032,7 @@ mod tests {
     #[test]
     fn test_hook_deny_reason_falls_back_when_the_model_reason_is_blank() {
         let a = checked("R-A-002", Verdict::Conflicting, "some span", "");
-        let reason = hook_deny_reason(&[&a]);
+        let reason = hook_deny_reason(&[&a], None, 1, DEFAULT_MAX_ROUNDS);
         assert!(reason.contains("conflicts with the plan"));
     }
 
@@ -784,8 +1047,28 @@ mod tests {
             "log the signing key for debugging",
             "R-A-002 forbids logging the key",
         );
-        let reason = hook_deny_reason(&[&a]);
+        let reason = hook_deny_reason(&[&a], None, 1, DEFAULT_MAX_ROUNDS);
         assert!(reason.contains(&a.statement));
+    }
+
+    #[test]
+    fn test_hook_deny_reason_with_no_session_omits_override_instructions() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
+        let reason = hook_deny_reason(&[&a], None, 1, DEFAULT_MAX_ROUNDS);
+        assert!(!reason.contains("plan-check-override"));
+    }
+
+    #[test]
+    fn test_hook_deny_reason_with_a_session_names_the_override_command() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
+        let reason = hook_deny_reason(&[&a], Some("sess-123"), 2, 3);
+        assert!(reason.contains("Round 2/3"));
+        assert!(reason.contains("actual plan-check-override"));
+        assert!(reason.contains("--session sess-123"));
+        assert!(reason.contains(&format!(
+            "--rule {}",
+            plan_check_session::key(&a.doc_slug, &a.rule_id)
+        )));
     }
 
     #[test]
@@ -987,6 +1270,7 @@ mod tests {
             model: None,
             json: false,
             rebuild: false,
+            max_rounds: DEFAULT_MAX_ROUNDS,
         }
     }
 
@@ -1108,7 +1392,7 @@ mod tests {
         )
         .unwrap();
 
-        let gathered = gather_rules(&selection, root.path());
+        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
         assert!(gathered.rules.is_empty());
     }
 
@@ -1128,7 +1412,7 @@ mod tests {
         )
         .unwrap();
 
-        let gathered = gather_rules(&selection, root.path());
+        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
         assert!(gathered.rules.is_empty());
     }
 
@@ -1152,6 +1436,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(matches!(
@@ -1178,7 +1463,15 @@ mod tests {
         args.limit = 0;
         let rules_dir = crate::rules::rules_dir(root.path());
 
-        let outcome = run_pipeline("Sign tokens", root.path(), &rules_dir, &args, false).unwrap();
+        let outcome = run_pipeline(
+            "Sign tokens",
+            root.path(),
+            &rules_dir,
+            &args,
+            false,
+            &BTreeSet::new(),
+        )
+        .unwrap();
         assert!(matches!(outcome, Outcome::NothingApplies));
     }
 
@@ -1250,6 +1543,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::NothingApplies));
@@ -1283,6 +1577,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(matches!(
@@ -1317,6 +1612,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(matches!(
@@ -1352,6 +1648,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(matches!(
@@ -1397,6 +1694,7 @@ mod tests {
             &rules_dir,
             &args,
             true,
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(matches!(
@@ -1639,5 +1937,277 @@ mod tests {
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
         exec_hook_with(&args, &raw);
+    }
+
+    // ── the revision loop (AK-677): exclusion, session persistence, ────────
+    // ── round limits, and overrides ─────────────────────────────────────
+
+    /// The mechanism the whole revision loop rests on: a rule named in
+    /// `exclude` is never even offered to the judge as a candidate. Proven
+    /// here by having the fake judge answer for it *anyway* (as a real judge
+    /// flip-flopping on a settled rule would) — `check::check`'s own "never
+    /// invent or drop silently" validation then discards that verdict as
+    /// naming a pair that was never a candidate, so it cannot appear in the
+    /// result no matter what the judge says.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pipeline_excludes_a_settled_rule_even_if_the_judge_answers_for_it_anyway() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        // A judge that flip-flops: R-A-001 was cleared last round, but this
+        // (misbehaving) judge answers "conflicting" for it anyway.
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "flip-flopped", "reason": "should never be seen"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "still conflicting"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let exclude: BTreeSet<String> = [plan_check_session::key(
+            "cross-cutting-token-signing-1c57",
+            "R-A-001",
+        )]
+        .into_iter()
+        .collect();
+
+        let outcome = run_pipeline(
+            "Sign access tokens with RS256",
+            root.path(),
+            &rules_dir,
+            &args,
+            false,
+            &exclude,
+        )
+        .unwrap();
+
+        let Outcome::Verdicts { verdicts, .. } = outcome else {
+            panic!("expected Verdicts, got a different outcome");
+        };
+        assert_eq!(
+            verdicts.len(),
+            1,
+            "the excluded rule must not appear at all"
+        );
+        assert_eq!(verdicts[0].rule_id, "R-A-002");
+    }
+
+    /// When every rule a selection would otherwise judge is already settled,
+    /// there is nothing new to check — this must short-circuit before ever
+    /// resolving a runner (proven by there being no working `CLAUDE_BINARY`
+    /// at all: a real resolution attempt would fail this test as `NoRunner`).
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pipeline_skips_runner_resolution_when_everything_is_already_settled() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let exclude: BTreeSet<String> = [
+            plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001"),
+            plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-002"),
+        ]
+        .into_iter()
+        .collect();
+
+        let outcome = run_pipeline(
+            "Sign access tokens with RS256",
+            root.path(),
+            &rules_dir,
+            &args,
+            false,
+            &exclude,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            Outcome::Verdicts { ref verdicts, runner_label: None, .. } if verdicts.is_empty()
+        ));
+    }
+
+    /// End-to-end through `exec_hook_with`: a mixed conforming/conflicting
+    /// round must persist the conforming rule as cleared and count as one
+    /// round, for the session named in the envelope.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_persists_cleared_rules_and_counts_a_round() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({
+            "session_id": "sess-persist-1",
+            "tool_input": {"plan": "Sign access tokens with RS256"},
+        })
+        .to_string();
+        exec_hook_with(&args, &raw);
+
+        let session = plan_check_session::load("sess-persist-1");
+        assert_eq!(session.rounds, 1);
+        assert!(session.cleared.contains(&plan_check_session::key(
+            "cross-cutting-token-signing-1c57",
+            "R-A-001"
+        )));
+        assert!(!session.cleared.contains(&plan_check_session::key(
+            "cross-cutting-token-signing-1c57",
+            "R-A-002"
+        )));
+    }
+
+    /// The round limit: repeated conflicting rounds for the same session must
+    /// stop denying once the cap is exceeded, and that pass must be recorded
+    /// in the audit log rather than merely inferred from silence.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_stops_denying_and_logs_once_the_round_limit_is_exceeded() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        // Always conflicting on R-A-002, so this session never resolves on
+        // its own -- the only way it stops denying is the round limit.
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.max_rounds = 1;
+        let raw = serde_json::json!({
+            "session_id": "sess-limit-1",
+            "tool_input": {"plan": "Sign access tokens with RS256"},
+        })
+        .to_string();
+
+        // Round 1: rounds becomes 1, 1 > max_rounds(1) is false -> normal deny.
+        exec_hook_with(&args, &raw);
+        assert_eq!(plan_check_session::load("sess-limit-1").rounds, 1);
+
+        // Round 2: rounds becomes 2, 2 > 1 -> the gate stops denying.
+        exec_hook_with(&args, &raw);
+        assert_eq!(plan_check_session::load("sess-limit-1").rounds, 2);
+
+        let log = std::fs::read_to_string(plan_check_session::audit_log_path().unwrap()).unwrap();
+        assert!(log.contains("\"kind\":\"round_limit\""));
+        assert!(log.contains("sess-limit-1"));
+    }
+
+    /// An override recorded for a session is honored on the next round: the
+    /// overridden rule is excluded from judging even if the judge would
+    /// otherwise still call it conflicting.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_honors_a_recorded_override() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+
+        plan_check_session::record_override(
+            "sess-override-1",
+            &[
+                plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001"),
+                plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-002"),
+            ],
+            "reviewed and accepted by the security team",
+        );
+
+        // No working runner at all: if the override did not exclude both
+        // rules, run_pipeline would need to resolve one and this would
+        // surface as NoRunner instead of completing silently.
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({
+            "session_id": "sess-override-1",
+            "tool_input": {"plan": "Sign access tokens with RS256"},
+        })
+        .to_string();
+        exec_hook_with(&args, &raw);
+
+        // The override itself is untouched by this round (exec_hook_with
+        // only ever adds to `cleared`, never to `overrides`).
+        let session = plan_check_session::load("sess-override-1");
+        assert_eq!(session.overrides.len(), 2);
+    }
+
+    #[test]
+    fn test_override_reminder_none_without_any_overrides() {
+        assert!(override_reminder(&PlanCheckSession::default()).is_none());
+    }
+
+    #[test]
+    fn test_override_reminder_names_the_rule_and_reason() {
+        let mut session = PlanCheckSession::default();
+        session.overrides.push(plan_check_session::Override {
+            key: plan_check_session::key("doc", "R-001"),
+            reason: "reviewed and accepted".to_string(),
+            at: chrono::Utc::now(),
+            round: 1,
+        });
+        let reminder = override_reminder(&session).unwrap();
+        assert!(reminder.contains("doc::R-001"));
+        assert!(reminder.contains("reviewed and accepted"));
+    }
+
+    #[test]
+    fn test_round_limit_message_names_every_unresolved_rule() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
+        let message = round_limit_message(&[&a], 4, 3);
+        assert!(message.contains("R-A-002"));
+        assert!(message.contains("round limit (3)"));
+    }
+
+    #[test]
+    fn test_exec_override_records_and_returns_ok() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-1".to_string(),
+            rules: vec![plan_check_session::key("doc", "R-001")],
+            reason: "reviewed and accepted".to_string(),
+        };
+        assert!(exec_override(&args).is_ok());
+
+        let session = plan_check_session::load("sess-cli-1");
+        assert_eq!(session.overrides.len(), 1);
+        assert_eq!(session.overrides[0].reason, "reviewed and accepted");
     }
 }

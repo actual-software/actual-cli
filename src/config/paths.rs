@@ -138,12 +138,22 @@ pub fn save_to(config: &Config, path: &Path) -> Result<(), ActualError> {
 }
 
 /// Write config content to a file, ensuring it is never world-readable.
+fn write_config_secure(path: &Path, content: &str) -> Result<(), ActualError> {
+    write_secure(path, content.as_bytes())
+        .map_err(|e| config_error(format!("Failed to write config file: {e}")))
+}
+
+/// Write `bytes` to `path`, ensuring the file is never world-readable.
 ///
 /// On unix, opens the file with `O_CREAT | mode(0o600)` so the file is created
-/// with restricted permissions from the start — no TOCTOU gap.
-/// On non-unix, falls back to a plain write.
+/// with restricted permissions from the start — no TOCTOU gap between an
+/// ordinary write and a later `chmod`. On non-unix, falls back to a plain
+/// write. Shared by every module under `config_dir()` that writes a file of
+/// its own (config, tokens, credentials, plan-check session/audit state) so
+/// the secure-creation idiom is written once rather than re-implemented per
+/// caller.
 #[cfg(unix)]
-fn write_config_secure(path: &Path, content: &str) -> Result<(), ActualError> {
+pub fn write_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()
@@ -151,18 +161,38 @@ fn write_config_secure(path: &Path, content: &str) -> Result<(), ActualError> {
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(path)
-        .map_err(|e| config_error(format!("Failed to open config file for writing: {e}")))?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| config_error(format!("Failed to write config file: {e}")))?;
-    Ok(())
+        .open(path)?;
+    file.write_all(bytes)
+}
+
+/// Append `bytes` to `path`, creating it with owner-only permissions if it
+/// does not already exist. Unlike [`write_secure`], never truncates — for an
+/// append-only log where every prior line must survive.
+#[cfg(unix)]
+pub fn append_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)
 }
 
 #[cfg(not(unix))]
-fn write_config_secure(path: &Path, content: &str) -> Result<(), ActualError> {
-    std::fs::write(path, content)
-        .map_err(|e| config_error(format!("Failed to write config file: {e}")))?;
-    Ok(())
+pub fn write_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
+#[cfg(not(unix))]
+pub fn append_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
+    file.write_all(bytes)
 }
 
 #[cfg(test)]
@@ -432,10 +462,10 @@ mod tests {
         std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let err = save_to(&Config::default(), &config_file).unwrap_err();
-        // With write_config_secure, the open() call fails on read-only file
+        // With write_secure, the open() call fails on read-only file; the
+        // shared helper wraps both open and write failures under one message.
         assert!(
-            err.to_string()
-                .contains("Failed to open config file for writing"),
+            err.to_string().contains("Failed to write config file"),
             "Unexpected error: {err}"
         );
 

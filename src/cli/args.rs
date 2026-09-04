@@ -347,6 +347,10 @@ pub enum Command {
     Rules(RulesArgs),
     /// Check an implementation plan against the selected `.actual/rules/`
     PlanCheck(PlanCheckArgs),
+    /// Explicitly override one or more rules the plan-check revision loop
+    /// has denied, for a specific session — a human action, never the agent's
+    #[command(name = "plan-check-override")]
+    PlanCheckOverride(PlanCheckOverrideArgs),
 }
 
 /// Arguments for the `advisor` command
@@ -894,6 +898,52 @@ pub struct PlanCheckArgs {
     /// Rebuild the scope index before selecting.
     #[arg(long)]
     pub rebuild: bool,
+
+    /// How many rounds of the revision loop (`--claude-hook` only) a single
+    /// Claude Code session may spend denying the same conflict before the
+    /// gate stops blocking regardless of verdict. A round is one completed
+    /// judge call; fail-open outcomes (no runner, no applicable rules, a
+    /// crashed judge call) never count. Direct mode ignores this — there is
+    /// no session outside a hook envelope.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_ROUNDS,
+        env = "ACTUAL_PLAN_CHECK_MAX_ROUNDS"
+    )]
+    pub max_rounds: u32,
+}
+
+/// Default for [`PlanCheckArgs::max_rounds`].
+pub const DEFAULT_MAX_ROUNDS: u32 = 3;
+
+/// Arguments for the `plan-check-override` command: a human, never the
+/// agent, explicitly clearing one or more rules that the revision loop
+/// (`--claude-hook`) has denied, for a specific session.
+///
+/// There is deliberately no way for an agent to invoke this on its own
+/// behalf — the whole point of an override is that it is a human decision,
+/// made outside the agent's control, and [`crate::cli::commands::plan_check_session::record_override`]
+/// writes a durable, append-only audit-log entry for every one, so an
+/// override is visible, never silent.
+#[derive(Parser, Debug)]
+pub struct PlanCheckOverrideArgs {
+    /// The session to override. The deny message's last line names the exact
+    /// `plan-check-override` invocation to run, with this value already
+    /// filled in. Identifies one Claude Code conversation's revision loop.
+    #[arg(long, value_name = "SESSION_ID")]
+    pub session: String,
+
+    /// A rule to override, as `<doc-slug>::<rule-id>` (also as printed in the
+    /// deny message's suggested override command). Repeatable — one override
+    /// call can clear several rules at once, each recorded as its own
+    /// audit-log entry.
+    #[arg(long = "rule", value_name = "DOC_SLUG::RULE_ID", required = true, num_args = 1..)]
+    pub rules: Vec<String>,
+
+    /// Why this rule is being overridden. Required: an override with no
+    /// stated reason defeats the point of recording one.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: String,
 }
 
 #[cfg(test)]
