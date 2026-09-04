@@ -95,6 +95,13 @@ cargo run -- rules eval --golden tests/fixtures/scope_corpus/golden.json \
 `--rank` is opt-in because it costs one runner call per case. The default run is
 the offline comparison, which is what CI can afford on every commit.
 
+`--rank` measures the shipped command, trigger included: it reaches stage 2
+through the same `Prefiltered::rank_with` that `rules select` uses, so a case
+whose prefilter already fits the cap is scored without a model call, exactly as
+the command would answer it. That matters because an ungated measurement would
+be free to trim a set the command returns whole, and would report a precision
+the command never achieves.
+
 **Fixture corpus** — 38 rule files, 16 plans, cap 5, stage 2 on `claude-cli`
 with `claude-sonnet-4-6`:
 
@@ -108,6 +115,10 @@ Precision is where the rank pays, and it pays where the design says it should:
 0.86 against the index's 0.68, with recall unchanged at 0.87. Stage 2 cannot
 retrieve a rule stage 1 missed, so it does not move recall; what it does is stop
 returning the ones stage 1 got wrong.
+
+All sixteen cases leave more candidates than the cap — between 6 and 19 — so
+stage 2 ran on every one, and the trigger does not separate these numbers from
+what `rules select` returns.
 
 Two of those sixteen cases degraded to the prefilter mid-run — one runner
 timeout, one runner error — and were scored as prefilter results. The 0.86 is

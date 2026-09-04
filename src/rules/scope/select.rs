@@ -257,6 +257,48 @@ impl Prefiltered {
         self.selection(selected, stage2)
     }
 
+    /// Stage 2 over this candidate set, when it is warranted.
+    ///
+    /// **This is the only place the stage-2 trigger is decided.** Every caller
+    /// that has a runner goes through here — the `rules select` command,
+    /// `rules eval --rank`, and [`select`] — so a measurement cannot report a
+    /// number for a path the shipped command does not take. An earlier version
+    /// had the gate in two of the three and the tests pointed at the third.
+    ///
+    /// Never fails: a runner that is down, slow or wrong produces the stage-1
+    /// answer with the reason recorded, because a degraded selection is the
+    /// acceptance criterion and an error is not.
+    pub async fn rank_with<R: StructuredRunner>(
+        &self,
+        runner: &R,
+        model_override: Option<&str>,
+        max_budget_usd: Option<f64>,
+    ) -> Selection {
+        if !self.needs_rank() {
+            // `finish` rewrites this to `NotNeeded`, which is the honest
+            // status: no model was wanted, rather than none being available.
+            return self.finish(Stage2::NotRequested);
+        }
+        match rank::rank(
+            runner,
+            self.plan(),
+            self.paths(),
+            &self.candidates(),
+            model_override,
+            max_budget_usd,
+        )
+        .await
+        {
+            Ok(verdicts) => self.apply(&verdicts),
+            Err(e) => {
+                tracing::warn!("stage-2 rank failed, falling back to the prefilter: {e}");
+                self.finish(Stage2::Failed {
+                    reason: e.to_string(),
+                })
+            }
+        }
+    }
+
     /// Apply `verdicts` to the candidate set.
     ///
     /// The ranker partitions; this function orders. A candidate judged
@@ -347,11 +389,12 @@ impl Prefiltered {
     }
 }
 
-/// Both stages, with `runner` used only when stage 1 leaves a surplus.
+/// Both stages, for a caller that has no reason to hold the prefilter.
 ///
-/// Never fails: a runner that is down, slow or wrong produces the stage-1
-/// answer with the reason recorded, because a degraded selection is the
-/// acceptance criterion and an error is not.
+/// A convenience wrapper over [`prefilter`] and [`Prefiltered::rank_with`],
+/// which is where the behaviour lives. A caller that needs the candidate count
+/// before deciding anything — every CLI path does, to resolve a runner only
+/// when one will be used — should call those two directly.
 pub async fn select<R: StructuredRunner>(
     index: &ScopeIndex,
     query: &Query,
@@ -361,29 +404,9 @@ pub async fn select<R: StructuredRunner>(
     model_override: Option<&str>,
     max_budget_usd: Option<f64>,
 ) -> Selection {
-    let prefiltered = prefilter(index, query, limit, candidate_cap);
-    if !prefiltered.needs_rank() {
-        return prefiltered.finish(Stage2::NotRequested);
-    }
-    let candidates = prefiltered.candidates();
-    match rank::rank(
-        runner,
-        prefiltered.plan(),
-        prefiltered.paths(),
-        &candidates,
-        model_override,
-        max_budget_usd,
-    )
-    .await
-    {
-        Ok(verdicts) => prefiltered.apply(&verdicts),
-        Err(e) => {
-            tracing::warn!("stage-2 rank failed, falling back to the prefilter: {e}");
-            prefiltered.finish(Stage2::Failed {
-                reason: e.to_string(),
-            })
-        }
-    }
+    prefilter(index, query, limit, candidate_cap)
+        .rank_with(runner, model_override, max_budget_usd)
+        .await
 }
 
 /// Terms named in a reason line. Past a handful they stop being evidence and
@@ -752,6 +775,43 @@ mod tests {
             "stage 2 must not run without a surplus"
         );
         assert!(matches!(selection.stage2, Stage2::NotNeeded { .. }));
+    }
+
+    /// The gate belongs to `rank_with`, not to `select`. Asserting it here is
+    /// what makes it true for every caller: `rules select` and
+    /// `rules eval --rank` both reach stage 2 through this method, and an
+    /// earlier version that gated in `select` alone left the eval path
+    /// ungated while this file's tests still passed.
+    #[tokio::test]
+    async fn test_rank_with_skips_the_runner_when_the_prefilter_fits_the_cap() {
+        let (_root, index) = corpus();
+        let runner = FakeRunner::ok(serde_json::json!({}));
+        let prefiltered = prefilter(&index, &token_query(), 50, 50);
+        assert!(!prefiltered.needs_rank());
+
+        let selection = prefiltered.rank_with(&runner, None, None).await;
+        assert!(
+            !runner.was_called(),
+            "stage 2 must not run without a surplus"
+        );
+        assert!(matches!(selection.stage2, Stage2::NotNeeded { .. }));
+        // And the answer is the whole prefilter, untrimmed — an ungated rank
+        // would have dropped whatever it judged `unrelated`.
+        assert_eq!(selection.selected.len(), prefiltered.len());
+    }
+
+    #[tokio::test]
+    async fn test_rank_with_calls_the_runner_when_there_is_a_surplus() {
+        let (_root, index) = corpus();
+        let prefiltered = prefilter(&index, &token_query(), 1, DEFAULT_CANDIDATES);
+        assert!(prefiltered.needs_rank());
+        let slug = prefiltered.candidates()[1].slug.clone();
+        let runner = FakeRunner::ok(verdicts(&[(&slug, "governs", "it governs the change")]));
+
+        let selection = prefiltered.rank_with(&runner, None, None).await;
+        assert!(runner.was_called());
+        assert!(selection.stage2.is_applied());
+        assert_eq!(selection.selected[0].slug, slug);
     }
 
     #[tokio::test]
