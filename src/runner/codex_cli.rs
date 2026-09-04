@@ -228,10 +228,15 @@ async fn run_codex_subprocess<T: serde::de::DeserializeOwned>(
     // on drop, preventing orphaned processes.
     cmd.kill_on_drop(true);
 
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    // Retry on ETXTBSY, as every other spawn site in this crate does. A binary
+    // that is still being written — by an installer, an update, or a test that
+    // just made its own fake executable — is busy for a few milliseconds, and
+    // spawning it once turns that window into a hard failure.
+    let child = crate::runner::util::spawn_with_etxtbsy_retry(|| cmd.spawn())
+        .await
         .map_err(|e| io_err("Failed to spawn Codex CLI", e))?;
 
     let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
