@@ -215,16 +215,6 @@ pub fn load_rule_set(root_dir: &Path) -> Result<RuleSetLoadReport, ActualError> 
     Ok(parse_rule_sources(read_rule_sources(root_dir)?))
 }
 
-/// Load every rule document directly out of `dir`.
-///
-/// The convention-based [`load_rule_set`] is the usual entry point. This one
-/// exists for the same reason [`read_rule_sources_in`] does: the plan-stage
-/// hook resolves the rules directory itself and forwards the resolved path
-/// in, rather than a repository root for this command to rediscover it from.
-pub fn load_rule_set_in(dir: &Path) -> Result<RuleSetLoadReport, ActualError> {
-    Ok(parse_rule_sources(read_rule_sources_in(dir)?))
-}
-
 /// Reject a repository root that does not exist or is not a directory.
 ///
 /// This exists to keep two states apart that are otherwise indistinguishable in

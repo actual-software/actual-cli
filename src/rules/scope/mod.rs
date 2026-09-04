@@ -278,6 +278,139 @@ mod tests {
         assert!(resolve(root.path(), false).is_err());
     }
 
+    // ── resolve_in: the explicit-directory path `--rules-dir` drives ────────
+
+    #[test]
+    fn test_resolve_in_builds_then_reuses_the_cached_index() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        // An explicit directory that is not the `<root>/.actual/rules`
+        // convention path — exactly the shape `--rules-dir` /
+        // `ACTUAL_RULES_DIR` produces for a monorepo subproject.
+        let root = tempdir().unwrap();
+        let explicit_dir = root.path().join("subproject-rules");
+        std::fs::create_dir_all(&explicit_dir).unwrap();
+        std::fs::write(explicit_dir.join("a.md"), DOC).unwrap();
+        std::fs::write(explicit_dir.join("b.md"), OTHER).unwrap();
+
+        let first = resolve_in(&explicit_dir, root.path(), false).unwrap();
+        assert_eq!(first.source, IndexSource::Built);
+        assert_eq!(first.index.len(), 2);
+        assert!(first.report.is_some());
+
+        let second = resolve_in(&explicit_dir, root.path(), false).unwrap();
+        assert_eq!(second.source, IndexSource::Cached);
+        assert_eq!(second.index, first.index);
+        assert!(second.report.is_none());
+    }
+
+    #[test]
+    fn test_resolve_in_rebuilds_after_a_rule_file_changes() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let root = tempdir().unwrap();
+        let explicit_dir = root.path().join("subproject-rules");
+        std::fs::create_dir_all(&explicit_dir).unwrap();
+        std::fs::write(explicit_dir.join("a.md"), DOC).unwrap();
+
+        assert_eq!(
+            resolve_in(&explicit_dir, root.path(), false)
+                .unwrap()
+                .index
+                .len(),
+            1
+        );
+
+        std::fs::write(explicit_dir.join("b.md"), OTHER).unwrap();
+        let after = resolve_in(&explicit_dir, root.path(), false).unwrap();
+        assert_eq!(after.source, IndexSource::Built);
+        assert_eq!(after.index.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_in_force_rebuild_rewrites_the_cache() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let root = tempdir().unwrap();
+        let explicit_dir = root.path().join("subproject-rules");
+        std::fs::create_dir_all(&explicit_dir).unwrap();
+        std::fs::write(explicit_dir.join("a.md"), DOC).unwrap();
+        resolve_in(&explicit_dir, root.path(), false).unwrap();
+
+        let forced = resolve_in(&explicit_dir, root.path(), true).unwrap();
+        assert_eq!(forced.source, IndexSource::Rebuilt);
+        assert_eq!(
+            resolve_in(&explicit_dir, root.path(), false)
+                .unwrap()
+                .source,
+            IndexSource::Cached
+        );
+    }
+
+    /// A directory that is not `<root>/.actual/rules` must not collide with
+    /// the convention path's own cache entry — this is the whole point of
+    /// `--rules-dir`: a monorepo subproject's rules are governed
+    /// independently of anything the outer root's convention path might find.
+    #[test]
+    fn test_resolve_in_does_not_collide_with_the_convention_path_cache() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let root = seed(&[("a.md", DOC)]);
+        let explicit_dir = root.path().join("subproject-rules");
+        std::fs::create_dir_all(&explicit_dir).unwrap();
+        std::fs::write(explicit_dir.join("a.md"), DOC).unwrap();
+        std::fs::write(explicit_dir.join("b.md"), OTHER).unwrap();
+
+        let via_convention = resolve(root.path(), false).unwrap();
+        let via_explicit_dir = resolve_in(&explicit_dir, root.path(), false).unwrap();
+
+        assert_eq!(via_convention.index.len(), 1);
+        assert_eq!(via_explicit_dir.index.len(), 2);
+        assert_eq!(via_convention.source, IndexSource::Built);
+        assert_eq!(via_explicit_dir.source, IndexSource::Built);
+    }
+
+    #[test]
+    fn test_resolve_in_on_a_directory_that_does_not_exist() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let root = tempdir().unwrap();
+        let missing_dir = root.path().join("no-such-rules-dir");
+        let resolved = resolve_in(&missing_dir, root.path(), false).unwrap();
+        assert!(resolved.index.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_in_propagates_a_load_failure() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let root = tempdir().unwrap();
+        // A path that exists but is a file, not a directory: `read_dir` fails
+        // with something other than `NotFound`.
+        let not_a_dir = root.path().join("rules-dir-is-a-file");
+        std::fs::write(&not_a_dir, "not a directory").unwrap();
+
+        assert!(resolve_in(&not_a_dir, root.path(), false).is_err());
+    }
+
     #[test]
     fn test_index_source_labels() {
         assert_eq!(IndexSource::Cached.label(), "(cached)");

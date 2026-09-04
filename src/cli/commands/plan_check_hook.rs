@@ -24,7 +24,7 @@
 //! resolved" rather than an error, because the caller's whole reason for
 //! being here is that fail-open is mandatory.
 
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -129,12 +129,21 @@ pub fn resolve_plan(envelope: &HookEnvelope) -> Option<(String, PlanSource)> {
 }
 
 /// Read a file, refusing anything empty or over [`MAX_READ_BYTES`].
+///
+/// The read itself is capped at one byte past [`MAX_READ_BYTES`] via
+/// `Read::take`, the same pattern `crate::rules::discover::read_rule_file`
+/// uses, rather than checking `metadata().len()` first and then reading the
+/// whole file: a stat-then-read has a gap between the two — a file that
+/// grows after the check (or a sparse file whose reported length understates
+/// what a read produces) would still be buffered in full despite the check
+/// having passed.
 fn read_capped(path: &Path) -> Option<String> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if metadata.len() > MAX_READ_BYTES {
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_READ_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_READ_BYTES {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
     let text = String::from_utf8(bytes).ok()?;
     if text.trim().is_empty() {
         None
@@ -320,6 +329,23 @@ mod tests {
     #[test]
     fn test_resolve_plan_none_when_plan_file_path_is_unreadable() {
         let env = envelope(r#"{"tool_input":{"planFilePath":"/no/such/file.md"}}"#);
+        assert!(resolve_plan(&env).is_none());
+    }
+
+    /// `read_capped` must actually refuse an oversized file rather than
+    /// buffering it in full: it is capped via `Read::take`, not a
+    /// stat-then-read, precisely so a file that exceeds `MAX_READ_BYTES`
+    /// never gets fully read into memory before being rejected.
+    #[test]
+    fn test_resolve_plan_none_when_plan_file_path_exceeds_max_read_bytes() {
+        let dir = tempdir().unwrap();
+        let plan_file = dir.path().join("huge.md");
+        let oversized = vec![b'x'; (MAX_READ_BYTES + 1) as usize];
+        std::fs::write(&plan_file, &oversized).unwrap();
+        let env = envelope(&format!(
+            r#"{{"tool_input":{{"planFilePath":"{}"}}}}"#,
+            plan_file.display()
+        ));
         assert!(resolve_plan(&env).is_none());
     }
 

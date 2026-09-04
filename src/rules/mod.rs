@@ -14,16 +14,20 @@
 //!   offline, which is the layer that replaces reading filenames by eye.
 //! * [`check`] is the conformance evaluation: it takes the rules `scope`
 //!   selected and asks whether a plan actually obeys them.
+//! * [`prompt_fence`] is a small shared helper `scope::rank` and `check` both
+//!   use to interpolate the developer's plan into a prompt without letting an
+//!   imitated section header close the block early.
 
 pub mod check;
 pub mod discover;
 pub mod parse;
+mod prompt_fence;
 pub mod scope;
 pub mod types;
 
 pub use discover::{
-    load_rule_set, load_rule_set_in, parse_rule_sources, read_rule_sources, read_rule_sources_in,
-    rules_dir, RuleSource, RuleSources, MAX_RULE_FILE_SIZE, RULES_DIR_NAME,
+    load_rule_set, parse_rule_sources, read_rule_sources, read_rule_sources_in, rules_dir,
+    RuleSource, RuleSources, MAX_RULE_FILE_SIZE, RULES_DIR_NAME,
 };
 pub use parse::parse_rule_document;
 pub use scope::{resolve, resolve_in, IndexSource, Match, Query, ResolvedIndex, ScopeIndex};
