@@ -27,7 +27,6 @@ use crate::rules::scope::{
     self, baseline,
     eval::{CaseResult, EvaluationReport, GoldenCase, Scores},
     index::{Field, Match, Query, ScopeIndex, Weights},
-    rank,
     select::{self, Selection, Stage2},
     IndexSource, ResolvedIndex,
 };
@@ -198,8 +197,10 @@ fn run_selection(
 ) -> Result<SelectionRun, ActualError> {
     let prefiltered = select::prefilter(index, query, args.limit, args.candidates);
 
-    // `finish` reports `NotNeeded` on its own when the prefilter already fits
-    // inside the cap, so both of these produce the honest status.
+    // Resolving a runner probes the environment and can spawn a subprocess, so
+    // it is skipped whenever stage 2 would not be asked anyway. `finish`
+    // reports `NotNeeded` on its own when the prefilter already fits inside the
+    // cap, so both of these produce the honest status.
     if args.no_rank || !prefiltered.needs_rank() {
         return Ok(SelectionRun {
             selection: prefiltered.finish(Stage2::NotRequested),
@@ -222,19 +223,10 @@ fn run_selection(
             }
         };
 
-    let label = resolved_runner.label();
-    match rank_with(&resolved_runner, &prefiltered) {
-        Ok(verdicts) => Ok(SelectionRun {
-            selection: prefiltered.apply(&verdicts),
-            runner: Some(label),
-        }),
-        Err(e) => Ok(SelectionRun {
-            selection: prefiltered.finish(Stage2::Failed {
-                reason: e.to_string(),
-            }),
-            runner: Some(label),
-        }),
-    }
+    Ok(SelectionRun {
+        runner: Some(resolved_runner.label()),
+        selection: rank_with(&resolved_runner, &prefiltered)?,
+    })
 }
 
 /// Drive one rank call on its own runtime.
@@ -245,19 +237,12 @@ fn run_selection(
 fn rank_with(
     resolved: &ResolvedRunner,
     prefiltered: &select::Prefiltered,
-) -> Result<Vec<rank::RankedVerdict>, ActualError> {
+) -> Result<Selection, ActualError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
-    runtime.block_on(rank::rank(
-        &resolved.runner,
-        prefiltered.plan(),
-        prefiltered.paths(),
-        &prefiltered.candidates(),
-        resolved.model.as_deref(),
-        None,
-    ))
+    Ok(runtime.block_on(prefiltered.rank_with(&resolved.runner, resolved.model.as_deref(), None)))
 }
 
 /// `0.83  governs  cross-cutting-access-tokens-include-e410`, with the reason
@@ -600,19 +585,18 @@ fn evaluate_two_stage(
     for case in cases {
         let query = Query::new(case.plan.clone()).with_paths(case.paths.clone());
         let prefiltered = select::prefilter(index, &query, args.limit, args.candidates);
-        let selection = match rank_with(&resolved, &prefiltered) {
-            Ok(verdicts) => prefiltered.apply(&verdicts),
-            // One failed case degrades to the prefilter rather than aborting
-            // the run: a partial measurement across ten plans is worth more
-            // than no measurement because the ninth timed out. The status is
-            // still recorded in the selection.
-            Err(e) => {
-                tracing::warn!(case = %case.name, "rank failed, scoring the prefilter: {e}");
-                prefiltered.finish(Stage2::Failed {
-                    reason: e.to_string(),
-                })
-            }
-        };
+        // The same call `rules select` makes, gate included. A measurement that
+        // ranked cases the command would have left alone would be reporting a
+        // number for a path nobody takes.
+        //
+        // A case whose rank fails degrades to the prefilter inside `rank_with`
+        // rather than aborting the run: a partial measurement across ten plans
+        // is worth more than no measurement because the ninth timed out, and
+        // the reason is recorded on the selection either way.
+        let selection = rank_with(&resolved, &prefiltered)?;
+        if let Stage2::Failed { reason } = &selection.stage2 {
+            tracing::warn!(case = %case.name, "rank failed, scoring the prefilter: {reason}");
+        }
         let selected: Vec<String> = selection
             .selected
             .iter()
@@ -690,6 +674,10 @@ fn truncate(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Only the tests build verdicts by hand; the command paths reach stage 2
+    // through `Prefiltered::rank_with`.
+    use crate::rules::scope::rank;
 
     use tempfile::{tempdir, TempDir};
 
