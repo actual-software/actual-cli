@@ -687,24 +687,40 @@ mod tests {
     /// without waiting on it.
     #[tokio::test(start_paused = true)]
     async fn test_rank_gives_up_at_the_budget() {
-        struct HangingRunner;
+        #[derive(Default)]
+        struct HangingRunner {
+            called: std::sync::atomic::AtomicBool,
+        }
 
         impl StructuredRunner for HangingRunner {
-            async fn run_structured_json(
+            /// Hands back a future that never resolves.
+            ///
+            /// Written as a plain function returning a future rather than as an
+            /// `async fn`, which the trait's return-position `impl Future`
+            /// allows. An `async fn` that never resolves never reaches its own
+            /// closing brace, and a line nothing reaches is a line coverage
+            /// counts as missed. This way every line here runs.
+            fn run_structured_json(
                 &self,
                 _prompt: &str,
                 _schema: &str,
                 _model_override: Option<&str>,
                 _max_budget_usd: Option<f64>,
-            ) -> Result<serde_json::Value, ActualError> {
-                tokio::time::sleep(RANK_BUDGET * 4).await;
-                unreachable!("the budget should have fired first")
+            ) -> impl std::future::Future<Output = Result<serde_json::Value, ActualError>> + Send
+            {
+                self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::future::pending()
             }
         }
 
-        let err = rank(&HangingRunner, "plan", &[], &candidates(), None, None)
+        let runner = HangingRunner::default();
+        let err = rank(&runner, "plan", &[], &candidates(), None, None)
             .await
             .unwrap_err();
+        assert!(
+            runner.called.load(std::sync::atomic::Ordering::SeqCst),
+            "the budget must bound a runner the rank actually reached"
+        );
         assert!(
             matches!(err, ActualError::RunnerTimeout { seconds } if seconds == RANK_BUDGET.as_secs())
         );

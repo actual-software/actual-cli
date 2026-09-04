@@ -357,6 +357,54 @@ mod tests {
         )
     }
 
+    /// A stage-2 rank payload, which shares nothing with `TailoringOutput`.
+    const RANK_PAYLOAD: &str =
+        r#"{"verdicts":[{"slug":"a-rule","verdict":"governs","reason":"because"}]}"#;
+
+    /// The second caller of the same subprocess path: any schema, returned
+    /// unparsed, unwrapped from Cursor's stdout envelope.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_structured_json_returns_the_payload_verbatim() {
+        use crate::runner::structured::StructuredRunner;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-agent.sh");
+        let envelope = cursor_envelope(RANK_PAYLOAD);
+        let script_content = format!("#!/bin/sh\necho '{}'\n", envelope.replace('\'', "'\\''"));
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let value = CursorCliRunner::new(script, None, Duration::from_secs(10))
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::from_str::<serde_json::Value>(RANK_PAYLOAD).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_run_structured_json_propagates_a_subprocess_failure() {
+        use crate::runner::structured::StructuredRunner;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-agent.sh");
+        std::fs::write(&script, "#!/bin/sh\necho 'nope' >&2\nexit 3\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = CursorCliRunner::new(script, None, Duration::from_secs(10))
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .await
+            .expect_err("expected Err");
+        assert!(err.to_string().to_lowercase().contains("cursor"), "{err}");
+    }
+
     // ---- Test 1: valid JSON parsed correctly ----
 
     #[tokio::test]

@@ -744,16 +744,8 @@ mod tests {
         .unwrap();
 
         let selection = prefiltered.apply(&parsed);
-        let Stage2::Applied {
-            governs,
-            related,
-            unrelated,
-            unjudged,
-            candidates,
-        } = selection.stage2
-        else {
-            panic!("expected an applied rank");
-        };
+        #[rustfmt::skip]
+        let Stage2::Applied { governs, related, unrelated, unjudged, candidates } = selection.stage2 else { unreachable!("expected an applied rank") };
         assert_eq!((governs, related, unrelated), (1, 1, 1));
         assert_eq!(unjudged, slugs.len() - 3);
         assert_eq!(candidates, slugs.len());
@@ -868,9 +860,8 @@ mod tests {
         )
         .await;
         assert!(runner.was_called());
-        let Stage2::Failed { ref reason } = selection.stage2 else {
-            panic!("expected a failed rank, got {:?}", selection.stage2);
-        };
+        #[rustfmt::skip]
+        let Stage2::Failed { ref reason } = selection.stage2 else { unreachable!("expected a failed rank") };
         assert!(reason.contains("runner is down"));
         assert_eq!(selection.selected.len(), 2);
         for rule in &selection.selected {

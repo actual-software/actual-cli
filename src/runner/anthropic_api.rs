@@ -543,6 +543,57 @@ mod tests {
         assert_eq!(output.summary.total_input, 1);
     }
 
+    /// The second caller of the same request path: any schema, returned
+    /// unparsed. The selection ranker uses this, and its payload has nothing to
+    /// do with tailoring, so the tool-use extraction has to be output-agnostic.
+    #[tokio::test]
+    async fn test_run_structured_json_returns_the_tool_use_payload_verbatim() {
+        use crate::runner::structured::StructuredRunner;
+
+        let mut server = Server::new_async().await;
+        let payload = serde_json::json!({
+            "verdicts": [{"slug": "a-rule", "verdict": "governs", "reason": "because"}]
+        });
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(anthropic_tool_use_response(payload.clone()).to_string())
+            .create_async()
+            .await;
+
+        let value = make_runner(&server.url())
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .await
+            .expect("expected Ok");
+
+        mock.assert_async().await;
+        assert_eq!(value, payload);
+    }
+
+    /// A transport failure reaches the caller rather than being swallowed, so
+    /// stage 2 can record why it degraded.
+    #[tokio::test]
+    async fn test_run_structured_json_propagates_a_server_error() {
+        use crate::runner::structured::StructuredRunner;
+
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .with_status(500)
+            .with_body("boom")
+            .create_async()
+            .await;
+
+        let err = make_runner(&server.url())
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .await
+            .expect_err("expected Err");
+
+        mock.assert_async().await;
+        assert!(err.to_string().contains("500"), "{err}");
+    }
+
     // Test 2: 401 maps to ApiKeyMissing with ANTHROPIC_API_KEY
     #[tokio::test]
     async fn test_401_maps_to_api_key_missing() {

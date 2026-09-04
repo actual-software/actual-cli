@@ -349,6 +349,235 @@ mod tests {
         Config::default()
     }
 
+    /// A fake backend on disk: answers the auth probe as logged in, and every
+    /// other invocation with `payload` on stdout.
+    ///
+    /// One script serves all three CLI backends because each is driven the same
+    /// way — spawn, read stdout — and what is under test here is the wiring
+    /// that picks and builds a runner, not the backend's own protocol, which
+    /// each runner module tests against its own fake.
+    #[cfg(unix)]
+    fn fake_backend(dir: &std::path::Path, name: &str, payload: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = dir.join(name);
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{payload}'\n"
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// A stream-json envelope carrying `inner` as the structured result, which
+    /// is what the Claude CLI runner reads.
+    #[cfg(unix)]
+    fn claude_envelope(inner: serde_json::Value) -> String {
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "structured_output": inner,
+        })
+        .to_string()
+    }
+
+    /// The payload a rank returns, in the shape `parse_verdicts` accepts.
+    #[cfg(unix)]
+    fn rank_payload() -> serde_json::Value {
+        serde_json::json!({"verdicts": []})
+    }
+
+    // ── the production wiring: probe, build, and dispatch ───────────────
+
+    /// `resolve` end to end on the one backend a test can stand up on disk:
+    /// the probe passes, the claude arm of `build` runs, and the enum carries a
+    /// runner that actually answers.
+    /// Helper: drive one async call on a fresh runtime.
+    ///
+    /// These tests cannot be `#[tokio::test]`: `resolve` probes auth by
+    /// building a runtime of its own, and nesting one runtime inside another
+    /// panics. So the resolution happens synchronously and only the runner call
+    /// is driven.
+    #[cfg(unix)]
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_builds_a_claude_runner_that_answers() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let script = fake_backend(
+            dir.path(),
+            "fake-claude.sh",
+            &claude_envelope(rank_payload()),
+        );
+        let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+
+        let resolved = resolve(Some(&RunnerChoice::ClaudeCli), Some("haiku"), &config())
+            .expect("claude-cli should resolve against the fake binary");
+        assert_eq!(resolved.choice, RunnerChoice::ClaudeCli);
+        assert_eq!(resolved.label(), "claude-cli (haiku)");
+
+        let value = block_on(resolved.runner.run_structured_json(
+            "rank these",
+            r#"{"type":"object"}"#,
+            None,
+            None,
+        ))
+        .expect("the fake backend answers");
+        assert_eq!(value, rank_payload());
+    }
+
+    /// The codex arm of `build`, including the API-key injection, and its
+    /// dispatch arm.
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_builds_a_codex_runner_that_answers() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let script = fake_backend(dir.path(), "fake-codex.sh", "");
+        let _binary = EnvGuard::set("CODEX_BINARY", script.to_str().unwrap());
+        let _key = EnvGuard::set("OPENAI_API_KEY", "test-key");
+
+        let resolved = resolve(Some(&RunnerChoice::CodexCli), None, &config())
+            .expect("codex-cli should resolve against the fake binary");
+        assert_eq!(resolved.choice, RunnerChoice::CodexCli);
+        // Codex picks its own model when none is configured, so the label
+        // carries no model to show.
+        assert_eq!(resolved.label(), "codex-cli");
+
+        // Codex writes its answer to --output-last-message, which this fake
+        // does not honour, so the call fails — the point here is that the
+        // dispatch arm runs and the failure is the backend's, not the wiring's.
+        assert!(block_on(resolved.runner.run_structured_json(
+            "rank these",
+            r#"{"type":"object"}"#,
+            None,
+            None,
+        ))
+        .is_err());
+    }
+
+    /// The cursor arm of `build`, its API-key injection, and its dispatch arm.
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_builds_a_cursor_runner_that_answers() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": rank_payload().to_string(),
+            "session_id": "test",
+        })
+        .to_string();
+        let script = fake_backend(dir.path(), "cursor-agent", &envelope);
+        let _binary = EnvGuard::set("CURSOR_BINARY", script.to_str().unwrap());
+        let _key = EnvGuard::set("CURSOR_API_KEY", "test-key");
+
+        let resolved = resolve(
+            Some(&RunnerChoice::CursorCli),
+            Some("some-model"),
+            &config(),
+        )
+        .expect("cursor-cli should resolve against the fake binary");
+        assert_eq!(resolved.label(), "cursor-cli (some-model)");
+
+        let value = block_on(resolved.runner.run_structured_json(
+            "rank these",
+            r#"{"type":"object"}"#,
+            None,
+            None,
+        ))
+        .expect("the fake backend answers");
+        assert_eq!(value, rank_payload());
+    }
+
+    /// The two HTTP backends cannot be reached through `resolve`, which builds
+    /// them against the production URL, so their dispatch arms are driven
+    /// directly against a mock server.
+    #[tokio::test]
+    async fn test_the_http_dispatch_arms_reach_their_runners() {
+        use crate::runner::anthropic_api::DEFAULT_MAX_TOKENS;
+
+        let mut server = mockito::Server::new_async().await;
+        let anthropic = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "content": [{
+                        "type": "tool_use",
+                        "name": "return_result",
+                        "input": {"verdicts": []},
+                    }],
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+        let openai = server
+            .mock("POST", "/v1/responses")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                serde_json::json!({
+                    "id": "resp_test",
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "{\"verdicts\":[]}"}],
+                    }],
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let anthropic_runner = SelectionRunner::AnthropicApi(
+            AnthropicApiRunner::with_base_url(
+                "k".to_string(),
+                "m".to_string(),
+                Duration::from_secs(10),
+                server.url(),
+                DEFAULT_MAX_TOKENS,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            anthropic_runner
+                .run_structured_json("rank", r#"{"type":"object"}"#, None, None)
+                .await
+                .unwrap(),
+            serde_json::json!({"verdicts": []})
+        );
+
+        let openai_runner = SelectionRunner::OpenAiApi(
+            OpenAiApiRunner::new("k".to_string(), "m".to_string(), Duration::from_secs(10))
+                .unwrap()
+                .with_base_url(server.url()),
+        );
+        assert_eq!(
+            openai_runner
+                .run_structured_json("rank", r#"{"type":"object"}"#, None, None)
+                .await
+                .unwrap(),
+            serde_json::json!({"verdicts": []})
+        );
+
+        anthropic.assert_async().await;
+        openai.assert_async().await;
+    }
+
     #[test]
     fn test_an_explicit_runner_is_the_whole_candidate_list() {
         // Asking for a backend that is not installed must report that, rather
@@ -530,6 +759,65 @@ mod tests {
             max_budget_usd: None,
         };
         assert_eq!(unlabelled.label(), "codex-cli");
+    }
+
+    /// Every variant names itself. The arms exist so a log line identifies the
+    /// backend, and an arm nobody formats is an arm nobody notices is wrong.
+    #[test]
+    #[cfg(unix)]
+    fn test_debug_names_every_backend() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let script = fake_backend(dir.path(), "fake.sh", "");
+        let timeout = Duration::from_secs(1);
+
+        let variants = [
+            (
+                SelectionRunner::ClaudeCli(CliClaudeRunner::new(script.clone(), timeout)),
+                "claude-cli",
+            ),
+            (
+                SelectionRunner::AnthropicApi(
+                    AnthropicApiRunner::with_max_tokens(
+                        "k".to_string(),
+                        "m".to_string(),
+                        timeout,
+                        DEFAULT_MAX_TOKENS,
+                    )
+                    .unwrap(),
+                ),
+                "anthropic-api",
+            ),
+            (
+                SelectionRunner::OpenAiApi(
+                    OpenAiApiRunner::new("k".to_string(), "m".to_string(), timeout).unwrap(),
+                ),
+                "openai-api",
+            ),
+            (
+                SelectionRunner::CodexCli(CodexCliRunner::new(script.clone(), None, timeout)),
+                "codex-cli",
+            ),
+            (
+                SelectionRunner::CursorCli(CursorCliRunner::new(script, None, timeout)),
+                "cursor-cli",
+            ),
+        ];
+        for (runner, name) in &variants {
+            assert_eq!(format!("{runner:?}"), format!("SelectionRunner({name})"));
+        }
+    }
+
+    /// The OpenAI probe arm, which no other test reaches: the other four
+    /// backends are probed by the resolution tests above.
+    #[test]
+    fn test_probe_covers_the_openai_arm() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _key = EnvGuard::set("OPENAI_API_KEY", "test-key");
+        assert!(probe(&RunnerChoice::OpenAiApi, &config()).is_ok());
+
+        let _cleared = EnvGuard::remove("OPENAI_API_KEY");
+        assert!(probe(&RunnerChoice::OpenAiApi, &config()).is_err());
     }
 
     /// A resolution failure is logged, and a derived `Debug` would put the
