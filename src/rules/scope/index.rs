@@ -336,6 +336,36 @@ impl ScopeIndex {
         (n / df).ln().max(0.0)
     }
 
+    /// What a query term is worth when ranking, which is inverse document
+    /// frequency everywhere the corpus can support the question.
+    ///
+    /// [`Self::idf`] asks which document a term *discriminates towards*. A
+    /// corpus of one document cannot answer that: every term it contains is a
+    /// term in every document, so `ln(1/1)` is zero, every field's coverage is
+    /// zero, and a freshly synced repository holding a single rule selects
+    /// nothing at all for a plan that obviously matches it.
+    ///
+    /// So below two documents the question changes from "which rule matches
+    /// best" to "does this rule match", and each term the corpus knows counts
+    /// the same. A term the corpus has never seen still scores zero, so an
+    /// unrelated plan still matches nothing.
+    ///
+    /// This deliberately does **not** smooth `idf` into never reaching zero.
+    /// Zero for a term on every document is the property the whole index rests
+    /// on — it is what retires the dead `cross-cutting` filename prefix across
+    /// 425 of 425 documents with no stopword list — and a floor would resurrect
+    /// it. The fallback fires only where ranking is impossible anyway.
+    pub fn term_weight(&self, term: &str) -> f64 {
+        if self.documents.len() > 1 {
+            return self.idf(term);
+        }
+        if self.document_frequency.contains_key(term) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
     /// Terms present in every indexed document, and therefore contributing
     /// nothing. Reported by `--explain` so a wrong selection is diagnosable.
     pub fn ubiquitous_terms(&self) -> Vec<&str> {
@@ -366,7 +396,7 @@ impl ScopeIndex {
         // lengths and a weight means the same thing everywhere.
         let idf: HashMap<&str, f64> = query_terms
             .iter()
-            .map(|t| (t.as_str(), self.idf(t)))
+            .map(|t| (t.as_str(), self.term_weight(t)))
             .collect();
         // Summed over the sorted term list, never over the map's values.
         // `HashMap` seeds each instance from a thread-local counter, so its
@@ -764,6 +794,78 @@ mod tests {
         let index = sample_index();
         // `terraform` is on one document, `token` on two.
         assert!(index.idf("terraform") > index.idf("token"));
+    }
+
+    // ── term_weight: IDF, and what replaces it when IDF cannot speak ────
+
+    /// Above one document `term_weight` is inverse document frequency and
+    /// nothing else, so none of the measured behaviour changes.
+    #[test]
+    fn test_term_weight_is_idf_on_a_corpus_that_can_discriminate() {
+        let index = sample_index();
+        for term in ["token", "terraform", "cross", "kubernetes"] {
+            assert_eq!(index.term_weight(term), index.idf(term), "{term}");
+        }
+    }
+
+    /// A one-document corpus scores `ln(1/1) == 0` for every term it holds, so
+    /// IDF alone makes a freshly synced repository unsearchable. Each known
+    /// term counts the same instead.
+    #[test]
+    fn test_term_weight_falls_back_to_uniform_on_a_single_document() {
+        let index = index_of(vec![doc(
+            "cross-cutting-token-signing-e410",
+            "Adopt RS256: Token Signing",
+            "These rules are ALWAYS ACTIVE for OAuth token signing.",
+            "grep -r \"jwt.sign\" services/auth/oauth/",
+        )]);
+        assert_eq!(index.idf("token"), 0.0, "IDF is structurally zero here");
+        assert_eq!(index.term_weight("token"), 1.0);
+        // A term the corpus has never seen is still worth nothing, so an
+        // unrelated plan cannot match by default.
+        assert_eq!(index.term_weight("kubernetes"), 0.0);
+    }
+
+    /// The behaviour the fallback exists for: one rule, a plan that plainly
+    /// matches it, and no path named. Before the fallback this returned
+    /// nothing.
+    #[test]
+    fn test_a_single_document_corpus_is_searchable() {
+        let index = index_of(vec![doc(
+            "cross-cutting-token-signing-e410",
+            "Adopt RS256: Token Signing",
+            "These rules are ALWAYS ACTIVE for OAuth token signing.",
+            "grep -r \"jwt.sign\" services/auth/oauth/",
+        )]);
+
+        let hits = index.search(&Query::new("rotate the OAuth token signing keypair"), 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].slug, "cross-cutting-token-signing-e410");
+        assert!(hits[0].score > 0.0);
+
+        // An unrelated plan still selects nothing, so the fallback bought
+        // recall without giving up the ability to say "no rule applies".
+        assert!(index
+            .search(&Query::new("kubernetes ingress controller"), 5)
+            .is_empty());
+    }
+
+    /// An empty corpus has no terms, so nothing is worth anything and the
+    /// single-document branch cannot divide by a corpus that is not there.
+    #[test]
+    fn test_term_weight_on_an_empty_corpus() {
+        let index = index_of(Vec::new());
+        assert_eq!(index.term_weight("token"), 0.0);
+        assert!(index.search(&Query::new("token"), 5).is_empty());
+    }
+
+    /// The dead-prefix property is the reason IDF was not simply smoothed, so
+    /// it is asserted next to the fallback that could have broken it.
+    #[test]
+    fn test_the_fallback_does_not_resurrect_a_ubiquitous_term() {
+        let index = sample_index();
+        assert_eq!(index.term_weight("cross"), 0.0);
+        assert_eq!(index.term_weight("cutting"), 0.0);
     }
 
     #[test]

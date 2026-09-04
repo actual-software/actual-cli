@@ -108,6 +108,14 @@ pub struct ResolvedRunner {
     /// The model the runner will use, for display. `None` when the backend
     /// picks its own default.
     pub model: Option<String>,
+    /// The spending cap for one rank, inherited from `max_budget_usd` in the
+    /// config so a selection cannot outspend what tailoring is allowed.
+    ///
+    /// **Only the Claude CLI enforces this.** The other four backends take the
+    /// value and drop it, because their APIs offer no per-request cap. It is
+    /// therefore a real bound on one runner and a no-op on the rest, which is
+    /// worth knowing before treating it as a spend control.
+    pub max_budget_usd: Option<f64>,
 }
 
 impl ResolvedRunner {
@@ -202,6 +210,7 @@ fn build(
         runner,
         choice: choice.clone(),
         model,
+        max_budget_usd: cfg.max_budget_usd,
     };
 
     match choice {
@@ -510,6 +519,7 @@ mod tests {
             runner: resolved.runner,
             choice: RunnerChoice::CodexCli,
             model: None,
+            max_budget_usd: None,
         };
         assert_eq!(unlabelled.label(), "codex-cli");
     }
@@ -532,6 +542,38 @@ mod tests {
         let rendered = format!("{resolved:?}");
         assert!(rendered.contains("anthropic-api"));
         assert!(!rendered.contains("sk-secret-value"));
+    }
+
+    /// A rank inherits the configured spending cap rather than running
+    /// uncapped, so a selection cannot outspend what tailoring is allowed.
+    #[test]
+    fn test_a_resolved_runner_inherits_the_configured_budget() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _key = EnvGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let mut cfg = config();
+        cfg.max_budget_usd = Some(0.25);
+        let resolved = build(
+            &RunnerChoice::AnthropicApi,
+            None,
+            &cfg,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(resolved.max_budget_usd, Some(0.25));
+    }
+
+    #[test]
+    fn test_an_unset_budget_stays_unset() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _key = EnvGuard::set("ANTHROPIC_API_KEY", "test-key");
+        let resolved = build(
+            &RunnerChoice::AnthropicApi,
+            None,
+            &config(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(resolved.max_budget_usd, None);
     }
 
     #[test]

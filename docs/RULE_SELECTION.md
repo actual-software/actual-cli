@@ -138,13 +138,22 @@ quietly break them.
 Stage 1 is sub-millisecond against a built index. Stage 2 is a single model
 call, and it is the whole cost of the command.
 
-That call is bounded by a 90-second wall-clock deadline enforced in
-`rules::scope::rank`, not by the runner's own timeout. A runner timeout is an
+It is bounded two ways, and only one of them binds everywhere.
+
+**Time.** A 90-second wall-clock deadline enforced in `rules::scope::rank`, not
+by the runner's own timeout. A runner timeout is an
 *inactivity* timer that resets on every streamed event, so a backend that keeps
 talking is never cut off by it: a measured `claude-cli` call ran 218 seconds
 under a 60-second runner timeout. Two runs of the same plan took 6 and 218
 seconds, which is the real spread. Exceeding the deadline degrades to the
 prefilter like any other failure.
+
+**Money, on one backend.** A rank inherits `max_budget_usd` from the config, so
+a selection cannot outspend what tailoring is allowed. Only the Claude CLI
+enforces it: the other four backends accept the value and drop it, because their
+APIs offer no per-request cap. Treat it as a real bound on one runner rather
+than as a spend control, and use the deadline as the bound that applies to all
+five.
 
 ## Honest limits
 
@@ -155,6 +164,16 @@ prefilter like any other failure.
   retrieved. A rule the lexical index never surfaced cannot be promoted, however
   obviously it applies. Raising `--candidates` widens the window at the cost of
   prompt size; it does not remove the ceiling.
+- **A very small rule set ranks poorly, by construction.** Inverse document
+  frequency measures how a term separates one document from the others, so it
+  has less and less to say as the corpus shrinks. At one document it has nothing
+  to say at all — every term is on every document — and the index falls back to
+  weighting each known term equally, which answers "does this rule match" rather
+  than "which rule matches best". Between two and roughly a dozen near-duplicate
+  documents there is no fallback and none is wanted: shared wording genuinely
+  does not separate them, and only the terms that differ carry rank. A freshly
+  synced repository is therefore ranked more crudely than a mature one, and the
+  numbers below were measured on corpora of 38 and 425 files.
 - **The `related` bucket is a judgement call.** A rule that constrains a change
   indirectly can land in either bucket, and where it lands decides whether it
   survives the cap. The verdict is printed for exactly this reason.

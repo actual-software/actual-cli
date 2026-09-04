@@ -122,6 +122,14 @@ filename scan wastes nearly two.
   what makes the index sharp once a plan does name a file.
 - **Retrieval is lexical.** A plan that paraphrases its whole domain without
   naming it will not match, and no amount of weighting fixes that.
+- **Inverse document frequency needs documents to compare.** It scores a term by
+  how well it separates one document from the rest, so it says less as the
+  corpus shrinks and nothing at all at a single document, where every term is on
+  every document and `ln(1/1) = 0`. Below two documents the index weights each
+  known term equally instead — the same fallback would be wrong at scale, since
+  it is exactly the zero on a ubiquitous term that retires the dead
+  `cross-cutting` prefix. Both numbers above are from corpora far past that
+  boundary.
 
 ## Cost
 
