@@ -75,7 +75,10 @@ pub enum Stage2 {
     Unavailable { reason: String },
     /// A runner was available and did not produce a usable rank.
     Failed { reason: String },
-    /// The rank was applied.
+    /// The rank was applied. `unjudged` candidates were returned at their
+    /// prefilter rank, below everything the ranker affirmed — so a selection
+    /// under this status is not necessarily a fully judged one, and the counts
+    /// are what say which.
     Applied {
         candidates: usize,
         governs: usize,
@@ -103,10 +106,21 @@ impl Stage2 {
                 related,
                 unrelated,
                 unjudged,
-            } => format!(
-                "ranked {candidates} candidate(s): {governs} governs, {related} related, \
-                 {unrelated} unrelated, {unjudged} unjudged"
-            ),
+            } => {
+                // A rank that judged fewer candidates than it skipped is
+                // mostly prefilter padding wearing a `ranked` label, and the
+                // count alone is easy to read past. Say which it was.
+                let judged = governs + related + unrelated;
+                let verb = if *unjudged > judged {
+                    "partly ranked"
+                } else {
+                    "ranked"
+                };
+                format!(
+                    "{verb} {candidates} candidate(s): {governs} governs, {related} related, \
+                     {unrelated} unrelated, {unjudged} unjudged (kept at prefilter rank)"
+                )
+            }
         }
     }
 
@@ -994,6 +1008,32 @@ mod tests {
             prefilter_reason(&hit),
             "ranked by the scope index; no single signal carried it"
         );
+    }
+
+    /// A rank that skipped more candidates than it judged is padding with
+    /// prefilter hits, and the summary should not call that "ranked".
+    #[test]
+    fn test_a_mostly_unjudged_rank_says_so() {
+        let mostly_unjudged = Stage2::Applied {
+            candidates: 12,
+            governs: 1,
+            related: 0,
+            unrelated: 0,
+            unjudged: 11,
+        };
+        assert!(mostly_unjudged.summary().starts_with("partly ranked"));
+        assert!(mostly_unjudged.summary().contains("kept at prefilter rank"));
+
+        let fully_judged = Stage2::Applied {
+            candidates: 12,
+            governs: 3,
+            related: 4,
+            unrelated: 5,
+            unjudged: 0,
+        };
+        assert!(fully_judged.summary().starts_with("ranked 12"));
+        // Both are still `Applied`: the wording changed, not the status.
+        assert!(mostly_unjudged.is_applied() && fully_judged.is_applied());
     }
 
     #[test]

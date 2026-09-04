@@ -228,6 +228,19 @@ fn validate_root(root_dir: &Path) -> Result<(), ActualError> {
 
 /// Markdown rule files in `dir`, sorted by path. Per-entry listing failures are
 /// recorded on `report` and skipped so they cannot hide a sibling file.
+/// The `.md` files directly under `dir`, sorted by the caller.
+///
+/// **Flat by design: a subdirectory is skipped, not descended into.** The rules
+/// directory is generated, and everything that writes it writes one flat level,
+/// so recursion would only ever pick up files something else put there — a
+/// vendored copy, an editor backup directory, someone's notes — and silently
+/// govern the repository by them. A rule file that does not appear in
+/// `rules ls` is a visible absence; one that appears from a directory nobody
+/// meant to scan is not.
+///
+/// The cost is that a hand-organised `.actual/rules/auth/` is ignored without
+/// comment. If that stops being the right trade, the fix is to descend *and*
+/// report what was found, not to descend quietly.
 fn collect_rule_files(
     dir: &Path,
     entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>,

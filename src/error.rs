@@ -80,6 +80,17 @@ pub enum ActualError {
     #[error("Tailoring output validation failed: {0}")]
     TailoringValidationError(String),
 
+    /// A stage-2 rule rank came back in a shape the selector cannot use.
+    ///
+    /// Its own variant rather than [`Self::TailoringValidationError`]: the two
+    /// payloads share nothing but a shape of failure, and code branching on
+    /// the tailoring variant should not catch a rank. This one is not fatal in
+    /// practice — `rules select` records the message on the selection and
+    /// answers from the deterministic prefilter — so a user meets it as a
+    /// `Stage 2: failed` line rather than as an exit code.
+    #[error("Rule rank output validation failed: {0}")]
+    RuleRankInvalid(String),
+
     #[error("Internal error: {0}")]
     InternalError(String),
 
@@ -273,6 +284,10 @@ mod tests {
             1
         );
         assert_eq!(
+            ActualError::RuleRankInvalid("test".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
             ActualError::InternalError("test".to_string()).exit_code(),
             1
         );
@@ -407,6 +422,12 @@ mod tests {
 
         let msg = ActualError::UserCancelled.to_string();
         assert!(msg.contains("cancelled"), "expected 'cancelled' in: {msg}");
+
+        // A rank failure names the rank, so a log line cannot be mistaken for a
+        // tailoring failure.
+        let rank = ActualError::RuleRankInvalid("no `verdicts` array".to_string()).to_string();
+        assert!(rank.contains("Rule rank"), "{rank}");
+        assert!(!rank.contains("Tailoring"), "{rank}");
 
         let msg = ActualError::TailoringValidationError("empty content".to_string()).to_string();
         assert!(
