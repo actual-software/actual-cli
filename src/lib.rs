@@ -60,6 +60,24 @@ mod tests {
     }
 
     #[test]
+    fn test_run_plan_check_dispatch_with_no_applicable_rules_returns_ok() {
+        use tempfile::tempdir;
+
+        // Exercises the Command::PlanCheck dispatch arm. A repo root with no
+        // `.actual/rules/` resolves to "nothing applies", which needs no
+        // runner and no network access, so the arm is covered hermetically.
+        let repo = tempdir().unwrap();
+        let cli = Cli::parse_from([
+            "actual",
+            "plan-check",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "a plan",
+        ]);
+        assert!(run(cli).is_ok());
+    }
+
+    #[test]
     fn test_run_cache_clear_returns_ok() {
         use crate::testutil::{EnvGuard, ENV_MUTEX};
         use tempfile::tempdir;

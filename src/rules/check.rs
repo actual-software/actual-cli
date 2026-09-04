@@ -508,6 +508,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_verdicts_skips_an_entry_missing_doc_slug() {
+        let value = verdicts_value(serde_json::json!([
+            {"rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "no doc_slug field"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "ok"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "ok"},
+        ]));
+        let verdicts = parse_verdicts(&value, &rules()).unwrap();
+        assert_eq!(verdicts.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_verdicts_skips_an_entry_missing_rule_id() {
+        let value = verdicts_value(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "verdict": "conforming", "span": "", "reason": "no rule_id field"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "ok"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "ok"},
+        ]));
+        let verdicts = parse_verdicts(&value, &rules()).unwrap();
+        assert_eq!(verdicts.len(), 2);
+    }
+
+    #[test]
     fn test_parse_verdicts_happy_path() {
         let value = verdicts_value(serde_json::json!([
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256 as required"},
@@ -722,15 +744,21 @@ mod tests {
     struct TimeoutRunner;
 
     impl StructuredRunner for TimeoutRunner {
-        async fn run_structured_json(
+        /// Hands back a future that never resolves.
+        ///
+        /// Written as a plain function returning a future rather than as an
+        /// `async fn`, matching `scope::rank`'s own timeout test: an `async
+        /// fn` that never resolves never reaches its own closing brace, and a
+        /// line nothing reaches is a line coverage counts as missed. This way
+        /// every line here runs.
+        fn run_structured_json(
             &self,
             _prompt: &str,
             _schema: &str,
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
-        ) -> Result<serde_json::Value, ActualError> {
-            std::future::pending::<()>().await;
-            unreachable!()
+        ) -> impl std::future::Future<Output = Result<serde_json::Value, ActualError>> {
+            std::future::pending()
         }
     }
 

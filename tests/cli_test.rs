@@ -428,3 +428,69 @@ fn test_config_show_redacts_both_keys_simultaneously() {
         .stdout(predicate::str::contains("sk-ant-test-12345").not())
         .stdout(predicate::str::contains("sk-openai-test-67890").not());
 }
+
+// ── plan-check: the stdin-touching paths, tested as a real subprocess ──────
+//
+// `resolve_direct_plan`'s stdin fallback and `--claude-hook`'s envelope read
+// both call `std::io::stdin()` directly. Driving them in-process from a
+// `--lib` unit test would read whatever stdin the test harness itself has —
+// a real terminal, notably, which could block waiting for input. Running the
+// compiled binary as its own subprocess with piped stdin (the same pattern
+// every other `cmd()` test here uses) controls that safely.
+
+#[test]
+fn test_plan_check_direct_mode_reads_the_plan_from_stdin() {
+    let repo = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["plan-check", "--repo", repo.path().to_str().unwrap()])
+        .write_stdin("Add a caching layer in front of the user repository.")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Plan check"));
+}
+
+#[test]
+fn test_plan_check_direct_mode_errors_when_stdin_is_empty() {
+    let repo = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["plan-check", "--repo", repo.path().to_str().unwrap()])
+        .write_stdin("   \n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no plan given"));
+}
+
+#[test]
+fn test_plan_check_claude_hook_reads_a_valid_envelope_from_stdin() {
+    let repo = tempfile::tempdir().unwrap();
+    cmd()
+        .args([
+            "plan-check",
+            "--claude-hook",
+            "--rules-dir",
+            repo.path().join(".actual/rules").to_str().unwrap(),
+        ])
+        .write_stdin(r#"{"tool_input":{"plan":"Add a caching layer."}}"#)
+        .assert()
+        .success();
+}
+
+/// `read_to_string` fails on invalid UTF-8, which is what exercises
+/// `exec_hook`'s own stdin-read-failure branch specifically (as opposed to
+/// `exec_hook_with`'s malformed-JSON branch, reached only once stdin has
+/// already been read successfully).
+#[test]
+fn test_plan_check_claude_hook_fails_open_on_non_utf8_stdin() {
+    let repo = tempfile::tempdir().unwrap();
+    cmd()
+        .args([
+            "plan-check",
+            "--claude-hook",
+            "--rules-dir",
+            repo.path().join(".actual/rules").to_str().unwrap(),
+        ])
+        .write_stdin(vec![0xffu8, 0xfe, 0x00, 0x41])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("systemMessage"));
+}
