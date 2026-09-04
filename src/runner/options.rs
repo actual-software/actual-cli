@@ -221,17 +221,67 @@ mod tests {
     /// it means a developer added an exec or network tool to a profile that
     /// bypasses all permission checks — that would silently allow arbitrary code
     /// execution or exfiltration.
+    ///
+    /// Every profile that bypasses permissions is checked here, not just the
+    /// first one written. A profile added later is exactly the one nobody
+    /// remembers to audit.
     #[test]
     fn test_skip_permissions_only_with_readonly_tools() {
-        let opts = InvocationOptions::for_tailoring(None);
-        assert!(opts.skip_permissions);
-        let forbidden = ["Bash", "WebFetch"];
-        for tool in &forbidden {
-            assert!(!opts.tools.contains(tool));
-            for allowed in &opts.allowed_tools {
-                assert!(!allowed.starts_with(tool));
+        let profiles = [
+            ("for_tailoring", InvocationOptions::for_tailoring(None)),
+            ("for_selection", InvocationOptions::for_selection(None)),
+        ];
+        for (name, opts) in &profiles {
+            assert!(opts.skip_permissions, "{name} should bypass permissions");
+            let forbidden = ["Bash", "WebFetch"];
+            for tool in &forbidden {
+                assert!(!opts.tools.contains(tool), "{name} grants {tool}");
+                for allowed in &opts.allowed_tools {
+                    assert!(!allowed.starts_with(tool), "{name} allows {tool}");
+                }
             }
         }
+    }
+
+    /// The ranker is handed its candidates in the prompt, so it needs no tools
+    /// and no second turn. Granting either would let the answer depend on what
+    /// the model happened to open, which is the opposite of a reproducible
+    /// selection.
+    #[test]
+    fn test_for_selection_takes_one_turn_and_no_tools() {
+        let opts = InvocationOptions::for_selection(None);
+        assert_eq!(opts.max_turns, 1);
+        assert!(opts.tools.is_empty(), "tools: {:?}", opts.tools);
+        assert!(opts.allowed_tools.is_empty());
+
+        let args = opts.to_args();
+        assert_arg_value(&args, "--max-turns", "1");
+        assert_arg_value(&args, "--tools", "");
+        // No tool is granted, so there is nothing to allow.
+        assert!(!args.contains(&"--allowedTools".to_string()));
+    }
+
+    #[test]
+    fn test_for_selection_model_override_and_default() {
+        assert_arg_value(
+            &InvocationOptions::for_selection(Some("opus")).to_args(),
+            "--model",
+            "opus",
+        );
+        assert_arg_value(
+            &InvocationOptions::for_selection(None).to_args(),
+            "--model",
+            "sonnet",
+        );
+    }
+
+    /// The selection profile carries no budget or schema of its own; the caller
+    /// sets both, and an unset one must stay off the command line.
+    #[test]
+    fn test_for_selection_omits_an_unset_schema_and_budget() {
+        let args = InvocationOptions::for_selection(None).to_args();
+        assert!(!args.contains(&"--json-schema".to_string()));
+        assert!(!args.contains(&"--max-budget-usd".to_string()));
     }
 
     #[test]

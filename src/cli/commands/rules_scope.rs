@@ -242,7 +242,11 @@ fn rank_with(
         .enable_all()
         .build()
         .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
-    Ok(runtime.block_on(prefiltered.rank_with(&resolved.runner, resolved.model.as_deref(), None)))
+    Ok(runtime.block_on(prefiltered.rank_with(
+        &resolved.runner,
+        resolved.model.as_deref(),
+        resolved.max_budget_usd,
+    )))
 }
 
 /// `0.83  governs  cross-cutting-access-tokens-include-e410`, with the reason
