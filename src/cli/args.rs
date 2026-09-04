@@ -815,10 +815,16 @@ pub struct RulesEvalArgs {
 ///
 /// Two callers, two shapes. A human runs this directly: the plan is a
 /// positional argument, a `--plan-file`, or stdin, and the result is a panel
-/// or `--json`. `hooks/plan-gate.sh` runs it with `--claude-hook`: the plan
-/// comes from a Claude Code `PreToolUse` hook envelope on stdin instead, and
-/// the result is the hook's own JSON contract — see
-/// `crate::cli::commands::plan_check` for what that contract requires.
+/// or `--json`, with a nonzero exit reserved specifically for a `conflicting`
+/// verdict (a real rule violation) — every other outcome, including
+/// `not_checked` (no runner, no applicable rules, or the judge call itself
+/// failed) and `requires_decision`, exits 0. A CI job that gates on this
+/// command's exit code alone will not see the difference between "checked
+/// and clean" and "could not check"; a job that needs that distinction should
+/// read `--json`'s `status` field instead. `hooks/plan-gate.sh` runs it with
+/// `--claude-hook`: the plan comes from a Claude Code `PreToolUse` hook
+/// envelope on stdin instead, and the result is the hook's own JSON contract
+/// — see `crate::cli::commands::plan_check` for what that contract requires.
 #[derive(Parser, Debug)]
 pub struct PlanCheckArgs {
     /// The plan to check. Omit to read from `--plan-file` or stdin. Ignored
@@ -859,12 +865,24 @@ pub struct PlanCheckArgs {
     #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
     pub candidates: usize,
 
-    /// Runner to use for the conformance judge. Probed automatically when
-    /// omitted.
+    /// Skip stage 2 (a runner-backed rank refining which documents apply) and
+    /// select with the deterministic prefilter alone. Direct-mode use only:
+    /// `--claude-hook` always uses the prefilter alone regardless of this
+    /// flag, so its one model call stays reserved for the conformance judge
+    /// inside Claude Code's 120-second `PreToolUse` timeout — see
+    /// `crate::cli::commands::plan_check` for why running both there risks
+    /// that budget. A human at a terminal has no such constraint, so direct
+    /// mode runs stage 2 by default, the same way `rules select` does.
+    #[arg(long)]
+    pub no_rank: bool,
+
+    /// Runner to use for stage 2 selection (direct mode only) and the
+    /// conformance judge. Probed automatically when omitted.
     #[arg(long, value_enum)]
     pub runner: Option<RunnerChoice>,
 
-    /// Model for the judge, overriding the configured one.
+    /// Model for stage 2 selection (direct mode only) and the judge,
+    /// overriding the configured one.
     #[arg(long)]
     pub model: Option<String>,
 
@@ -1825,5 +1843,75 @@ mod parse_tests {
     fn test_rules_index_args_from_other_commands_is_none() {
         assert!(rules_index_args_from(["actual", "rules", "ls"].as_slice()).is_none());
         assert!(rules_index_args_from(["actual", "status"].as_slice()).is_none());
+    }
+
+    /// Extract `plan-check` arguments from a parsed command.
+    fn plan_check_args_from(argv: &[&str]) -> Option<PlanCheckArgs> {
+        match Cli::try_parse_from(argv).ok()?.command {
+            Command::PlanCheck(args) => Some(args),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_plan_check_parses_the_positional_plan_with_defaults() {
+        let args = plan_check_args_from(&["actual", "plan-check", "Add", "caching"])
+            .expect("expected a plan-check command");
+        assert_eq!(args.plan, vec!["Add".to_string(), "caching".to_string()]);
+        assert!(!args.claude_hook);
+        assert!(!args.no_rank);
+        assert!(!args.json);
+        assert!(!args.rebuild);
+        assert_eq!(args.limit, 20);
+        assert_eq!(args.candidates, crate::rules::scope::DEFAULT_CANDIDATES);
+        assert!(args.runner.is_none());
+        assert!(args.model.is_none());
+        assert!(args.rules_dir.is_none());
+    }
+
+    #[test]
+    fn test_plan_check_claude_hook_needs_no_positional_plan() {
+        let args = plan_check_args_from(&["actual", "plan-check", "--claude-hook"])
+            .expect("--claude-hook needs no positional plan");
+        assert!(args.claude_hook);
+        assert!(args.plan.is_empty());
+    }
+
+    #[test]
+    fn test_plan_check_rules_dir_and_no_rank_parse() {
+        let args = plan_check_args_from(&[
+            "actual",
+            "plan-check",
+            "--no-rank",
+            "--rules-dir",
+            "/repo/.actual/rules",
+            "a plan",
+        ])
+        .expect("expected a plan-check command");
+        assert!(args.no_rank);
+        assert_eq!(
+            args.rules_dir.as_deref(),
+            Some(std::path::Path::new("/repo/.actual/rules"))
+        );
+    }
+
+    /// `--plan-file` and `--claude-hook` name mutually exclusive plan
+    /// sources: the hook always resolves the plan from its own envelope, so
+    /// combining them is a usage error rather than a silently ignored flag.
+    #[test]
+    fn test_plan_check_plan_file_conflicts_with_claude_hook() {
+        assert!(Cli::try_parse_from([
+            "actual",
+            "plan-check",
+            "--claude-hook",
+            "--plan-file",
+            "plan.md",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn test_plan_check_args_from_other_commands_is_none() {
+        assert!(plan_check_args_from(&["actual", "status"]).is_none());
     }
 }

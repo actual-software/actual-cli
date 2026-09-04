@@ -25,16 +25,18 @@
 //! gate has no business granting the approval it is supposed to be checking.
 //!
 //! [`run_pipeline`] is the shared core both callers drive: resolve the rules
-//! directory, select the documents that apply (stage 1 only — see below),
-//! gather their individual rules, and hand the whole batch to
-//! [`crate::rules::check`] in one call.
+//! directory, select the documents that apply, gather their individual
+//! rules, and hand the whole batch to [`crate::rules::check`] in one call.
 //!
-//! **Selection stays offline here.** `rules select`'s stage 2 spends a model
-//! call improving *which documents* are chosen; `plan-check` skips it and
-//! keeps the deterministic prefilter's answer, because this command only has
-//! one model call to spend inside Claude Code's 120-second `PreToolUse`
-//! timeout, and that call belongs to the conformance judge, not to selection.
-//! Running both would risk the very budget the acceptance criteria call out.
+//! **Selection's stage 2 is a hook-only restriction, not a blanket one.**
+//! `rules select`'s stage 2 spends a model call improving *which documents*
+//! are chosen. `--claude-hook` skips it unconditionally and keeps the
+//! deterministic prefilter's answer, because that call has exactly one model
+//! call to spend inside Claude Code's 120-second `PreToolUse` timeout, and it
+//! belongs to the conformance judge — running both risks the judge never
+//! getting its turn, which is a worse failure than an imprecise selection
+//! (see AK-734). Direct mode has no such deadline, so it runs stage 2 by
+//! default, the same way `rules select` does, with `--no-rank` opting out.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -43,7 +45,7 @@ use serde::Serialize;
 
 use crate::cli::args::PlanCheckArgs;
 use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
-use crate::cli::commands::rules_rank::{self, ResolvedRunner};
+use crate::cli::commands::rules_rank;
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
@@ -54,6 +56,12 @@ use crate::rules::scope::{self, select, Query, Selection, Stage2};
 /// prefilter already caps *documents*; a single selected document can still
 /// hold far more rules than one structured-output call can weigh usefully, so
 /// this bounds the prompt without changing which documents were selected.
+///
+/// Exceeding it is treated as a failure to check, never as license to judge a
+/// partial set: [`gather_rules`] reports how many rules it actually found, and
+/// [`run_pipeline`] refuses to call the judge at all when that exceeds the
+/// cap, rather than silently sending the first [`MAX_RULES_JUDGED`] and
+/// calling whatever came back a complete answer.
 const MAX_RULES_JUDGED: usize = 60;
 
 fn repo_root(explicit: Option<&PathBuf>) -> PathBuf {
@@ -76,18 +84,28 @@ pub fn exec(args: &PlanCheckArgs) -> Result<(), ActualError> {
 /// it. Every variant except [`Outcome::Verdicts`] is a "could not check"
 /// state rather than a finding — direct mode surfaces these as informational
 /// output with a clean exit; `--claude-hook` treats every one of them as
-/// fail-open.
+/// fail-open. The non-`Verdicts` variants carry how many documents were under
+/// consideration when the pipeline stopped, so neither caller has to report a
+/// misleading zero for a failure that happened after selection ran.
 enum Outcome {
     /// No committed rule document applied to this plan, or the rules
     /// directory holds none. Not a failure — most plans do not touch every
     /// rule in the corpus.
     NothingApplies,
     /// No backend was available to run the judge.
-    NoRunner(String),
-    /// The judge call could not be used (timeout, malformed output, every
-    /// candidate rule dropped as unrecognized).
-    CheckFailed(String),
-    /// The judge ran and produced verdicts.
+    NoRunner {
+        documents_selected: usize,
+        reason: String,
+    },
+    /// The judge could not be used: the call itself failed (timeout,
+    /// malformed or incomplete output), or the selected documents held more
+    /// rules than [`MAX_RULES_JUDGED`] and the judge was never called at all
+    /// rather than being shown a silently truncated set.
+    CheckFailed {
+        documents_selected: usize,
+        reason: String,
+    },
+    /// The judge ran and produced verdicts for every selected rule.
     Verdicts {
         selection: Selection,
         verdicts: Vec<CheckedRule>,
@@ -95,8 +113,12 @@ enum Outcome {
     },
 }
 
-/// Run the whole pipeline: resolve the index, select documents (stage 1
-/// only), gather their rules, resolve a runner, and judge.
+/// Run the whole pipeline: resolve the index, select documents, gather their
+/// rules, resolve a runner, and judge.
+///
+/// `use_rank` gates selection's stage 2. `--claude-hook` always passes
+/// `false`, unconditionally, regardless of any flag — see the module doc for
+/// why. Direct mode passes `!args.no_rank`.
 ///
 /// Returns `Err` only when the rules directory itself could not be read at
 /// all — the one condition serious enough that a direct-mode caller should
@@ -107,49 +129,110 @@ fn run_pipeline(
     root: &Path,
     rules_dir: &Path,
     args: &PlanCheckArgs,
+    use_rank: bool,
 ) -> Result<Outcome, ActualError> {
     let resolved = scope::resolve_in(rules_dir, root, args.rebuild)?;
     let query = Query::new(plan_text.to_string());
     let prefiltered = select::prefilter(&resolved.index, &query, args.limit, args.candidates);
-    let selection = prefiltered.finish(Stage2::NotRequested);
+
+    if prefiltered.is_empty() {
+        return Ok(Outcome::NothingApplies);
+    }
+
+    // One runner resolution serves both stage 2's rank (when `use_rank`) and
+    // the judge call that always follows it — there is never a reason to
+    // probe the environment twice for one invocation.
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    let resolved_runner =
+        match rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg) {
+            Ok(runner) => runner,
+            Err(reason) => {
+                return Ok(Outcome::NoRunner {
+                    documents_selected: prefiltered.len(),
+                    reason,
+                })
+            }
+        };
+    let label = resolved_runner.label();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
+
+    let selection = if use_rank {
+        runtime.block_on(prefiltered.rank_with(
+            &resolved_runner.runner,
+            resolved_runner.model.as_deref(),
+            resolved_runner.max_budget_usd,
+        ))
+    } else {
+        prefiltered.finish(Stage2::NotRequested)
+    };
 
     if selection.selected.is_empty() {
         return Ok(Outcome::NothingApplies);
     }
 
-    let rules_for_judging = gather_rules(&selection, root);
-    if rules_for_judging.is_empty() {
+    let gathered = gather_rules(&selection, root);
+    if gathered.rules.is_empty() {
         return Ok(Outcome::NothingApplies);
     }
+    if gathered.truncated {
+        return Ok(Outcome::CheckFailed {
+            documents_selected: selection.selected.len(),
+            reason: format!(
+                "the selected documents contain {} rules, over the {MAX_RULES_JUDGED}-rule \
+                 judging cap; refusing to judge a partial set",
+                gathered.considered
+            ),
+        });
+    }
 
-    let cfg = crate::config::paths::load().unwrap_or_default();
-    let resolved_runner =
-        match rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg) {
-            Ok(runner) => runner,
-            Err(reason) => return Ok(Outcome::NoRunner(reason)),
-        };
-    let label = resolved_runner.label();
-
-    match check_with(&resolved_runner, plan_text, &rules_for_judging) {
+    match runtime.block_on(check::check(
+        &resolved_runner.runner,
+        plan_text,
+        &gathered.rules,
+        resolved_runner.model.as_deref(),
+        resolved_runner.max_budget_usd,
+    )) {
         Ok(verdicts) => Ok(Outcome::Verdicts {
             selection,
             verdicts,
             runner_label: Some(label),
         }),
-        Err(e) => Ok(Outcome::CheckFailed(e.to_string())),
+        Err(e) => Ok(Outcome::CheckFailed {
+            documents_selected: selection.selected.len(),
+            reason: e.to_string(),
+        }),
     }
 }
 
+/// The rules gathered from every selected document, capped at
+/// [`MAX_RULES_JUDGED`], and whether the true count exceeded that cap.
+struct GatheredRules {
+    rules: Vec<RuleForJudging>,
+    /// Total individual rules found across every selected document,
+    /// including any past the cap. Equal to `rules.len()` unless `truncated`.
+    considered: usize,
+    /// True when `considered` exceeds [`MAX_RULES_JUDGED`] — some of the
+    /// selected documents' rules were never gathered at all. The caller must
+    /// treat this as "could not check", not as license to judge `rules` alone
+    /// and call the result complete.
+    truncated: bool,
+}
+
 /// Read the individual rules out of every selected document, in selection
-/// order, capped at [`MAX_RULES_JUDGED`].
+/// order.
 ///
 /// A document that no longer parses (removed, edited to something invalid,
 /// between selection and this read) is skipped rather than failing the whole
 /// batch — one bad file never costs the rest, the same invariant
 /// `crate::rules::discover` enforces on the original scan.
-fn gather_rules(selection: &Selection, root: &Path) -> Vec<RuleForJudging> {
-    let mut out = Vec::new();
-    'documents: for selected in &selection.selected {
+fn gather_rules(selection: &Selection, root: &Path) -> GatheredRules {
+    let mut rules = Vec::new();
+    let mut considered = 0usize;
+    for selected in &selection.selected {
         let path = root.join(&selected.relative_path);
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
@@ -161,40 +244,22 @@ fn gather_rules(selection: &Selection, root: &Path) -> Vec<RuleForJudging> {
             continue;
         };
         for rule in doc.rules {
-            if out.len() >= MAX_RULES_JUDGED {
-                break 'documents;
+            considered += 1;
+            if rules.len() < MAX_RULES_JUDGED {
+                rules.push(RuleForJudging::new(
+                    selected.slug.clone(),
+                    rule.id,
+                    rule.level,
+                    rule.statement,
+                ));
             }
-            out.push(RuleForJudging::new(
-                selected.slug.clone(),
-                rule.id,
-                rule.level,
-                rule.statement,
-            ));
         }
     }
-    out
-}
-
-/// Drive one judge call on its own runtime.
-///
-/// `plan-check` is a synchronous command, the same shape `rules select` and
-/// `login` use to bridge into the async runner traits.
-fn check_with(
-    resolved: &ResolvedRunner,
-    plan: &str,
-    rules: &[RuleForJudging],
-) -> Result<Vec<CheckedRule>, ActualError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| ActualError::InternalError(format!("failed to build tokio runtime: {e}")))?;
-    runtime.block_on(check::check(
-        &resolved.runner,
-        plan,
+    GatheredRules {
+        truncated: considered > MAX_RULES_JUDGED,
         rules,
-        resolved.model.as_deref(),
-        None,
-    ))
+        considered,
+    }
 }
 
 // ── direct mode ──────────────────────────────────────────────────────────
@@ -207,7 +272,7 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
 
-    let outcome = run_pipeline(&plan_text, &root, &rules_dir, args)?;
+    let outcome = run_pipeline(&plan_text, &root, &rules_dir, args, !args.no_rank)?;
 
     let width = term_size::terminal_width();
     if args.json {
@@ -263,11 +328,19 @@ fn render_panel(outcome: &Outcome, plan: &str, rules_dir: &Path, width: usize) -
             .separator()
             .line("No committed rule document applies to this plan.")
             .render(width),
-        Outcome::NoRunner(reason) => panel
+        Outcome::NoRunner {
+            documents_selected,
+            reason,
+        } => panel
+            .kv("Documents selected", &documents_selected.to_string())
             .separator()
             .line(&format!("Could not check: no runner available ({reason})."))
             .render(width),
-        Outcome::CheckFailed(reason) => panel
+        Outcome::CheckFailed {
+            documents_selected,
+            reason,
+        } => panel
+            .kv("Documents selected", &documents_selected.to_string())
             .separator()
             .line(&format!("Could not check: {reason}"))
             .render(width),
@@ -336,18 +409,24 @@ fn render_json(outcome: &Outcome) -> String {
             documents_selected: 0,
             verdicts: Vec::new(),
         },
-        Outcome::NoRunner(reason) => PlanCheckJson {
+        Outcome::NoRunner {
+            documents_selected,
+            reason,
+        } => PlanCheckJson {
             status: "not_checked",
             detail: Some(format!("no runner available: {reason}")),
             runner: None,
-            documents_selected: 0,
+            documents_selected: *documents_selected,
             verdicts: Vec::new(),
         },
-        Outcome::CheckFailed(reason) => PlanCheckJson {
+        Outcome::CheckFailed {
+            documents_selected,
+            reason,
+        } => PlanCheckJson {
             status: "not_checked",
             detail: Some(reason.clone()),
             runner: None,
-            documents_selected: 0,
+            documents_selected: *documents_selected,
             verdicts: Vec::new(),
         },
         Outcome::Verdicts {
@@ -397,12 +476,12 @@ fn deny_summary(conflicts: &[&CheckedRule]) -> String {
 
 /// Run the `--claude-hook` path.
 ///
-/// INVARIANT: this function never returns and never panics its way to a
-/// nonzero exit on an ordinary failure — every fallible step below is
-/// matched explicitly and turned into a fail-open notice (or, for a real
-/// violation, a deny). The only way [`exec`] surfaces a nonzero exit from
-/// this path is an actual Rust panic, which this function's own logic never
-/// triggers.
+/// INVARIANT: [`exec`] always sees this path complete normally — every
+/// fallible step below is matched explicitly and turned into a fail-open
+/// notice (or, for a real violation, a deny) rather than propagating an
+/// error, so this function has no path that reaches an ordinary nonzero
+/// exit. The only way [`exec`] could surface one from this path is an actual
+/// Rust panic, which this function's own logic never triggers.
 fn exec_hook(args: &PlanCheckArgs) {
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
@@ -436,7 +515,9 @@ fn exec_hook(args: &PlanCheckArgs) {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
 
-    let outcome = match run_pipeline(&plan_text, &root, &rules_dir, args) {
+    // `use_rank: false`, unconditionally, regardless of `args.no_rank`: the
+    // hook's one model call stays reserved for the judge. See the module doc.
+    let outcome = match run_pipeline(&plan_text, &root, &rules_dir, args, false) {
         Ok(outcome) => outcome,
         Err(e) => {
             emit(plan_check_hook::render_notice(&format!(
@@ -453,12 +534,12 @@ fn exec_hook(args: &PlanCheckArgs) {
                 "No committed rule under .actual/rules/ applies to this plan.",
             ));
         }
-        Outcome::NoRunner(reason) => {
+        Outcome::NoRunner { reason, .. } => {
             emit(plan_check_hook::render_notice(&format!(
                 "Actual plan governance did not run: no runner available ({reason})."
             )));
         }
-        Outcome::CheckFailed(reason) => {
+        Outcome::CheckFailed { reason, .. } => {
             emit(plan_check_hook::render_notice(&format!(
                 "Actual plan governance did not run: {reason}"
             )));
@@ -586,8 +667,9 @@ mod tests {
         let selection = prefiltered.finish(Stage2::NotRequested);
         assert!(!selection.selected.is_empty());
 
-        let rules = gather_rules(&selection, root.path());
-        let ids: Vec<&str> = rules.iter().map(|r| r.rule_id.as_str()).collect();
+        let gathered = gather_rules(&selection, root.path());
+        assert!(!gathered.truncated);
+        let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
         assert!(ids.contains(&"R-A-001"));
         assert!(ids.contains(&"R-A-002"));
     }
@@ -606,12 +688,17 @@ mod tests {
         )
         .unwrap();
 
-        let rules = gather_rules(&selection, root.path());
-        assert!(rules.is_empty());
+        let gathered = gather_rules(&selection, root.path());
+        assert!(gathered.rules.is_empty());
+        assert_eq!(gathered.considered, 0);
+        assert!(!gathered.truncated);
     }
 
+    /// Exceeding the cap must be visible, not just silently clipped: the
+    /// caller decides what to do with a truncated count, but it must be able
+    /// to see one occurred.
     #[test]
-    fn test_gather_rules_caps_at_max_rules_judged() {
+    fn test_gather_rules_reports_truncation_rather_than_silently_capping() {
         let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
         for i in 0..(MAX_RULES_JUDGED + 10) {
             body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
@@ -623,8 +710,28 @@ mod tests {
         let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
         assert!(!selection.selected.is_empty());
 
-        let rules = gather_rules(&selection, root.path());
-        assert_eq!(rules.len(), MAX_RULES_JUDGED);
+        let gathered = gather_rules(&selection, root.path());
+        assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
+        assert_eq!(gathered.considered, MAX_RULES_JUDGED + 10);
+        assert!(gathered.truncated);
+    }
+
+    #[test]
+    fn test_gather_rules_not_truncated_exactly_at_the_cap() {
+        let mut body = "# Exactly Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..MAX_RULES_JUDGED {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-exactly-many-abcd.md", &body)]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Add a new widget in services/widgets".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+
+        let gathered = gather_rules(&selection, root.path());
+        assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
+        assert_eq!(gathered.considered, MAX_RULES_JUDGED);
+        assert!(!gathered.truncated);
     }
 
     // ── deny / notice text ───────────────────────────────────────────────
@@ -759,6 +866,48 @@ mod tests {
         assert!(value["detail"].is_string());
     }
 
+    /// The review finding this guards: `NoRunner` and `CheckFailed` happen
+    /// after selection ran, and must report how many documents were selected
+    /// rather than a hardcoded zero that a CI consumer of `--json` cannot
+    /// distinguish from "nothing applied at all".
+    #[test]
+    fn test_render_json_reports_documents_selected_on_no_runner_and_check_failed() {
+        let no_runner = Outcome::NoRunner {
+            documents_selected: 7,
+            reason: "no ANTHROPIC_API_KEY".to_string(),
+        };
+        let value: serde_json::Value = serde_json::from_str(&render_json(&no_runner)).unwrap();
+        assert_eq!(value["status"], "not_checked");
+        assert_eq!(value["documents_selected"], 7);
+
+        let check_failed = Outcome::CheckFailed {
+            documents_selected: 3,
+            reason: "runner timed out".to_string(),
+        };
+        let value: serde_json::Value = serde_json::from_str(&render_json(&check_failed)).unwrap();
+        assert_eq!(value["status"], "not_checked");
+        assert_eq!(value["documents_selected"], 3);
+    }
+
+    #[test]
+    fn test_render_panel_reports_documents_selected_on_no_runner_and_check_failed() {
+        let no_runner = Outcome::NoRunner {
+            documents_selected: 7,
+            reason: "no ANTHROPIC_API_KEY".to_string(),
+        };
+        let panel = render_panel(&no_runner, "a plan", Path::new("/x/.actual/rules"), 80);
+        assert!(panel.contains("Documents selected"));
+        assert!(panel.contains('7'));
+
+        let check_failed = Outcome::CheckFailed {
+            documents_selected: 3,
+            reason: "runner timed out".to_string(),
+        };
+        let panel = render_panel(&check_failed, "a plan", Path::new("/x/.actual/rules"), 80);
+        assert!(panel.contains("Documents selected"));
+        assert!(panel.contains('3'));
+    }
+
     #[test]
     fn test_truncate_counts_chars_not_bytes() {
         let s = "é".repeat(200);
@@ -792,6 +941,7 @@ mod tests {
             claude_hook: false,
             limit: 20,
             candidates: crate::rules::scope::DEFAULT_CANDIDATES,
+            no_rank: false,
             runner: None,
             model: None,
             json: false,

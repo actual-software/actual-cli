@@ -91,6 +91,21 @@ pub enum ActualError {
     #[error("Rule rank output validation failed: {0}")]
     RuleRankInvalid(String),
 
+    /// The plan-check conformance judge came back in a shape the checker
+    /// cannot use.
+    ///
+    /// Its own variant for the same reason [`Self::RuleRankInvalid`] has one
+    /// rather than reusing [`Self::TailoringValidationError`]: a judge failure
+    /// and a tailoring failure share nothing but a shape of failure, and a
+    /// direct-mode `plan-check` message that read "Tailoring output
+    /// validation failed" for a conformance-judge problem would be actively
+    /// misleading about what broke. Unlike a rank failure, this one *is*
+    /// fatal to the check — `plan-check` has no third stage to fall back to,
+    /// so the caller degrades to fail-open (hook) or "could not check"
+    /// (direct mode) rather than to a lesser answer.
+    #[error("Plan-check conformance judge output validation failed: {0}")]
+    RuleCheckInvalid(String),
+
     #[error("Internal error: {0}")]
     InternalError(String),
 
@@ -297,6 +312,10 @@ mod tests {
             1
         );
         assert_eq!(
+            ActualError::RuleCheckInvalid("test".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
             ActualError::InternalError("test".to_string()).exit_code(),
             1
         );
@@ -437,6 +456,13 @@ mod tests {
         let rank = ActualError::RuleRankInvalid("no `verdicts` array".to_string()).to_string();
         assert!(rank.contains("Rule rank"), "{rank}");
         assert!(!rank.contains("Tailoring"), "{rank}");
+
+        // Same guarantee for the conformance judge: its failures must not be
+        // mistaken for a rank failure or a tailoring failure.
+        let check = ActualError::RuleCheckInvalid("no `verdicts` array".to_string()).to_string();
+        assert!(check.contains("Plan-check conformance judge"), "{check}");
+        assert!(!check.contains("Tailoring"), "{check}");
+        assert!(!check.contains("Rule rank"), "{check}");
 
         let msg = ActualError::TailoringValidationError("empty content".to_string()).to_string();
         assert!(
