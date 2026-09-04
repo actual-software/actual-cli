@@ -43,7 +43,7 @@ use crate::rules::{RuleDocument, RuleSetLoadReport};
 
 /// Bump when the stored shape or the scoring inputs change, so a cached index
 /// written by an older build is discarded rather than misread.
-pub const INDEX_FORMAT_VERSION: u32 = 2;
+pub const INDEX_FORMAT_VERSION: u32 = 3;
 
 /// Which signal a match came from. Ordered as the fields are documented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -139,7 +139,6 @@ pub struct IndexedDocument {
     pub title: Option<String>,
     pub scope: Option<String>,
     pub globs: Vec<String>,
-    pub extensions: Vec<String>,
     /// Terms per field with how often each occurs in that field.
     ///
     /// Frequencies, not a plain set, because inverse document frequency alone
@@ -625,7 +624,6 @@ fn index_document(doc: &RuleDocument, root: &std::path::Path) -> IndexedDocument
         title: doc.title.clone(),
         scope: doc.scope.clone(),
         globs: extracted.globs.into_iter().map(|g| g.pattern).collect(),
-        extensions: extracted.extensions,
         field_terms,
     }
 }
@@ -760,7 +758,6 @@ mod tests {
             .find(|d| d.slug.ends_with("e410"))
             .unwrap();
         assert_eq!(signing.globs, vec!["services/auth/oauth/**"]);
-        assert_eq!(signing.extensions, vec!["*.ts"]);
     }
 
     #[test]
@@ -866,6 +863,25 @@ mod tests {
         let index = sample_index();
         assert_eq!(index.term_weight("cross"), 0.0);
         assert_eq!(index.term_weight("cutting"), 0.0);
+    }
+
+    /// Extensions are extracted so they never become path globs, and then
+    /// dropped because nothing scores them. The diversion is the point, so it
+    /// is asserted here now that no field records it.
+    #[test]
+    fn test_an_extension_filter_never_becomes_a_path_glob() {
+        let index = index_of(vec![doc(
+            "cross-cutting-token-signing-e410",
+            "Adopt RS256: Token Signing",
+            "These rules are ALWAYS ACTIVE for OAuth token signing.",
+            "grep -r \"jwt.sign\" services/auth/oauth/ --include=\"*.ts\"",
+        )]);
+        let globs = &index.documents[0].globs;
+        assert!(
+            globs.iter().all(|g| !g.contains("*.ts")),
+            "an extension filter leaked into the path globs: {globs:?}"
+        );
+        assert!(globs.iter().any(|g| g.starts_with("services/auth/oauth")));
     }
 
     #[test]

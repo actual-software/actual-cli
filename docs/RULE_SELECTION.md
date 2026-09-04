@@ -157,6 +157,19 @@ five.
 
 ## Honest limits
 
+- **The plan is trusted input.** It is interpolated into the prompt as prose,
+  fenced in a delimiter derived from its own bytes so an imitated section header
+  cannot close the block. That raises the cost of a blind injection; it does not
+  end it, and a plan can still bias verdicts. What it cannot do is add a rule,
+  since a verdict naming a non-candidate is dropped — so the worst case is
+  mis-ranking documents that genuinely govern the repository. Anyone feeding
+  `rules select` a plan from an issue body, a webhook or a pull-request
+  description is crossing that boundary and needs a defence at their own layer.
+- **A rank need not be a full judgement.** A model that returns one verdict and
+  omits the rest still produces a capped answer: the unjudged candidates are
+  kept at their prefilter rank, below everything the ranker affirmed. The status
+  line says `partly ranked` and gives the count when that happens, and each
+  padded rule keeps `stage: prefilter` with no verdict in the JSON.
 - **Stage 2's quality is the model's quality.** The tests bound what the
   orchestration can do to a good answer; they say nothing about whether a given
   model gives one. The reason line is what makes a bad verdict visible.

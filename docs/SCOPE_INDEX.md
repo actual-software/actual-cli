@@ -120,6 +120,11 @@ filename scan wastes nearly two.
 - **The `path` signal only fires when the caller names paths.** At plan time
   most callers do not, so it contributes nothing to most of these numbers. It is
   what makes the index sharp once a plan does name a file.
+- **Discovery is flat.** Only `.md` files directly under `.actual/rules/` are
+  indexed; a subdirectory is skipped without comment. The directory is
+  generated and written one level deep, so this avoids governing a repository
+  by a vendored copy or an editor backup that happened to land there. A
+  hand-organised `.actual/rules/auth/` is ignored.
 - **Retrieval is lexical.** A plan that paraphrases its whole domain without
   naming it will not match, and no amount of weighting fixes that.
 - **Inverse document frequency needs documents to compare.** It scores a term by

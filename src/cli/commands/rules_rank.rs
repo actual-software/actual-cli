@@ -34,12 +34,20 @@ use crate::runner::probe::{
 use crate::runner::structured::StructuredRunner;
 use crate::runner::subprocess::CliClaudeRunner;
 
-/// How long stage 2 waits for a verdict.
+/// How long a runner may stay **silent** during a rank before it is abandoned.
 ///
-/// Far below the tailoring timeout, which is measured in minutes. Selection is
-/// meant to sit inside an interactive turn, and a ranker still thinking after a
-/// minute has already cost more than the precision it was going to buy — the
-/// caller degrades to the prefilter instead.
+/// This is an inactivity timer, not a bound on the call: a runner resets it on
+/// every streamed event, so a backend that keeps talking is never cut off by
+/// it. A measured `claude-cli` rank ran 218 seconds under this 60-second value.
+/// The bound on the whole call is
+/// [`RANK_BUDGET`](crate::rules::scope::rank::RANK_BUDGET), which is wall clock
+/// and is what the "interactive turn" claim rests on.
+///
+/// Two limits rather than one because they catch different failures: a backend
+/// that has hung answers to this one, and a backend that is merely slow answers
+/// to the deadline. It is set far below the tailoring timeout, which is
+/// measured in minutes, because a selection that stalls should degrade to the
+/// prefilter rather than hold the turn open.
 pub const RANK_TIMEOUT_SECS: u64 = 60;
 
 /// One of the five backends, chosen at run time.
@@ -524,8 +532,6 @@ mod tests {
         assert_eq!(unlabelled.label(), "codex-cli");
     }
 
-    /// The selection timeout is capped well under the tailoring one: a ranker
-    /// still thinking after a minute has already cost more than it can buy.
     /// A resolution failure is logged, and a derived `Debug` would put the
     /// resolved API key in that log line.
     #[test]
@@ -576,9 +582,18 @@ mod tests {
         assert_eq!(resolved.max_budget_usd, None);
     }
 
+    /// The two limits on a rank measure different things, and only one of them
+    /// bounds the call. This asserts the ordering that makes the pair coherent:
+    /// the inactivity timer is shorter than the tailoring timeout it replaces,
+    /// and the deadline is longer than the inactivity timer, so a backend that
+    /// keeps streaming is cut off by the deadline rather than by silence.
     #[test]
-    fn test_the_rank_timeout_is_far_below_the_tailoring_timeout() {
+    fn test_the_two_rank_limits_are_ordered_coherently() {
         const { assert!(RANK_TIMEOUT_SECS < DEFAULT_TIMEOUT_SECS) };
+        assert!(
+            Duration::from_secs(RANK_TIMEOUT_SECS) < crate::rules::scope::rank::RANK_BUDGET,
+            "the deadline must outlast the inactivity timer, or it can never fire"
+        );
     }
 
     #[test]

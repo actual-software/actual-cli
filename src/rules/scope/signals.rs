@@ -473,7 +473,18 @@ fn extract_from_find(args: &[String], globs: &mut Vec<PathGlob>, extensions: &mu
     }
 }
 
-/// Record `--include=*.ts` style filters as extension signal.
+/// Divert `--include=*.ts` style filters away from the path globs.
+///
+/// The extensions are collected rather than scored. Nothing ranks on them: a
+/// `*.ts` filter says which language a rule polices, not which plan it governs,
+/// and at plan time there is no file list to match one against. What this
+/// exists for is the diversion itself — without it `*.ts` reaches `push_path`
+/// and becomes a path glob matching every TypeScript file in the repository,
+/// which would make the strongest signal the least discriminating one.
+///
+/// They are therefore extracted and dropped, not extracted and stored: an
+/// `IndexedDocument` that carried them would imply a sixth signal that does not
+/// exist.
 fn collect_option_value(token: &str, extensions: &mut Vec<String>) {
     if let Some((flag, value)) = token.split_once('=') {
         if flag.starts_with("--include") || flag == "--glob" || flag == "-g" || flag == "--type" {
