@@ -474,14 +474,16 @@ fn deny_summary(conflicts: &[&CheckedRule]) -> String {
 
 // ── --claude-hook mode ───────────────────────────────────────────────────
 
-/// Run the `--claude-hook` path.
+/// Read the hook payload from real stdin and hand it to [`exec_hook_with`].
 ///
-/// INVARIANT: [`exec`] always sees this path complete normally — every
-/// fallible step below is matched explicitly and turned into a fail-open
-/// notice (or, for a real violation, a deny) rather than propagating an
-/// error, so this function has no path that reaches an ordinary nonzero
-/// exit. The only way [`exec`] could surface one from this path is an actual
-/// Rust panic, which this function's own logic never triggers.
+/// Kept to this one fallible line on purpose: `std::io::stdin()` is real
+/// process I/O, and calling it from an in-process unit test risks blocking on
+/// whatever the test harness's own stdin happens to be (a real terminal,
+/// notably — CI's closed/redirected stdin is not a given everywhere this runs).
+/// Everything that does not touch the real world lives in [`exec_hook_with`],
+/// which takes the bytes as a plain `&str` and is exercised directly; this
+/// wrapper itself is covered by a subprocess test in `tests/cli_test.rs`,
+/// which controls stdin safely because it drives a separate process.
 fn exec_hook(args: &PlanCheckArgs) {
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
@@ -490,8 +492,19 @@ fn exec_hook(args: &PlanCheckArgs) {
         ));
         return;
     }
+    exec_hook_with(args, &raw);
+}
 
-    let envelope: HookEnvelope = match serde_json::from_str(&raw) {
+/// Run the `--claude-hook` path against an already-read payload.
+///
+/// INVARIANT: [`exec`] always sees this path complete normally — every
+/// fallible step below is matched explicitly and turned into a fail-open
+/// notice (or, for a real violation, a deny) rather than propagating an
+/// error, so this function has no path that reaches an ordinary nonzero
+/// exit. The only way [`exec`] could surface one from this path is an actual
+/// Rust panic, which this function's own logic never triggers.
+fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
+    let envelope: HookEnvelope = match serde_json::from_str(raw) {
         Ok(envelope) => envelope,
         Err(_) => {
             emit(plan_check_hook::render_notice(
@@ -629,6 +642,7 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use crate::rules::types::RuleLevel;
+    use crate::testutil::{EnvGuard, ENV_MUTEX};
 
     const OAUTH_DOC: &str = "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: log the raw signing key.\n";
     const TERRAFORM_DOC: &str = "# Pin Providers: Terraform\n\nThese rules are ALWAYS ACTIVE for Terraform configuration in `infra/terraform/`.\n\n### Rules\n\n- **R-B-001** MUST: pin providers.\n";
@@ -878,6 +892,15 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "conflicting");
 
+        let requires_decision = Outcome::Verdicts {
+            selection: selection.clone(),
+            verdicts: vec![checked("R-A-003", Verdict::RequiresDecision, "x", "y")],
+            runner_label: None,
+        };
+        let json = render_json(&requires_decision);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["status"], "requires_decision");
+
         let json = render_json(&Outcome::NothingApplies);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "not_checked");
@@ -965,5 +988,656 @@ mod tests {
             json: false,
             rebuild: false,
         }
+    }
+
+    /// Helper: an isolated config directory, so a runner-resolving test never
+    /// touches the real `~/.actualai` cache or config.
+    fn isolated_config(home: &TempDir) -> (EnvGuard, EnvGuard) {
+        (
+            EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap()),
+            EnvGuard::remove("ACTUAL_CONFIG"),
+        )
+    }
+
+    /// A fake Claude Code binary that answers the auth probe as logged in and
+    /// every other invocation with `structured_output`, whatever it is.
+    ///
+    /// This is what lets a runner-dependent pipeline path run end to end —
+    /// runner resolution, the runtime bridge, and response parsing — without
+    /// a model, a key or a network, the same technique `rules_scope.rs` uses
+    /// for its own stage-2 tests.
+    #[cfg(unix)]
+    fn fake_claude(dir: &Path, structured_output: &serde_json::Value) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "structured_output": structured_output,
+        })
+        .to_string();
+        let script = dir.join("fake-claude.sh");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nprintf '%s' '{envelope}'\n"
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// A fake binary that only ever answers the auth probe. Used when a test
+    /// needs a runner to resolve successfully but the pipeline should never
+    /// actually reach a completion call (e.g. it fails, or refuses, first).
+    #[cfg(unix)]
+    fn fake_claude_auth_only(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = dir.join("fake-claude-auth-only.sh");
+        let body = "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{\"loggedIn\":true}'; exit 0; fi\nexit 1\n";
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// `structured_output` shaped for the check schema: an array of
+    /// `{doc_slug, rule_id, verdict, span, reason}` entries.
+    fn check_output(entries: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "verdicts": entries })
+    }
+
+    /// `structured_output` shaped for the *rank* schema (`slug`/`verdict`/
+    /// `reason`) — valid input for stage 2's rank, and deliberately the wrong
+    /// shape for the judge, so reusing it for a check call exercises the
+    /// "judge output was malformed" path.
+    fn rank_output(slug: &str) -> serde_json::Value {
+        serde_json::json!({
+            "verdicts": [{"slug": slug, "verdict": "governs", "reason": "it governs the change"}]
+        })
+    }
+
+    // ── repo_root ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_repo_root_uses_the_explicit_path_when_given() {
+        let explicit = PathBuf::from("/some/explicit/repo");
+        assert_eq!(repo_root(Some(&explicit)), explicit);
+    }
+
+    #[test]
+    fn test_repo_root_falls_back_to_the_working_directory() {
+        assert_eq!(repo_root(None), crate::cli::commands::sync::resolve_cwd());
+    }
+
+    // ── resolve_direct_plan: the branches that never touch real stdin ──────
+
+    #[test]
+    fn test_resolve_direct_plan_errors_when_the_plan_file_is_empty() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("empty.md");
+        std::fs::write(&file, "   \n\n").unwrap();
+        let mut args = base_args();
+        args.plan_file = Some(file.clone());
+        let err = resolve_direct_plan(&args).unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(_)));
+        assert!(err.to_string().contains(&file.display().to_string()));
+    }
+
+    #[test]
+    fn test_resolve_direct_plan_errors_when_the_plan_file_does_not_exist() {
+        let mut args = base_args();
+        args.plan_file = Some(PathBuf::from("/no/such/plan-file.md"));
+        let err = resolve_direct_plan(&args).unwrap_err();
+        assert!(matches!(err, ActualError::IoError(_)));
+    }
+
+    // ── gather_rules: the remaining per-file failure branches ───────────────
+
+    #[test]
+    fn test_gather_rules_skips_a_document_that_is_not_valid_utf8() {
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Sign tokens".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+
+        // Corrupt the file to invalid UTF-8 after selection but before gathering.
+        std::fs::write(
+            crate::rules::rules_dir(root.path()).join("cross-cutting-token-signing-1c57.md"),
+            [0xff, 0xfe, 0x00, 0x41],
+        )
+        .unwrap();
+
+        let gathered = gather_rules(&selection, root.path());
+        assert!(gathered.rules.is_empty());
+    }
+
+    #[test]
+    fn test_gather_rules_skips_a_document_that_no_longer_parses() {
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Sign tokens".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+
+        // Rewrite with content that fails to parse (no rules section) between
+        // selection and gathering.
+        std::fs::write(
+            crate::rules::rules_dir(root.path()).join("cross-cutting-token-signing-1c57.md"),
+            "just some prose, no rules section at all\n",
+        )
+        .unwrap();
+
+        let gathered = gather_rules(&selection, root.path());
+        assert!(gathered.rules.is_empty());
+    }
+
+    // ── run_pipeline: branches that need a resolved (or unavailable) runner ─
+
+    #[test]
+    fn test_run_pipeline_no_runner_available() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let rules_dir = crate::rules::rules_dir(root.path());
+
+        let outcome = run_pipeline(
+            "Sign access tokens with RS256",
+            root.path(),
+            &rules_dir,
+            &args,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            Outcome::NoRunner { documents_selected, .. } if documents_selected > 0
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pipeline_nothing_applies_when_limit_is_zero() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude_auth_only(bin.path()).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.limit = 0;
+        let rules_dir = crate::rules::rules_dir(root.path());
+
+        let outcome = run_pipeline("Sign tokens", root.path(), &rules_dir, &args, false).unwrap();
+        assert!(matches!(outcome, Outcome::NothingApplies));
+    }
+
+    /// `gathered.rules.is_empty()` with a *non-empty* `selection` — the TOCTOU
+    /// case `gather_rules`'s own doc comment names: a document indexed a
+    /// moment ago no longer parses by the time it is re-read for gathering.
+    ///
+    /// Reproducing that race deterministically (rather than timing a real
+    /// file mutation mid-call) means decoupling what the index claims from
+    /// what is actually on disk: a hand-built `ScopeIndex` naming a document
+    /// that was never written is stored directly in the on-disk cache, keyed
+    /// under the real, unchanged directory's own content digest. `resolve_in`
+    /// then gets a legitimate cache hit — the digest matches, because the
+    /// real files never changed — and hands back this index, whose one
+    /// document points at a file that does not exist. Selection is therefore
+    /// non-empty, but gathering it finds nothing, exactly like a document
+    /// that vanished between the two reads would.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pipeline_nothing_applies_when_a_selected_document_cannot_be_gathered() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let root = tempdir().unwrap();
+        let rules_dir = crate::rules::rules_dir(root.path());
+        std::fs::create_dir_all(&rules_dir).unwrap();
+        // One real, boring file, so the directory's content digest is stable
+        // and never changes across this test.
+        std::fs::write(
+            rules_dir.join("boring.md"),
+            "# Boring\n\nThese rules are ALWAYS ACTIVE for nothing in particular.\n\n### Rules\n\n- **R-BORING-001** MAY: exist.\n",
+        )
+        .unwrap();
+        let digest = crate::rules::read_rule_sources_in(&rules_dir)
+            .unwrap()
+            .digest;
+
+        let mut phantom = crate::rules::RuleDocument::empty(&rules_dir.join("phantom.md"));
+        phantom.title = Some("Widget Colors".to_string());
+        phantom.scope =
+            Some("These rules are ALWAYS ACTIVE for choosing widget colors.".to_string());
+        phantom.rules.push(crate::rules::Rule {
+            id: "R-PHANTOM-001".to_string(),
+            level: RuleLevel::Must,
+            statement: "use blue for primary buttons.".to_string(),
+            line: 1,
+        });
+        let report = crate::rules::RuleSetLoadReport {
+            rules_dir: rules_dir.clone(),
+            documents: vec![phantom],
+            errors: Vec::new(),
+            digest: digest.clone(),
+        };
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), digest);
+        crate::rules::scope::cache::store(&rules_dir, &index);
+
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude_auth_only(bin.path()).to_str().unwrap(),
+        );
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+
+        let outcome = run_pipeline(
+            "Choose colors for widget buttons",
+            root.path(),
+            &rules_dir,
+            &args,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Outcome::NothingApplies));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pipeline_check_failed_when_rules_exceed_the_judging_cap() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 1) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude_auth_only(bin.path()).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let rules_dir = crate::rules::rules_dir(root.path());
+
+        let outcome = run_pipeline(
+            "Add a new widget in services/widgets",
+            root.path(),
+            &rules_dir,
+            &args,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            Outcome::CheckFailed { ref reason, .. } if reason.contains("judging cap")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pipeline_check_failed_when_the_judge_response_is_malformed() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        // Rank-shaped output is the wrong shape for the judge.
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &rank_output("cross-cutting-token-signing-1c57"))
+                .to_str()
+                .unwrap(),
+        );
+
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let rules_dir = crate::rules::rules_dir(root.path());
+
+        let outcome = run_pipeline(
+            "Sign access tokens with RS256",
+            root.path(),
+            &rules_dir,
+            &args,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            Outcome::CheckFailed { ref reason, .. } if !reason.is_empty()
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pipeline_produces_verdicts_via_a_resolved_runner() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let rules_dir = crate::rules::rules_dir(root.path());
+
+        let outcome = run_pipeline(
+            "Sign access tokens with RS256",
+            root.path(),
+            &rules_dir,
+            &args,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            &outcome,
+            Outcome::Verdicts { verdicts, runner_label, .. }
+                if verdicts.len() == 2
+                    && runner_label.as_deref().is_some_and(|l| l.starts_with("claude-cli"))
+        ));
+    }
+
+    /// `use_rank: true` actually reaches stage 2's rank, not just the
+    /// deterministic prefilter — proven by requiring more candidates than
+    /// `--limit` (which forces `needs_rank()`) and a runner that only
+    /// produces a *rank*-shaped answer. The judge call that necessarily
+    /// follows then fails on that same malformed shape, which is itself a
+    /// legitimate, separately-asserted outcome.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pipeline_uses_stage_two_rank_when_use_rank_is_true() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[
+            ("cross-cutting-token-signing-1c57.md", OAUTH_DOC),
+            ("cross-cutting-terraform-c340.md", TERRAFORM_DOC),
+        ]);
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &rank_output("cross-cutting-token-signing-1c57"))
+                .to_str()
+                .unwrap(),
+        );
+
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.limit = 1;
+        let rules_dir = crate::rules::rules_dir(root.path());
+
+        let outcome = run_pipeline(
+            "Rotate the OAuth signing key and pin providers",
+            root.path(),
+            &rules_dir,
+            &args,
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            Outcome::CheckFailed { .. } | Outcome::Verdicts { .. }
+        ));
+    }
+
+    // ── exec / exec_direct: dispatch and the conforming/conflict outcomes ───
+
+    #[test]
+    fn test_exec_direct_dispatch_with_no_applicable_rules_returns_ok() {
+        let repo = tempdir().unwrap();
+        let mut args = base_args();
+        args.plan = vec!["a plan".to_string()];
+        args.repo = Some(repo.path().to_path_buf());
+        assert!(exec(&args).is_ok());
+    }
+
+    #[test]
+    fn test_exec_direct_json_output_with_no_applicable_rules() {
+        let repo = tempdir().unwrap();
+        let mut args = base_args();
+        args.plan = vec!["a plan".to_string()];
+        args.repo = Some(repo.path().to_path_buf());
+        args.json = true;
+        assert!(exec(&args).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_direct_returns_ok_on_a_conforming_plan() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.plan = vec![
+            "Sign".to_string(),
+            "access".to_string(),
+            "tokens".to_string(),
+            "with".to_string(),
+            "RS256".to_string(),
+        ];
+        args.repo = Some(root.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.no_rank = true;
+
+        assert!(exec(&args).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_direct_returns_plan_not_conforming_on_a_real_conflict() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.plan = vec![
+            "Sign".to_string(),
+            "access".to_string(),
+            "tokens".to_string(),
+            "with".to_string(),
+            "RS256".to_string(),
+        ];
+        args.repo = Some(root.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.no_rank = true;
+
+        let err = exec(&args).unwrap_err();
+        assert!(matches!(err, ActualError::PlanNotConforming(_)));
+    }
+
+    // ── exec_hook_with: every notice/deny branch, without touching stdin ────
+
+    #[test]
+    fn test_exec_hook_with_malformed_json_is_a_silent_fail_open() {
+        // No panic, no emitted deny -- covered by not panicking, since stdout
+        // capture is not exercised at this layer (see the subprocess tests
+        // in tests/cli_test.rs for the observable-stdout contract).
+        exec_hook_with(&base_args(), "not json");
+    }
+
+    #[test]
+    fn test_exec_hook_with_no_plan_resolvable() {
+        exec_hook_with(&base_args(), "{}");
+    }
+
+    #[test]
+    fn test_exec_hook_with_reports_a_rules_directory_load_failure() {
+        let root = tempdir().unwrap();
+        let not_a_dir = root.path().join("rules-dir-is-a-file");
+        std::fs::write(&not_a_dir, "not a directory").unwrap();
+
+        let mut args = base_args();
+        args.rules_dir = Some(not_a_dir);
+        let raw = serde_json::json!({"tool_input": {"plan": "a plan"}}).to_string();
+        exec_hook_with(&args, &raw);
+    }
+
+    #[test]
+    fn test_exec_hook_with_nothing_applies() {
+        let repo = tempdir().unwrap();
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        let raw = serde_json::json!({"tool_input": {"plan": "a plan"}}).to_string();
+        exec_hook_with(&args, &raw);
+    }
+
+    #[test]
+    fn test_exec_hook_with_no_runner_available() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
+            .to_string();
+        exec_hook_with(&args, &raw);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_check_failed() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &rank_output("cross-cutting-token-signing-1c57"))
+                .to_str()
+                .unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
+            .to_string();
+        exec_hook_with(&args, &raw);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_denies_a_real_conflict() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
+            .to_string();
+        exec_hook_with(&args, &raw);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_flags_a_requires_decision_verdict() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "requires_decision", "span": "moves to HS256", "reason": "deliberate supersession"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
+            .to_string();
+        exec_hook_with(&args, &raw);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_stays_silent_on_a_fully_conforming_plan() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
+            .to_string();
+        exec_hook_with(&args, &raw);
     }
 }

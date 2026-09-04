@@ -488,6 +488,157 @@ mod tests {
         assert_eq!(plan, "# Ok plan");
     }
 
+    /// The transcript correlates to a real `planFilePath`, but the file at
+    /// that path is empty — `find_plan_file_in_transcript` succeeds while
+    /// `read_capped` on its result still fails, which are two different
+    /// failure points that must both degrade to `None`.
+    #[test]
+    fn test_resolve_plan_transcript_found_a_path_but_could_not_read_it() {
+        let dir = tempdir().unwrap();
+        let empty_plan = dir.path().join("empty-plan.md");
+        std::fs::write(&empty_plan, "   \n").unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"attachment\",\"attachment\":{{\"type\":\"plan_mode\",\"planFilePath\":\"{}\",\"planExists\":true}}}}\n",
+                empty_plan.display()
+            ),
+        )
+        .unwrap();
+        let env = envelope(&format!(
+            r#"{{"prompt_id":"x","transcript_path":"{}","tool_input":{{}}}}"#,
+            transcript.display()
+        ));
+        assert!(resolve_plan(&env).is_none());
+    }
+
+    #[test]
+    fn test_read_capped_none_for_a_whitespace_only_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("blank.md");
+        std::fs::write(&file, "   \n\t\n").unwrap();
+        assert!(read_capped(&file).is_none());
+    }
+
+    /// The scan must actually stop at [`MAX_READ_BYTES`] rather than only
+    /// documenting that it does: a transcript this large is streamed, never
+    /// buffered whole.
+    #[test]
+    fn test_find_plan_file_in_transcript_stops_scanning_past_max_read_bytes() {
+        let dir = tempdir().unwrap();
+        let plan_file = dir.path().join("plan.md");
+        std::fs::write(&plan_file, "# Never reached").unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+
+        // Pad the transcript past the scan cap with an oversized, otherwise
+        // harmless line before the real attachment, so the attachment is
+        // never reached if the cap is honored.
+        let mut contents = String::new();
+        let filler = "{\"type\":\"user\",\"promptId\":\"filler\"}".to_string();
+        let padding_line = format!("{filler}{}\n", " ".repeat(MAX_READ_BYTES as usize));
+        contents.push_str(&padding_line);
+        contents.push_str(&format!(
+            "{{\"type\":\"attachment\",\"attachment\":{{\"type\":\"plan_mode\",\"planFilePath\":\"{}\",\"planExists\":true}}}}\n",
+            plan_file.display()
+        ));
+        std::fs::write(&transcript, contents).unwrap();
+
+        let env = envelope(&format!(
+            r#"{{"prompt_id":"x","transcript_path":"{}","tool_input":{{}}}}"#,
+            transcript.display()
+        ));
+        assert!(resolve_plan(&env).is_none());
+    }
+
+    #[test]
+    fn test_find_plan_file_in_transcript_ignores_a_non_user_non_attachment_entry() {
+        let dir = tempdir().unwrap();
+        let plan_file = dir.path().join("plan.md");
+        std::fs::write(&plan_file, "# Ok plan").unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"assistant\"}}\n{{\"type\":\"attachment\",\"attachment\":{{\"type\":\"plan_mode\",\"planFilePath\":\"{}\",\"planExists\":true}}}}\n",
+                plan_file.display()
+            ),
+        )
+        .unwrap();
+        let env = envelope(&format!(
+            r#"{{"prompt_id":"x","transcript_path":"{}","tool_input":{{}}}}"#,
+            transcript.display()
+        ));
+        let (plan, _) = resolve_plan(&env).unwrap();
+        assert_eq!(plan, "# Ok plan");
+    }
+
+    #[test]
+    fn test_find_plan_file_in_transcript_ignores_an_attachment_entry_with_no_attachment_field() {
+        let dir = tempdir().unwrap();
+        let plan_file = dir.path().join("plan.md");
+        std::fs::write(&plan_file, "# Ok plan").unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"attachment\"}}\n{{\"type\":\"attachment\",\"attachment\":{{\"type\":\"plan_mode\",\"planFilePath\":\"{}\",\"planExists\":true}}}}\n",
+                plan_file.display()
+            ),
+        )
+        .unwrap();
+        let env = envelope(&format!(
+            r#"{{"prompt_id":"x","transcript_path":"{}","tool_input":{{}}}}"#,
+            transcript.display()
+        ));
+        let (plan, _) = resolve_plan(&env).unwrap();
+        assert_eq!(plan, "# Ok plan");
+    }
+
+    #[test]
+    fn test_find_plan_file_in_transcript_ignores_a_non_plan_mode_attachment() {
+        let dir = tempdir().unwrap();
+        let plan_file = dir.path().join("plan.md");
+        std::fs::write(&plan_file, "# Ok plan").unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"attachment\",\"attachment\":{{\"type\":\"other_kind\"}}}}\n{{\"type\":\"attachment\",\"attachment\":{{\"type\":\"plan_mode\",\"planFilePath\":\"{}\",\"planExists\":true}}}}\n",
+                plan_file.display()
+            ),
+        )
+        .unwrap();
+        let env = envelope(&format!(
+            r#"{{"prompt_id":"x","transcript_path":"{}","tool_input":{{}}}}"#,
+            transcript.display()
+        ));
+        let (plan, _) = resolve_plan(&env).unwrap();
+        assert_eq!(plan, "# Ok plan");
+    }
+
+    #[test]
+    fn test_find_plan_file_in_transcript_ignores_a_plan_mode_attachment_with_no_path() {
+        let dir = tempdir().unwrap();
+        let plan_file = dir.path().join("plan.md");
+        std::fs::write(&plan_file, "# Ok plan").unwrap();
+        let transcript = dir.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{{\"type\":\"attachment\",\"attachment\":{{\"type\":\"plan_mode\",\"planExists\":true}}}}\n{{\"type\":\"attachment\",\"attachment\":{{\"type\":\"plan_mode\",\"planFilePath\":\"{}\",\"planExists\":true}}}}\n",
+                plan_file.display()
+            ),
+        )
+        .unwrap();
+        let env = envelope(&format!(
+            r#"{{"prompt_id":"x","transcript_path":"{}","tool_input":{{}}}}"#,
+            transcript.display()
+        ));
+        let (plan, _) = resolve_plan(&env).unwrap();
+        assert_eq!(plan, "# Ok plan");
+    }
+
     // ── resolve_plan: nothing works ──────────────────────────────────────
 
     #[test]
