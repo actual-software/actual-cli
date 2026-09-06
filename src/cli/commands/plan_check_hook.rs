@@ -37,13 +37,21 @@ use serde::{Deserialize, Serialize};
 pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 
 /// The fields this module reads out of a `PreToolUse` hook envelope. Every
-/// other field Claude Code sends (`session_id`, `cwd`, `permission_mode`,
-/// `tool_name`, ...) is ignored by construction: an unrecognized field is
-/// simply absent from this struct rather than rejected, so a newer hook
-/// envelope with additional fields still deserializes.
+/// other field Claude Code sends (`cwd`, `permission_mode`, `tool_name`, ...)
+/// is ignored by construction: an unrecognized field is simply absent from
+/// this struct rather than rejected, so a newer hook envelope with additional
+/// fields still deserializes.
+///
+/// `session_id` is read (unlike the rest of the ignored fields) because it is
+/// the identity the revision loop keys its state on — see
+/// `crate::cli::commands::plan_check_session`. It is optional: an envelope
+/// that omits it (an older Claude Code build) simply never engages the
+/// loop/override/round-limit features, the same fail-open posture as every
+/// other hook-only behavior in this module.
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 pub struct HookEnvelope {
+    pub session_id: Option<String>,
     pub prompt_id: Option<String>,
     pub transcript_path: Option<String>,
     pub tool_input: Option<ToolInput>,
@@ -668,6 +676,18 @@ mod tests {
             r##"{"session_id":"s1","cwd":"/repo","permission_mode":"plan","hook_event_name":"PreToolUse","tool_name":"ExitPlanMode","tool_use_id":"t1","tool_input":{"plan":"# Plan","planFilePath":"/x"}}"##,
         );
         assert_eq!(env.tool_input.unwrap().plan.as_deref(), Some("# Plan"));
+    }
+
+    #[test]
+    fn test_envelope_reads_session_id() {
+        let env = envelope(r##"{"session_id":"abc-123","tool_input":{"plan":"# Plan"}}"##);
+        assert_eq!(env.session_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn test_envelope_session_id_absent_is_none() {
+        let env = envelope(r##"{"tool_input":{"plan":"# Plan"}}"##);
+        assert_eq!(env.session_id, None);
     }
 
     // ── output rendering ─────────────────────────────────────────────────
