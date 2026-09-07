@@ -14,15 +14,51 @@
 //! `PreToolUse` envelope on stdin, and the contract there is fixed by
 //! `skills/actual/SKILL.md` in the `actual-skill` plugin repository: a
 //! conforming plan prints **nothing** and exits 0 so the user's approval
-//! dialog is untouched; a genuine violation prints exactly one JSON object
-//! naming the rule id and the conflicting span; and every other outcome —
-//! no plan resolvable, no rules, no runner, a crashed judge call — fails
-//! open. `--claude-hook` never returns `Err` from [`exec`]: every fallible
-//! step is caught and turned into a fail-open notice, the same invariant
-//! `crate::rules::discover` documents for its per-file loop. `permission
-//! Decision: "allow"` is never emitted anywhere in this module or in
-//! [`plan_check_hook`] — there is no function that produces it — because a
-//! gate has no business granting the approval it is supposed to be checking.
+//! dialog is untouched; a genuine violation or an unconfirmed "deliberate
+//! supersession" claim prints exactly one JSON object naming the rule id
+//! and the conflicting span; and every other outcome — no plan resolvable,
+//! no rules, no runner, a crashed judge call — fails open. `--claude-hook`
+//! never returns `Err` from [`exec`]: every fallible step is caught and
+//! turned into a fail-open notice, the same invariant `crate::rules::discover`
+//! documents for its per-file loop. `permission Decision: "allow"` is never
+//! emitted anywhere in this module or in [`plan_check_hook`] — there is no
+//! function that produces it — because a gate has no business granting the
+//! approval it is supposed to be checking.
+//!
+//! # This is an advisory gate, not an enforcement boundary
+//!
+//! Worth being explicit about, because the fail-open conditions below stack:
+//! this hook can raise the bar for an agent that is cooperating with
+//! governance, and it can catch an oversight before it ships. It is not a
+//! security control, and it cannot be, because it fails open by design in
+//! several distinct ways, each individually deliberate:
+//!
+//! - **Any infrastructure failure fails open.** No runner available, the
+//!   judge call itself failing (timeout, malformed output), no plan text
+//!   resolvable, no rules directory readable — every one of these is a
+//!   `--claude-hook` notice, never a deny. A `PreToolUse` hook that could
+//!   block on its own dependencies being unavailable would make the tool
+//!   itself unreliable for reasons that have nothing to do with the plan.
+//! - **The [`MAX_RULES_JUDGED`] cap fails open for the *entire* selected
+//!   batch, not just the overflow.** If the documents [`run_pipeline`]
+//!   selects for a plan hold more than 60 individual rules combined — one
+//!   large document is enough on its own, and several ordinary ones add up
+//!   just as easily — nothing in that batch gets judged at all this round.
+//!   A single oversized rules corpus is a single point of failure for
+//!   governance on any plan that selects it.
+//! - **The revision loop's own escape valves (below) are additional,
+//!   deliberate fail-open paths**, not enforcement: the round limit stops
+//!   blocking a persistently unresolved rule specifically so the hook does
+//!   not get uninstalled, and an override lets a human wave a specific rule
+//!   through outright. Both are recorded, which makes them *inspectable*,
+//!   not enforced.
+//!
+//! None of this is a defect to fix — a `PreToolUse` hook that could hang or
+//! wrongly block a tool call under infrastructure failure would be a worse
+//! design than one that fails open — but it does mean this module's job is
+//! to raise the cost of an unreviewed change, not to guarantee one cannot
+//! happen. Treat every "deny" this module produces as a strong nudge with a
+//! paper trail, not a guarantee nothing gets past it.
 //!
 //! [`run_pipeline`] is the shared core both callers drive: resolve the rules
 //! directory, select the documents that apply, gather their individual
@@ -41,34 +77,50 @@
 //! # The revision loop (AK-677)
 //!
 //! `--claude-hook` fires again every time the agent revises a denied plan and
-//! calls `ExitPlanMode` once more. Three things follow from that, all keyed
+//! calls `ExitPlanMode` once more. Four things follow from that, all keyed
 //! on the hook envelope's `session_id` (stable for one Claude Code
-//! conversation) via [`plan_check_session`]:
+//! conversation, paired with `rules_dir` — see [`plan_check_session`]'s own
+//! doc for why session_id alone is not enough):
 //!
-//! 1. **Never re-litigate a cleared rule.** Every rule the judge has already
-//!    called [`Verdict::Conforming`] for this session is excluded from every
-//!    later judge call outright — not merely re-asked and hoped to agree. A
-//!    judge is a model call, not a deterministic function; without this, a
-//!    borderline rule could flip from cleared to conflicting on a later round
-//!    for no reason the agent caused. An explicit override (below) is
-//!    excluded the same way.
-//! 2. **An explicit, recorded override.** A human — never the agent, which
-//!    has no channel to invoke this — runs `actual plan-check-override`
-//!    directly. It is excluded from judging from that point on, exactly like
-//!    a cleared rule, but every subsequent round says so out loud in a
-//!    non-blocking notice: an override is deliberately visible, not a silent
-//!    bypass. See [`plan_check_session::record_override`].
-//! 3. **A bounded number of rounds.** [`DEFAULT_MAX_ROUNDS`] real judge calls
-//!    (`--max-rounds` / `ACTUAL_PLAN_CHECK_MAX_ROUNDS` to change it) may deny
-//!    the same session before the gate stops blocking regardless of the
-//!    verdict — a hard block with no exit gets the hook uninstalled, which
-//!    governs nothing. The round-limit pass is recorded exactly like an
-//!    override (see [`plan_check_session::record_round_limit`]), never
-//!    silent, just triggered by the cap instead of a human action.
+//! 1. **`requires_decision` blocks exactly like a real conflict.** A plan the
+//!    judge classifies as *deliberately* superseding a rule is not
+//!    automatically believed — that classification is model output, not a
+//!    recorded human decision, and the epic this belongs to (AK-662) asks
+//!    for the deliberate case to be "surfaced for explicit architectural
+//!    review," not silently allowed past. So it gets the same deny + per-rule
+//!    round-limit + override treatment as [`Verdict::Conflicting`], not a
+//!    notice the agent can simply proceed past.
+//! 2. **Never re-litigate a cleared rule.** Every rule the judge has already
+//!    called [`Verdict::Conforming`] for this session, against this exact
+//!    plan text, is excluded from the next judge call outright — not merely
+//!    re-asked and hoped to agree. A judge is a model call, not a
+//!    deterministic function; without this, a borderline rule could flip
+//!    from cleared to blocking on a later round for no reason the agent
+//!    caused. An explicit override (below) is excluded the same way,
+//!    regardless of plan text.
+//! 3. **An explicit, recorded override.** A human runs
+//!    `actual plan-check-override` directly, from an interactive terminal —
+//!    [`exec_override`]'s own doc comment explains why that check exists and
+//!    what it does and does not guarantee. An overridden rule is excluded
+//!    from judging from that point on, exactly like a cleared rule, but
+//!    every subsequent round says so out loud in a non-blocking notice: an
+//!    override is deliberately visible, not a silent bypass. See
+//!    [`plan_check_session::record_override`].
+//! 4. **A bounded number of rounds, per rule.** [`DEFAULT_MAX_ROUNDS`] real
+//!    denials of the *same rule* (`--max-rounds` / `ACTUAL_PLAN_CHECK_MAX_ROUNDS`
+//!    to change it) may block a session before the gate stops blocking on
+//!    that rule specifically, regardless of verdict — a hard block with no
+//!    exit gets the hook uninstalled, which governs nothing. A single rule
+//!    exhausting its budget never exempts a different, still-fresh conflict
+//!    in the same round (see [`PlanCheckSession::deny_limit_exceeded`]). The
+//!    round-limit pass is recorded exactly like an override (see
+//!    [`plan_check_session::record_round_limit`]), never silent, just
+//!    triggered by the cap instead of a human action.
 //!
 //! Direct mode never reads or writes session state (there is no
 //! `session_id` outside a hook envelope), so none of this changes its
-//! behavior: `run_pipeline`'s `exclude` set is simply empty.
+//! behavior: `requires_decision` still only sets `--json`'s status field
+//! there and exits 0, matching its documented, unchanged contract.
 
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -711,21 +763,30 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                 }
             }
 
-            let conflicts: Vec<&CheckedRule> =
-                verdicts.iter().filter(|v| v.verdict.blocks()).collect();
+            // A verdict blocks the tool call when it is a genuine conflict,
+            // or when the judge classifies the plan as *deliberately*
+            // superseding a rule — that classification is model output, not
+            // a recorded human decision, so it gets exactly the same deny +
+            // override treatment as an outright conflict, not a notice the
+            // agent can simply proceed past. See the module doc's "advisory
+            // gate" section.
+            let blocking: Vec<&CheckedRule> = verdicts
+                .iter()
+                .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
+                .collect();
 
-            if !conflicts.is_empty() {
+            if !blocking.is_empty() {
                 if session_id.is_some() {
-                    // Every currently-conflicting rule gets its own denial
+                    // Every currently-blocking rule gets its own denial
                     // recorded, independent of any other rule's count — see
                     // the module doc's "the round limit is per rule" note.
-                    for c in &conflicts {
+                    for c in &blocking {
                         session.record_denial(&plan_check_session::key(&c.doc_slug, &c.rule_id));
                     }
                 }
 
                 if let Some(session_id) = session_id {
-                    let exhausted: Vec<&CheckedRule> = conflicts
+                    let exhausted: Vec<&CheckedRule> = blocking
                         .iter()
                         .filter(|c| {
                             session.deny_limit_exceeded(
@@ -741,7 +802,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                     // hook can only deny or not deny the tool call as a
                     // whole, so an exhausted rule cannot be waved through
                     // while a fresh one still needs to block.
-                    if !exhausted.is_empty() && exhausted.len() == conflicts.len() {
+                    if !exhausted.is_empty() && exhausted.len() == blocking.len() {
                         let keys: Vec<String> = exhausted
                             .iter()
                             .map(|c| plan_check_session::key(&c.doc_slug, &c.rule_id))
@@ -761,7 +822,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                     plan_check_session::store(session_id, &rules_dir, &session);
                 }
                 emit(plan_check_hook::render_deny(&hook_deny_reason(
-                    &conflicts, session_id,
+                    &blocking, session_id,
                 )));
                 return;
             }
@@ -770,19 +831,9 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                 plan_check_session::store(session_id, &rules_dir, &session);
             }
 
-            let decisions: Vec<&CheckedRule> = verdicts
-                .iter()
-                .filter(|v| v.verdict == Verdict::RequiresDecision)
-                .collect();
-            if !decisions.is_empty() {
-                emit(plan_check_hook::render_notice(&requires_decision_message(
-                    &decisions,
-                )));
-                return;
-            }
-            // Fully conforming (no conflicts, no decisions): the contract is
-            // silence — UNLESS this session carries an active override, which
-            // must stay visible on every round rather than being silently
+            // Fully conforming (nothing blocking): the contract is silence —
+            // UNLESS this session carries an active override, which must
+            // stay visible on every round rather than being silently
             // absorbed once granted.
             if let Some(reminder) = override_reminder(&session) {
                 emit(plan_check_hook::render_notice(&reminder));
@@ -870,7 +921,13 @@ fn emit(json: String) {
 /// verbatim, the judge's reason, and the quoted plan span, one per line — so
 /// a reader (or the agent revising the plan) sees every violation at once
 /// rather than only the first, and can revise against the rule's actual text
-/// rather than the judge's paraphrase of it.
+/// rather than the judge's paraphrase of it. `blocking` names both real
+/// conflicts and `requires_decision` verdicts — a plan claiming it
+/// deliberately supersedes a rule is model output, not a recorded human
+/// decision, so it is denied exactly like an outright conflict (see the
+/// module doc's "advisory gate" section) — labeled `CONFLICT` or `DECISION`
+/// per rule, the same labels direct mode's panel already uses, so a reader
+/// switching between the two callers sees consistent vocabulary.
 ///
 /// When `session_id` is present (a `--claude-hook` call whose envelope named
 /// one), a final line names the session and points a human at
@@ -895,12 +952,20 @@ fn emit(json: String) {
 /// rule" note), and this message denies the whole call regardless of which
 /// individual rule's count is closest to its limit — that number belongs in
 /// [`round_limit_message`], emitted only once fail-open actually happens.
-fn hook_deny_reason(conflicts: &[&CheckedRule], session_id: Option<&str>) -> String {
-    let mut lines: Vec<String> = conflicts
+fn hook_deny_reason(blocking: &[&CheckedRule], session_id: Option<&str>) -> String {
+    let mut lines: Vec<String> = blocking
         .iter()
         .map(|c| {
+            let label = match c.verdict {
+                Verdict::RequiresDecision => "DECISION",
+                // `Conflicting` is the only other verdict a caller ever
+                // passes here; anything else falls back to the same label a
+                // real conflict gets rather than assuming a shape this
+                // fail-open hook has no business panicking over.
+                _ => "CONFLICT",
+            };
             format!(
-                "{} ({}): {} — rule: \"{}\" — plan: \"{}\"",
+                "{label} {} ({}): {} — rule: \"{}\" — plan: \"{}\"",
                 c.rule_id,
                 c.level.as_str(),
                 non_empty_or(&c.reason, "conflicts with the plan"),
@@ -921,17 +986,9 @@ fn hook_deny_reason(conflicts: &[&CheckedRule], session_id: Option<&str>) -> Str
     lines.join("\n")
 }
 
-fn requires_decision_message(decisions: &[&CheckedRule]) -> String {
-    let ids: Vec<&str> = decisions.iter().map(|c| c.rule_id.as_str()).collect();
-    format!(
-        "This plan appears to deliberately change an established decision ({}), rather than \
-         violate it. Not blocked automatically in this MVP — review before proceeding.",
-        ids.join(", ")
-    )
-}
-
-/// The non-blocking notice emitted when every rule still conflicting this
-/// round has *individually* exhausted its own denial budget (see
+/// The non-blocking notice emitted when every rule still blocking this
+/// round (a conflict or an unconfirmed `requires_decision` claim) has
+/// *individually* exhausted its own denial budget (see
 /// [`PlanCheckSession::deny_limit_exceeded`]): the gate stops denying, but
 /// says exactly why, names every exhausted rule and how many times each was
 /// actually denied, so this is a loud pass, not a silent one. Paired with
@@ -960,10 +1017,10 @@ fn round_limit_message(
 }
 
 /// A non-blocking reminder naming every active override on `session`, for a
-/// round that would otherwise be completely silent (fully conforming, no
-/// decisions). An override must stay visible on every round it applies to —
-/// never silently absorbed once granted. `None` when the session has no
-/// overrides at all.
+/// round that would otherwise be completely silent (nothing blocking this
+/// round at all). An override must stay visible on every round it applies
+/// to — never silently absorbed once granted. `None` when the session has
+/// no overrides at all.
 fn override_reminder(session: &PlanCheckSession) -> Option<String> {
     if session.overrides.is_empty() {
         return None;
@@ -1206,17 +1263,30 @@ mod tests {
         assert!(!reason.to_lowercase().contains(&a.doc_slug.to_lowercase()));
     }
 
+    /// The behavior change this guards: an unconfirmed "deliberate
+    /// supersession" claim is model output, not a recorded human decision,
+    /// so `hook_deny_reason` denies it exactly like a real conflict — but
+    /// still labels it `DECISION` rather than `CONFLICT`, matching direct
+    /// mode's panel vocabulary, so a reader can tell the two apart.
     #[test]
-    fn test_requires_decision_message_names_the_rule_and_does_not_use_deny_language() {
+    fn test_hook_deny_reason_labels_a_requires_decision_verdict_distinctly() {
         let a = checked(
             "R-A-001",
             Verdict::RequiresDecision,
             "span",
             "supersedes it",
         );
-        let message = requires_decision_message(&[&a]);
-        assert!(message.contains("R-A-001"));
-        assert!(!message.to_lowercase().contains("deny"));
+        let reason = hook_deny_reason(&[&a], None);
+        assert!(reason.contains("DECISION R-A-001"));
+        assert!(!reason.contains("CONFLICT R-A-001"));
+    }
+
+    #[test]
+    fn test_hook_deny_reason_labels_a_conflicting_verdict_distinctly() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
+        let reason = hook_deny_reason(&[&a], None);
+        assert!(reason.contains("CONFLICT R-A-002"));
+        assert!(!reason.contains("DECISION R-A-002"));
     }
 
     // ── rendering ────────────────────────────────────────────────────────
@@ -2034,13 +2104,18 @@ mod tests {
         exec_hook_with(&args, &raw);
     }
 
+    /// The behavior change this guards: a `requires_decision` verdict must be
+    /// denied exactly like a real conflict (per-rule denial recorded, same
+    /// round-limit/override machinery), not merely surfaced as a notice the
+    /// agent can proceed past. See the module doc's "advisory gate" section.
     #[cfg(unix)]
     #[test]
-    fn test_exec_hook_with_flags_a_requires_decision_verdict() {
+    fn test_exec_hook_with_denies_a_requires_decision_verdict_like_a_conflict() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(root.path());
         let bin = tempdir().unwrap();
         let response = check_output(serde_json::json!([
             {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "requires_decision", "span": "moves to HS256", "reason": "deliberate supersession"},
@@ -2052,11 +2127,21 @@ mod tests {
         );
 
         let mut args = base_args();
-        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.rules_dir = Some(rules_dir.clone());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
-        let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
-            .to_string();
+        let raw = serde_json::json!({
+            "session_id": "sess-decision-1",
+            "tool_input": {"plan": "Sign access tokens with RS256"},
+        })
+        .to_string();
         exec_hook_with(&args, &raw);
+
+        // A requires_decision verdict must be recorded as a denial, exactly
+        // like a real conflict -- proving it went through the same per-rule
+        // tracking, not a separate notice-only path.
+        let session = plan_check_session::load("sess-decision-1", &rules_dir);
+        let key = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001");
+        assert_eq!(session.deny_counts.get(&key), Some(&1));
     }
 
     #[cfg(unix)]
