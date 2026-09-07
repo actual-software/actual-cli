@@ -273,6 +273,25 @@ fn parse_budget(s: &str) -> Result<f64, String> {
     Ok(val)
 }
 
+/// Parse and validate `--max-rounds` / `ACTUAL_PLAN_CHECK_MAX_ROUNDS`, rejecting
+/// anything under 1.
+///
+/// A value of 0 would mean "fail open on the very first denial" — silently
+/// disabling the gate through a numeric knob, with no signal that's what
+/// happened. There is already an explicit, obviously-named way to fully
+/// disable governance (`ACTUAL_PLAN_GATE=off`, read by the shell hook in
+/// `actual-skill`); this parser exists so a fat-fingered or templated-into-CI
+/// zero is rejected outright instead of quietly reproducing that switch.
+fn parse_max_rounds(s: &str) -> Result<u32, String> {
+    let val: u32 = s
+        .parse()
+        .map_err(|_| format!("'{s}' is not a valid number"))?;
+    if val < 1 {
+        return Err(format!("max-rounds must be at least 1, got {val}"));
+    }
+    Ok(val)
+}
+
 /// Parse and validate a model name, rejecting flag-like values and shell metacharacters.
 ///
 /// Allowed: alphanumeric start, then alphanumeric, dots, underscores, slashes, or hyphens.
@@ -899,16 +918,19 @@ pub struct PlanCheckArgs {
     #[arg(long)]
     pub rebuild: bool,
 
-    /// How many rounds of the revision loop (`--claude-hook` only) a single
-    /// Claude Code session may spend denying the same conflict before the
-    /// gate stops blocking regardless of verdict. A round is one completed
-    /// judge call; fail-open outcomes (no runner, no applicable rules, a
-    /// crashed judge call) never count. Direct mode ignores this — there is
-    /// no session outside a hook envelope.
+    /// How many times a single rule may be denied within one Claude Code
+    /// session (`--claude-hook` only) before the gate stops blocking on it
+    /// specifically, regardless of verdict. Tracked per rule, not per round:
+    /// a brand-new conflict always gets its own fresh count, no matter how
+    /// exhausted some other rule's count already is. Direct mode ignores
+    /// this — there is no session outside a hook envelope. Must be at least
+    /// 1: a value of 0 is rejected outright rather than treated as "always
+    /// fail open" (see `parse_max_rounds`).
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_ROUNDS,
-        env = "ACTUAL_PLAN_CHECK_MAX_ROUNDS"
+        env = "ACTUAL_PLAN_CHECK_MAX_ROUNDS",
+        value_parser = parse_max_rounds
     )]
     pub max_rounds: u32,
 }
@@ -1064,6 +1086,46 @@ mod parse_tests {
     #[test]
     fn test_parse_budget_valid_positive() {
         assert_eq!(parse_budget("1.5").unwrap(), 1.5);
+    }
+
+    // ---- parse_max_rounds unit tests ----
+
+    #[test]
+    fn test_parse_max_rounds_valid_positive() {
+        assert_eq!(parse_max_rounds("3").unwrap(), 3);
+    }
+
+    #[test]
+    fn test_parse_max_rounds_rejects_zero() {
+        let err = parse_max_rounds("0").unwrap_err();
+        assert!(err.contains("at least 1"), "message: {err}");
+    }
+
+    #[test]
+    fn test_parse_max_rounds_rejects_negative() {
+        assert!(parse_max_rounds("-1").is_err());
+    }
+
+    #[test]
+    fn test_parse_max_rounds_rejects_invalid_string() {
+        let err = parse_max_rounds("nope").unwrap_err();
+        assert!(err.contains("not a valid number"), "message: {err}");
+    }
+
+    #[test]
+    fn test_cli_rejects_max_rounds_zero() {
+        let result = Cli::try_parse_from(["actual", "plan-check", "--max-rounds", "0", "a plan"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_accepts_valid_max_rounds() {
+        let cli =
+            Cli::try_parse_from(["actual", "plan-check", "--max-rounds", "5", "a plan"]).unwrap();
+        match cli.command {
+            Command::PlanCheck(args) => assert_eq!(args.max_rounds, 5),
+            _ => panic!("expected PlanCheck command"),
+        }
     }
 
     #[test]

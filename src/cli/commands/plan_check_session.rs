@@ -39,8 +39,8 @@
 //! rule alone and survives any number of plan edits until the human revokes
 //! it (there is no revoke command yet — out of scope for this pass).
 //!
-//! **Two stores, two lifetimes.** The session file (`cleared`, `overrides`,
-//! `rounds`) is mutable, per-conversation, and pruned after
+//! **Two stores, two lifetimes.** The session file (`cleared`, `deny_counts`,
+//! `overrides`, `rounds`) is mutable, per-conversation, and pruned after
 //! [`SESSION_MAX_AGE`] — it is a cache of "what has this loop already settled
 //! or been told to skip," not a record of anything happening. The audit log
 //! (`plan-check-overrides.log`) is append-only and never pruned: it is the
@@ -83,9 +83,13 @@ const SESSION_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 
 #[serde(default)]
 pub struct PlanCheckSession {
     format_version: u32,
-    /// How many times a real judge call has completed for this session.
-    /// Fail-open outcomes (no runner, no applicable rules, a crashed judge
-    /// call) never increment this — nothing was actually checked.
+    /// How many times a real judge call has completed for this session, of
+    /// any verdict. Informational only — a round-limit decision is never
+    /// made from this alone (see [`deny_counts`](Self::deny_counts)): three
+    /// clean or mixed rounds must not spend down a budget meant for "how
+    /// many times has this specific rule actually been denied." Fail-open
+    /// outcomes (no runner, no applicable rules, a crashed judge call) never
+    /// increment this — nothing was actually checked.
     pub rounds: u32,
     /// `"{doc_slug}::{rule_id}"` -> the digest of the plan text that was
     /// last judged [`crate::rules::check::Verdict::Conforming`] for it (see
@@ -93,6 +97,13 @@ pub struct PlanCheckSession {
     /// overwrites the entry — only the most recent judgment matters, so this
     /// holds one entry per rule ever cleared, not one per round.
     pub cleared: BTreeMap<String, String>,
+    /// `"{doc_slug}::{rule_id}"` -> how many times that specific rule has
+    /// been denied (judged [`crate::rules::check::Verdict::Conflicting`]) in
+    /// this session. This is what the round limit actually counts against,
+    /// per rule rather than per session: a brand-new conflict always starts
+    /// at zero and gets its own full budget, no matter how exhausted some
+    /// other rule's count already is — see the module doc.
+    pub deny_counts: BTreeMap<String, u32>,
     /// Every explicit, human-issued override recorded against this session.
     pub overrides: Vec<Override>,
 }
@@ -125,6 +136,22 @@ impl PlanCheckSession {
     /// a reminder notice.
     pub fn is_overridden(&self, key: &str) -> bool {
         self.overrides.iter().any(|o| o.key == key)
+    }
+
+    /// Record one more denial of `key` this session and return its new
+    /// total. Called exactly once per conflicting rule per round.
+    pub fn record_denial(&mut self, key: &str) -> u32 {
+        let count = self.deny_counts.entry(key.to_string()).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// True when `key` has already been denied more times than `max_rounds`
+    /// allows — this specific rule's round budget is spent, regardless of
+    /// how many rounds the session has run in total or how any other rule's
+    /// count stands.
+    pub fn deny_limit_exceeded(&self, key: &str, max_rounds: u32) -> bool {
+        self.deny_counts.get(key).is_some_and(|&n| n > max_rounds)
     }
 }
 
@@ -417,6 +444,47 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
 
         assert_eq!(load("session-corrupt"), PlanCheckSession::default());
+    }
+
+    #[test]
+    fn test_record_denial_increments_and_returns_the_new_total() {
+        let mut session = PlanCheckSession::default();
+        assert_eq!(session.record_denial(&key("doc", "R-A")), 1);
+        assert_eq!(session.record_denial(&key("doc", "R-A")), 2);
+        assert_eq!(session.record_denial(&key("doc", "R-A")), 3);
+    }
+
+    /// The gap this guards: a per-session (not per-rule) counter would let a
+    /// long-exhausted rule's history bleed into an unrelated, brand-new
+    /// conflict. Each key's count must be independent.
+    #[test]
+    fn test_record_denial_is_independent_per_key() {
+        let mut session = PlanCheckSession::default();
+        session.record_denial(&key("doc", "R-A"));
+        session.record_denial(&key("doc", "R-A"));
+        session.record_denial(&key("doc", "R-A"));
+        session.record_denial(&key("doc", "R-A"));
+        // A brand-new key must start at zero, not inherit R-A's count.
+        assert_eq!(session.record_denial(&key("doc", "R-B")), 1);
+        assert!(!session.deny_limit_exceeded(&key("doc", "R-B"), 3));
+        assert!(session.deny_limit_exceeded(&key("doc", "R-A"), 3));
+    }
+
+    #[test]
+    fn test_deny_limit_exceeded_false_for_a_never_denied_key() {
+        let session = PlanCheckSession::default();
+        assert!(!session.deny_limit_exceeded(&key("doc", "R-A"), 3));
+    }
+
+    #[test]
+    fn test_deny_limit_exceeded_true_only_once_the_count_exceeds_max_rounds() {
+        let mut session = PlanCheckSession::default();
+        session.record_denial(&key("doc", "R-A"));
+        session.record_denial(&key("doc", "R-A"));
+        session.record_denial(&key("doc", "R-A"));
+        assert!(!session.deny_limit_exceeded(&key("doc", "R-A"), 3));
+        session.record_denial(&key("doc", "R-A"));
+        assert!(session.deny_limit_exceeded(&key("doc", "R-A"), 3));
     }
 
     #[test]
