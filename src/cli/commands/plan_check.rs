@@ -70,7 +70,6 @@
 //! `session_id` outside a hook envelope), so none of this changes its
 //! behavior: `run_pipeline`'s `exclude` set is simply empty.
 
-use std::collections::BTreeSet;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
@@ -160,11 +159,13 @@ enum Outcome {
 /// `false`, unconditionally, regardless of any flag — see the module doc for
 /// why. Direct mode passes `!args.no_rank`.
 ///
-/// `exclude` names every `"{doc_slug}::{rule_id}"` (see
-/// [`plan_check_session::key`]) that must never reach the judge — a rule
-/// already cleared or overridden earlier in this session. Direct mode always
-/// passes an empty set: there is no session outside a hook envelope. When
-/// every rule a selection would otherwise judge is excluded, this returns
+/// `session` names every rule that must never reach the judge again for
+/// *this* plan text — see [`PlanCheckSession::excludes`] for exactly what
+/// that means (an override applies regardless of wording; a clearance only
+/// while the plan digest still matches the one that earned it). Direct mode
+/// always passes [`PlanCheckSession::default`]: there is no session outside a
+/// hook envelope, so nothing is ever excluded there. When every rule a
+/// selection would otherwise judge is excluded, this returns
 /// `Outcome::Verdicts` with an empty `verdicts` and no runner ever resolved —
 /// there is nothing new to check, which is exactly the fully-conforming,
 /// silent-in-hook-mode case, not "nothing applies" (which would misreport
@@ -180,8 +181,9 @@ fn run_pipeline(
     rules_dir: &Path,
     args: &PlanCheckArgs,
     use_rank: bool,
-    exclude: &BTreeSet<String>,
+    session: &PlanCheckSession,
 ) -> Result<Outcome, ActualError> {
+    let plan_digest = plan_check_session::plan_digest(plan_text);
     let resolved = scope::resolve_in(rules_dir, root, args.rebuild)?;
     let query = Query::new(plan_text.to_string());
     let prefiltered = select::prefilter(&resolved.index, &query, args.limit, args.candidates);
@@ -232,7 +234,7 @@ fn run_pipeline(
         return Ok(Outcome::NothingApplies);
     }
 
-    let gathered = gather_rules(&selection, root, exclude);
+    let gathered = gather_rules(&selection, root, session, &plan_digest);
     if gathered.rules.is_empty() {
         return Ok(if gathered.excluded > 0 {
             // Every applicable rule was already settled this session: there
@@ -305,23 +307,29 @@ struct GatheredRules {
     /// treat this as "could not check", not as license to judge `rules` alone
     /// and call the result complete.
     truncated: bool,
-    /// How many rules were dropped because they matched `exclude` (already
-    /// settled this session) — distinct from `truncated`, and from a
-    /// genuinely empty selection: it is the caller's signal that `rules`
-    /// being empty means "nothing new," not "nothing applies."
+    /// How many rules were dropped because `session` already excludes them
+    /// for this plan digest (already cleared against this exact text, or
+    /// overridden) — distinct from `truncated`, and from a genuinely empty
+    /// selection: it is the caller's signal that `rules` being empty means
+    /// "nothing new," not "nothing applies."
     excluded: usize,
 }
 
 /// Read the individual rules out of every selected document, in selection
-/// order, dropping any rule whose `"{doc_slug}::{rule_id}"` key is in
-/// `exclude` before the [`MAX_RULES_JUDGED`] cap is applied — an excluded
-/// rule must never consume cap budget that a rule still worth judging needs.
+/// order, dropping any rule [`PlanCheckSession::excludes`] for `plan_digest`
+/// before the [`MAX_RULES_JUDGED`] cap is applied — an excluded rule must
+/// never consume cap budget that a rule still worth judging needs.
 ///
 /// A document that no longer parses (removed, edited to something invalid,
 /// between selection and this read) is skipped rather than failing the whole
 /// batch — one bad file never costs the rest, the same invariant
 /// `crate::rules::discover` enforces on the original scan.
-fn gather_rules(selection: &Selection, root: &Path, exclude: &BTreeSet<String>) -> GatheredRules {
+fn gather_rules(
+    selection: &Selection,
+    root: &Path,
+    session: &PlanCheckSession,
+    plan_digest: &str,
+) -> GatheredRules {
     let mut rules = Vec::new();
     let mut considered = 0usize;
     let mut excluded = 0usize;
@@ -337,7 +345,10 @@ fn gather_rules(selection: &Selection, root: &Path, exclude: &BTreeSet<String>) 
             continue;
         };
         for rule in doc.rules {
-            if exclude.contains(&plan_check_session::key(&selected.slug, &rule.id)) {
+            if session.excludes(
+                &plan_check_session::key(&selected.slug, &rule.id),
+                plan_digest,
+            ) {
                 excluded += 1;
                 continue;
             }
@@ -376,7 +387,7 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         &rules_dir,
         args,
         !args.no_rank,
-        &BTreeSet::new(),
+        &PlanCheckSession::default(),
     )?;
 
     let width = term_size::terminal_width();
@@ -639,11 +650,11 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     // output. See the module doc's "revision loop" section.
     let session_id = envelope.session_id.as_deref();
     let mut session = session_id.map(plan_check_session::load).unwrap_or_default();
-    let exclude = session.settled();
+    let plan_digest = plan_check_session::plan_digest(&plan_text);
 
     // `use_rank: false`, unconditionally, regardless of `args.no_rank`: the
     // hook's one model call stays reserved for the judge. See the module doc.
-    let outcome = match run_pipeline(&plan_text, &root, &rules_dir, args, false, &exclude) {
+    let outcome = match run_pipeline(&plan_text, &root, &rules_dir, args, false, &session) {
         Ok(outcome) => outcome,
         Err(e) => {
             emit(plan_check_hook::render_notice(&format!(
@@ -681,10 +692,16 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
             let judge_ran = runner_label.is_some();
             if session_id.is_some() {
                 for v in &verdicts {
+                    let key = plan_check_session::key(&v.doc_slug, &v.rule_id);
                     if v.verdict == Verdict::Conforming {
-                        session
-                            .cleared
-                            .insert(plan_check_session::key(&v.doc_slug, &v.rule_id));
+                        session.cleared.insert(key, plan_digest.clone());
+                    } else {
+                        // A rule that was cleared against an earlier plan and
+                        // is no longer conforming against this one must not
+                        // leave a stale entry behind -- it is no longer a
+                        // true fact about the current plan, digest mismatch
+                        // or not.
+                        session.cleared.remove(&key);
                     }
                 }
                 if judge_ran {
@@ -987,7 +1004,12 @@ mod tests {
         let selection = prefiltered.finish(Stage2::NotRequested);
         assert!(!selection.selected.is_empty());
 
-        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &PlanCheckSession::default(),
+            "test-digest",
+        );
         assert!(!gathered.truncated);
         let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
         assert!(ids.contains(&"R-A-001"));
@@ -1008,7 +1030,12 @@ mod tests {
         )
         .unwrap();
 
-        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &PlanCheckSession::default(),
+            "test-digest",
+        );
         assert!(gathered.rules.is_empty());
         assert_eq!(gathered.considered, 0);
         assert!(!gathered.truncated);
@@ -1030,7 +1057,12 @@ mod tests {
         let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
         assert!(!selection.selected.is_empty());
 
-        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &PlanCheckSession::default(),
+            "test-digest",
+        );
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
         assert_eq!(gathered.considered, MAX_RULES_JUDGED + 10);
         assert!(gathered.truncated);
@@ -1048,7 +1080,12 @@ mod tests {
         let query = Query::new("Add a new widget in services/widgets".to_string());
         let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
 
-        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &PlanCheckSession::default(),
+            "test-digest",
+        );
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
         assert_eq!(gathered.considered, MAX_RULES_JUDGED);
         assert!(!gathered.truncated);
@@ -1446,7 +1483,12 @@ mod tests {
         )
         .unwrap();
 
-        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &PlanCheckSession::default(),
+            "test-digest",
+        );
         assert!(gathered.rules.is_empty());
     }
 
@@ -1466,7 +1508,12 @@ mod tests {
         )
         .unwrap();
 
-        let gathered = gather_rules(&selection, root.path(), &BTreeSet::new());
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &PlanCheckSession::default(),
+            "test-digest",
+        );
         assert!(gathered.rules.is_empty());
     }
 
@@ -1490,7 +1537,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
-            &BTreeSet::new(),
+            &PlanCheckSession::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -1523,7 +1570,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
-            &BTreeSet::new(),
+            &PlanCheckSession::default(),
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::NothingApplies));
@@ -1597,7 +1644,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
-            &BTreeSet::new(),
+            &PlanCheckSession::default(),
         )
         .unwrap();
         assert!(matches!(outcome, Outcome::NothingApplies));
@@ -1631,7 +1678,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
-            &BTreeSet::new(),
+            &PlanCheckSession::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -1666,7 +1713,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
-            &BTreeSet::new(),
+            &PlanCheckSession::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -1702,7 +1749,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
-            &BTreeSet::new(),
+            &PlanCheckSession::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -1748,7 +1795,7 @@ mod tests {
             &rules_dir,
             &args,
             true,
-            &BTreeSet::new(),
+            &PlanCheckSession::default(),
         )
         .unwrap();
         assert!(matches!(
@@ -2025,22 +2072,15 @@ mod tests {
         let mut args = base_args();
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let rules_dir = crate::rules::rules_dir(root.path());
-        let exclude: BTreeSet<String> = [plan_check_session::key(
-            "cross-cutting-token-signing-1c57",
-            "R-A-001",
-        )]
-        .into_iter()
-        .collect();
+        let plan_text = "Sign access tokens with RS256";
+        let mut session = PlanCheckSession::default();
+        session.cleared.insert(
+            plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001"),
+            plan_check_session::plan_digest(plan_text),
+        );
 
-        let outcome = run_pipeline(
-            "Sign access tokens with RS256",
-            root.path(),
-            &rules_dir,
-            &args,
-            false,
-            &exclude,
-        )
-        .unwrap();
+        let outcome =
+            run_pipeline(plan_text, root.path(), &rules_dir, &args, false, &session).unwrap();
 
         let Outcome::Verdicts { verdicts, .. } = outcome else {
             panic!("expected Verdicts, got a different outcome");
@@ -2069,12 +2109,22 @@ mod tests {
         let mut args = base_args();
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let rules_dir = crate::rules::rules_dir(root.path());
-        let exclude: BTreeSet<String> = [
-            plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001"),
-            plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-002"),
-        ]
-        .into_iter()
-        .collect();
+        // Overrides, not clearances: exclusion via an override does not
+        // depend on the plan digest, so this test does not need to compute
+        // one to prove the shortcut.
+        let mut session = PlanCheckSession::default();
+        session.overrides.push(plan_check_session::Override {
+            key: plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001"),
+            reason: "reviewed".to_string(),
+            at: chrono::Utc::now(),
+            round: 1,
+        });
+        session.overrides.push(plan_check_session::Override {
+            key: plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-002"),
+            reason: "reviewed".to_string(),
+            at: chrono::Utc::now(),
+            round: 1,
+        });
 
         let outcome = run_pipeline(
             "Sign access tokens with RS256",
@@ -2082,7 +2132,7 @@ mod tests {
             &rules_dir,
             &args,
             false,
-            &exclude,
+            &session,
         )
         .unwrap();
 
@@ -2090,6 +2140,93 @@ mod tests {
             outcome,
             Outcome::Verdicts { ref verdicts, runner_label: None, .. } if verdicts.is_empty()
         ));
+    }
+
+    /// The gap this guards (the exact bypass a review flagged): a rule
+    /// cleared against one plan text must be judged fresh once the plan has
+    /// actually changed, even within the same session -- a stale clearance
+    /// must never mask a new violation. `run_pipeline` alone cannot show
+    /// this end-to-end (it does not persist anything itself), so this drives
+    /// two rounds through `exec_hook_with` with the same `session_id`: round
+    /// one clears R-A-001 against a plan that does not mention signing at
+    /// all, round two revises the plan to violate R-A-001 outright, and the
+    /// second round's judge must actually be asked about it again.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_rejudges_a_cleared_rule_once_the_plan_actually_changes() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(root.path());
+
+        // Round 1: a plan that does not touch signing at all -- both rules
+        // come back conforming (vacuously) and get cleared.
+        let bin1 = tempdir().unwrap();
+        let round1_response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "plan does not touch signing"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "plan does not touch logging"},
+        ]));
+        {
+            let _binary = EnvGuard::set(
+                "CLAUDE_BINARY",
+                fake_claude(bin1.path(), &round1_response).to_str().unwrap(),
+            );
+            let mut args = base_args();
+            args.rules_dir = Some(rules_dir.clone());
+            args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+            let raw = serde_json::json!({
+                "session_id": "sess-rejudge-1",
+                "tool_input": {"plan": "Add a health-check endpoint to the auth service."},
+            })
+            .to_string();
+            exec_hook_with(&args, &raw);
+        }
+        let after_round1 = plan_check_session::load("sess-rejudge-1");
+        assert!(after_round1.cleared.contains_key(&plan_check_session::key(
+            "cross-cutting-token-signing-1c57",
+            "R-A-001"
+        )));
+
+        // Round 2: the *revised* plan now genuinely violates R-A-001. If the
+        // clearance still applied, this rule would never even reach the
+        // judge and the plan would pass silently -- exactly the bypass a
+        // review flagged.
+        let bin2 = tempdir().unwrap();
+        let round2_response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "signs with HS256", "reason": "violates RS256 requirement"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "still does not log the key"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin2.path(), &round2_response).to_str().unwrap(),
+        );
+        let mut args = base_args();
+        args.rules_dir = Some(rules_dir);
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({
+            "session_id": "sess-rejudge-1",
+            "tool_input": {"plan": "Sign access tokens with HS256 and a hardcoded shared secret."},
+        })
+        .to_string();
+        exec_hook_with(&args, &raw);
+
+        // R-A-001 must have been re-judged (not silently excluded): its
+        // cleared entry must be gone (the judge called it conflicting this
+        // round, not conforming), and R-A-002's clearance updates to the new
+        // plan's digest rather than staying pinned to the old one.
+        let after_round2 = plan_check_session::load("sess-rejudge-1");
+        let key_a001 = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001");
+        let key_a002 = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-002");
+        assert!(
+            !after_round2.cleared.contains_key(&key_a001),
+            "a rule the judge just called conflicting must not remain cleared"
+        );
+        assert_ne!(
+            after_round2.cleared.get(&key_a002),
+            after_round1.cleared.get(&key_a002),
+            "a re-cleared rule's stored digest must move to the new plan text"
+        );
     }
 
     /// End-to-end through `exec_hook_with`: a mixed conforming/conflicting
@@ -2124,11 +2261,11 @@ mod tests {
 
         let session = plan_check_session::load("sess-persist-1");
         assert_eq!(session.rounds, 1);
-        assert!(session.cleared.contains(&plan_check_session::key(
+        assert!(session.cleared.contains_key(&plan_check_session::key(
             "cross-cutting-token-signing-1c57",
             "R-A-001"
         )));
-        assert!(!session.cleared.contains(&plan_check_session::key(
+        assert!(!session.cleared.contains_key(&plan_check_session::key(
             "cross-cutting-token-signing-1c57",
             "R-A-002"
         )));
