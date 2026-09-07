@@ -713,14 +713,38 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                 verdicts.iter().filter(|v| v.verdict.blocks()).collect();
 
             if !conflicts.is_empty() {
+                if session_id.is_some() {
+                    // Every currently-conflicting rule gets its own denial
+                    // recorded, independent of any other rule's count — see
+                    // the module doc's "the round limit is per rule" note.
+                    for c in &conflicts {
+                        session.record_denial(&plan_check_session::key(&c.doc_slug, &c.rule_id));
+                    }
+                }
+
                 if let Some(session_id) = session_id {
-                    if session.rounds > args.max_rounds {
-                        let keys: Vec<String> = conflicts
+                    let exhausted: Vec<&CheckedRule> = conflicts
+                        .iter()
+                        .filter(|c| {
+                            session.deny_limit_exceeded(
+                                &plan_check_session::key(&c.doc_slug, &c.rule_id),
+                                args.max_rounds,
+                            )
+                        })
+                        .copied()
+                        .collect();
+                    // Fail open only when *every* rule blocking this round has
+                    // individually exhausted its own budget. A single rule
+                    // still within budget keeps the whole call denied — the
+                    // hook can only deny or not deny the tool call as a
+                    // whole, so an exhausted rule cannot be waved through
+                    // while a fresh one still needs to block.
+                    if !exhausted.is_empty() && exhausted.len() == conflicts.len() {
+                        let keys: Vec<String> = exhausted
                             .iter()
                             .map(|c| plan_check_session::key(&c.doc_slug, &c.rule_id))
                             .collect();
-                        let message =
-                            round_limit_message(&conflicts, session.rounds, args.max_rounds);
+                        let message = round_limit_message(&exhausted, &session, args.max_rounds);
                         plan_check_session::record_round_limit(
                             session_id,
                             session.rounds,
@@ -734,10 +758,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                     plan_check_session::store(session_id, &session);
                 }
                 emit(plan_check_hook::render_deny(&hook_deny_reason(
-                    &conflicts,
-                    session_id,
-                    session.rounds,
-                    args.max_rounds,
+                    &conflicts, session_id,
                 )));
                 return;
             }
@@ -843,7 +864,7 @@ fn emit(json: String) {
 /// rather than the judge's paraphrase of it.
 ///
 /// When `session_id` is present (a `--claude-hook` call whose envelope named
-/// one), a final line names the round and the session, and points a human at
+/// one), a final line names the session and points a human at
 /// `plan-check-override --help` rather than handing back a ready-to-paste
 /// invocation.
 ///
@@ -859,12 +880,13 @@ fn emit(json: String) {
 /// so this message alone is not enough to construct a working `--rule` flag.
 /// Absent (no session, or direct mode's own `deny_summary` instead), the
 /// message is unchanged from before the revision loop existed.
-fn hook_deny_reason(
-    conflicts: &[&CheckedRule],
-    session_id: Option<&str>,
-    round: u32,
-    max_rounds: u32,
-) -> String {
+///
+/// No per-rule denial count or round number appears here on purpose: a round
+/// budget is tracked per rule (see the module doc's "the round limit is per
+/// rule" note), and this message denies the whole call regardless of which
+/// individual rule's count is closest to its limit — that number belongs in
+/// [`round_limit_message`], emitted only once fail-open actually happens.
+fn hook_deny_reason(conflicts: &[&CheckedRule], session_id: Option<&str>) -> String {
     let mut lines: Vec<String> = conflicts
         .iter()
         .map(|c| {
@@ -880,11 +902,11 @@ fn hook_deny_reason(
         .collect();
     if let Some(session_id) = session_id {
         lines.push(format!(
-            "Round {round}/{max_rounds}. A revised plan is re-checked automatically. Session: \
-             {session_id}. A human reviewing this — not the agent — can override a specific \
-             rule explicitly by running `actual plan-check-override` from an interactive \
-             terminal (see `actual plan-check-override --help` for the exact flags); that \
-             command refuses to run non-interactively."
+            "A revised plan is re-checked automatically. Session: {session_id}. A human \
+             reviewing this — not the agent — can override a specific rule explicitly by \
+             running `actual plan-check-override` from an interactive terminal (see `actual \
+             plan-check-override --help` for the exact flags); that command refuses to run \
+             non-interactively."
         ));
     }
     lines.join("\n")
@@ -899,18 +921,32 @@ fn requires_decision_message(decisions: &[&CheckedRule]) -> String {
     )
 }
 
-/// The non-blocking notice emitted when the round limit is hit with a rule
-/// still conflicting: the gate stops denying, but says exactly why, and
-/// names every rule still unresolved, so this is a loud pass, not a silent
-/// one. Paired with [`plan_check_session::record_round_limit`], which writes
-/// the durable side of the same event.
-fn round_limit_message(conflicts: &[&CheckedRule], round: u32, max_rounds: u32) -> String {
-    let ids: Vec<&str> = conflicts.iter().map(|c| c.rule_id.as_str()).collect();
+/// The non-blocking notice emitted when every rule still conflicting this
+/// round has *individually* exhausted its own denial budget (see
+/// [`PlanCheckSession::deny_limit_exceeded`]): the gate stops denying, but
+/// says exactly why, names every exhausted rule and how many times each was
+/// actually denied, so this is a loud pass, not a silent one. Paired with
+/// [`plan_check_session::record_round_limit`], which writes the durable side
+/// of the same event.
+fn round_limit_message(
+    exhausted: &[&CheckedRule],
+    session: &PlanCheckSession,
+    max_rounds: u32,
+) -> String {
+    let parts: Vec<String> = exhausted
+        .iter()
+        .map(|c| {
+            let key = plan_check_session::key(&c.doc_slug, &c.rule_id);
+            let count = session.deny_counts.get(&key).copied().unwrap_or(0);
+            format!("{} (denied {count} times)", c.rule_id)
+        })
+        .collect();
     format!(
-        "Actual plan governance hit its round limit ({max_rounds}) for this session with \
-         unresolved conflict(s) on {}: proceeding without blocking further. This is not a \
-         silent pass — round {round} is recorded in plan-check-overrides.log.",
-        ids.join(", ")
+        "Actual plan governance hit its round limit ({max_rounds} denials) for {}: proceeding \
+         without blocking further on {} specifically. This is not a silent pass — recorded in \
+         plan-check-overrides.log.",
+        parts.join(", "),
+        if exhausted.len() == 1 { "it" } else { "them" }
     )
 }
 
@@ -1101,7 +1137,7 @@ mod tests {
             "log the signing key for debugging",
             "R-A-002 forbids logging the key",
         );
-        let reason = hook_deny_reason(&[&a], None, 1, DEFAULT_MAX_ROUNDS);
+        let reason = hook_deny_reason(&[&a], None);
         assert!(reason.contains("R-A-002"));
         assert!(reason.contains("log the signing key for debugging"));
     }
@@ -1109,7 +1145,7 @@ mod tests {
     #[test]
     fn test_hook_deny_reason_falls_back_when_the_model_reason_is_blank() {
         let a = checked("R-A-002", Verdict::Conflicting, "some span", "");
-        let reason = hook_deny_reason(&[&a], None, 1, DEFAULT_MAX_ROUNDS);
+        let reason = hook_deny_reason(&[&a], None);
         assert!(reason.contains("conflicts with the plan"));
     }
 
@@ -1124,22 +1160,21 @@ mod tests {
             "log the signing key for debugging",
             "R-A-002 forbids logging the key",
         );
-        let reason = hook_deny_reason(&[&a], None, 1, DEFAULT_MAX_ROUNDS);
+        let reason = hook_deny_reason(&[&a], None);
         assert!(reason.contains(&a.statement));
     }
 
     #[test]
     fn test_hook_deny_reason_with_no_session_omits_override_instructions() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], None, 1, DEFAULT_MAX_ROUNDS);
+        let reason = hook_deny_reason(&[&a], None);
         assert!(!reason.contains("plan-check-override"));
     }
 
     #[test]
     fn test_hook_deny_reason_with_a_session_points_at_override_help() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], Some("sess-123"), 2, 3);
-        assert!(reason.contains("Round 2/3"));
+        let reason = hook_deny_reason(&[&a], Some("sess-123"));
         assert!(reason.contains("Session: sess-123"));
         assert!(reason.contains("actual plan-check-override"));
         assert!(reason.contains("--help"));
@@ -1156,7 +1191,7 @@ mod tests {
     #[test]
     fn test_hook_deny_reason_never_assembles_a_working_override_invocation() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], Some("sess-123"), 2, 3);
+        let reason = hook_deny_reason(&[&a], Some("sess-123"));
         assert!(!reason.contains("--session sess-123 --rule"));
         assert!(!reason.contains(&plan_check_session::key(&a.doc_slug, &a.rule_id)));
         assert!(!reason.to_lowercase().contains(&a.doc_slug.to_lowercase()));
@@ -2316,6 +2351,185 @@ mod tests {
         assert!(log.contains("sess-limit-1"));
     }
 
+    /// The exact bug a review flagged: `rounds` used to increment on every
+    /// completed judge call, conforming or not, so several clean rounds
+    /// could spend the whole budget before a real conflict was ever denied
+    /// even once. Three fully-conforming rounds here, with `--max-rounds 1`,
+    /// must not leave a brand-new conflict in round four pre-exhausted.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_clean_rounds_do_not_spend_the_round_limit_budget() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let mut args = base_args();
+        args.rules_dir = Some(rules_dir);
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.max_rounds = 1;
+
+        let clean_response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let bin_clean = tempdir().unwrap();
+        {
+            let _binary = EnvGuard::set(
+                "CLAUDE_BINARY",
+                fake_claude(bin_clean.path(), &clean_response)
+                    .to_str()
+                    .unwrap(),
+            );
+            for plan in [
+                "Add a health-check endpoint to the auth service.",
+                "Add a retry policy to the auth service's health-check endpoint.",
+                "Add a metrics counter to the auth service's health-check endpoint.",
+            ] {
+                let raw = serde_json::json!({
+                    "session_id": "sess-clean-rounds",
+                    "tool_input": {"plan": plan},
+                })
+                .to_string();
+                exec_hook_with(&args, &raw);
+            }
+        }
+        assert_eq!(plan_check_session::load("sess-clean-rounds").rounds, 3);
+        assert!(plan_check_session::load("sess-clean-rounds")
+            .deny_counts
+            .is_empty());
+
+        // Round four: a genuinely new conflict on R-A-001, never denied
+        // before. If clean rounds had spent the budget, this would
+        // fail-open immediately instead of denying.
+        let conflict_response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "signs with HS256", "reason": "violates RS256 requirement"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let bin_conflict = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin_conflict.path(), &conflict_response)
+                .to_str()
+                .unwrap(),
+        );
+        let raw = serde_json::json!({
+            "session_id": "sess-clean-rounds",
+            "tool_input": {"plan": "Sign access tokens with HS256 and a hardcoded shared secret."},
+        })
+        .to_string();
+        exec_hook_with(&args, &raw);
+
+        let session = plan_check_session::load("sess-clean-rounds");
+        let key_a001 = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001");
+        assert_eq!(session.deny_counts.get(&key_a001), Some(&1));
+        assert!(
+            !session.deny_limit_exceeded(&key_a001, args.max_rounds),
+            "a rule's first-ever denial must never already be exhausted"
+        );
+        let log = std::fs::read_to_string(plan_check_session::audit_log_path().unwrap())
+            .unwrap_or_default();
+        assert!(
+            !log.contains("round_limit"),
+            "a brand-new conflict must be denied normally, not fail open: {log}"
+        );
+    }
+
+    /// The other half of the same fix: a rule that has individually
+    /// exhausted its own budget must not cause a *different*, still-within-
+    /// budget rule's conflict in the same round to fail open. Only once
+    /// every currently-conflicting rule is individually exhausted does the
+    /// gate stop blocking.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_an_exhausted_rule_does_not_exempt_a_fresh_conflict_in_the_same_round() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let mut args = base_args();
+        args.rules_dir = Some(rules_dir);
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.max_rounds = 1;
+        let key_a001 = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001");
+        let key_a002 = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-002");
+
+        // Round 1: only R-A-001 conflicts (count -> 1, not yet exceeded).
+        let round1 = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "signs with HS256", "reason": "violates RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        {
+            let bin = tempdir().unwrap();
+            let _binary = EnvGuard::set(
+                "CLAUDE_BINARY",
+                fake_claude(bin.path(), &round1).to_str().unwrap(),
+            );
+            let raw = serde_json::json!({
+                "session_id": "sess-mixed-exhaustion",
+                "tool_input": {"plan": "Sign with HS256."},
+            })
+            .to_string();
+            exec_hook_with(&args, &raw);
+        }
+
+        // Round 2: R-A-001 conflicts again (count -> 2, now exhausted at
+        // max_rounds=1), but the revised plan *also* newly violates R-A-002
+        // for the first time (count -> 1, not exhausted). Since not every
+        // conflicting rule this round is exhausted, this must still deny.
+        let round2 = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "still signs with HS256", "reason": "still violates RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        {
+            let bin = tempdir().unwrap();
+            let _binary = EnvGuard::set(
+                "CLAUDE_BINARY",
+                fake_claude(bin.path(), &round2).to_str().unwrap(),
+            );
+            let raw = serde_json::json!({
+                "session_id": "sess-mixed-exhaustion",
+                "tool_input": {"plan": "Sign with HS256 and log the key."},
+            })
+            .to_string();
+            exec_hook_with(&args, &raw);
+        }
+        let after_round2 = plan_check_session::load("sess-mixed-exhaustion");
+        assert!(after_round2.deny_limit_exceeded(&key_a001, args.max_rounds));
+        assert!(!after_round2.deny_limit_exceeded(&key_a002, args.max_rounds));
+        let log_after_round2 =
+            std::fs::read_to_string(plan_check_session::audit_log_path().unwrap())
+                .unwrap_or_default();
+        assert!(
+            !log_after_round2.contains("round_limit"),
+            "R-A-002 is not exhausted yet, so the round must still deny: {log_after_round2}"
+        );
+
+        // Round 3: the plan now only violates R-A-001 (the exhausted one).
+        // With every currently-conflicting rule individually exhausted, the
+        // gate now stops blocking.
+        let round3 = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "still signs with HS256", "reason": "still violates RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no longer logs the key"},
+        ]));
+        let bin = tempdir().unwrap();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &round3).to_str().unwrap(),
+        );
+        let raw = serde_json::json!({
+            "session_id": "sess-mixed-exhaustion",
+            "tool_input": {"plan": "Sign with HS256, key no longer logged."},
+        })
+        .to_string();
+        exec_hook_with(&args, &raw);
+
+        let log_after_round3 =
+            std::fs::read_to_string(plan_check_session::audit_log_path().unwrap()).unwrap();
+        assert!(log_after_round3.contains("\"kind\":\"round_limit\""));
+    }
+
     /// An override recorded for a session is honored on the next round: the
     /// overridden rule is excluded from judging even if the judge would
     /// otherwise still call it conflicting.
@@ -2379,9 +2593,14 @@ mod tests {
     #[test]
     fn test_round_limit_message_names_every_unresolved_rule() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let message = round_limit_message(&[&a], 4, 3);
+        let mut session = PlanCheckSession::default();
+        session
+            .deny_counts
+            .insert(plan_check_session::key(&a.doc_slug, &a.rule_id), 4);
+        let message = round_limit_message(&[&a], &session, 3);
         assert!(message.contains("R-A-002"));
-        assert!(message.contains("round limit (3)"));
+        assert!(message.contains("denied 4 times"));
+        assert!(message.contains("round limit (3"));
     }
 
     /// The testable core (see `exec_override`'s own doc comment for why the
