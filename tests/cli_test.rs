@@ -494,3 +494,30 @@ fn test_plan_check_claude_hook_fails_open_on_non_utf8_stdin() {
         .success()
         .stdout(predicate::str::contains("systemMessage"));
 }
+
+// ── plan-check-override: the TTY-only gate ──────────────────────────────
+//
+// `exec_override`'s `is_terminal()` check is not exercised from a `--lib`
+// unit test on purpose: whether a test *process's* own stdin happens to be a
+// terminal depends on how the test binary itself was launched, which a
+// `--lib` unit test cannot control. `assert_cmd::Command` gives every
+// subprocess here piped (non-terminal) stdin by default, which is exactly
+// the condition this gate exists to catch — an agent's own shell tool calls
+// never get a pty either.
+
+#[test]
+fn test_plan_check_override_refuses_without_a_terminal() {
+    cmd()
+        .args([
+            "plan-check-override",
+            "--session",
+            "sess-1",
+            "--rule",
+            "doc::R-001",
+            "--reason",
+            "reviewed",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("interactively"));
+}

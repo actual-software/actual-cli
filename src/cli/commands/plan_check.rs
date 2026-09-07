@@ -71,7 +71,7 @@
 //! behavior: `run_pipeline`'s `exclude` set is simply empty.
 
 use std::collections::BTreeSet;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -750,11 +750,49 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     }
 }
 
-/// Run `actual plan-check-override`: a human explicitly clearing one or more
-/// rules for a specific session. Always succeeds — there is no invalid state
-/// this can observe (an unknown `session_id` just starts a fresh session),
-/// so there is nothing for a caller to react to beyond "it ran."
+/// Run `actual plan-check-override`.
+///
+/// This is the one control standing between "a human decided to override a
+/// denial" and "the agent that received the denial cleared it itself" — the
+/// deny message deliberately no longer hands back a ready-to-paste
+/// invocation (see [`hook_deny_reason`]'s doc comment), but that alone is not
+/// enough: an agent with shell access could still construct and run this
+/// command on its own behalf. Refusing to run unless standard input is a
+/// real terminal is a genuine (if not airtight — a tool that allocates its
+/// own pty could still spoof one) distinguishing signal, because the coding
+/// agent's own tool calls do not get a pty: only a human actually typing at
+/// an interactive shell does.
+///
+/// This check is deliberately *not* exercised from a `--lib` unit test:
+/// like [`exec_hook`]'s own real-stdin read, whether a test process's stdin
+/// happens to be a terminal depends on how it was launched (a real terminal
+/// when a developer runs `cargo test` directly at one, never one under CI),
+/// so asserting on it in-process would be either untestable or flaky
+/// depending on the environment. See `tests/cli_test.rs` for the subprocess
+/// test, which controls this safely by piping stdin the same way every
+/// other `--claude-hook` stdin test there does. Everything that does not
+/// depend on the real terminal lives in [`exec_override_impl`], which is
+/// exercised directly.
 pub fn exec_override(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
+    if !std::io::stdin().is_terminal() {
+        return Err(ActualError::NotInteractive(
+            "plan-check-override must be run interactively, from a real terminal. It records a \
+             human decision to override plan-stage governance, and is refused here precisely \
+             because this invocation has no terminal attached — if you are a human seeing this, \
+             run the command directly in your own shell instead of through a script or agent."
+                .to_string(),
+        ));
+    }
+    exec_override_impl(args)
+}
+
+/// The testable core of `actual plan-check-override`: a human explicitly
+/// clearing one or more rules for a specific session. Always succeeds — there
+/// is no invalid state this can observe (an unknown `session_id` just starts
+/// a fresh session), so there is nothing for a caller to react to beyond "it
+/// ran." [`exec_override`] is the real entry point; this exists separately so
+/// the recording logic is testable without a real terminal.
+fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     plan_check_session::record_override(&args.session, &args.rules, &args.reason);
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Plan check override recorded");
@@ -788,12 +826,22 @@ fn emit(json: String) {
 /// rather than the judge's paraphrase of it.
 ///
 /// When `session_id` is present (a `--claude-hook` call whose envelope named
-/// one), a final line names the round and gives the exact
-/// `plan-check-override` invocation to clear these rules explicitly — the
-/// session id printed here is the only place a human learns it, since
-/// `hooks/plan-gate.sh` never surfaces the raw envelope. Absent (no session,
-/// or direct mode's own `deny_summary` instead), the message is unchanged
-/// from before the revision loop existed.
+/// one), a final line names the round and the session, and points a human at
+/// `plan-check-override --help` rather than handing back a ready-to-paste
+/// invocation.
+///
+/// This is deliberate, not an oversight: this text reaches the agent's own
+/// tool result, and the agent already runs a shell. Earlier versions
+/// pre-filled `--session <id> --rule <doc-slug>::<rule-id>` here, which meant
+/// the *only* control standing between "the agent read its own denial" and
+/// "the agent cleared its own denial" was `exec_override`'s TTY check (see
+/// its own doc comment) — a second, independent layer, not a substitute for
+/// this one. `<doc-slug>::<rule-id>` (see [`plan_check_session::key`]) is
+/// never assembled here for that reason: the per-conflict lines above name
+/// the bare rule id (needed to revise the plan) but never the document slug,
+/// so this message alone is not enough to construct a working `--rule` flag.
+/// Absent (no session, or direct mode's own `deny_summary` instead), the
+/// message is unchanged from before the revision loop existed.
 fn hook_deny_reason(
     conflicts: &[&CheckedRule],
     session_id: Option<&str>,
@@ -814,20 +862,12 @@ fn hook_deny_reason(
         })
         .collect();
     if let Some(session_id) = session_id {
-        let rule_flags: String = conflicts
-            .iter()
-            .map(|c| {
-                format!(
-                    "--rule {}",
-                    plan_check_session::key(&c.doc_slug, &c.rule_id)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
         lines.push(format!(
-            "Round {round}/{max_rounds}. A revised plan is re-checked automatically. To \
-             override explicitly instead, run: actual plan-check-override --session \
-             {session_id} {rule_flags} --reason \"<why>\""
+            "Round {round}/{max_rounds}. A revised plan is re-checked automatically. Session: \
+             {session_id}. A human reviewing this — not the agent — can override a specific \
+             rule explicitly by running `actual plan-check-override` from an interactive \
+             terminal (see `actual plan-check-override --help` for the exact flags); that \
+             command refuses to run non-interactively."
         ));
     }
     lines.join("\n")
@@ -1059,16 +1099,30 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_deny_reason_with_a_session_names_the_override_command() {
+    fn test_hook_deny_reason_with_a_session_points_at_override_help() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
         let reason = hook_deny_reason(&[&a], Some("sess-123"), 2, 3);
         assert!(reason.contains("Round 2/3"));
+        assert!(reason.contains("Session: sess-123"));
         assert!(reason.contains("actual plan-check-override"));
-        assert!(reason.contains("--session sess-123"));
-        assert!(reason.contains(&format!(
-            "--rule {}",
-            plan_check_session::key(&a.doc_slug, &a.rule_id)
-        )));
+        assert!(reason.contains("--help"));
+    }
+
+    /// The gap this guards: the deny reason must never hand back a
+    /// ready-to-paste override invocation. The agent that receives this text
+    /// already has shell access -- a fully-formed `--session <id> --rule
+    /// <doc-slug>::<rule-id> --reason "..."` command here would let it clear
+    /// its own denial. `doc_slug` specifically must never appear: the
+    /// per-conflict lines above name the bare rule id (needed to revise the
+    /// plan) but pairing it with the document slug is exactly what a valid
+    /// `--rule` flag requires, and that pairing must not be assembled here.
+    #[test]
+    fn test_hook_deny_reason_never_assembles_a_working_override_invocation() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
+        let reason = hook_deny_reason(&[&a], Some("sess-123"), 2, 3);
+        assert!(!reason.contains("--session sess-123 --rule"));
+        assert!(!reason.contains(&plan_check_session::key(&a.doc_slug, &a.rule_id)));
+        assert!(!reason.to_lowercase().contains(&a.doc_slug.to_lowercase()));
     }
 
     #[test]
@@ -2193,8 +2247,11 @@ mod tests {
         assert!(message.contains("round limit (3)"));
     }
 
+    /// The testable core (see `exec_override`'s own doc comment for why the
+    /// TTY-gated entry point itself is covered by a subprocess test in
+    /// `tests/cli_test.rs` instead).
     #[test]
-    fn test_exec_override_records_and_returns_ok() {
+    fn test_exec_override_impl_records_and_returns_ok() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
@@ -2204,7 +2261,7 @@ mod tests {
             rules: vec![plan_check_session::key("doc", "R-001")],
             reason: "reviewed and accepted".to_string(),
         };
-        assert!(exec_override(&args).is_ok());
+        assert!(exec_override_impl(&args).is_ok());
 
         let session = plan_check_session::load("sess-cli-1");
         assert_eq!(session.overrides.len(), 1);
