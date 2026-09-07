@@ -529,6 +529,14 @@ mod tests {
     ///
     /// Uses an explicit path (no env vars) so this test is fully
     /// deterministic and cannot race with other test modules.
+    ///
+    /// `write_secure` now stages content at a `.tmp` sibling and renames it
+    /// into place (see `config::paths::write_secure`), so a save no longer
+    /// fails when only the config *file itself* is read-only — `rename(2)`
+    /// only needs write permission on the containing directory, not on the
+    /// entry it replaces. Forcing the failure this test wants means making
+    /// the directory read-only instead, which blocks creating the `.tmp`
+    /// sibling in the first place.
     #[cfg(unix)]
     #[test]
     fn test_run_with_path_set_save_error() {
@@ -540,10 +548,11 @@ mod tests {
         // Create a valid config so load_from succeeds
         config::paths::save_to(&config::Config::default(), &config_file).unwrap();
 
-        // Make the config file read-only so save_to fails
-        let mut perms = std::fs::metadata(&config_file).unwrap().permissions();
-        perms.set_mode(0o444);
-        std::fs::set_permissions(&config_file, perms.clone()).unwrap();
+        // Make the containing directory read-only so save_to's write of the
+        // `.tmp` sibling fails.
+        let mut perms = std::fs::metadata(dir.path()).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(dir.path(), perms.clone()).unwrap();
 
         let args = ConfigArgs {
             action: ConfigAction::Set(ConfigSetArgs {
@@ -555,8 +564,8 @@ mod tests {
         assert!(result.is_err());
 
         // Restore writable permissions so temp dir cleanup succeeds
-        perms.set_mode(0o644);
-        std::fs::set_permissions(&config_file, perms).unwrap();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(dir.path(), perms).unwrap();
     }
 
     /// Verify that `config show` still returns Ok when API keys are present in the config.

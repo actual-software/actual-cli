@@ -495,6 +495,44 @@ fn test_plan_check_claude_hook_fails_open_on_non_utf8_stdin() {
         .stdout(predicate::str::contains("systemMessage"));
 }
 
+// Mirrors `plan_check_hook::MAX_READ_BYTES` (1 MiB) — kept as a plain
+// constant here rather than importing the lib, since this file drives the
+// compiled binary as a black-box subprocess.
+const MAX_READ_BYTES: usize = 1024 * 1024;
+
+/// The exact behavior a review flagged: an unbounded stdin read used to let
+/// `--claude-hook` buffer an arbitrarily large envelope in full before ever
+/// parsing it. This must now fail open the same way a non-UTF8 payload does,
+/// rather than exhausting memory on a huge or runaway pipe.
+#[test]
+fn test_plan_check_claude_hook_fails_open_on_oversized_stdin() {
+    let repo = tempfile::tempdir().unwrap();
+    cmd()
+        .args([
+            "plan-check",
+            "--claude-hook",
+            "--rules-dir",
+            repo.path().join(".actual/rules").to_str().unwrap(),
+        ])
+        .write_stdin(vec![b'x'; MAX_READ_BYTES + 1])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("could not read the hook payload"));
+}
+
+/// Direct mode's stdin fallback must also refuse an oversized plan rather
+/// than buffering it in full.
+#[test]
+fn test_plan_check_direct_mode_errors_when_stdin_exceeds_the_size_limit() {
+    let repo = tempfile::tempdir().unwrap();
+    cmd()
+        .args(["plan-check", "--repo", repo.path().to_str().unwrap()])
+        .write_stdin(vec![b'x'; MAX_READ_BYTES + 1])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("exceeds"));
+}
+
 // ── plan-check-override: the TTY-only gate ──────────────────────────────
 //
 // `exec_override`'s `is_terminal()` check is not exercised from a `--lib`
