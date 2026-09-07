@@ -949,9 +949,13 @@ pub const DEFAULT_MAX_ROUNDS: u32 = 3;
 /// override is visible, never silent.
 #[derive(Parser, Debug)]
 pub struct PlanCheckOverrideArgs {
-    /// The session to override. The deny message's last line names the exact
-    /// `plan-check-override` invocation to run, with this value already
-    /// filled in. Identifies one Claude Code conversation's revision loop.
+    /// The session to override, as named in the deny message. One Claude
+    /// Code conversation can govern more than one repository or monorepo
+    /// subproject, so `session_id` alone does not identify a revision loop —
+    /// pair it with `--repo`/`--rules-dir` (defaulting to the current
+    /// directory, same as `plan-check` itself) naming *which* governed
+    /// context to override. Run this from the same repo the denial came
+    /// from and the defaults already match.
     #[arg(long, value_name = "SESSION_ID")]
     pub session: String,
 
@@ -966,6 +970,21 @@ pub struct PlanCheckOverrideArgs {
     /// stated reason defeats the point of recording one.
     #[arg(long, value_name = "TEXT")]
     pub reason: String,
+
+    /// Repository root to resolve the rules directory against. Defaults to
+    /// the current directory — run this from the repo the denial came from,
+    /// same as `plan-check` itself.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<std::path::PathBuf>,
+
+    /// Rules directory this override applies to, overriding
+    /// `<repo>/.actual/rules`. Must match what the hook resolved for this
+    /// session (`ACTUAL_RULES_DIR`, if the denial came from a monorepo
+    /// subproject) — this is what makes the override land on the same
+    /// governed context the denial came from, rather than a same-named but
+    /// unrelated one.
+    #[arg(long, value_name = "PATH")]
+    pub rules_dir: Option<std::path::PathBuf>,
 }
 
 #[cfg(test)]
