@@ -649,7 +649,9 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     // — no state read, no state written, no round/override language in the
     // output. See the module doc's "revision loop" section.
     let session_id = envelope.session_id.as_deref();
-    let mut session = session_id.map(plan_check_session::load).unwrap_or_default();
+    let mut session = session_id
+        .map(|id| plan_check_session::load(id, &rules_dir))
+        .unwrap_or_default();
     let plan_digest = plan_check_session::plan_digest(&plan_text);
 
     // `use_rank: false`, unconditionally, regardless of `args.no_rank`: the
@@ -747,15 +749,16 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                         let message = round_limit_message(&exhausted, &session, args.max_rounds);
                         plan_check_session::record_round_limit(
                             session_id,
+                            &rules_dir,
                             session.rounds,
                             &keys,
                             &message,
                         );
-                        plan_check_session::store(session_id, &session);
+                        plan_check_session::store(session_id, &rules_dir, &session);
                         emit(plan_check_hook::render_notice(&message));
                         return;
                     }
-                    plan_check_session::store(session_id, &session);
+                    plan_check_session::store(session_id, &rules_dir, &session);
                 }
                 emit(plan_check_hook::render_deny(&hook_deny_reason(
                     &conflicts, session_id,
@@ -764,7 +767,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
             }
 
             if let Some(session_id) = session_id {
-                plan_check_session::store(session_id, &session);
+                plan_check_session::store(session_id, &rules_dir, &session);
             }
 
             let decisions: Vec<&CheckedRule> = verdicts
@@ -831,10 +834,16 @@ pub fn exec_override(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
 /// ran." [`exec_override`] is the real entry point; this exists separately so
 /// the recording logic is testable without a real terminal.
 fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
-    plan_check_session::record_override(&args.session, &args.rules, &args.reason);
+    let root = repo_root(args.repo.as_ref());
+    let rules_dir = args
+        .rules_dir
+        .clone()
+        .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    plan_check_session::record_override(&args.session, &rules_dir, &args.rules, &args.reason);
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Plan check override recorded");
     panel = panel.kv("Session", &args.session);
+    panel = panel.kv("Rules dir", &rules_dir.display().to_string());
     panel = panel.kv("Reason", &args.reason);
     for rule in &args.rules {
         panel = panel.kv("Rule", rule);
@@ -2217,7 +2226,7 @@ mod tests {
             .to_string();
             exec_hook_with(&args, &raw);
         }
-        let after_round1 = plan_check_session::load("sess-rejudge-1");
+        let after_round1 = plan_check_session::load("sess-rejudge-1", &rules_dir);
         assert!(after_round1.cleared.contains_key(&plan_check_session::key(
             "cross-cutting-token-signing-1c57",
             "R-A-001"
@@ -2237,7 +2246,7 @@ mod tests {
             fake_claude(bin2.path(), &round2_response).to_str().unwrap(),
         );
         let mut args = base_args();
-        args.rules_dir = Some(rules_dir);
+        args.rules_dir = Some(rules_dir.clone());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({
             "session_id": "sess-rejudge-1",
@@ -2250,7 +2259,7 @@ mod tests {
         // cleared entry must be gone (the judge called it conflicting this
         // round, not conforming), and R-A-002's clearance updates to the new
         // plan's digest rather than staying pinned to the old one.
-        let after_round2 = plan_check_session::load("sess-rejudge-1");
+        let after_round2 = plan_check_session::load("sess-rejudge-1", &rules_dir);
         let key_a001 = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001");
         let key_a002 = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-002");
         assert!(
@@ -2284,8 +2293,9 @@ mod tests {
             fake_claude(bin.path(), &response).to_str().unwrap(),
         );
 
+        let rules_dir = crate::rules::rules_dir(root.path());
         let mut args = base_args();
-        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.rules_dir = Some(rules_dir.clone());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({
             "session_id": "sess-persist-1",
@@ -2294,7 +2304,7 @@ mod tests {
         .to_string();
         exec_hook_with(&args, &raw);
 
-        let session = plan_check_session::load("sess-persist-1");
+        let session = plan_check_session::load("sess-persist-1", &rules_dir);
         assert_eq!(session.rounds, 1);
         assert!(session.cleared.contains_key(&plan_check_session::key(
             "cross-cutting-token-signing-1c57",
@@ -2328,8 +2338,9 @@ mod tests {
             fake_claude(bin.path(), &response).to_str().unwrap(),
         );
 
+        let rules_dir = crate::rules::rules_dir(root.path());
         let mut args = base_args();
-        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.rules_dir = Some(rules_dir.clone());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         args.max_rounds = 1;
         let raw = serde_json::json!({
@@ -2340,11 +2351,17 @@ mod tests {
 
         // Round 1: rounds becomes 1, 1 > max_rounds(1) is false -> normal deny.
         exec_hook_with(&args, &raw);
-        assert_eq!(plan_check_session::load("sess-limit-1").rounds, 1);
+        assert_eq!(
+            plan_check_session::load("sess-limit-1", &rules_dir).rounds,
+            1
+        );
 
         // Round 2: rounds becomes 2, 2 > 1 -> the gate stops denying.
         exec_hook_with(&args, &raw);
-        assert_eq!(plan_check_session::load("sess-limit-1").rounds, 2);
+        assert_eq!(
+            plan_check_session::load("sess-limit-1", &rules_dir).rounds,
+            2
+        );
 
         let log = std::fs::read_to_string(plan_check_session::audit_log_path().unwrap()).unwrap();
         assert!(log.contains("\"kind\":\"round_limit\""));
@@ -2365,7 +2382,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let rules_dir = crate::rules::rules_dir(root.path());
         let mut args = base_args();
-        args.rules_dir = Some(rules_dir);
+        args.rules_dir = Some(rules_dir.clone());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         args.max_rounds = 1;
 
@@ -2394,8 +2411,11 @@ mod tests {
                 exec_hook_with(&args, &raw);
             }
         }
-        assert_eq!(plan_check_session::load("sess-clean-rounds").rounds, 3);
-        assert!(plan_check_session::load("sess-clean-rounds")
+        assert_eq!(
+            plan_check_session::load("sess-clean-rounds", &rules_dir).rounds,
+            3
+        );
+        assert!(plan_check_session::load("sess-clean-rounds", &rules_dir)
             .deny_counts
             .is_empty());
 
@@ -2420,7 +2440,7 @@ mod tests {
         .to_string();
         exec_hook_with(&args, &raw);
 
-        let session = plan_check_session::load("sess-clean-rounds");
+        let session = plan_check_session::load("sess-clean-rounds", &rules_dir);
         let key_a001 = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001");
         assert_eq!(session.deny_counts.get(&key_a001), Some(&1));
         assert!(
@@ -2449,7 +2469,7 @@ mod tests {
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
         let rules_dir = crate::rules::rules_dir(root.path());
         let mut args = base_args();
-        args.rules_dir = Some(rules_dir);
+        args.rules_dir = Some(rules_dir.clone());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         args.max_rounds = 1;
         let key_a001 = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001");
@@ -2495,7 +2515,7 @@ mod tests {
             .to_string();
             exec_hook_with(&args, &raw);
         }
-        let after_round2 = plan_check_session::load("sess-mixed-exhaustion");
+        let after_round2 = plan_check_session::load("sess-mixed-exhaustion", &rules_dir);
         assert!(after_round2.deny_limit_exceeded(&key_a001, args.max_rounds));
         assert!(!after_round2.deny_limit_exceeded(&key_a002, args.max_rounds));
         let log_after_round2 =
@@ -2540,9 +2560,11 @@ mod tests {
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(root.path());
 
         plan_check_session::record_override(
             "sess-override-1",
+            &rules_dir,
             &[
                 plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001"),
                 plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-002"),
@@ -2556,7 +2578,7 @@ mod tests {
         let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
 
         let mut args = base_args();
-        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.rules_dir = Some(rules_dir.clone());
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         let raw = serde_json::json!({
             "session_id": "sess-override-1",
@@ -2567,7 +2589,7 @@ mod tests {
 
         // The override itself is untouched by this round (exec_hook_with
         // only ever adds to `cleared`, never to `overrides`).
-        let session = plan_check_session::load("sess-override-1");
+        let session = plan_check_session::load("sess-override-1", &rules_dir);
         assert_eq!(session.overrides.len(), 2);
     }
 
@@ -2611,16 +2633,43 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
+        let repo = tempdir().unwrap();
 
         let args = PlanCheckOverrideArgs {
             session: "sess-cli-1".to_string(),
             rules: vec![plan_check_session::key("doc", "R-001")],
             reason: "reviewed and accepted".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
         };
         assert!(exec_override_impl(&args).is_ok());
 
-        let session = plan_check_session::load("sess-cli-1");
+        let rules_dir = crate::rules::rules_dir(repo.path());
+        let session = plan_check_session::load("sess-cli-1", &rules_dir);
         assert_eq!(session.overrides.len(), 1);
         assert_eq!(session.overrides[0].reason, "reviewed and accepted");
+    }
+
+    /// The override must land in the same governed context (`rules_dir`) the
+    /// hook itself resolves to, matching by an explicit `--rules-dir` rather
+    /// than relying on `--repo` deriving the same default.
+    #[test]
+    fn test_exec_override_impl_honors_an_explicit_rules_dir() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules_dir = tempdir().unwrap();
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-2".to_string(),
+            rules: vec![plan_check_session::key("doc", "R-001")],
+            reason: "reviewed".to_string(),
+            repo: None,
+            rules_dir: Some(rules_dir.path().to_path_buf()),
+        };
+        assert!(exec_override_impl(&args).is_ok());
+
+        let session = plan_check_session::load("sess-cli-2", rules_dir.path());
+        assert_eq!(session.overrides.len(), 1);
     }
 }
