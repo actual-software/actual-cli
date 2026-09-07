@@ -39,13 +39,15 @@
 //!   `--claude-hook` notice, never a deny. A `PreToolUse` hook that could
 //!   block on its own dependencies being unavailable would make the tool
 //!   itself unreliable for reasons that have nothing to do with the plan.
-//! - **The [`MAX_RULES_JUDGED`] cap fails open for the *entire* selected
-//!   batch, not just the overflow.** If the documents [`run_pipeline`]
-//!   selects for a plan hold more than 60 individual rules combined — one
-//!   large document is enough on its own, and several ordinary ones add up
-//!   just as easily — nothing in that batch gets judged at all this round.
-//!   A single oversized rules corpus is a single point of failure for
-//!   governance on any plan that selects it.
+//! - **The [`MAX_RULES_JUDGED`] cap means a large enough selected batch is
+//!   only ever partially judged.** If the documents [`run_pipeline`] selects
+//!   for a plan hold more than 60 individual rules combined — one large
+//!   document is enough on its own, and several ordinary ones add up just as
+//!   easily — only a deterministically-prioritized prefix (selection order,
+//!   then declaration order within a document) is actually judged this
+//!   round. This is disclosed, not silent: every caller is told `N of M`
+//!   rules were checked, so "conforming" never gets reported as "conforming"
+//!   full stop when it was really "conforming, as far as we looked."
 //! - **The revision loop's own escape valves (below) are additional,
 //!   deliberate fail-open paths**, not enforcement: the round limit stops
 //!   blocking a persistently unresolved rule specifically so the hook does
@@ -142,11 +144,14 @@ use crate::rules::scope::{self, select, Query, Selection, Stage2};
 /// hold far more rules than one structured-output call can weigh usefully, so
 /// this bounds the prompt without changing which documents were selected.
 ///
-/// Exceeding it is treated as a failure to check, never as license to judge a
-/// partial set: [`gather_rules`] reports how many rules it actually found, and
-/// [`run_pipeline`] refuses to call the judge at all when that exceeds the
-/// cap, rather than silently sending the first [`MAX_RULES_JUDGED`] and
-/// calling whatever came back a complete answer.
+/// Exceeding it is not treated as a failure to check: [`gather_rules`] still
+/// judges the first [`MAX_RULES_JUDGED`] rules, in a deterministic priority
+/// order (selection order — the prefilter's own relevance ranking — then
+/// declaration order within a document), and [`run_pipeline`] reports the
+/// judged count against the true total so every caller can say plainly "N of
+/// M rules checked" rather than either silently calling a partial answer
+/// complete or refusing to check anything at all. See the module doc's
+/// "advisory gate" section.
 const MAX_RULES_JUDGED: usize = 60;
 
 fn repo_root(explicit: Option<&PathBuf>) -> PathBuf {
@@ -182,19 +187,26 @@ enum Outcome {
         documents_selected: usize,
         reason: String,
     },
-    /// The judge could not be used: the call itself failed (timeout,
-    /// malformed or incomplete output), or the selected documents held more
-    /// rules than [`MAX_RULES_JUDGED`] and the judge was never called at all
-    /// rather than being shown a silently truncated set.
+    /// The judge call itself failed — timeout, malformed or incomplete
+    /// output. Unlike hitting [`MAX_RULES_JUDGED`] (see [`Outcome::Verdicts`]'s
+    /// `partial`), this is not a disclosed partial answer: nothing about this
+    /// round's verdicts can be trusted, so none are reported.
     CheckFailed {
         documents_selected: usize,
         reason: String,
     },
-    /// The judge ran and produced verdicts for every selected rule.
+    /// The judge ran and produced a verdict for every rule it was shown.
     Verdicts {
         selection: Selection,
         verdicts: Vec<CheckedRule>,
         runner_label: Option<String>,
+        /// `Some((judged, total))` when the selected documents held more
+        /// individual rules than [`MAX_RULES_JUDGED`] and only a
+        /// deterministically-prioritized prefix was actually judged this
+        /// round; `None` when every candidate rule (after session exclusion)
+        /// was judged. Every caller must disclose this when present, never
+        /// report a partial answer as a complete one.
+        partial: Option<(usize, usize)>,
     },
 }
 
@@ -297,19 +309,10 @@ fn run_pipeline(
                 selection,
                 verdicts: Vec::new(),
                 runner_label: None,
+                partial: None,
             }
         } else {
             Outcome::NothingApplies
-        });
-    }
-    if gathered.truncated {
-        return Ok(Outcome::CheckFailed {
-            documents_selected: selection.selected.len(),
-            reason: format!(
-                "the selected documents contain {} rules, over the {MAX_RULES_JUDGED}-rule \
-                 judging cap; refusing to judge a partial set",
-                gathered.considered
-            ),
         });
     }
 
@@ -338,6 +341,9 @@ fn run_pipeline(
             selection,
             verdicts,
             runner_label: Some(label),
+            partial: gathered
+                .truncated
+                .then_some((gathered.rules.len(), gathered.considered)),
         }),
         Err(e) => Ok(Outcome::CheckFailed {
             documents_selected: selection.selected.len(),
@@ -349,15 +355,18 @@ fn run_pipeline(
 /// The rules gathered from every selected document, capped at
 /// [`MAX_RULES_JUDGED`], and whether the true count exceeded that cap.
 struct GatheredRules {
+    /// The rules actually handed to the judge: every non-excluded candidate,
+    /// in priority order, up to [`MAX_RULES_JUDGED`].
     rules: Vec<RuleForJudging>,
-    /// Total individual rules found across every selected document,
-    /// including any past the cap or removed by `exclude`. Equal to
-    /// `rules.len() + excluded` unless `truncated`.
+    /// Total *non-excluded* individual rules found across every selected
+    /// document — i.e. `excluded` is not part of this count. Equal to
+    /// `rules.len()` unless `truncated`, in which case it is the true count
+    /// that would have been judged with no cap at all.
     considered: usize,
-    /// True when `considered` exceeds [`MAX_RULES_JUDGED`] — some of the
-    /// selected documents' rules were never gathered at all. The caller must
-    /// treat this as "could not check", not as license to judge `rules` alone
-    /// and call the result complete.
+    /// True when `considered` exceeds [`MAX_RULES_JUDGED`] — `rules` holds
+    /// only a prefix, not everything that applies. The caller must disclose
+    /// `rules.len()` of `considered` rather than reporting `rules` as
+    /// complete coverage (see [`Outcome::Verdicts`]'s `partial`).
     truncated: bool,
     /// How many rules were dropped because `session` already excludes them
     /// for this plan digest (already cleared against this exact text, or
@@ -368,9 +377,14 @@ struct GatheredRules {
 }
 
 /// Read the individual rules out of every selected document, in selection
-/// order, dropping any rule [`PlanCheckSession::excludes`] for `plan_digest`
-/// before the [`MAX_RULES_JUDGED`] cap is applied — an excluded rule must
-/// never consume cap budget that a rule still worth judging needs.
+/// order (the prefilter's own relevance ranking — the highest-priority
+/// document's rules fill the cap first) and then declaration order within a
+/// document, dropping any rule [`PlanCheckSession::excludes`] for
+/// `plan_digest` before the [`MAX_RULES_JUDGED`] cap is applied — an excluded
+/// rule must never consume cap budget that a rule still worth judging needs.
+/// This ordering is what makes a truncated `rules` a deterministic *prefix*
+/// rather than an arbitrary subset: the same plan against the same rules
+/// always drops the same tail.
 ///
 /// A document that no longer parses (removed, edited to something invalid,
 /// between selection and this read) is skipped rather than failing the whole
@@ -516,12 +530,22 @@ fn render_panel(outcome: &Outcome, plan: &str, rules_dir: &Path, width: usize) -
             selection,
             verdicts,
             runner_label,
+            partial,
         } => {
             panel = panel.kv("Documents selected", &selection.selected.len().to_string());
             if let Some(label) = runner_label {
                 panel = panel.kv("Runner", label);
             }
-            panel = panel.kv("Rules checked", &verdicts.len().to_string());
+            panel = panel.kv(
+                "Rules checked",
+                &match partial {
+                    Some((judged, total)) => format!(
+                        "{judged} of {total} (over the {MAX_RULES_JUDGED}-rule cap; the rest \
+                         were not judged)"
+                    ),
+                    None => verdicts.len().to_string(),
+                },
+            );
             panel = panel.separator();
 
             let conflicts: Vec<&CheckedRule> =
@@ -557,6 +581,14 @@ fn render_verdict_line(panel: Panel, label: &str, rule: &CheckedRule) -> Panel {
 }
 
 #[derive(Serialize)]
+struct PartialCoverage {
+    /// How many rules were actually judged.
+    judged: usize,
+    /// How many rules applied in total, including the untruncated tail.
+    total: usize,
+}
+
+#[derive(Serialize)]
 struct PlanCheckJson {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -566,6 +598,12 @@ struct PlanCheckJson {
     documents_selected: usize,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     verdicts: Vec<CheckedRule>,
+    /// Present only when [`MAX_RULES_JUDGED`] was exceeded and `verdicts`
+    /// covers a prefix, not everything that applied — a consumer that reads
+    /// only `status` must still be able to see a "conforming" answer was
+    /// partial by checking for this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partial: Option<PartialCoverage>,
 }
 
 fn render_json(outcome: &Outcome) -> String {
@@ -576,6 +614,7 @@ fn render_json(outcome: &Outcome) -> String {
             runner: None,
             documents_selected: 0,
             verdicts: Vec::new(),
+            partial: None,
         },
         Outcome::NoRunner {
             documents_selected,
@@ -586,6 +625,7 @@ fn render_json(outcome: &Outcome) -> String {
             runner: None,
             documents_selected: *documents_selected,
             verdicts: Vec::new(),
+            partial: None,
         },
         Outcome::CheckFailed {
             documents_selected,
@@ -596,11 +636,13 @@ fn render_json(outcome: &Outcome) -> String {
             runner: None,
             documents_selected: *documents_selected,
             verdicts: Vec::new(),
+            partial: None,
         },
         Outcome::Verdicts {
             selection,
             verdicts,
             runner_label,
+            partial,
         } => {
             let status = if verdicts.iter().any(|v| v.verdict.blocks()) {
                 "conflicting"
@@ -618,6 +660,7 @@ fn render_json(outcome: &Outcome) -> String {
                 runner: runner_label.clone(),
                 documents_selected: selection.selected.len(),
                 verdicts: verdicts.clone(),
+                partial: partial.map(|(judged, total)| PartialCoverage { judged, total }),
             }
         }
     };
@@ -738,6 +781,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
         Outcome::Verdicts {
             verdicts,
             runner_label,
+            partial,
             ..
         } => {
             // A round is one *completed judge call* — `runner_label` is only
@@ -822,7 +866,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                     plan_check_session::store(session_id, &rules_dir, &session);
                 }
                 emit(plan_check_hook::render_deny(&hook_deny_reason(
-                    &blocking, session_id,
+                    &blocking, session_id, partial,
                 )));
                 return;
             }
@@ -832,11 +876,21 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
             }
 
             // Fully conforming (nothing blocking): the contract is silence —
-            // UNLESS this session carries an active override, which must
-            // stay visible on every round rather than being silently
-            // absorbed once granted.
+            // UNLESS this session carries an active override (must stay
+            // visible on every round, never silently absorbed once granted)
+            // or this round only covered a prefix of what applies (a plain
+            // "conforming" silence would misreport partial coverage as
+            // complete). Either reason alone is enough to break silence;
+            // both together are joined into one notice.
+            let mut notes = Vec::new();
+            if let Some((judged, total)) = partial {
+                notes.push(partial_coverage_note(judged, total));
+            }
             if let Some(reminder) = override_reminder(&session) {
-                emit(plan_check_hook::render_notice(&reminder));
+                notes.push(reminder);
+            }
+            if !notes.is_empty() {
+                emit(plan_check_hook::render_notice(&notes.join("\n")));
             }
         }
     }
@@ -952,7 +1006,17 @@ fn emit(json: String) {
 /// rule" note), and this message denies the whole call regardless of which
 /// individual rule's count is closest to its limit — that number belongs in
 /// [`round_limit_message`], emitted only once fail-open actually happens.
-fn hook_deny_reason(blocking: &[&CheckedRule], session_id: Option<&str>) -> String {
+///
+/// `partial` — `Some((judged, total))` when [`MAX_RULES_JUDGED`] cut this
+/// round's candidates to a prefix — adds one more line so a denial is never
+/// read as "the whole plan was checked and this is everything wrong with
+/// it" when it was really "this is everything wrong with the rules we got
+/// to."
+fn hook_deny_reason(
+    blocking: &[&CheckedRule],
+    session_id: Option<&str>,
+    partial: Option<(usize, usize)>,
+) -> String {
     let mut lines: Vec<String> = blocking
         .iter()
         .map(|c| {
@@ -974,6 +1038,9 @@ fn hook_deny_reason(blocking: &[&CheckedRule], session_id: Option<&str>) -> Stri
             )
         })
         .collect();
+    if let Some((judged, total)) = partial {
+        lines.push(partial_coverage_note(judged, total));
+    }
     if let Some(session_id) = session_id {
         lines.push(format!(
             "A revised plan is re-checked automatically. Session: {session_id}. A human \
@@ -984,6 +1051,18 @@ fn hook_deny_reason(blocking: &[&CheckedRule], session_id: Option<&str>) -> Stri
         ));
     }
     lines.join("\n")
+}
+
+/// The disclosure line for a partially-judged round: plain enough that
+/// "conforming" or "no conflicts among these" is never mistaken for "the
+/// whole plan was checked." Shared between the deny path (appended to
+/// [`hook_deny_reason`]) and the silent-otherwise path (emitted as its own
+/// notice in `exec_hook_with`), so the wording is identical either way.
+fn partial_coverage_note(judged: usize, total: usize) -> String {
+    format!(
+        "Only {judged} of {total} rules in scope were checked this round — the rest exceeded \
+         the {MAX_RULES_JUDGED}-rule judging cap and were not evaluated at all."
+    )
 }
 
 /// The non-blocking notice emitted when every rule still blocking this
@@ -1203,7 +1282,7 @@ mod tests {
             "log the signing key for debugging",
             "R-A-002 forbids logging the key",
         );
-        let reason = hook_deny_reason(&[&a], None);
+        let reason = hook_deny_reason(&[&a], None, None);
         assert!(reason.contains("R-A-002"));
         assert!(reason.contains("log the signing key for debugging"));
     }
@@ -1211,7 +1290,7 @@ mod tests {
     #[test]
     fn test_hook_deny_reason_falls_back_when_the_model_reason_is_blank() {
         let a = checked("R-A-002", Verdict::Conflicting, "some span", "");
-        let reason = hook_deny_reason(&[&a], None);
+        let reason = hook_deny_reason(&[&a], None, None);
         assert!(reason.contains("conflicts with the plan"));
     }
 
@@ -1226,21 +1305,21 @@ mod tests {
             "log the signing key for debugging",
             "R-A-002 forbids logging the key",
         );
-        let reason = hook_deny_reason(&[&a], None);
+        let reason = hook_deny_reason(&[&a], None, None);
         assert!(reason.contains(&a.statement));
     }
 
     #[test]
     fn test_hook_deny_reason_with_no_session_omits_override_instructions() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], None);
+        let reason = hook_deny_reason(&[&a], None, None);
         assert!(!reason.contains("plan-check-override"));
     }
 
     #[test]
     fn test_hook_deny_reason_with_a_session_points_at_override_help() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], Some("sess-123"));
+        let reason = hook_deny_reason(&[&a], Some("sess-123"), None);
         assert!(reason.contains("Session: sess-123"));
         assert!(reason.contains("actual plan-check-override"));
         assert!(reason.contains("--help"));
@@ -1257,7 +1336,7 @@ mod tests {
     #[test]
     fn test_hook_deny_reason_never_assembles_a_working_override_invocation() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], Some("sess-123"));
+        let reason = hook_deny_reason(&[&a], Some("sess-123"), None);
         assert!(!reason.contains("--session sess-123 --rule"));
         assert!(!reason.contains(&plan_check_session::key(&a.doc_slug, &a.rule_id)));
         assert!(!reason.to_lowercase().contains(&a.doc_slug.to_lowercase()));
@@ -1276,7 +1355,7 @@ mod tests {
             "span",
             "supersedes it",
         );
-        let reason = hook_deny_reason(&[&a], None);
+        let reason = hook_deny_reason(&[&a], None, None);
         assert!(reason.contains("DECISION R-A-001"));
         assert!(!reason.contains("CONFLICT R-A-001"));
     }
@@ -1284,9 +1363,23 @@ mod tests {
     #[test]
     fn test_hook_deny_reason_labels_a_conflicting_verdict_distinctly() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], None);
+        let reason = hook_deny_reason(&[&a], None, None);
         assert!(reason.contains("CONFLICT R-A-002"));
         assert!(!reason.contains("DECISION R-A-002"));
+    }
+
+    #[test]
+    fn test_hook_deny_reason_discloses_partial_coverage_when_present() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
+        let reason = hook_deny_reason(&[&a], None, Some((60, 85)));
+        assert!(reason.contains("Only 60 of 85"));
+    }
+
+    #[test]
+    fn test_hook_deny_reason_omits_partial_note_when_absent() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
+        let reason = hook_deny_reason(&[&a], None, None);
+        assert!(!reason.contains("judging cap"));
     }
 
     // ── rendering ────────────────────────────────────────────────────────
@@ -1316,10 +1409,34 @@ mod tests {
             selection,
             verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "uses RS256")],
             runner_label: Some("claude-cli (sonnet)".to_string()),
+            partial: None,
         };
         let panel = render_panel(&outcome, "a plan", Path::new("/x/.actual/rules"), 80);
         assert!(panel.contains("Conforming"));
         assert!(!panel.contains("CONFLICT"));
+    }
+
+    /// The behavior change this guards: a partially-judged round must
+    /// disclose "N of M" in the panel, not report `verdicts.len()` as if it
+    /// were complete coverage.
+    #[test]
+    fn test_render_panel_discloses_partial_coverage() {
+        let selection = Selection {
+            plan: "p".to_string(),
+            paths: Vec::new(),
+            indexed_documents: 1,
+            limit: 10,
+            selected: vec![],
+            stage2: Stage2::NotRequested,
+        };
+        let outcome = Outcome::Verdicts {
+            selection,
+            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "uses RS256")],
+            runner_label: Some("claude-cli (sonnet)".to_string()),
+            partial: Some((60, 85)),
+        };
+        let panel = render_panel(&outcome, "a plan", Path::new("/x/.actual/rules"), 80);
+        assert!(panel.contains("60 of 85"));
     }
 
     #[test]
@@ -1344,6 +1461,7 @@ mod tests {
                 ),
             ],
             runner_label: None,
+            partial: None,
         };
         let panel = render_panel(&outcome, "a plan", Path::new("/x/.actual/rules"), 80);
         assert!(panel.contains("CONFLICT"));
@@ -1366,15 +1484,18 @@ mod tests {
             selection: selection.clone(),
             verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "")],
             runner_label: None,
+            partial: None,
         };
         let json = render_json(&conforming);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "conforming");
+        assert!(value.get("partial").is_none());
 
         let conflicting = Outcome::Verdicts {
             selection: selection.clone(),
             verdicts: vec![checked("R-A-002", Verdict::Conflicting, "x", "y")],
             runner_label: None,
+            partial: None,
         };
         let json = render_json(&conflicting);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1384,10 +1505,23 @@ mod tests {
             selection: selection.clone(),
             verdicts: vec![checked("R-A-003", Verdict::RequiresDecision, "x", "y")],
             runner_label: None,
+            partial: None,
         };
         let json = render_json(&requires_decision);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "requires_decision");
+
+        let partial = Outcome::Verdicts {
+            selection: selection.clone(),
+            verdicts: vec![checked("R-A-001", Verdict::Conforming, "", "")],
+            runner_label: None,
+            partial: Some((60, 85)),
+        };
+        let json = render_json(&partial);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["status"], "conforming");
+        assert_eq!(value["partial"]["judged"], 60);
+        assert_eq!(value["partial"]["total"], 85);
 
         let json = render_json(&Outcome::NothingApplies);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1766,7 +1900,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_run_pipeline_check_failed_when_rules_exceed_the_judging_cap() {
+    fn test_run_pipeline_judges_a_deterministic_prefix_when_rules_exceed_the_cap() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
@@ -1777,9 +1911,28 @@ mod tests {
         }
         let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
         let bin = tempdir().unwrap();
+        // A verdict for every one of the first MAX_RULES_JUDGED rule ids, in
+        // declaration order -- the prefix the cap must actually judge. The
+        // 61st rule (never sent as a candidate) is deliberately absent: if
+        // gather_rules ever included it, check::check's own "never invent or
+        // drop silently" validation would reject the whole batch for a
+        // verdict naming a pair that was never a candidate.
+        let verdicts: Vec<serde_json::Value> = (0..MAX_RULES_JUDGED)
+            .map(|i| {
+                serde_json::json!({
+                    "doc_slug": "cross-cutting-many-abcd",
+                    "rule_id": format!("R-X-{i:04}"),
+                    "verdict": "conforming",
+                    "span": "",
+                    "reason": "not touched",
+                })
+            })
+            .collect();
         let _binary = EnvGuard::set(
             "CLAUDE_BINARY",
-            fake_claude_auth_only(bin.path()).to_str().unwrap(),
+            fake_claude(bin.path(), &check_output(serde_json::json!(verdicts)))
+                .to_str()
+                .unwrap(),
         );
 
         let mut args = base_args();
@@ -1795,10 +1948,14 @@ mod tests {
             &PlanCheckSession::default(),
         )
         .unwrap();
-        assert!(matches!(
-            outcome,
-            Outcome::CheckFailed { ref reason, .. } if reason.contains("judging cap")
-        ));
+        let Outcome::Verdicts {
+            verdicts, partial, ..
+        } = outcome
+        else {
+            panic!("expected Verdicts, got a different outcome");
+        };
+        assert_eq!(verdicts.len(), MAX_RULES_JUDGED);
+        assert_eq!(partial, Some((MAX_RULES_JUDGED, MAX_RULES_JUDGED + 1)));
     }
 
     #[cfg(unix)]
@@ -2142,6 +2299,79 @@ mod tests {
         let session = plan_check_session::load("sess-decision-1", &rules_dir);
         let key = plan_check_session::key("cross-cutting-token-signing-1c57", "R-A-001");
         assert_eq!(session.deny_counts.get(&key), Some(&1));
+    }
+
+    /// The behavior change this guards: exceeding `MAX_RULES_JUDGED` must
+    /// still judge and act on a deterministic prefix -- deny/session-state
+    /// tracking for the rules it *did* see, not refuse the whole round.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_judges_and_acts_on_a_prefix_past_the_rule_cap() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 5) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let bin = tempdir().unwrap();
+
+        // The first rule in the judged prefix conflicts; the rest conform.
+        let mut verdicts = vec![serde_json::json!({
+            "doc_slug": "cross-cutting-many-abcd",
+            "rule_id": "R-X-0000",
+            "verdict": "conflicting",
+            "span": "violates it",
+            "reason": "conflict",
+        })];
+        for i in 1..MAX_RULES_JUDGED {
+            verdicts.push(serde_json::json!({
+                "doc_slug": "cross-cutting-many-abcd",
+                "rule_id": format!("R-X-{i:04}"),
+                "verdict": "conforming",
+                "span": "",
+                "reason": "not touched",
+            }));
+        }
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &check_output(serde_json::json!(verdicts)))
+                .to_str()
+                .unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(rules_dir.clone());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({
+            "session_id": "sess-partial-1",
+            "tool_input": {"plan": "Add a new widget in services/widgets"},
+        })
+        .to_string();
+        exec_hook_with(&args, &raw);
+
+        let session = plan_check_session::load("sess-partial-1", &rules_dir);
+        // The one conflicting rule in the prefix was denied...
+        assert_eq!(
+            session.deny_counts.get(&plan_check_session::key(
+                "cross-cutting-many-abcd",
+                "R-X-0000"
+            )),
+            Some(&1)
+        );
+        // ...and every other rule in the (60-rule) prefix was cleared --
+        // proving the judge actually ran on the capped batch rather than the
+        // round being refused outright.
+        assert_eq!(session.cleared.len(), MAX_RULES_JUDGED - 1);
+        // The rules past the cap (R-X-0060..R-X-0064) were never candidates
+        // at all, so they can appear in neither bucket.
+        assert!(!session.cleared.contains_key(&plan_check_session::key(
+            "cross-cutting-many-abcd",
+            "R-X-0064"
+        )));
     }
 
     #[cfg(unix)]
