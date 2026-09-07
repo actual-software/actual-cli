@@ -17,13 +17,27 @@
 //! so it is exactly "one plan-revision loop" with no extra correlation
 //! needed. Direct-mode (`actual plan-check` with no `--claude-hook`) has no
 //! `session_id` and so never engages this module at all — the caller passes
-//! an empty exclude set and skips loading/storing a session, the same
+//! an empty, default session and skips loading/storing one, the same
 //! fail-open posture as every other hook-only feature in this command.
 //!
 //! **Keying within a session.** A rule id is only unique within its document
 //! (`check::CHECK_OUTPUT_SCHEMA`'s own doc notes the corpus repeats ids across
 //! documents), so every key here is `"{doc_slug}::{rule_id}"`, never a bare
 //! rule id.
+//!
+//! **`cleared` is scoped to the plan text that earned it, `overrides` are
+//! not — deliberately different.** A cleared rule guards against exactly one
+//! thing: a non-deterministic judge asked the *same* question twice giving a
+//! different answer. It is not a standing pass. So `cleared` maps a rule key
+//! to the digest of the plan text that was judged conforming for it
+//! ([`plan_digest`]), and [`PlanCheckSession::excludes`] only honors that
+//! entry while the *current* plan's digest still matches — edit the plan at
+//! all and every rule whose relevant text might have changed is judged
+//! fresh, never silently waved through on a stale verdict. An override is the
+//! opposite kind of fact: a human decided a specific rule does not block this
+//! *effort*, not that one exact wording was fine, so it stays keyed to the
+//! rule alone and survives any number of plan edits until the human revokes
+//! it (there is no revoke command yet — out of scope for this pass).
 //!
 //! **Two stores, two lifetimes.** The session file (`cleared`, `overrides`,
 //! `rounds`) is mutable, per-conversation, and pruned after
@@ -34,7 +48,7 @@
 //! a round-limit pass, and must outlive the session cache entry that
 //! triggered it.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -44,7 +58,11 @@ use sha2::{Digest, Sha256};
 /// Bumped whenever [`PlanCheckSession`]'s on-disk shape changes incompatibly.
 /// A mismatched version is treated as a miss (start fresh), the same
 /// tolerance `rules::scope::cache` gives `INDEX_FORMAT_VERSION`.
-const FORMAT_VERSION: u32 = 1;
+///
+/// 2: `cleared` changed from a flat set of rule keys to a map of rule key ->
+/// the plan digest that cleared it (see the module doc's "scoped to the plan
+/// text" note) — an incompatible shape change, not just a new field.
+const FORMAT_VERSION: u32 = 2;
 
 /// Subdirectory of the config directory holding per-session state.
 const SESSIONS_DIR_NAME: &str = "plan-check-sessions";
@@ -69,11 +87,12 @@ pub struct PlanCheckSession {
     /// Fail-open outcomes (no runner, no applicable rules, a crashed judge
     /// call) never increment this — nothing was actually checked.
     pub rounds: u32,
-    /// `"{doc_slug}::{rule_id}"` for every rule ever judged
-    /// [`crate::rules::check::Verdict::Conforming`] in this session. Never
-    /// re-judged: see the module doc's "recorded, not silent" note for why a
-    /// judge flip-flop must not be able to re-raise these.
-    pub cleared: BTreeSet<String>,
+    /// `"{doc_slug}::{rule_id}"` -> the digest of the plan text that was
+    /// last judged [`crate::rules::check::Verdict::Conforming`] for it (see
+    /// [`plan_digest`]). A later clearance for the same rule simply
+    /// overwrites the entry — only the most recent judgment matters, so this
+    /// holds one entry per rule ever cleared, not one per round.
+    pub cleared: BTreeMap<String, String>,
     /// Every explicit, human-issued override recorded against this session.
     pub overrides: Vec<Override>,
 }
@@ -91,12 +110,14 @@ pub struct Override {
 }
 
 impl PlanCheckSession {
-    /// Every key this session must never send to the judge again: cleared by
-    /// a prior conforming verdict, or explicitly overridden.
-    pub fn settled(&self) -> BTreeSet<String> {
-        let mut settled = self.cleared.clone();
-        settled.extend(self.overrides.iter().map(|o| o.key.clone()));
-        settled
+    /// True when `key` must never be sent to the judge again for a plan
+    /// whose digest is `plan_digest`: either explicitly overridden (session-
+    /// scoped, regardless of plan text), or judged conforming against this
+    /// *exact* plan text already (content-scoped — see the module doc). A
+    /// rule cleared against a plan that has since been edited is not
+    /// excluded: `plan_digest` will not match, so it is judged fresh.
+    pub fn excludes(&self, key: &str, plan_digest: &str) -> bool {
+        self.is_overridden(key) || self.cleared.get(key).is_some_and(|d| d == plan_digest)
     }
 
     /// True when `key` was explicitly overridden (as opposed to merely
@@ -110,6 +131,21 @@ impl PlanCheckSession {
 /// The settled-rule key: a rule id is only unique within its document.
 pub fn key(doc_slug: &str, rule_id: &str) -> String {
     format!("{doc_slug}::{rule_id}")
+}
+
+/// A content digest of `plan_text`, for scoping a [`PlanCheckSession`]'s
+/// `cleared` entries to the exact wording that earned them. Same construction
+/// as `rules::scope::cache`'s content-hashed keys (SHA-256, hex-encoded) —
+/// deliberately the raw text's hash, not a normalized or excerpted one:
+/// isolating which rule's *relevant* text changed would need per-rule span
+/// tracking this module does not have, so any edit at all is treated as
+/// "re-judge everything previously cleared in scope," which is the safe
+/// direction to err in.
+pub fn plan_digest(plan_text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(plan_text.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn sessions_dir() -> Option<PathBuf> {
@@ -292,6 +328,16 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_digest_is_stable_for_identical_text() {
+        assert_eq!(plan_digest("Add caching."), plan_digest("Add caching."));
+    }
+
+    #[test]
+    fn test_plan_digest_differs_for_different_text() {
+        assert_ne!(plan_digest("Add caching."), plan_digest("Add logging."));
+    }
+
+    #[test]
     fn test_load_absent_session_is_default() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
@@ -308,12 +354,17 @@ mod tests {
             rounds: 2,
             ..Default::default()
         };
-        session.cleared.insert(key("doc-a", "R-001"));
+        session
+            .cleared
+            .insert(key("doc-a", "R-001"), "digest-v1".to_string());
         store("session-1", &session);
 
         let loaded = load("session-1");
         assert_eq!(loaded.rounds, 2);
-        assert!(loaded.cleared.contains(&key("doc-a", "R-001")));
+        assert_eq!(
+            loaded.cleared.get(&key("doc-a", "R-001")),
+            Some(&"digest-v1".to_string())
+        );
     }
 
     #[test]
@@ -322,16 +373,16 @@ mod tests {
         let _guard = with_config_dir();
 
         let mut a = PlanCheckSession::default();
-        a.cleared.insert(key("doc", "R-A"));
+        a.cleared.insert(key("doc", "R-A"), "d".to_string());
         store("session-a", &a);
 
         let mut b = PlanCheckSession::default();
-        b.cleared.insert(key("doc", "R-B"));
+        b.cleared.insert(key("doc", "R-B"), "d".to_string());
         store("session-b", &b);
 
-        assert!(load("session-a").cleared.contains(&key("doc", "R-A")));
-        assert!(!load("session-a").cleared.contains(&key("doc", "R-B")));
-        assert!(load("session-b").cleared.contains(&key("doc", "R-B")));
+        assert!(load("session-a").cleared.contains_key(&key("doc", "R-A")));
+        assert!(!load("session-a").cleared.contains_key(&key("doc", "R-B")));
+        assert!(load("session-b").cleared.contains_key(&key("doc", "R-B")));
     }
 
     #[test]
@@ -346,7 +397,7 @@ mod tests {
             serde_json::json!({
                 "format_version": FORMAT_VERSION + 1,
                 "rounds": 5,
-                "cleared": [],
+                "cleared": {},
                 "overrides": [],
             })
             .to_string(),
@@ -369,9 +420,11 @@ mod tests {
     }
 
     #[test]
-    fn test_settled_includes_both_cleared_and_overridden() {
+    fn test_excludes_true_for_both_cleared_and_overridden() {
         let mut session = PlanCheckSession::default();
-        session.cleared.insert(key("doc", "R-clear"));
+        session
+            .cleared
+            .insert(key("doc", "R-clear"), "digest-v1".to_string());
         session.overrides.push(Override {
             key: key("doc", "R-over"),
             reason: "reviewed".to_string(),
@@ -379,15 +432,35 @@ mod tests {
             round: 1,
         });
 
-        let settled = session.settled();
-        assert!(settled.contains(&key("doc", "R-clear")));
-        assert!(settled.contains(&key("doc", "R-over")));
+        assert!(session.excludes(&key("doc", "R-clear"), "digest-v1"));
+        assert!(session.excludes(&key("doc", "R-over"), "any-digest-at-all"));
         assert!(session.is_overridden(&key("doc", "R-over")));
         assert!(!session.is_overridden(&key("doc", "R-clear")));
     }
 
+    /// The gap this guards: a rule cleared against one plan text must not be
+    /// excluded once the plan has changed — a stale clearance must not mask
+    /// a fresh violation. An override, in contrast, is not scoped to plan
+    /// text at all: it stays excluded regardless of which digest is asked.
     #[test]
-    fn test_record_override_marks_settled_and_writes_audit_log() {
+    fn test_excludes_false_for_a_cleared_rule_once_the_plan_digest_changes() {
+        let mut session = PlanCheckSession::default();
+        session
+            .cleared
+            .insert(key("doc", "R-clear"), "digest-v1".to_string());
+        session.overrides.push(Override {
+            key: key("doc", "R-over"),
+            reason: "reviewed".to_string(),
+            at: Utc::now(),
+            round: 1,
+        });
+
+        assert!(!session.excludes(&key("doc", "R-clear"), "digest-v2"));
+        assert!(session.excludes(&key("doc", "R-over"), "digest-v2"));
+    }
+
+    #[test]
+    fn test_record_override_excludes_regardless_of_plan_digest_and_writes_audit_log() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let (_home, _g1, _g2) = with_config_dir();
 
@@ -398,7 +471,7 @@ mod tests {
         );
 
         let session = load("session-override");
-        assert!(session.settled().contains(&key("doc", "R-001")));
+        assert!(session.excludes(&key("doc", "R-001"), "whatever-digest"));
         assert!(session.is_overridden(&key("doc", "R-001")));
 
         let log_path = audit_log_path().unwrap();
