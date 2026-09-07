@@ -292,6 +292,30 @@ fn parse_max_rounds(s: &str) -> Result<u32, String> {
     Ok(val)
 }
 
+/// Parse and validate a `plan-check-override --rule` value, rejecting
+/// anything that is not `<doc-slug>::<rule-id>`.
+///
+/// Without this, a value missing the `<doc-slug>::` prefix (an easy mistake
+/// -- nothing else this command shows a human ever prints that prefix, by
+/// design: `hook_deny_reason`'s own doc comment explains why the deny
+/// message deliberately never assembles one) would be silently accepted,
+/// stored, and reported as a successful override that can never actually
+/// match a real rule — `PlanCheckSession::excludes` compares against the
+/// exact `doc_slug::rule_id` key, so a malformed one is a silent no-op the
+/// human has no way to notice short of the same rule denying them again
+/// next round.
+fn parse_rule_key(s: &str) -> Result<String, String> {
+    match s.split_once("::") {
+        Some((doc_slug, rule_id)) if !doc_slug.is_empty() && !rule_id.is_empty() => {
+            Ok(s.to_string())
+        }
+        _ => Err(format!(
+            "'{s}' is not a valid rule key — expected <doc-slug>::<rule-id>, e.g. \
+             cross-cutting-token-signing-1c57::R-A-001"
+        )),
+    }
+}
+
 /// Parse and validate a model name, rejecting flag-like values and shell metacharacters.
 ///
 /// Allowed: alphanumeric start, then alphanumeric, dots, underscores, slashes, or hyphens.
@@ -848,7 +872,19 @@ pub struct RulesEvalArgs {
 /// `--claude-hook`: the plan comes from a Claude Code `PreToolUse` hook
 /// envelope on stdin instead, and the result is the hook's own JSON contract
 /// — see `crate::cli::commands::plan_check` for what that contract requires.
+///
+/// This doc comment is not what `--help` shows for this subcommand — clap
+/// takes a subcommand's "about" text from the `Command` enum variant's own
+/// doc comment, not this struct's, so the exit-code explanation above is
+/// real documentation that no CLI user would ever see without the
+/// `after_help` below repeating the load-bearing part of it.
 #[derive(Parser, Debug)]
+#[command(
+    after_help = "Exit codes: 0 for conforming, requires_decision, or not_checked (no \
+runner available, no applicable rules, or the judge call itself failed) -- only a real \
+conflict exits nonzero. A CI job that gates on exit code alone cannot distinguish \"checked \
+and clean\" from \"could not check\"; read --json's `status` field for that distinction."
+)]
 pub struct PlanCheckArgs {
     /// The plan to check. Omit to read from `--plan-file` or stdin. Ignored
     /// under `--claude-hook`, which resolves the plan from the hook envelope.
@@ -963,7 +999,13 @@ pub struct PlanCheckOverrideArgs {
     /// deny message's suggested override command). Repeatable — one override
     /// call can clear several rules at once, each recorded as its own
     /// audit-log entry.
-    #[arg(long = "rule", value_name = "DOC_SLUG::RULE_ID", required = true, num_args = 1..)]
+    #[arg(
+        long = "rule",
+        value_name = "DOC_SLUG::RULE_ID",
+        required = true,
+        num_args = 1..,
+        value_parser = parse_rule_key
+    )]
     pub rules: Vec<String>,
 
     /// Why this rule is being overridden. Required: an override with no
@@ -1129,6 +1171,76 @@ mod parse_tests {
     fn test_parse_max_rounds_rejects_invalid_string() {
         let err = parse_max_rounds("nope").unwrap_err();
         assert!(err.contains("not a valid number"), "message: {err}");
+    }
+
+    // ---- parse_rule_key unit tests ----
+
+    #[test]
+    fn test_parse_rule_key_valid() {
+        assert_eq!(
+            parse_rule_key("cross-cutting-token-signing-1c57::R-A-001").unwrap(),
+            "cross-cutting-token-signing-1c57::R-A-001"
+        );
+    }
+
+    /// The gap this guards: a bare rule id with no doc-slug prefix must be
+    /// rejected outright, not silently accepted as an override that can
+    /// never match anything.
+    #[test]
+    fn test_parse_rule_key_rejects_bare_rule_id() {
+        let err = parse_rule_key("R-A-001").unwrap_err();
+        assert!(err.contains("doc-slug"), "message: {err}");
+    }
+
+    #[test]
+    fn test_parse_rule_key_rejects_empty_doc_slug() {
+        assert!(parse_rule_key("::R-A-001").is_err());
+    }
+
+    #[test]
+    fn test_parse_rule_key_rejects_empty_rule_id() {
+        assert!(parse_rule_key("some-doc::").is_err());
+    }
+
+    #[test]
+    fn test_parse_rule_key_rejects_empty_string() {
+        assert!(parse_rule_key("").is_err());
+    }
+
+    #[test]
+    fn test_cli_rejects_plan_check_override_without_doc_slug() {
+        let result = Cli::try_parse_from([
+            "actual",
+            "plan-check-override",
+            "--session",
+            "s1",
+            "--rule",
+            "R-A-001",
+            "--reason",
+            "reviewed",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cli_accepts_plan_check_override_with_a_valid_rule_key() {
+        let cli = Cli::try_parse_from([
+            "actual",
+            "plan-check-override",
+            "--session",
+            "s1",
+            "--rule",
+            "some-doc::R-A-001",
+            "--reason",
+            "reviewed",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::PlanCheckOverride(args) => {
+                assert_eq!(args.rules, vec!["some-doc::R-A-001".to_string()]);
+            }
+            _ => panic!("expected PlanCheckOverride command"),
+        }
     }
 
     #[test]

@@ -472,6 +472,31 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
     Ok(())
 }
 
+/// Read `reader` into a string, capped at one byte past
+/// [`plan_check_hook::MAX_READ_BYTES`] via `Read::take` -- the same
+/// stat-then-read-avoiding technique `plan_check_hook::read_capped` already
+/// uses for the hook's own file reads -- so neither a `--plan-file` nor a
+/// piped stdin plan can make this process buffer an unbounded amount of
+/// input before its size is even checked. `source` names what was being read,
+/// for the "too large" message only; callers still do their own trim/empty
+/// check afterward with their own distinct message, since "empty" means
+/// something different for a missing file than for empty stdin.
+fn capped_read<R: Read>(reader: R, source: &str) -> Result<String, ActualError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(plan_check_hook::MAX_READ_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(ActualError::IoError)?;
+    if bytes.len() as u64 > plan_check_hook::MAX_READ_BYTES {
+        return Err(ActualError::ConfigError(format!(
+            "{source} exceeds the {}-byte plan-check limit",
+            plan_check_hook::MAX_READ_BYTES
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| ActualError::ConfigError(format!("{source} is not valid UTF-8")))
+}
+
 /// The plan text for direct-mode use: the positional argument, then
 /// `--plan-file`, then stdin.
 fn resolve_direct_plan(args: &PlanCheckArgs) -> Result<String, ActualError> {
@@ -479,7 +504,8 @@ fn resolve_direct_plan(args: &PlanCheckArgs) -> Result<String, ActualError> {
         return Ok(args.plan.join(" "));
     }
     if let Some(path) = &args.plan_file {
-        let text = std::fs::read_to_string(path).map_err(ActualError::IoError)?;
+        let file = std::fs::File::open(path).map_err(ActualError::IoError)?;
+        let text = capped_read(file, &path.display().to_string())?;
         if text.trim().is_empty() {
             return Err(ActualError::ConfigError(format!(
                 "{} is empty",
@@ -488,10 +514,7 @@ fn resolve_direct_plan(args: &PlanCheckArgs) -> Result<String, ActualError> {
         }
         return Ok(text);
     }
-    let mut text = String::new();
-    std::io::stdin()
-        .read_to_string(&mut text)
-        .map_err(ActualError::IoError)?;
+    let text = capped_read(std::io::stdin(), "stdin")?;
     if text.trim().is_empty() {
         return Err(ActualError::ConfigError(
             "no plan given: pass PLAN, --plan-file, or pipe the plan on stdin".to_string(),
@@ -696,13 +719,20 @@ fn deny_summary(conflicts: &[&CheckedRule]) -> String {
 /// wrapper itself is covered by a subprocess test in `tests/cli_test.rs`,
 /// which controls stdin safely because it drives a separate process.
 fn exec_hook(args: &PlanCheckArgs) {
-    let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() {
-        emit(plan_check_hook::render_notice(
-            "plan-check could not read the hook payload on stdin",
-        ));
-        return;
-    }
+    // Capped via `capped_read`, same as `resolve_direct_plan`'s reads: an
+    // over-long, non-UTF8, or outright unreadable payload all collapse to
+    // the same fail-open notice here -- unlike direct mode, this path has no
+    // human waiting on a distinct error message, only an agent that must
+    // never be blocked by a malformed or oversized envelope.
+    let raw = match capped_read(std::io::stdin(), "the hook payload") {
+        Ok(text) => text,
+        Err(_) => {
+            emit(plan_check_hook::render_notice(
+                "plan-check could not read the hook payload on stdin",
+            ));
+            return;
+        }
+    };
     exec_hook_with(args, &raw);
 }
 
@@ -860,13 +890,26 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                             &message,
                         );
                         plan_check_session::store(session_id, &rules_dir, &session);
-                        emit(plan_check_hook::render_notice(&message));
+                        // The audit log keeps the round-limit message on its
+                        // own, undecorated -- the override reminder is only
+                        // appended to what the human actually sees, same
+                        // spirit as the silent-path `notes` below.
+                        emit(plan_check_hook::render_notice(&with_override_reminder(
+                            message, &session,
+                        )));
                         return;
                     }
                     plan_check_session::store(session_id, &rules_dir, &session);
                 }
-                emit(plan_check_hook::render_deny(&hook_deny_reason(
-                    &blocking, session_id, partial,
+                // A deny is not silence, but it is also not the same as "no
+                // active override" -- a different rule's conflict must not
+                // bury the fact that this session still carries a recorded
+                // override elsewhere. See the module doc's "override
+                // visibility" note.
+                let deny_reason = hook_deny_reason(&blocking, session_id, partial);
+                emit(plan_check_hook::render_deny(&with_override_reminder(
+                    deny_reason,
+                    &session,
                 )));
                 return;
             }
@@ -1095,11 +1138,11 @@ fn round_limit_message(
     )
 }
 
-/// A non-blocking reminder naming every active override on `session`, for a
-/// round that would otherwise be completely silent (nothing blocking this
-/// round at all). An override must stay visible on every round it applies
-/// to — never silently absorbed once granted. `None` when the session has
-/// no overrides at all.
+/// A non-blocking reminder naming every active override on `session`. An
+/// override must stay visible on every round it applies to — never silently
+/// absorbed once granted, whether this round is otherwise fully silent, a
+/// deny on some *other* rule, or a round-limit notice. `None` when the
+/// session has no overrides at all.
 fn override_reminder(session: &PlanCheckSession) -> Option<String> {
     if session.overrides.is_empty() {
         return None;
@@ -1115,6 +1158,20 @@ fn override_reminder(session: &PlanCheckSession) -> Option<String> {
         })
         .collect();
     Some(lines.join("\n"))
+}
+
+/// Append [`override_reminder`]'s text to `message` when the session has an
+/// active override, else return `message` unchanged. The shared tail used by
+/// the deny path and the round-limit notice so an active override stays
+/// visible no matter which of the two a round ends in — only the fully-silent
+/// path builds its own `notes` combination instead, since it also needs to
+/// fold in the partial-coverage note.
+fn with_override_reminder(mut message: String, session: &PlanCheckSession) -> String {
+    if let Some(reminder) = override_reminder(session) {
+        message.push('\n');
+        message.push_str(&reminder);
+    }
+    message
 }
 
 fn non_empty_or<'a>(s: &'a str, fallback: &'a str) -> &'a str {
@@ -1712,6 +1769,47 @@ mod tests {
         args.plan_file = Some(PathBuf::from("/no/such/plan-file.md"));
         let err = resolve_direct_plan(&args).unwrap_err();
         assert!(matches!(err, ActualError::IoError(_)));
+    }
+
+    /// The exact behavior a review flagged: `--plan-file` used to read the
+    /// whole file via `std::fs::read_to_string` regardless of size. This must
+    /// now refuse an oversized file instead of buffering it in full, the same
+    /// `Read::take` discipline `plan_check_hook::read_capped` already applies
+    /// to the hook's own file reads.
+    #[test]
+    fn test_resolve_direct_plan_errors_when_the_plan_file_exceeds_the_size_limit() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("huge.md");
+        let oversized = vec![b'x'; (plan_check_hook::MAX_READ_BYTES + 1) as usize];
+        std::fs::write(&file, &oversized).unwrap();
+        let mut args = base_args();
+        args.plan_file = Some(file);
+        let err = resolve_direct_plan(&args).unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(_)));
+        assert!(err.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn test_capped_read_reads_content_within_the_limit() {
+        assert_eq!(
+            capped_read("hello".as_bytes(), "test input").unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn test_capped_read_errors_when_the_input_exceeds_the_limit() {
+        let oversized = vec![b'x'; (plan_check_hook::MAX_READ_BYTES + 1) as usize];
+        let err = capped_read(oversized.as_slice(), "test input").unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(_)));
+        assert!(err.to_string().contains("test input"));
+    }
+
+    #[test]
+    fn test_capped_read_errors_on_non_utf8_input() {
+        let err = capped_read([0xff, 0xfe].as_slice(), "test input").unwrap_err();
+        assert!(matches!(err, ActualError::ConfigError(_)));
+        assert!(err.to_string().contains("not valid UTF-8"));
     }
 
     // ── gather_rules: the remaining per-file failure branches ───────────────
@@ -2925,6 +3023,35 @@ mod tests {
         let reminder = override_reminder(&session).unwrap();
         assert!(reminder.contains("doc::R-001"));
         assert!(reminder.contains("reviewed and accepted"));
+    }
+
+    #[test]
+    fn test_with_override_reminder_unchanged_without_any_overrides() {
+        let message = with_override_reminder(
+            "DECISION R-A-001: conflicts".to_string(),
+            &PlanCheckSession::default(),
+        );
+        assert_eq!(message, "DECISION R-A-001: conflicts");
+    }
+
+    /// The exact behavior item #2/#4 of a review closed: a deny on one rule
+    /// must still mention that a *different* rule in this same session is
+    /// actively overridden -- the reminder used to fire only on the fully-
+    /// silent path, so a human reviewing a denied round could easily miss
+    /// that an earlier override was still in effect.
+    #[test]
+    fn test_with_override_reminder_appends_to_a_deny_message() {
+        let mut session = PlanCheckSession::default();
+        session.overrides.push(plan_check_session::Override {
+            key: plan_check_session::key("doc", "R-002"),
+            reason: "reviewed and accepted".to_string(),
+            at: chrono::Utc::now(),
+            round: 1,
+        });
+        let message = with_override_reminder("DECISION R-A-001: conflicts".to_string(), &session);
+        assert!(message.starts_with("DECISION R-A-001: conflicts\n"));
+        assert!(message.contains("doc::R-002"));
+        assert!(message.contains("reviewed and accepted"));
     }
 
     #[test]

@@ -143,26 +143,47 @@ fn write_config_secure(path: &Path, content: &str) -> Result<(), ActualError> {
         .map_err(|e| config_error(format!("Failed to write config file: {e}")))
 }
 
-/// Write `bytes` to `path`, ensuring the file is never world-readable.
+/// The sibling path `write_secure` stages its content at before renaming into
+/// place: `<path>` with `.tmp` appended to the file name (not the extension —
+/// a path already ending in `.json` must not become `.tmp` by replacing it).
+fn tmp_sibling(path: &Path) -> PathBuf {
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    path.with_file_name(tmp_name)
+}
+
+/// Write `bytes` to `path` atomically, ensuring the file is never
+/// world-readable.
 ///
-/// On unix, opens the file with `O_CREAT | mode(0o600)` so the file is created
-/// with restricted permissions from the start — no TOCTOU gap between an
-/// ordinary write and a later `chmod`. On non-unix, falls back to a plain
-/// write. Shared by every module under `config_dir()` that writes a file of
-/// its own (config, tokens, credentials, plan-check session/audit state) so
-/// the secure-creation idiom is written once rather than re-implemented per
-/// caller.
+/// On unix, stages the content at a sibling `.tmp` path (`O_CREAT |
+/// mode(0o600)`, so it is created with restricted permissions from the
+/// start — no TOCTOU gap between an ordinary write and a later `chmod`),
+/// `fsync`s it, and renames it into place — `rename(2)` on the same
+/// filesystem is atomic, so `path` is either the previous complete content
+/// or the new complete content, never a partial write. Without this, a
+/// process killed mid-write leaves `path` truncated; for a caller like
+/// `plan_check_session::store` that treats an unparseable file as "start
+/// fresh," a truncated write would silently reset session state — including
+/// dropping a recorded human override — rather than merely losing this one
+/// write. On non-unix, falls back to a plain (non-atomic) write. Shared by
+/// every module under `config_dir()` that writes a file of its own (config,
+/// tokens, credentials, plan-check session/audit state) so the secure-
+/// creation idiom is written once rather than re-implemented per caller.
 #[cfg(unix)]
 pub fn write_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    let tmp_path = tmp_sibling(path);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)
+        .open(&tmp_path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp_path, path)
 }
 
 /// Append `bytes` to `path`, creating it with owner-only permissions if it
@@ -182,7 +203,12 @@ pub fn append_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 pub fn write_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, bytes)
+    // No 0600 mode bit off unix, but still atomic: stage-then-rename is what
+    // actually matters for the crash-safety property `write_secure` exists
+    // for (see the unix doc comment above).
+    let tmp_path = tmp_sibling(path);
+    std::fs::write(&tmp_path, bytes)?;
+    std::fs::rename(&tmp_path, path)
 }
 
 #[cfg(not(unix))]
@@ -587,6 +613,60 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "Config file must be created with mode 0600");
+    }
+
+    #[test]
+    fn test_write_secure_writes_the_exact_content() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        write_secure(&path, b"hello").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+    }
+
+    /// The gap this guards: a crash between an ordinary truncating write and
+    /// its data landing on disk leaves the target half-written, which a
+    /// caller like `plan_check_session::load` treats as corrupt and silently
+    /// resets state. Staging at a `.tmp` sibling and renaming means the
+    /// target is only ever the previous complete content or the new complete
+    /// content -- this test cannot simulate a mid-write crash directly, but
+    /// it does assert the sibling never survives a successful call, which
+    /// is what proves the rename actually happened rather than a plain copy.
+    #[test]
+    fn test_write_secure_leaves_no_tmp_sibling_after_success() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        write_secure(&path, b"hello").unwrap();
+        assert!(!tmp_sibling(&path).exists());
+    }
+
+    #[test]
+    fn test_write_secure_overwrites_existing_content_atomically() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        write_secure(&path, b"first").unwrap();
+        write_secure(&path, b"second, and shorter than \"first\" was not").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "second, and shorter than \"first\" was not"
+        );
+        assert!(!tmp_sibling(&path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_secure_result_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        write_secure(&path, b"hello").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn test_tmp_sibling_appends_rather_than_replaces_the_extension() {
+        let path = Path::new("/x/y/session.json");
+        assert_eq!(tmp_sibling(path), Path::new("/x/y/session.json.tmp"));
     }
 
     #[test]
