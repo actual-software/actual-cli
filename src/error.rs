@@ -153,6 +153,18 @@ pub enum ActualError {
     /// stdout with a clean exit 0, never as a process error.
     #[error("plan does not conform: {0}")]
     PlanNotConforming(String),
+
+    /// A command that must be run by a human at a real terminal (currently
+    /// only `plan-check-override`) was invoked with no terminal attached.
+    ///
+    /// Deliberately its own variant rather than a plain [`Self::ConfigError`]:
+    /// that variant's hint points the user at `config.yaml`, which is the
+    /// wrong place to look for "you ran this from a script or an agent's
+    /// shell tool instead of your own terminal" — the same reasoning
+    /// documented on [`Self::Sec1KeyUnsupported`]. The message itself is the
+    /// whole remedy, so no hint is needed.
+    #[error("{0}")]
+    NotInteractive(String),
 }
 
 impl ActualError {
@@ -171,7 +183,8 @@ impl ActualError {
             | Self::NotLoggedIn
             | Self::NoRunnerAvailable { .. }
             | Self::OrgMismatch { .. }
-            | Self::RepoNotFound(_) => 2,
+            | Self::RepoNotFound(_)
+            | Self::NotInteractive(_) => 2,
             Self::CreditBalanceTooLow { .. } => 3,
             Self::ApiError(_) | Self::ApiResponseError { .. } | Self::ServiceUnavailable => 3,
             Self::IoError(_) => 5,
@@ -303,6 +316,10 @@ mod tests {
         assert_eq!(ActualError::RunnerTimeout { seconds: 30 }.exit_code(), 1);
         assert_eq!(ActualError::AnalysisEmpty.exit_code(), 1);
         assert_eq!(ActualError::UserCancelled.exit_code(), 4);
+        assert_eq!(
+            ActualError::NotInteractive("no tty".to_string()).exit_code(),
+            2
+        );
         assert_eq!(
             ActualError::TailoringValidationError("test".to_string()).exit_code(),
             1
@@ -862,6 +879,18 @@ mod tests {
     #[test]
     fn test_service_unavailable_hint_is_none() {
         assert_eq!(ActualError::ServiceUnavailable.hint(), None);
+    }
+
+    /// The gap this guards: a plain `ConfigError` here would carry a
+    /// "Check ~/.actualai/actual/config.yaml" hint, which is actively wrong
+    /// advice for "you invoked this without a terminal attached" — the same
+    /// reasoning `Sec1KeyUnsupported`'s own doc comment gives for not reusing
+    /// `ConfigError`.
+    #[test]
+    fn test_not_interactive_hint_is_none_and_message_is_displayed() {
+        let err = ActualError::NotInteractive("must run interactively".to_string());
+        assert_eq!(err.hint(), None);
+        assert_eq!(err.to_string(), "must run interactively");
     }
 
     #[test]
