@@ -58,14 +58,33 @@ use crate::runner::structured::StructuredRunner;
 
 /// The wall-clock budget for one conformance check.
 ///
-/// `actual plan-check --claude-hook` runs inside Claude Code's 120-second
-/// `PreToolUse` timeout, and selection's own stage-2 rank is skipped for this
-/// path precisely so the one model call this module makes has the budget to
-/// itself (see `crate::cli::commands::plan_check`). This deadline is on the
-/// whole call, not on inactivity between streamed events — the same reasoning
-/// [`super::scope::rank::RANK_BUDGET`] documents — so a backend that keeps
-/// talking past it still degrades to fail-open rather than blocking the hook.
-pub const CHECK_BUDGET: Duration = Duration::from_secs(90);
+/// `actual plan-check --claude-hook` runs inside `hooks/plan-gate.sh`'s own
+/// `PreToolUse` hook timeout (`actual-skill`'s `hooks.json`, currently 180
+/// seconds — not a Claude Code platform ceiling: a `command`-type hook on
+/// `PreToolUse` defaults to 600 seconds, and `plan-gate.sh` deliberately
+/// configures a much smaller one), and selection's own stage-2 rank is
+/// skipped for this path precisely so the one model call this module makes
+/// has the budget to itself (see `crate::cli::commands::plan_check`). This
+/// deadline is on the whole call, not on inactivity between streamed events
+/// — the same reasoning [`super::scope::rank::RANK_BUDGET`] documents — so a
+/// backend that keeps talking past it still degrades to fail-open rather
+/// than blocking the hook.
+///
+/// Raised twice after live measurement against a real 425-rule-document
+/// corpus: originally 90 seconds, then 110, now 150. Even with
+/// [`JUDGE_EFFORT`] applied and `crate::cli::commands::plan_check`'s own
+/// `MAX_RULES_JUDGED` cap lowered, the same real plan and rule batch
+/// measured anywhere from 58 to over 100 seconds of API time across repeated
+/// runs of the *identical* call — live model latency varies enough on its
+/// own, for a prompt this size, that no fixed batch size removes the risk of
+/// landing over a too-tight budget on a slow run. 150 seconds leaves margin
+/// comparable in size to the variance actually observed (not a number with a
+/// rigorous bound behind it, since the variance itself didn't scale
+/// predictably with batch size either), while `plan-gate.sh`'s own 180-second
+/// hook timeout leaves 30 seconds above that for selection, the runner's
+/// auth probe, shell overhead, and this budget's own graceful unwind back
+/// through the hook rather than an abrupt kill.
+pub const CHECK_BUDGET: Duration = Duration::from_secs(150);
 
 /// The inactivity-timeout cap a caller must resolve the judge's runner with.
 ///
@@ -76,13 +95,14 @@ pub const CHECK_BUDGET: Duration = Duration::from_secs(90);
 /// caller supplies that cap, and if it passes `RANK_TIMEOUT_SECS` (60s, sized
 /// for stage-2 rank) for a runner that will instead make this module's call,
 /// the shorter inactivity timeout wins silently — the judge never gets
-/// anywhere near `CHECK_BUDGET`'s 90 seconds no matter how that constant is
+/// anywhere near `CHECK_BUDGET`'s own seconds no matter how that constant is
 /// tuned. Measured directly: the judge's final structured answer arrives as
 /// one block with no incremental streaming, so a batch large enough to spend
-/// more than 60 silent seconds generating it hits exactly this ceiling.
-/// Equal to `CHECK_BUDGET`'s own seconds — not larger — because the outer
-/// `tokio::time::timeout` is already the real, tunable enforcement point;
-/// this cap only has to avoid being the thing that fires first.
+/// more than `RANK_TIMEOUT_SECS` worth of silent seconds generating it hits
+/// exactly this ceiling. Equal to `CHECK_BUDGET`'s own seconds — not larger —
+/// because the outer `tokio::time::timeout` is already the real, tunable
+/// enforcement point; this cap only has to avoid being the thing that fires
+/// first.
 pub const CHECK_TIMEOUT_SECS: u64 = CHECK_BUDGET.as_secs();
 
 /// The reasoning-effort level the judge call runs at, on backends that
@@ -93,14 +113,15 @@ pub const CHECK_TIMEOUT_SECS: u64 = CHECK_BUDGET.as_secs();
 /// out exactly what `conforming`/`conflicting`/`requires_decision` mean for
 /// each of a capped, finite list of rules — not an open-ended problem that
 /// benefits from deep deliberation. Measured directly against a real judge
-/// call with a 60-rule batch (the [`super::check`] module's own
-/// `MAX_RULES_JUDGED` cap), the backend's own default effort spent over 90
-/// seconds — the whole of [`CHECK_BUDGET`] — accumulating extended-thinking
+/// call with a 60-rule batch (the cap in place at the time; see
+/// `crate::cli::commands::plan_check`'s `MAX_RULES_JUDGED` for the current
+/// one), the backend's own default effort spent over 90 seconds accumulating
+/// extended-thinking
 /// tokens before producing any answer, which is exactly the "Runner timed
 /// out" fail-open this module's doc comment describes. `"low"` produced the
 /// same complete, correctly-reasoned 60-verdict answer (including correctly
 /// classifying a deliberate rule deviation as `requires_decision`) in under
-/// half the budget, at roughly half the cost.
+/// half that time, at roughly half the cost.
 const JUDGE_EFFORT: &str = "low";
 
 /// How the judge classified a rule against the plan.
