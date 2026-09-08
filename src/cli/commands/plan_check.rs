@@ -1045,6 +1045,32 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
     }
 }
 
+/// True when `CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` is set in this
+/// process's own environment — the markers Claude Code stamps into every
+/// process it spawns for tool execution. `crate::runner::subprocess`
+/// already depends on their presence being reliable: it explicitly strips
+/// both before invoking a nested `claude` CLI as the judge runner,
+/// specifically because a child process inherits them otherwise. That
+/// existing reliance is what makes them usable here as a second signal
+/// alongside [`std::io::IsTerminal`]: an agent's default tool call gets
+/// neither a pty nor a clean environment, so [`exec_override`] catches it on
+/// either axis rather than the terminal check alone.
+///
+/// Not airtight, and does not try to be: an agent deliberately reaching for
+/// `script`/`expect`/`socat` *and* scrubbing its own environment first would
+/// still pass both checks. This closes the default, no-special-effort
+/// bypass, not every conceivable one — see [`exec_override`]'s own doc for
+/// what this override does and does not guarantee.
+///
+/// A human running this from an ordinary terminal is unaffected unless that
+/// terminal is itself something Claude Code launched (its own integrated
+/// terminal, or a shell it spawned) — a real false-positive this trades for
+/// closing the common bypass; see [`not_interactive`]'s message, which
+/// tells a human hitting this what to do about it.
+fn running_under_claude_code() -> bool {
+    std::env::var_os("CLAUDECODE").is_some() || std::env::var_os("CLAUDE_CODE_ENTRYPOINT").is_some()
+}
+
 /// Run `actual plan-check-override`.
 ///
 /// This is the one control standing between "a human decided to override a
@@ -1052,22 +1078,33 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
 /// deny message deliberately no longer hands back a ready-to-paste
 /// invocation (see [`hook_deny_reason`]'s doc comment), but that alone is not
 /// enough: an agent with shell access could still construct and run this
-/// command on its own behalf. Refusing to run unless standard input is a
-/// real terminal is a genuine (if not airtight — a tool that allocates its
-/// own pty could still spoof one) distinguishing signal, because the coding
-/// agent's own tool calls do not get a pty: only a human actually typing at
-/// an interactive shell does.
+/// command on its own behalf.
 ///
-/// This check is deliberately *not* exercised from a `--lib` unit test:
-/// like [`exec_hook`]'s own real-stdin read, whether a test process's stdin
-/// happens to be a terminal depends on how it was launched (a real terminal
-/// when a developer runs `cargo test` directly at one, never one under CI),
-/// so asserting on it in-process would be either untestable or flaky
-/// depending on the environment. See `tests/cli_test.rs` for the subprocess
-/// test, which controls this safely by piping stdin the same way every
-/// other `--claude-hook` stdin test there does. Everything that does not
-/// depend on the real terminal lives in [`exec_override_impl`], which is
-/// exercised directly.
+/// Two signals gate this, both real but neither individually airtight:
+/// standard input must be a real terminal (the coding agent's own tool calls
+/// do not get a pty — only a human actually typing at an interactive shell
+/// does, though a tool that allocates its own pty, e.g. `script`, `expect`,
+/// or `socat`, could still spoof one), and [`running_under_claude_code`]
+/// must be false (an agent's default tool-execution environment carries
+/// Claude Code's own markers — see that function's doc for exactly what
+/// this does and does not close). Neither check is a cryptographic proof of
+/// human origin, and the two together still are not: this is a real,
+/// deliberately-raised bar against an agent's *default* execution
+/// environment, not an enforcement boundary against one that goes out of
+/// its way to evade detection. Treat it the same way the module doc treats
+/// every other fail-open path here — cost-raising, not guarantee-providing.
+///
+/// The terminal check is deliberately *not* exercised from a `--lib` unit
+/// test: like [`exec_hook`]'s own real-stdin read, whether a test process's
+/// stdin happens to be a terminal depends on how it was launched (a real
+/// terminal when a developer runs `cargo test` directly at one, never one
+/// under CI), so asserting on it in-process would be either untestable or
+/// flaky depending on the environment. See `tests/cli_test.rs` for the
+/// subprocess test, which controls this safely by piping stdin the same way
+/// every other `--claude-hook` stdin test there does. [`running_under_claude_code`]
+/// carries no such restriction and is exercised directly. Everything else
+/// that does not depend on the real terminal lives in [`exec_override_impl`],
+/// which is also exercised directly.
 pub fn exec_override(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     // Deliberately a single-line if/else expression, not an early-return
     // guard clause: no test anywhere (in-process or subprocess) can ever
@@ -1076,17 +1113,24 @@ pub fn exec_override(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     // line that *is* exercised every time (the terminal check itself) is
     // what keeps coverage honest about what's actually tested, rather than
     // manufacturing a fake terminal in a test just to satisfy a line count.
+    // `running_under_claude_code()` joins the same condition for the same
+    // reason: whichever half is false, the line executed is identical.
     #[rustfmt::skip]
-    let result = if std::io::stdin().is_terminal() { exec_override_impl(args) } else { Err(not_interactive()) };
+    let result = if std::io::stdin().is_terminal() && !running_under_claude_code() { exec_override_impl(args) } else { Err(not_interactive()) };
     result
 }
 
 fn not_interactive() -> ActualError {
     ActualError::NotInteractive(
-        "plan-check-override must be run interactively, from a real terminal. It records a \
-         human decision to override plan-stage governance, and is refused here precisely \
-         because this invocation has no terminal attached — if you are a human seeing this, \
-         run the command directly in your own shell instead of through a script or agent."
+        "plan-check-override must be run interactively, from an ordinary terminal — not through \
+         a script, an agent's tool call, or a terminal Claude Code itself launched. It records a \
+         human decision to override plan-stage governance, and this invocation was refused \
+         because it looks like an agent's own shell rather than a human's: either no terminal is \
+         attached, or this process's environment carries Claude Code's own CLAUDECODE / \
+         CLAUDE_CODE_ENTRYPOINT markers. If you are a human seeing this from inside Claude \
+         Code's integrated terminal (or a similar wrapper), run the command from a separate, \
+         plain terminal window instead. This is a real but not airtight check, not a \
+         cryptographic guarantee of human origin — see `actual plan-check-override --help`."
             .to_string(),
     )
 }
@@ -3366,6 +3410,32 @@ mod tests {
         assert!(message.contains("R-A-002"));
         assert!(message.contains("denied 4 times"));
         assert!(message.contains("round limit (3"));
+    }
+
+    /// Unlike the terminal check, this one carries no restriction on being
+    /// exercised in-process — it only reads the environment.
+    #[test]
+    fn test_running_under_claude_code_false_when_neither_marker_is_set() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("CLAUDECODE");
+        let _g2 = EnvGuard::remove("CLAUDE_CODE_ENTRYPOINT");
+        assert!(!running_under_claude_code());
+    }
+
+    #[test]
+    fn test_running_under_claude_code_true_when_claudecode_is_set() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::set("CLAUDECODE", "1");
+        let _g2 = EnvGuard::remove("CLAUDE_CODE_ENTRYPOINT");
+        assert!(running_under_claude_code());
+    }
+
+    #[test]
+    fn test_running_under_claude_code_true_when_entrypoint_is_set() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _g1 = EnvGuard::remove("CLAUDECODE");
+        let _g2 = EnvGuard::set("CLAUDE_CODE_ENTRYPOINT", "cli");
+        assert!(running_under_claude_code());
     }
 
     /// The testable core (see `exec_override`'s own doc comment for why the
