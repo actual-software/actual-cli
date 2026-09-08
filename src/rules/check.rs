@@ -67,6 +67,24 @@ use crate::runner::structured::StructuredRunner;
 /// talking past it still degrades to fail-open rather than blocking the hook.
 pub const CHECK_BUDGET: Duration = Duration::from_secs(90);
 
+/// The inactivity-timeout cap a caller must resolve the judge's runner with.
+///
+/// `CHECK_BUDGET` is a wall-clock deadline on the whole call, enforced by the
+/// `tokio::time::timeout` around it below — it says nothing about the
+/// runner's *own* subprocess timeout, which resets on every streamed event
+/// and fires independently. `crate::cli::commands::rules_rank::resolve`'s
+/// caller supplies that cap, and if it passes `RANK_TIMEOUT_SECS` (60s, sized
+/// for stage-2 rank) for a runner that will instead make this module's call,
+/// the shorter inactivity timeout wins silently — the judge never gets
+/// anywhere near `CHECK_BUDGET`'s 90 seconds no matter how that constant is
+/// tuned. Measured directly: the judge's final structured answer arrives as
+/// one block with no incremental streaming, so a batch large enough to spend
+/// more than 60 silent seconds generating it hits exactly this ceiling.
+/// Equal to `CHECK_BUDGET`'s own seconds — not larger — because the outer
+/// `tokio::time::timeout` is already the real, tunable enforcement point;
+/// this cap only has to avoid being the thing that fires first.
+pub const CHECK_TIMEOUT_SECS: u64 = CHECK_BUDGET.as_secs();
+
 /// The reasoning-effort level the judge call runs at, on backends that
 /// support one (currently `claude-cli`, via [`InvocationOptions::effort`]
 /// (crate::runner::options::InvocationOptions::effort)).
