@@ -66,26 +66,27 @@ impl StructuredRunner for SelectionRunner {
         schema: &str,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
+        effort: Option<&str>,
     ) -> Result<serde_json::Value, ActualError> {
         match self {
             SelectionRunner::ClaudeCli(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
                     .await
             }
             SelectionRunner::AnthropicApi(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
                     .await
             }
             SelectionRunner::OpenAiApi(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
                     .await
             }
             SelectionRunner::CodexCli(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
                     .await
             }
             SelectionRunner::CursorCli(r) => {
-                r.run_structured_json(prompt, schema, model_override, max_budget_usd)
+                r.run_structured_json(prompt, schema, model_override, max_budget_usd, effort)
                     .await
             }
         }
@@ -430,6 +431,7 @@ mod tests {
             r#"{"type":"object"}"#,
             None,
             None,
+            None,
         ))
         .expect("the fake backend answers");
         assert_eq!(value, rank_payload());
@@ -459,6 +461,7 @@ mod tests {
         assert!(block_on(resolved.runner.run_structured_json(
             "rank these",
             r#"{"type":"object"}"#,
+            None,
             None,
             None,
         ))
@@ -494,6 +497,7 @@ mod tests {
         let value = block_on(resolved.runner.run_structured_json(
             "rank these",
             r#"{"type":"object"}"#,
+            None,
             None,
             None,
         ))
@@ -555,7 +559,7 @@ mod tests {
         );
         assert_eq!(
             anthropic_runner
-                .run_structured_json("rank", r#"{"type":"object"}"#, None, None)
+                .run_structured_json("rank", r#"{"type":"object"}"#, None, None, None)
                 .await
                 .unwrap(),
             serde_json::json!({"verdicts": []})
@@ -568,7 +572,7 @@ mod tests {
         );
         assert_eq!(
             openai_runner
-                .run_structured_json("rank", r#"{"type":"object"}"#, None, None)
+                .run_structured_json("rank", r#"{"type":"object"}"#, None, None, None)
                 .await
                 .unwrap(),
             serde_json::json!({"verdicts": []})

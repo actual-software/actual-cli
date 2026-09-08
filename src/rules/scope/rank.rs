@@ -362,8 +362,16 @@ pub async fn rank<R: StructuredRunner>(
     max_budget_usd: Option<f64>,
 ) -> Result<Vec<RankedVerdict>, ActualError> {
     let prompt = build_prompt(plan, paths, candidates);
-    let call =
-        runner.run_structured_json(&prompt, RANK_OUTPUT_SCHEMA, model_override, max_budget_usd);
+    // No effort override: unlike `rules::check`'s judge call, stage-2 rank
+    // hasn't been measured against a large candidate set, so there is no
+    // evidence yet that the backend's own default effort is a problem here.
+    let call = runner.run_structured_json(
+        &prompt,
+        RANK_OUTPUT_SCHEMA,
+        model_override,
+        max_budget_usd,
+        None,
+    );
     let value = tokio::time::timeout(RANK_BUDGET, call)
         .await
         .map_err(|_| ActualError::RunnerTimeout {
@@ -619,6 +627,7 @@ mod tests {
             _schema: &str,
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
+            _effort: Option<&str>,
         ) -> Result<serde_json::Value, ActualError> {
             self.answer.clone().map_err(|()| ActualError::RunnerFailed {
                 message: "runner is down".to_string(),
@@ -676,6 +685,7 @@ mod tests {
                 _schema: &str,
                 _model_override: Option<&str>,
                 _max_budget_usd: Option<f64>,
+                _effort: Option<&str>,
             ) -> impl std::future::Future<Output = Result<serde_json::Value, ActualError>> + Send
             {
                 self.called.store(true, std::sync::atomic::Ordering::SeqCst);

@@ -401,6 +401,7 @@ impl crate::runner::structured::StructuredRunner for CodexCliRunner {
         schema: &str,
         _model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
+        _effort: Option<&str>,
     ) -> Result<serde_json::Value, ActualError> {
         self.run_structured(prompt, schema).await
     }
@@ -531,6 +532,7 @@ echo '{}' > "$OUTPUT_FILE"
                 r#"{"type":"object","title":"rank"}"#,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -565,7 +567,7 @@ exit 3
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let err = CodexCliRunner::new(script, None, Duration::from_secs(10))
-            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
             .await
             .expect_err("expected Err");
         assert!(err.to_string().to_lowercase().contains("codex"), "{err}");

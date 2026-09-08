@@ -722,16 +722,15 @@ impl crate::runner::structured::StructuredRunner for CliClaudeRunner {
         schema: &str,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
+        effort: Option<&str>,
     ) -> Result<serde_json::Value, ActualError> {
         use crate::runner::options::InvocationOptions;
 
-        self.run_structured(
-            InvocationOptions::for_selection(model_override),
-            prompt,
-            schema,
-            max_budget_usd,
-        )
-        .await
+        let mut opts = InvocationOptions::for_selection(model_override);
+        opts.effort = effort.map(str::to_string);
+
+        self.run_structured(opts, prompt, schema, max_budget_usd)
+            .await
     }
 }
 
@@ -903,7 +902,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let value = CliClaudeRunner::new(script, Duration::from_secs(10))
-            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
             .await
             .unwrap();
         assert_eq!(value, payload);
@@ -918,6 +917,47 @@ mod tests {
         let tools = args.iter().position(|a| *a == "--tools").unwrap();
         assert_eq!(args[tools + 1], "");
         assert!(!args.contains(&"--allowedTools"));
+        // No effort override was passed, so the CLI's own default stands.
+        assert!(!args.contains(&"--effort"));
+    }
+
+    /// An effort override reaches the subprocess as `--effort`. This is the
+    /// exact mechanism `rules::check`'s judge call relies on to stay inside
+    /// `CHECK_BUDGET`: a 60-rule batch measured at over 90 seconds of
+    /// extended-thinking tokens alone under the CLI's own default effort,
+    /// against a real judge call, before this override existed.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_cli_runner_run_structured_json_passes_an_effort_override() {
+        use crate::runner::structured::StructuredRunner;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let args_file = dir.path().join("captured-args.txt");
+        let script_content = format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\" >> \"{}\"; done\necho '{}'\n",
+            args_file.display(),
+            stream_result_line(serde_json::json!({"verdicts": []}))
+        );
+        let script = dir.path().join("fake-claude.sh");
+        std::fs::write(&script, script_content).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        CliClaudeRunner::new(script, Duration::from_secs(10))
+            .run_structured_json(
+                "check these",
+                r#"{"type":"object"}"#,
+                None,
+                None,
+                Some("low"),
+            )
+            .await
+            .unwrap();
+
+        let captured = std::fs::read_to_string(&args_file).unwrap();
+        let args: Vec<&str> = captured.lines().collect();
+        let effort = args.iter().position(|a| *a == "--effort").unwrap();
+        assert_eq!(args[effort + 1], "low");
     }
 
     /// A budget reaches the subprocess. This is the one backend that enforces
@@ -945,6 +985,7 @@ mod tests {
                 r#"{"type":"object"}"#,
                 Some("haiku"),
                 Some(0.25),
+                None,
             )
             .await
             .unwrap();
@@ -969,7 +1010,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(CliClaudeRunner::new(script, Duration::from_secs(10))
-            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None)
+            .run_structured_json("rank these", r#"{"type":"object"}"#, None, None, None)
             .await
             .is_err());
     }

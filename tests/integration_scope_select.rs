@@ -133,6 +133,7 @@ impl StructuredRunner for FakeRunner {
         _schema: &str,
         _model_override: Option<&str>,
         _max_budget_usd: Option<f64>,
+        _effort: Option<&str>,
     ) -> Result<serde_json::Value, ActualError> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         match &self.answer {

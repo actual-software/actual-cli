@@ -67,6 +67,24 @@ use crate::runner::structured::StructuredRunner;
 /// talking past it still degrades to fail-open rather than blocking the hook.
 pub const CHECK_BUDGET: Duration = Duration::from_secs(90);
 
+/// The reasoning-effort level the judge call runs at, on backends that
+/// support one (currently `claude-cli`, via [`InvocationOptions::effort`]
+/// (crate::runner::options::InvocationOptions::effort)).
+///
+/// The judge is a bounded classification task — the prompt already spells
+/// out exactly what `conforming`/`conflicting`/`requires_decision` mean for
+/// each of a capped, finite list of rules — not an open-ended problem that
+/// benefits from deep deliberation. Measured directly against a real judge
+/// call with a 60-rule batch (the [`super::check`] module's own
+/// `MAX_RULES_JUDGED` cap), the backend's own default effort spent over 90
+/// seconds — the whole of [`CHECK_BUDGET`] — accumulating extended-thinking
+/// tokens before producing any answer, which is exactly the "Runner timed
+/// out" fail-open this module's doc comment describes. `"low"` produced the
+/// same complete, correctly-reasoned 60-verdict answer (including correctly
+/// classifying a deliberate rule deviation as `requires_decision`) in under
+/// half the budget, at roughly half the cost.
+const JUDGE_EFFORT: &str = "low";
+
 /// How the judge classified a rule against the plan.
 ///
 /// Three values, not a boolean, because the middle one is the reason this
@@ -392,8 +410,13 @@ pub async fn check<R: StructuredRunner>(
     max_budget_usd: Option<f64>,
 ) -> Result<Vec<CheckedRule>, ActualError> {
     let prompt = build_prompt(plan, rules);
-    let call =
-        runner.run_structured_json(&prompt, CHECK_OUTPUT_SCHEMA, model_override, max_budget_usd);
+    let call = runner.run_structured_json(
+        &prompt,
+        CHECK_OUTPUT_SCHEMA,
+        model_override,
+        max_budget_usd,
+        Some(JUDGE_EFFORT),
+    );
     let value = tokio::time::timeout(CHECK_BUDGET, call)
         .await
         .map_err(|_| ActualError::RunnerTimeout {
@@ -710,9 +733,54 @@ mod tests {
             _schema: &str,
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
+            _effort: Option<&str>,
         ) -> Result<serde_json::Value, ActualError> {
             Ok(self.response.clone())
         }
+    }
+
+    /// A runner that records the `effort` it was called with, so
+    /// [`test_check_requests_low_effort`] can assert on it directly rather
+    /// than only on the (identical either way) verdicts.
+    struct EffortCapturingRunner {
+        response: serde_json::Value,
+        seen_effort: std::sync::Mutex<Option<Option<String>>>,
+    }
+
+    impl StructuredRunner for EffortCapturingRunner {
+        async fn run_structured_json(
+            &self,
+            _prompt: &str,
+            _schema: &str,
+            _model_override: Option<&str>,
+            _max_budget_usd: Option<f64>,
+            effort: Option<&str>,
+        ) -> Result<serde_json::Value, ActualError> {
+            *self.seen_effort.lock().unwrap() = Some(effort.map(str::to_string));
+            Ok(self.response.clone())
+        }
+    }
+
+    /// The exact behavior this module's review closed: the judge call must
+    /// request [`JUDGE_EFFORT`], not the backend's own default -- a real
+    /// judge call measured over 90 seconds of extended-thinking tokens alone
+    /// under the default, for a 60-rule batch, before this override existed.
+    #[tokio::test]
+    async fn test_check_requests_low_effort() {
+        let runner = EffortCapturingRunner {
+            response: verdicts_value(serde_json::json!([
+                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "ok"},
+                {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "ok"},
+            ])),
+            seen_effort: std::sync::Mutex::new(None),
+        };
+        check(&runner, "a plan", &rules(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            *runner.seen_effort.lock().unwrap(),
+            Some(Some(JUDGE_EFFORT.to_string()))
+        );
     }
 
     #[tokio::test]
@@ -757,6 +825,7 @@ mod tests {
             _schema: &str,
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
+            _effort: Option<&str>,
         ) -> impl std::future::Future<Output = Result<serde_json::Value, ActualError>> {
             std::future::pending()
         }
