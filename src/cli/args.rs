@@ -1235,12 +1235,9 @@ mod parse_tests {
             "reviewed",
         ])
         .unwrap();
-        match cli.command {
-            Command::PlanCheckOverride(args) => {
-                assert_eq!(args.rules, vec!["some-doc::R-A-001".to_string()]);
-            }
-            _ => panic!("expected PlanCheckOverride command"),
-        }
+        #[rustfmt::skip]
+        let Command::PlanCheckOverride(args) = cli.command else { panic!("expected PlanCheckOverride command") };
+        assert_eq!(args.rules, vec!["some-doc::R-A-001".to_string()]);
     }
 
     #[test]
@@ -1253,10 +1250,9 @@ mod parse_tests {
     fn test_cli_accepts_valid_max_rounds() {
         let cli =
             Cli::try_parse_from(["actual", "plan-check", "--max-rounds", "5", "a plan"]).unwrap();
-        match cli.command {
-            Command::PlanCheck(args) => assert_eq!(args.max_rounds, 5),
-            _ => panic!("expected PlanCheck command"),
-        }
+        #[rustfmt::skip]
+        let Command::PlanCheck(args) = cli.command else { panic!("expected PlanCheck command") };
+        assert_eq!(args.max_rounds, 5);
     }
 
     #[test]
