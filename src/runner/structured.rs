@@ -30,12 +30,21 @@ pub trait StructuredRunner: Send + Sync {
     ///
     /// `model_override` and `max_budget_usd` carry the same meaning they do for
     /// tailoring: each runner applies whichever of them its backend supports.
+    ///
+    /// `effort` is a reasoning-effort override (e.g. `"low"`, `"high"`) for
+    /// backends that support one — currently only the `claude-cli` runner,
+    /// which maps it to `claude`'s own `--effort` flag. A backend with no such
+    /// concept ignores it, the same way every backend but `claude-cli` already
+    /// ignores `max_budget_usd`. `None` means "the backend's own default,"
+    /// never a fixed level — a caller that always wants a specific level
+    /// passes it explicitly every time.
     fn run_structured_json(
         &self,
         prompt: &str,
         schema: &str,
         model_override: Option<&str>,
         max_budget_usd: Option<f64>,
+        effort: Option<&str>,
     ) -> impl std::future::Future<Output = Result<serde_json::Value, ActualError>> + Send;
 }
 
@@ -55,6 +64,7 @@ mod tests {
             _schema: &str,
             model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
+            _effort: Option<&str>,
         ) -> Result<serde_json::Value, ActualError> {
             Ok(serde_json::json!({
                 "prompt": prompt,
@@ -66,7 +76,7 @@ mod tests {
     #[tokio::test]
     async fn test_a_fake_runner_satisfies_the_trait() {
         let value = EchoRunner
-            .run_structured_json("plan", "{}", Some("haiku"), None)
+            .run_structured_json("plan", "{}", Some("haiku"), None, None)
             .await
             .unwrap();
         assert_eq!(value["prompt"], "plan");

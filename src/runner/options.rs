@@ -27,6 +27,18 @@ pub struct InvocationOptions {
     /// (e.g., tailoring uses Read/Write/Edit/Glob/Grep). Profiles that include
     /// Bash or WebFetch must leave this `false` so the user is prompted.
     pub skip_permissions: bool,
+    /// Reasoning-effort override for `--effort` (e.g. `"low"`, `"high"`).
+    ///
+    /// `None` omits the flag, leaving the CLI's own default in effect. A
+    /// single-turn, tool-free structured-output call (selection, or the plan
+    /// conformance judge) has no need for the CLI's default extended-thinking
+    /// depth — it is answering a bounded classification question the prompt
+    /// already spells out, not exploring a codebase — and that default depth
+    /// can push a large batch past a caller's own timeout budget (this is
+    /// exactly what happened to `rules::check`'s `CHECK_BUDGET`: a 60-rule
+    /// batch spent over 90 seconds in extended thinking alone before
+    /// producing an answer, measured directly against a real judge call).
+    pub effort: Option<String>,
 }
 
 /// Default model for the Claude CLI runner.
@@ -56,6 +68,7 @@ impl InvocationOptions {
             json_schema: None,
             max_budget_usd: None,
             skip_permissions: true,
+            effort: None,
         }
     }
 
@@ -76,6 +89,7 @@ impl InvocationOptions {
             json_schema: None,
             max_budget_usd: None,
             skip_permissions: true,
+            effort: None,
         }
     }
 
@@ -98,6 +112,11 @@ impl InvocationOptions {
             // is combined with --print (enforced since Claude Code 1.0.x).
             "--verbose".to_string(),
         ];
+
+        if let Some(ref effort) = self.effort {
+            args.push("--effort".to_string());
+            args.push(effort.clone());
+        }
 
         if self.skip_permissions {
             // Use --dangerously-skip-permissions (not --allow-dangerously-skip-permissions).
@@ -259,6 +278,20 @@ mod tests {
         assert_arg_value(&args, "--tools", "");
         // No tool is granted, so there is nothing to allow.
         assert!(!args.contains(&"--allowedTools".to_string()));
+    }
+
+    #[test]
+    fn test_for_selection_omits_effort_by_default() {
+        let args = InvocationOptions::for_selection(None).to_args();
+        assert!(!args.contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn test_effort_override_is_included_when_set() {
+        let mut opts = InvocationOptions::for_selection(None);
+        opts.effort = Some("low".to_string());
+        let args = opts.to_args();
+        assert_arg_value(&args, "--effort", "low");
     }
 
     #[test]

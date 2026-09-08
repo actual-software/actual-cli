@@ -548,6 +548,7 @@ mod tests {
             _schema: &str,
             _model_override: Option<&str>,
             _max_budget_usd: Option<f64>,
+            _effort: Option<&str>,
         ) -> Result<serde_json::Value, crate::error::ActualError> {
             *self.seen.lock().unwrap() = Some(prompt.to_string());
             self.answer
