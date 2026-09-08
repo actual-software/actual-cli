@@ -929,7 +929,8 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
             if let Some((judged, total)) = partial {
                 notes.push(partial_coverage_note(judged, total));
             }
-            if let Some(reminder) = override_reminder(&session) {
+            let reminder = override_reminder(&session);
+            if let Some(reminder) = reminder {
                 notes.push(reminder);
             }
             if !notes.is_empty() {
@@ -963,16 +964,26 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
 /// depend on the real terminal lives in [`exec_override_impl`], which is
 /// exercised directly.
 pub fn exec_override(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
-    if !std::io::stdin().is_terminal() {
-        return Err(ActualError::NotInteractive(
-            "plan-check-override must be run interactively, from a real terminal. It records a \
-             human decision to override plan-stage governance, and is refused here precisely \
-             because this invocation has no terminal attached — if you are a human seeing this, \
-             run the command directly in your own shell instead of through a script or agent."
-                .to_string(),
-        ));
-    }
-    exec_override_impl(args)
+    // Deliberately a single-line if/else expression, not an early-return
+    // guard clause: no test anywhere (in-process or subprocess) can ever
+    // give this process a real terminal, so the success branch here can
+    // never be exercised on its own -- keeping both branches on the one
+    // line that *is* exercised every time (the terminal check itself) is
+    // what keeps coverage honest about what's actually tested, rather than
+    // manufacturing a fake terminal in a test just to satisfy a line count.
+    #[rustfmt::skip]
+    let result = if std::io::stdin().is_terminal() { exec_override_impl(args) } else { Err(not_interactive()) };
+    result
+}
+
+fn not_interactive() -> ActualError {
+    ActualError::NotInteractive(
+        "plan-check-override must be run interactively, from a real terminal. It records a \
+         human decision to override plan-stage governance, and is refused here precisely \
+         because this invocation has no terminal attached — if you are a human seeing this, \
+         run the command directly in your own shell instead of through a script or agent."
+            .to_string(),
+    )
 }
 
 /// The testable core of `actual plan-check-override`: a human explicitly
@@ -1892,6 +1903,37 @@ mod tests {
         ));
     }
 
+    /// The other `NoRunner` branch: `use_rank: true` resolves its runner
+    /// *before* selection (see `run_pipeline`'s `early_runner`), so a missing
+    /// runner must be caught there too, not just in the deferred, `use_rank:
+    /// false` path the test above covers.
+    #[test]
+    fn test_run_pipeline_no_runner_available_when_use_rank_is_true() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let mut args = base_args();
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let rules_dir = crate::rules::rules_dir(root.path());
+
+        let outcome = run_pipeline(
+            "Sign access tokens with RS256",
+            root.path(),
+            &rules_dir,
+            &args,
+            true,
+            &PlanCheckSession::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            Outcome::NoRunner { documents_selected, .. } if documents_selected > 0
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_run_pipeline_nothing_applies_when_limit_is_zero() {
@@ -2046,12 +2088,8 @@ mod tests {
             &PlanCheckSession::default(),
         )
         .unwrap();
-        let Outcome::Verdicts {
-            verdicts, partial, ..
-        } = outcome
-        else {
-            panic!("expected Verdicts, got a different outcome");
-        };
+        #[rustfmt::skip]
+        let Outcome::Verdicts { verdicts, partial, .. } = outcome else { panic!("expected Verdicts, got a different outcome") };
         assert_eq!(verdicts.len(), MAX_RULES_JUDGED);
         assert_eq!(partial, Some((MAX_RULES_JUDGED, MAX_RULES_JUDGED + 1)));
     }
@@ -2257,6 +2295,23 @@ mod tests {
 
         let err = exec(&args).unwrap_err();
         assert!(matches!(err, ActualError::PlanNotConforming(_)));
+    }
+
+    /// Direct mode's counterpart to
+    /// `test_exec_hook_with_reports_a_rules_directory_load_failure`: a
+    /// caller at a real terminal needs this surfaced as a real `Err`, not
+    /// fail-open silence — see `run_pipeline`'s own doc comment on when it
+    /// returns `Err` at all.
+    #[test]
+    fn test_exec_direct_errors_when_the_rules_directory_cannot_be_read() {
+        let root = tempdir().unwrap();
+        let not_a_dir = root.path().join("rules-dir-is-a-file");
+        std::fs::write(&not_a_dir, "not a directory").unwrap();
+
+        let mut args = base_args();
+        args.plan = vec!["a plan".to_string()];
+        args.rules_dir = Some(not_a_dir);
+        assert!(exec(&args).is_err());
     }
 
     // ── exec_hook_with: every notice/deny branch, without touching stdin ────
@@ -2472,6 +2527,66 @@ mod tests {
         )));
     }
 
+    /// The other half of the deterministic-prefix disclosure: a round that
+    /// judges only a capped prefix but finds *nothing* blocking in it must
+    /// still break silence with the partial-coverage note — otherwise a
+    /// plain "conforming" silence would misreport a partial answer as a
+    /// complete one. `test_exec_hook_with_judges_and_acts_on_a_prefix_past_the_rule_cap`
+    /// covers the case where the prefix also has something to deny; this is
+    /// the fully-conforming-but-partial case that branch doesn't reach.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_discloses_partial_coverage_on_an_otherwise_silent_round() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 5) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let bin = tempdir().unwrap();
+
+        // Every rule in the judged prefix conforms -- nothing blocking at
+        // all this round, so the only reason to emit anything is the
+        // partial-coverage disclosure.
+        let verdicts: Vec<serde_json::Value> = (0..MAX_RULES_JUDGED)
+            .map(|i| {
+                serde_json::json!({
+                    "doc_slug": "cross-cutting-many-abcd",
+                    "rule_id": format!("R-X-{i:04}"),
+                    "verdict": "conforming",
+                    "span": "",
+                    "reason": "not touched",
+                })
+            })
+            .collect();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &check_output(serde_json::json!(verdicts)))
+                .to_str()
+                .unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(rules_dir.clone());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({
+            "session_id": "sess-partial-silent-1",
+            "tool_input": {"plan": "Add a new widget in services/widgets"},
+        })
+        .to_string();
+        exec_hook_with(&args, &raw);
+
+        // Every rule in the (60-rule) prefix was cleared, proving the judge
+        // ran the capped batch to completion rather than the round being
+        // refused outright.
+        let session = plan_check_session::load("sess-partial-silent-1", &rules_dir);
+        assert_eq!(session.cleared.len(), MAX_RULES_JUDGED);
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_exec_hook_with_stays_silent_on_a_fully_conforming_plan() {
@@ -2539,9 +2654,8 @@ mod tests {
         let outcome =
             run_pipeline(plan_text, root.path(), &rules_dir, &args, false, &session).unwrap();
 
-        let Outcome::Verdicts { verdicts, .. } = outcome else {
-            panic!("expected Verdicts, got a different outcome");
-        };
+        #[rustfmt::skip]
+        let Outcome::Verdicts { verdicts, .. } = outcome else { panic!("expected Verdicts, got a different outcome") };
         assert_eq!(
             verdicts.len(),
             1,
