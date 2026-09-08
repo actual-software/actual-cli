@@ -284,6 +284,15 @@ pub enum AuditKind {
     /// The round limit was hit with a rule still conflicting, and the gate
     /// stopped blocking rather than denying indefinitely.
     RoundLimit,
+    /// A round judged only a prefix of the rules that applied (more
+    /// candidates than `plan_check`'s own rule-judging cap allows) and found
+    /// nothing blocking in that prefix, so the tool call went through with
+    /// the rest never evaluated. Unlike [`Override`] and
+    /// [`RoundLimit`], this is not a human or a policy acting — it is a
+    /// disclosed gap in coverage, recorded so it is inspectable later even
+    /// though the hook's own response, which the agent (not a human) is the
+    /// one actually reading, is the only place it would otherwise appear.
+    PartialCoverage,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -294,10 +303,21 @@ struct AuditEntry {
     /// identity (see the module doc), and included here so a human reading
     /// the log can tell two same-named rules in different repos apart.
     rules_dir: String,
+    /// `"{doc_slug}::{rule_id}"` for [`AuditKind::Override`] and
+    /// [`AuditKind::RoundLimit`]. Empty for [`AuditKind::PartialCoverage`],
+    /// which is not about any one rule — see `judged`/`total` instead.
     key: String,
     reason: String,
     round: u32,
     kind: AuditKind,
+    /// How many candidate rules were actually judged this round. Present
+    /// only for [`AuditKind::PartialCoverage`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    judged: Option<usize>,
+    /// How many candidate rules applied in total, including the unjudged
+    /// tail. Present only for [`AuditKind::PartialCoverage`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    total: Option<usize>,
 }
 
 /// `pub(crate)` rather than private so integration-style tests in
@@ -349,6 +369,8 @@ pub fn record_override(
             reason: reason.to_string(),
             round: session.rounds,
             kind: AuditKind::Override,
+            judged: None,
+            total: None,
         });
     }
     store(session_id, rules_dir, &session);
@@ -375,8 +397,42 @@ pub fn record_round_limit(
             reason: reason.to_string(),
             round,
             kind: AuditKind::RoundLimit,
+            judged: None,
+            total: None,
         });
     }
+}
+
+/// Append one audit-log entry recording that a round found nothing blocking
+/// but judged only `judged` of `total` applicable rules. Unlike
+/// [`record_override`] and [`record_round_limit`], this names no specific
+/// rule key — the whole point is that the unjudged tail was never
+/// individually identified, only counted — so it is not keyed to any one
+/// rule and does not touch the session file itself. Exists so a coverage gap
+/// is inspectable after the fact from the durable log, not only visible in
+/// the one hook response the agent happened to receive; see
+/// `plan_check`'s module doc, "advisory gate" section.
+pub fn record_partial_coverage(
+    session_id: &str,
+    rules_dir: &std::path::Path,
+    round: u32,
+    judged: usize,
+    total: usize,
+) {
+    append_audit(&AuditEntry {
+        at: Utc::now(),
+        session_id: session_id.to_string(),
+        rules_dir: rules_dir.display().to_string(),
+        key: String::new(),
+        reason: format!(
+            "only {judged} of {total} applicable rules were judged this round; the rest were \
+             not evaluated"
+        ),
+        round,
+        kind: AuditKind::PartialCoverage,
+        judged: Some(judged),
+        total: Some(total),
+    });
 }
 
 #[cfg(test)]
@@ -648,6 +704,25 @@ mod tests {
         let log = std::fs::read_to_string(audit_log_path().unwrap()).unwrap();
         assert!(log.contains("R-002"));
         assert!(log.contains("\"kind\":\"round_limit\""));
+    }
+
+    #[test]
+    fn test_record_partial_coverage_writes_audit_log_without_touching_session() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_home, _g1, _g2) = with_config_dir();
+
+        record_partial_coverage("session-partial", &rd(), 1, 40, 45);
+
+        // Same as record_round_limit: a disclosed coverage gap is not a
+        // session-state fact, only a durable log entry.
+        assert_eq!(load("session-partial", &rd()), PlanCheckSession::default());
+
+        let log = std::fs::read_to_string(audit_log_path().unwrap()).unwrap();
+        assert!(log.contains("\"kind\":\"partial_coverage\""));
+        assert!(log.contains("\"judged\":40"));
+        assert!(log.contains("\"total\":45"));
+        // No rule key applies to this kind of event.
+        assert!(log.contains("\"key\":\"\""));
     }
 
     #[test]

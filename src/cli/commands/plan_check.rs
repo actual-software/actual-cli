@@ -47,7 +47,16 @@
 //!   then declaration order within a document) is actually judged this
 //!   round. This is disclosed, not silent: every caller is told `N of M`
 //!   rules were checked, so "conforming" never gets reported as "conforming"
-//!   full stop when it was really "conforming, as far as we looked."
+//!   full stop when it was really "conforming, as far as we looked." In
+//!   `--claude-hook` mode, which prefix gets judged also rotates by round
+//!   (see [`gather_rules`]) so a rule in the truncated tail is not silently
+//!   unjudged for the entire life of a session — a mitigation, not a
+//!   guarantee: judging the full candidate set in one round regardless of
+//!   size is tracked separately (AK-743). A round whose judged prefix has
+//!   nothing blocking is always recorded to the durable audit log even when
+//!   the hook itself stays silent-but-for-the-disclosure-notice, precisely
+//!   because this is the one fail-open path a human is least likely to
+//!   notice in the moment — see [`plan_check_session::record_partial_coverage`].
 //! - **The revision loop's own escape valves (below) are additional,
 //!   deliberate fail-open paths**, not enforcement: the round limit stops
 //!   blocking a persistently unresolved rule specifically so the hook does
@@ -145,13 +154,14 @@ use crate::rules::scope::{self, select, Query, Selection, Stage2};
 /// this bounds the prompt without changing which documents were selected.
 ///
 /// Exceeding it is not treated as a failure to check: [`gather_rules`] still
-/// judges the first [`MAX_RULES_JUDGED`] rules, in a deterministic priority
-/// order (selection order — the prefilter's own relevance ranking — then
-/// declaration order within a document), and [`run_pipeline`] reports the
-/// judged count against the true total so every caller can say plainly "N of
-/// M rules checked" rather than either silently calling a partial answer
-/// complete or refusing to check anything at all. See the module doc's
-/// "advisory gate" section.
+/// judges [`MAX_RULES_JUDGED`] rules, in priority order (selection order —
+/// the prefilter's own relevance ranking — then declaration order within a
+/// document) starting from a per-round rotating offset rather than always
+/// index zero (see [`gather_rules`]'s own doc), and [`run_pipeline`] reports
+/// the judged count against the true total so every caller can say plainly
+/// "N of M rules checked" rather than either silently calling a partial
+/// answer complete or refusing to check anything at all. See the module
+/// doc's "advisory gate" section.
 ///
 /// Lowered from an original 60 after live measurement against a real
 /// 425-rule-document corpus: a 60-rule batch's structured answer, plus a real
@@ -392,8 +402,9 @@ fn run_pipeline(
 /// The rules gathered from every selected document, capped at
 /// [`MAX_RULES_JUDGED`], and whether the true count exceeded that cap.
 struct GatheredRules {
-    /// The rules actually handed to the judge: every non-excluded candidate,
-    /// in priority order, up to [`MAX_RULES_JUDGED`].
+    /// The rules actually handed to the judge: up to [`MAX_RULES_JUDGED`]
+    /// non-excluded candidates, in priority order starting from this round's
+    /// rotating offset when truncated (see [`gather_rules`]).
     rules: Vec<RuleForJudging>,
     /// Total *non-excluded* individual rules found across every selected
     /// document — i.e. `excluded` is not part of this count. Equal to
@@ -419,9 +430,27 @@ struct GatheredRules {
 /// document, dropping any rule [`PlanCheckSession::excludes`] for
 /// `plan_digest` before the [`MAX_RULES_JUDGED`] cap is applied — an excluded
 /// rule must never consume cap budget that a rule still worth judging needs.
-/// This ordering is what makes a truncated `rules` a deterministic *prefix*
-/// rather than an arbitrary subset: the same plan against the same rules
-/// always drops the same tail.
+///
+/// When the non-excluded candidate count exceeds the cap, the judged window
+/// is not pinned to index zero every round: it starts at
+/// [`rotation_offset`]`(session.rounds, considered)`, a cap-sized chunk per
+/// completed round, wrapping. A rule left in the truncated tail on round 1
+/// therefore has a real chance of landing inside the judged window on a
+/// later round instead of being silently skipped for the entire life of the
+/// session — session `rounds` only advances when a real judge call
+/// completes (see [`PlanCheckSession::rounds`]), so this only changes
+/// anything once a session has actually run more than one round against a
+/// selection this large. Still fully deterministic — the same session, at
+/// the same round, against the same candidates, always rotates to the same
+/// window — and still only a mitigation, not a guarantee: a plan approved on
+/// its first round always sees round 0's window (offset zero, identical to
+/// the old fixed-prefix behavior), and a session that revises only a few
+/// times before approval may never rotate far enough to reach a very large
+/// tail. Judging the entire candidate set in a single round regardless of
+/// size needs concurrent, sharded judge calls instead of a bigger one, which
+/// is real implementation work tracked separately as AK-743 — this only
+/// ensures the gap moves round over round instead of calcifying on the same
+/// rules forever.
 ///
 /// A document that no longer parses (removed, edited to something invalid,
 /// between selection and this read) is skipped rather than failing the whole
@@ -433,8 +462,7 @@ fn gather_rules(
     session: &PlanCheckSession,
     plan_digest: &str,
 ) -> GatheredRules {
-    let mut rules = Vec::new();
-    let mut considered = 0usize;
+    let mut candidates = Vec::new();
     let mut excluded = 0usize;
     for selected in &selection.selected {
         let path = root.join(&selected.relative_path);
@@ -455,23 +483,43 @@ fn gather_rules(
                 excluded += 1;
                 continue;
             }
-            considered += 1;
-            if rules.len() < MAX_RULES_JUDGED {
-                rules.push(RuleForJudging::new(
-                    selected.slug.clone(),
-                    rule.id,
-                    rule.level,
-                    rule.statement,
-                ));
-            }
+            candidates.push(RuleForJudging::new(
+                selected.slug.clone(),
+                rule.id,
+                rule.level,
+                rule.statement,
+            ));
         }
     }
+    let considered = candidates.len();
+    let truncated = considered > MAX_RULES_JUDGED;
+    if truncated {
+        candidates.rotate_left(rotation_offset(session.rounds, considered));
+        candidates.truncate(MAX_RULES_JUDGED);
+    }
     GatheredRules {
-        truncated: considered > MAX_RULES_JUDGED,
-        rules,
+        rules: candidates,
         considered,
+        truncated,
         excluded,
     }
+}
+
+/// The judged window's starting offset for `round`, into `considered`
+/// non-excluded candidates: `round` cap-sized chunks in, wrapping. Round 0 —
+/// a session's first call, and every direct-mode call, which never tracks
+/// rounds at all (`PlanCheckSession::default()` always has `rounds: 0`) —
+/// always resolves to offset zero, the same window a plain unrotated cap
+/// would have judged, so this changes nothing until a session completes at
+/// least one round against a selection larger than the cap. `considered == 0`
+/// cannot occur at the only call site (guarded by `truncated`, which implies
+/// `considered > MAX_RULES_JUDGED > 0`), but returns 0 rather than divide by
+/// zero if ever called otherwise.
+fn rotation_offset(round: u32, considered: usize) -> usize {
+    if considered == 0 {
+        return 0;
+    }
+    ((round as u64).saturating_mul(MAX_RULES_JUDGED as u64) % considered as u64) as usize
 }
 
 // ── direct mode ──────────────────────────────────────────────────────────
@@ -965,6 +1013,26 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
             let mut notes = Vec::new();
             if let Some((judged, total)) = partial {
                 notes.push(partial_coverage_note(judged, total));
+                // This is the one fail-open path with no other durable
+                // trace: a deny keeps per-rule accounting live in the
+                // session, and an override or round-limit pass already
+                // writes its own audit entry, but "conforming, as far as we
+                // looked" would otherwise exist only in the hook response
+                // the agent — not a human — is the one actually reading. See
+                // the module doc's "advisory gate" section.
+                if let Some(session_id) = session_id {
+                    plan_check_session::record_partial_coverage(
+                        session_id,
+                        &rules_dir,
+                        session.rounds,
+                        judged,
+                        total,
+                    );
+                    notes.push(
+                        "This is not a silent pass — recorded in plan-check-overrides.log."
+                            .to_string(),
+                    );
+                }
             }
             let reminder = override_reminder(&session);
             if let Some(reminder) = reminder {
@@ -1375,6 +1443,79 @@ mod tests {
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
         assert_eq!(gathered.considered, MAX_RULES_JUDGED);
         assert!(!gathered.truncated);
+    }
+
+    /// A session's first round (round 0, the same value direct mode's
+    /// `PlanCheckSession::default()` always has) must judge exactly the old
+    /// fixed prefix — rotation must not change round-0 behavior.
+    #[test]
+    fn test_gather_rules_round_zero_judges_the_unrotated_prefix() {
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 5) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Add a new widget in services/widgets".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &PlanCheckSession::default(),
+            "test-digest",
+        );
+        let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
+        assert!(ids.contains(&"R-X-0000"));
+        assert!(ids.contains(&"R-X-0039"));
+        assert!(!ids.contains(&"R-X-0044"));
+    }
+
+    /// A later round rotates the judged window by whole cap-sized chunks, so
+    /// a rule truncated out of round 0's prefix has a real chance of being
+    /// judged instead of staying permanently invisible to the judge for the
+    /// life of the session — the #2 mitigation for APR-001 (partial batches
+    /// silently never covering the same tail).
+    #[test]
+    fn test_gather_rules_rotates_the_judged_window_on_a_later_round() {
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 5) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Add a new widget in services/widgets".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+
+        let mut session = PlanCheckSession::default();
+        session.rounds = 1;
+        let gathered = gather_rules(&selection, root.path(), &session, "test-digest");
+        assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
+        assert_eq!(gathered.considered, MAX_RULES_JUDGED + 5);
+        assert!(gathered.truncated);
+
+        let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
+        // Round 0's judged window was R-X-0000..R-X-0039 (see the round-zero
+        // test above). Round 1 rotates a full cap-sized chunk forward, so
+        // the tail round 0 never saw is now in scope...
+        assert!(ids.contains(&"R-X-0040"));
+        assert!(ids.contains(&"R-X-0044"));
+        // ...and the top of round 0's window rotates out to make room,
+        // proving the window actually moved rather than simply grew.
+        assert!(!ids.contains(&"R-X-0035"));
+        assert!(!ids.contains(&"R-X-0039"));
+    }
+
+    #[test]
+    fn test_rotation_offset_is_zero_at_round_zero_and_wraps_thereafter() {
+        assert_eq!(rotation_offset(0, 45), 0);
+        assert_eq!(rotation_offset(1, 45), MAX_RULES_JUDGED);
+        // Wraps back toward the start once enough rounds have passed to
+        // cycle through every candidate at least once.
+        assert_eq!(rotation_offset(2, 45), (2 * MAX_RULES_JUDGED) % 45);
+        assert_eq!(rotation_offset(0, 0), 0);
     }
 
     // ── deny / notice text ───────────────────────────────────────────────
@@ -2622,6 +2763,15 @@ mod tests {
         // refused outright.
         let session = plan_check_session::load("sess-partial-silent-1", &rules_dir);
         assert_eq!(session.cleared.len(), MAX_RULES_JUDGED);
+
+        // A silent-but-partial round is not silent in the durable log: this
+        // is the one fail-open path that previously left no trace anywhere
+        // but the hook response the agent itself read.
+        let log = std::fs::read_to_string(plan_check_session::audit_log_path().unwrap()).unwrap();
+        assert!(log.contains("\"kind\":\"partial_coverage\""));
+        assert!(log.contains(&format!("\"judged\":{MAX_RULES_JUDGED}")));
+        assert!(log.contains(&format!("\"total\":{}", MAX_RULES_JUDGED + 5)));
+        assert!(log.contains("\"session_id\":\"sess-partial-silent-1\""));
     }
 
     #[cfg(unix)]
