@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::cli::args::{RulesEvalArgs, RulesIndexArgs, RulesSelectArgs};
-use crate::cli::commands::rules_rank::{self, ResolvedRunner};
+use crate::cli::commands::rules_rank::{self, ResolvedRunner, RANK_TIMEOUT_SECS};
 use crate::cli::ui::panel::Panel;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
@@ -212,16 +212,20 @@ fn run_selection(
     // nothing from it, and stage 2 degrades the same way it would with no
     // runner configured at all.
     let cfg = crate::config::paths::load().unwrap_or_default();
-    let resolved_runner =
-        match rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg) {
-            Ok(runner) => runner,
-            Err(reason) => {
-                return Ok(SelectionRun {
-                    selection: prefiltered.finish(Stage2::Unavailable { reason }),
-                    runner: None,
-                })
-            }
-        };
+    let resolved_runner = match rules_rank::resolve(
+        args.runner.as_ref(),
+        args.model.as_deref(),
+        &cfg,
+        RANK_TIMEOUT_SECS,
+    ) {
+        Ok(runner) => runner,
+        Err(reason) => {
+            return Ok(SelectionRun {
+                selection: prefiltered.finish(Stage2::Unavailable { reason }),
+                runner: None,
+            })
+        }
+    };
 
     Ok(SelectionRun {
         runner: Some(resolved_runner.label()),
@@ -612,8 +616,13 @@ fn evaluate_two_stage(
     args: &RulesEvalArgs,
 ) -> Result<EvaluationReport, ActualError> {
     let cfg = crate::config::paths::load().unwrap_or_default();
-    let resolved = rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg)
-        .map_err(ActualError::ConfigError)?;
+    let resolved = rules_rank::resolve(
+        args.runner.as_ref(),
+        args.model.as_deref(),
+        &cfg,
+        RANK_TIMEOUT_SECS,
+    )
+    .map_err(ActualError::ConfigError)?;
 
     let mut results = Vec::with_capacity(cases.len());
     for case in cases {

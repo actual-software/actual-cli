@@ -290,15 +290,29 @@ fn api_key(env_var: &str, config_key: Option<&str>) -> Result<String, String> {
 ///
 /// The `Err` is a sentence meant for a panel, not an error to propagate: no
 /// runner is an expected state, and the caller answers from stage 1 alone.
+///
+/// `timeout_cap_secs` bounds the resolved runner's own subprocess inactivity
+/// timeout (see [`CliClaudeRunner`]'s streaming timeout) — the config's
+/// `invocation_timeout_secs` still applies underneath it, but never above
+/// this cap. Despite the name, this same runner can end up making a call
+/// this function's own module doesn't know about: `plan_check::run_pipeline`
+/// resolves once and may reuse the result for the conformance judge, not
+/// just stage-2 rank, so callers resolving specifically for that judge call
+/// must pass a cap sized for it ([`crate::rules::check::CHECK_TIMEOUT_SECS`],
+/// not [`RANK_TIMEOUT_SECS`]) — passing the wrong one silently reintroduces
+/// the exact bug this parameter exists to prevent: an inactivity timeout
+/// shorter than the caller's own wall-clock budget wins by default, no
+/// matter how generous that budget is.
 pub fn resolve(
     explicit: Option<&RunnerChoice>,
     model: Option<&str>,
     cfg: &Config,
+    timeout_cap_secs: u64,
 ) -> Result<ResolvedRunner, String> {
     let timeout = Duration::from_secs(
         cfg.invocation_timeout_secs
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
-            .min(RANK_TIMEOUT_SECS),
+            .min(timeout_cap_secs),
     );
 
     let (choices, origin) = candidates(explicit, model.or(cfg.model.as_deref()), cfg);
@@ -421,8 +435,13 @@ mod tests {
         );
         let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
 
-        let resolved = resolve(Some(&RunnerChoice::ClaudeCli), Some("haiku"), &config())
-            .expect("claude-cli should resolve against the fake binary");
+        let resolved = resolve(
+            Some(&RunnerChoice::ClaudeCli),
+            Some("haiku"),
+            &config(),
+            RANK_TIMEOUT_SECS,
+        )
+        .expect("claude-cli should resolve against the fake binary");
         assert_eq!(resolved.choice, RunnerChoice::ClaudeCli);
         assert_eq!(resolved.label(), "claude-cli (haiku)");
 
@@ -437,6 +456,58 @@ mod tests {
         assert_eq!(value, rank_payload());
     }
 
+    /// The exact bug a review closed: `resolve`'s `timeout_cap_secs` used to
+    /// be the hardcoded `RANK_TIMEOUT_SECS` regardless of what the resolved
+    /// runner would actually be used for, so a caller resolving specifically
+    /// for `rules::check`'s judge call silently got rank's 60-second
+    /// inactivity cap instead of one sized for the judge -- a real batch
+    /// measured its answer arriving as one unstreamed block after 45+ silent
+    /// seconds, comfortably inside the judge's own 90-second wall-clock
+    /// budget but past a cap meant for a different call. Proven here with a
+    /// real (short) sleep rather than mocked time, since the timeout this
+    /// guards is a real subprocess's own inactivity timer, not a virtual
+    /// clock `resolve` or `run_structured_json` control.
+    #[test]
+    #[cfg(unix)]
+    fn test_resolve_honors_the_timeout_cap_parameter() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.path().join("fake-claude-slow.sh");
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '{{\"loggedIn\":true}}'; exit 0; fi\nsleep 2\nprintf '%s' '{}'\n",
+            claude_envelope(rank_payload())
+        );
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _guard = EnvGuard::set("CLAUDE_BINARY", script.to_str().unwrap());
+
+        // A 1-second cap can't survive a 2-second silence: the same failure
+        // shape the real bug produced.
+        let capped_short =
+            resolve(Some(&RunnerChoice::ClaudeCli), None, &config(), 1).expect("probe passes");
+        assert!(block_on(capped_short.runner.run_structured_json(
+            "rank these",
+            r#"{"type":"object"}"#,
+            None,
+            None,
+            None,
+        ))
+        .is_err());
+
+        // A 5-second cap comfortably outlasts the same 2-second silence.
+        let capped_long =
+            resolve(Some(&RunnerChoice::ClaudeCli), None, &config(), 5).expect("probe passes");
+        assert!(block_on(capped_long.runner.run_structured_json(
+            "rank these",
+            r#"{"type":"object"}"#,
+            None,
+            None,
+            None,
+        ))
+        .is_ok());
+    }
+
     /// The codex arm of `build`, including the API-key injection, and its
     /// dispatch arm.
     #[test]
@@ -448,8 +519,13 @@ mod tests {
         let _binary = EnvGuard::set("CODEX_BINARY", script.to_str().unwrap());
         let _key = EnvGuard::set("OPENAI_API_KEY", "test-key");
 
-        let resolved = resolve(Some(&RunnerChoice::CodexCli), None, &config())
-            .expect("codex-cli should resolve against the fake binary");
+        let resolved = resolve(
+            Some(&RunnerChoice::CodexCli),
+            None,
+            &config(),
+            RANK_TIMEOUT_SECS,
+        )
+        .expect("codex-cli should resolve against the fake binary");
         assert_eq!(resolved.choice, RunnerChoice::CodexCli);
         // Codex picks its own model when none is configured, so the label
         // carries no model to show.
@@ -490,6 +566,7 @@ mod tests {
             Some(&RunnerChoice::CursorCli),
             Some("some-model"),
             &config(),
+            RANK_TIMEOUT_SECS,
         )
         .expect("cursor-cli should resolve against the fake binary");
         assert_eq!(resolved.label(), "cursor-cli (some-model)");
@@ -892,7 +969,13 @@ mod tests {
     fn test_resolve_reports_every_backend_it_tried() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _anthropic = EnvGuard::remove("ANTHROPIC_API_KEY");
-        let err = resolve(Some(&RunnerChoice::AnthropicApi), None, &config()).unwrap_err();
+        let err = resolve(
+            Some(&RunnerChoice::AnthropicApi),
+            None,
+            &config(),
+            RANK_TIMEOUT_SECS,
+        )
+        .unwrap_err();
         assert!(err.starts_with("no runner available:"));
         assert!(err.contains("ANTHROPIC_API_KEY"));
     }

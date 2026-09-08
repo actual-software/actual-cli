@@ -268,7 +268,12 @@ fn run_pipeline(
     // rule turns out to already be excluded (see `gathered.excluded` below)
     // never has to resolve a runner it will not use.
     let early_runner = if use_rank {
-        match rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg) {
+        match rules_rank::resolve(
+            args.runner.as_ref(),
+            args.model.as_deref(),
+            &cfg,
+            rules_rank::RANK_TIMEOUT_SECS,
+        ) {
             Ok(runner) => Some(runner),
             Err(reason) => {
                 return Ok(Outcome::NoRunner {
@@ -317,8 +322,28 @@ fn run_pipeline(
     }
 
     let resolved_runner = match early_runner {
+        // Resolved above with `RANK_TIMEOUT_SECS` for stage 2's own call, then
+        // reused here for the judge -- a runner resolved this way can still
+        // hit the judge's own timeout ceiling on a large enough batch, same
+        // as the `None` branch used to unconditionally. Not fixed here: this
+        // path is direct-mode-with-rank-enabled only (`--claude-hook` always
+        // takes the `None` branch below, per the module doc), and doesn't
+        // have a measured failure the way that branch did.
         Some(runner) => runner,
-        None => match rules_rank::resolve(args.runner.as_ref(), args.model.as_deref(), &cfg) {
+        // `--claude-hook` always reaches this branch (use_rank is false,
+        // unconditionally), so this resolution is for the judge and nothing
+        // else -- it must use `CHECK_TIMEOUT_SECS`, not `RANK_TIMEOUT_SECS`.
+        // Passing the rank cap here was the exact bug: a real 60-rule batch
+        // measured the judge's answer arriving as one unstreamed block after
+        // 45+ silent seconds, comfortably inside `CHECK_BUDGET`'s 90-second
+        // wall clock but past a 60-second inactivity cap sized for a
+        // different call entirely.
+        None => match rules_rank::resolve(
+            args.runner.as_ref(),
+            args.model.as_deref(),
+            &cfg,
+            crate::rules::check::CHECK_TIMEOUT_SECS,
+        ) {
             Ok(runner) => runner,
             Err(reason) => {
                 return Ok(Outcome::NoRunner {
