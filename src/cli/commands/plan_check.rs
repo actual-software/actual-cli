@@ -41,7 +41,7 @@
 //!   itself unreliable for reasons that have nothing to do with the plan.
 //! - **The [`MAX_RULES_JUDGED`] cap means a large enough selected batch is
 //!   only ever partially judged.** If the documents [`run_pipeline`] selects
-//!   for a plan hold more than 60 individual rules combined — one large
+//!   for a plan hold more individual rules combined than that cap — one large
 //!   document is enough on its own, and several ordinary ones add up just as
 //!   easily — only a deterministically-prioritized prefix (selection order,
 //!   then declaration order within a document) is actually judged this
@@ -152,7 +152,19 @@ use crate::rules::scope::{self, select, Query, Selection, Stage2};
 /// M rules checked" rather than either silently calling a partial answer
 /// complete or refusing to check anything at all. See the module doc's
 /// "advisory gate" section.
-const MAX_RULES_JUDGED: usize = 60;
+///
+/// Lowered from an original 60 after live measurement against a real
+/// 425-rule-document corpus: a 60-rule batch's structured answer, plus a real
+/// plan long and detailed enough to need one, pushed the judge call close
+/// enough to `crate::rules::check::CHECK_BUDGET` that live model-latency
+/// variance alone (not a code defect — the identical call measured anywhere
+/// from 58 to 82 seconds of API time run to run) could tip it over. 40 is not
+/// a value with a precise safety proof behind it, since that variance itself
+/// didn't scale predictably with rule count in measurement either — it is a
+/// real, measured reduction in typical-case latency, paired with the raised
+/// `CHECK_BUDGET` for margin against the variance no batch size alone
+/// removes.
+const MAX_RULES_JUDGED: usize = 40;
 
 fn repo_root(explicit: Option<&PathBuf>) -> PathBuf {
     explicit
@@ -2540,7 +2552,7 @@ mod tests {
             )),
             Some(&1)
         );
-        // ...and every other rule in the (60-rule) prefix was cleared --
+        // ...and every other rule in the capped prefix was cleared --
         // proving the judge actually ran on the capped batch rather than the
         // round being refused outright.
         assert_eq!(session.cleared.len(), MAX_RULES_JUDGED - 1);
@@ -2605,7 +2617,7 @@ mod tests {
         .to_string();
         exec_hook_with(&args, &raw);
 
-        // Every rule in the (60-rule) prefix was cleared, proving the judge
+        // Every rule in the capped prefix was cleared, proving the judge
         // ran the capped batch to completion rather than the round being
         // refused outright.
         let session = plan_check_session::load("sess-partial-silent-1", &rules_dir);
