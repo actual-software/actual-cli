@@ -343,37 +343,30 @@ fn run_pipeline(
         });
     }
 
-    let resolved_runner = match early_runner {
-        // Resolved above with `RANK_TIMEOUT_SECS` for stage 2's own call, then
-        // reused here for the judge -- a runner resolved this way can still
-        // hit the judge's own timeout ceiling on a large enough batch, same
-        // as the `None` branch used to unconditionally. Not fixed here: this
-        // path is direct-mode-with-rank-enabled only (`--claude-hook` always
-        // takes the `None` branch below, per the module doc), and doesn't
-        // have a measured failure the way that branch did.
-        Some(runner) => runner,
-        // `--claude-hook` always reaches this branch (use_rank is false,
-        // unconditionally), so this resolution is for the judge and nothing
-        // else -- it must use `CHECK_TIMEOUT_SECS`, not `RANK_TIMEOUT_SECS`.
-        // Passing the rank cap here was the exact bug: a real 60-rule batch
-        // measured the judge's answer arriving as one unstreamed block after
-        // 45+ silent seconds, comfortably inside `CHECK_BUDGET`'s 90-second
-        // wall clock but past a 60-second inactivity cap sized for a
-        // different call entirely.
-        None => match rules_rank::resolve(
-            args.runner.as_ref(),
-            args.model.as_deref(),
-            &cfg,
-            crate::rules::check::CHECK_TIMEOUT_SECS,
-        ) {
-            Ok(runner) => runner,
-            Err(reason) => {
-                return Ok(Outcome::NoRunner {
-                    documents_selected: selection.selected.len(),
-                    reason,
-                })
-            }
-        },
+    // The judge always resolves its own runner, capped at
+    // `CHECK_TIMEOUT_SECS`/`CHECK_BUDGET`, regardless of whether stage 2's
+    // rank already resolved one above (`early_runner`, capped at the much
+    // shorter `RANK_TIMEOUT_SECS`). Reusing that one for the judge too used
+    // to be the bug here: an inactivity timeout sized for a different,
+    // shorter call silently wins over the judge's own, more generous
+    // budget, no matter how generous that budget is (see
+    // `rules_rank::resolve`'s own doc). Resolving twice costs nothing real
+    // — `resolve` only probes local binary/API-key availability, no
+    // network call — so there is no reason to thread two different caps
+    // through one cached runner instead.
+    let resolved_runner = match rules_rank::resolve(
+        args.runner.as_ref(),
+        args.model.as_deref(),
+        &cfg,
+        crate::rules::check::CHECK_TIMEOUT_SECS,
+    ) {
+        Ok(runner) => runner,
+        Err(reason) => {
+            return Ok(Outcome::NoRunner {
+                documents_selected: selection.selected.len(),
+                reason,
+            })
+        }
     };
     let label = resolved_runner.label();
 

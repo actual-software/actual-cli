@@ -294,15 +294,18 @@ fn api_key(env_var: &str, config_key: Option<&str>) -> Result<String, String> {
 /// `timeout_cap_secs` bounds the resolved runner's own subprocess inactivity
 /// timeout (see [`CliClaudeRunner`]'s streaming timeout) — the config's
 /// `invocation_timeout_secs` still applies underneath it, but never above
-/// this cap. Despite the name, this same runner can end up making a call
-/// this function's own module doesn't know about: `plan_check::run_pipeline`
-/// resolves once and may reuse the result for the conformance judge, not
-/// just stage-2 rank, so callers resolving specifically for that judge call
-/// must pass a cap sized for it ([`crate::rules::check::CHECK_TIMEOUT_SECS`],
-/// not [`RANK_TIMEOUT_SECS`]) — passing the wrong one silently reintroduces
-/// the exact bug this parameter exists to prevent: an inactivity timeout
+/// this cap. Despite the name, this function serves calls this module
+/// doesn't know about: `plan_check::run_pipeline` calls it once for stage
+/// 2's own rank call (capped at [`RANK_TIMEOUT_SECS`]) and, separately,
+/// once more for the conformance judge (capped at
+/// [`crate::rules::check::CHECK_TIMEOUT_SECS`]) — deliberately two
+/// independent resolutions, never one reused for both, because passing the
+/// wrong cap to whichever call actually runs silently reintroduces the
+/// exact bug this parameter exists to prevent: an inactivity timeout
 /// shorter than the caller's own wall-clock budget wins by default, no
-/// matter how generous that budget is.
+/// matter how generous that budget is. Any future caller resolving for a
+/// third kind of call must size this the same deliberate way, rather than
+/// borrowing a runner resolved for something else.
 pub fn resolve(
     explicit: Option<&RunnerChoice>,
     model: Option<&str>,
