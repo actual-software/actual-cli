@@ -133,6 +133,22 @@ pub fn get_git_head(repo_path: &Path) -> Option<String> {
     parse_git_head_output(output)
 }
 
+/// Get the `origin` remote URL for a git repository.
+///
+/// `git remote get-url` reads local config only (no network call), so this
+/// is safe to call synchronously without a timeout — same as
+/// [`get_git_head`]. Returns `None` if there is no `origin` remote, git is
+/// not installed, or the command fails for any reason.
+pub fn get_git_remote_origin_url(repo_path: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+
+    parse_git_head_output(output)
+}
+
 /// Get the current branch name for a git repository.
 ///
 /// Returns `None` if the path is not a git repo, git is not installed,
@@ -420,6 +436,37 @@ mod tests {
         let dir = tempdir().unwrap();
 
         let result = get_git_head(dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_get_git_remote_origin_url_returns_url_when_set() {
+        let dir = tempdir().unwrap();
+        create_git_repo(dir.path());
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", "https://github.com/org/repo.git"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let result = get_git_remote_origin_url(dir.path());
+        assert_eq!(result, Some("https://github.com/org/repo.git".to_string()));
+    }
+
+    #[test]
+    fn test_get_git_remote_origin_url_returns_none_without_remote() {
+        let dir = tempdir().unwrap();
+        create_git_repo(dir.path());
+
+        let result = get_git_remote_origin_url(dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_get_git_remote_origin_url_returns_none_for_non_git_dir() {
+        let dir = tempdir().unwrap();
+
+        let result = get_git_remote_origin_url(dir.path());
         assert_eq!(result, None);
     }
 

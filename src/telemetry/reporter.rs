@@ -37,22 +37,7 @@ async fn try_report_metrics(
     config: &Config,
     api_url: &str,
 ) -> Result<(), ActualError> {
-    // Opt-out via env var
-    if std::env::var("ACTUAL_NO_TELEMETRY")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    // Opt-out via config
-    if !config
-        .telemetry
-        .as_ref()
-        .and_then(|t| t.enabled)
-        .unwrap_or(true)
-    {
+    if crate::telemetry::opt_out::is_disabled(config) {
         return Ok(());
     }
 
