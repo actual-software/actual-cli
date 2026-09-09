@@ -167,8 +167,12 @@ fn tmp_sibling(path: &Path) -> PathBuf {
 /// dropping a recorded human override — rather than merely losing this one
 /// write. On non-unix, falls back to a plain (non-atomic) write. Shared by
 /// every module under `config_dir()` that writes a file of its own (config,
-/// tokens, credentials, plan-check session/audit state) so the secure-
-/// creation idiom is written once rather than re-implemented per caller.
+/// tokens, credentials, plan-check session/audit state, the scope and model
+/// caches) so the secure-creation idiom is written once rather than
+/// re-implemented per caller — `crate::auth::store` and
+/// `crate::auth::token_store` each still keep a thin wrapper of their own,
+/// but only to create a parent directory and translate the error type, not
+/// to re-implement the write itself.
 #[cfg(unix)]
 pub fn write_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;

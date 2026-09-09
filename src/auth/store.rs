@@ -180,32 +180,13 @@ pub fn delete_from(path: &Path) -> Result<(), ActualError> {
 
 /// Write credentials content, ensuring the file is never world-readable.
 ///
-/// On unix, opens with `O_CREAT | mode(0o600)` so the file is created with
-/// restricted permissions from the start. Mirrors
-/// [`crate::config::paths`]'s secure write.
-#[cfg(unix)]
+/// Delegates the actual write to [`crate::config::paths::write_secure`] for
+/// its atomic stage-then-rename idiom (see that function's own doc) rather
+/// than re-implementing the `O_CREAT | mode(0o600)` idiom here a second
+/// time.
 fn write_secure(path: &Path, content: &str) -> Result<(), ActualError> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| {
-            credentials_error(format!("Failed to open credentials file for writing: {e}"))
-        })?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| credentials_error(format!("Failed to write credentials file: {e}")))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_secure(path: &Path, content: &str) -> Result<(), ActualError> {
-    std::fs::write(path, content)
-        .map_err(|e| credentials_error(format!("Failed to write credentials file: {e}")))?;
-    Ok(())
+    crate::config::paths::write_secure(path, content.as_bytes())
+        .map_err(|e| credentials_error(format!("Failed to write credentials file: {e}")))
 }
 
 #[cfg(test)]
@@ -458,14 +439,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_save_to_open_error_when_path_is_directory() {
-        // write_secure opens the path for writing; a directory path fails there.
+        // write_secure stages its content at a sibling `.tmp` path, which
+        // succeeds even when `path` itself is a directory -- the failure
+        // instead surfaces at the final rename into place, since renaming a
+        // file onto an existing directory is rejected by the OS.
         let dir = tempdir().unwrap();
         let as_dir = dir.path().join("creds-dir");
         std::fs::create_dir(&as_dir).unwrap();
         let err = save_to(&sample(), &as_dir).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("Failed to open credentials file for writing"),
+            err.to_string().contains("Failed to write credentials file"),
             "got: {err}"
         );
     }

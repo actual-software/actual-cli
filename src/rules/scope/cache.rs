@@ -94,14 +94,12 @@ pub fn store(rules_dir: &Path, index: &ScopeIndex) {
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
-    let _ = std::fs::write(&path, json);
-    // 0600, consistent with everything else the CLI writes into the config
-    // directory. Rule text is not secret, but the directory's posture is uniform.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    // 0600 and stage-then-rename, consistent with everything else the CLI
+    // writes into the config directory (see `write_secure`'s own doc). Rule
+    // text is not secret, but the directory's posture is uniform, and this
+    // also removes the write-then-chmod window a plain `std::fs::write` +
+    // `set_permissions` pair used to leave open.
+    let _ = crate::config::paths::write_secure(&path, json.as_bytes());
 }
 
 /// Remove the cached index for `rules_dir`. Best-effort.

@@ -62,11 +62,20 @@ mod tests {
 
     #[test]
     fn test_run_plan_check_dispatch_with_no_applicable_rules_returns_ok() {
+        use crate::testutil::{EnvGuard, ENV_MUTEX};
         use tempfile::tempdir;
 
         // Exercises the Command::PlanCheck dispatch arm. A repo root with no
         // `.actual/rules/` resolves to "nothing applies", which needs no
         // runner and no network access, so the arm is covered hermetically.
+        // Still reaches `scope::resolve_in`, which caches an index under
+        // `config_dir()` regardless of outcome, so this must not run against
+        // the real `$HOME` or race a concurrently-running test that has its
+        // own `ACTUAL_CONFIG_DIR` set.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
         let repo = tempdir().unwrap();
         let cli = Cli::parse_from([
             "actual",

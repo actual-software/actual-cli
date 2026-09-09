@@ -1128,18 +1128,78 @@ fn not_interactive() -> ActualError {
     )
 }
 
+/// Reject an override naming a `<doc-slug>::<rule-id>` pair the rules corpus
+/// under `rules_dir` does not define.
+///
+/// [`crate::cli::args`]'s `parse_rule_key` (run at CLI-parse time, before
+/// `rules_dir` is even known) only checks the value's shape — that it
+/// splits on `::` with both halves non-empty — so a mistyped document slug
+/// or rule id is otherwise accepted, stored, and reported as "override
+/// recorded," while [`PlanCheckSession::excludes`] compares the exact
+/// string and never matches it: the denial persists every round after,
+/// silently, while the operator believes it was cleared.
+///
+/// Checked against every rule the corpus defines, not against the current
+/// session's judged selection: an override for a rule that exists but fell
+/// outside this round's cap or selection is legitimate (see the module
+/// doc's "explicit, recorded override" note), so the check has to be
+/// existence in the corpus, not membership in one round's prefix. A
+/// `rules_dir` that does not exist at all reads as an empty corpus (see
+/// [`crate::rules::read_rule_sources_in`]'s own contract), so every key is
+/// rejected rather than silently accepted — the same mistyped-input
+/// protection now also covers a wrong `--rules-dir`, not just a wrong
+/// `--rule`.
+fn validate_override_rules(rules_dir: &Path, keys: &[String]) -> Result<(), ActualError> {
+    let report = crate::rules::parse_rule_sources(crate::rules::read_rule_sources_in(rules_dir)?);
+    let known: std::collections::HashSet<String> = report
+        .documents
+        .iter()
+        .flat_map(|doc| {
+            let slug = doc.slug().unwrap_or("<unnamed>").to_string();
+            doc.rules
+                .iter()
+                .map(move |rule| plan_check_session::key(&slug, &rule.id))
+        })
+        .collect();
+    let unknown: Vec<&str> = keys
+        .iter()
+        .map(String::as_str)
+        .filter(|key| !known.contains(*key))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let (noun, verb) = if unknown.len() == 1 {
+        ("rule", "was")
+    } else {
+        ("rules", "were")
+    };
+    let named: Vec<String> = unknown.iter().map(|k| format!("'{k}'")).collect();
+    Err(ActualError::ConfigError(format!(
+        "{noun} {} {verb} not found under {} — check the exact <doc-slug>::<rule-id> named in \
+         the deny message. No override was recorded.",
+        named.join(", "),
+        rules_dir.display()
+    )))
+}
+
 /// The testable core of `actual plan-check-override`: a human explicitly
-/// clearing one or more rules for a specific session. Always succeeds — there
-/// is no invalid state this can observe (an unknown `session_id` just starts
-/// a fresh session), so there is nothing for a caller to react to beyond "it
-/// ran." [`exec_override`] is the real entry point; this exists separately so
-/// the recording logic is testable without a real terminal.
+/// clearing one or more rules for a specific session. Validates every named
+/// rule against the corpus first (see [`validate_override_rules`]) and
+/// records nothing at all if any is unknown — a multi-rule call is
+/// all-or-nothing, since a human asking to clear several rules together
+/// would not expect one typo to silently drop only that one while the rest
+/// went through. Otherwise always succeeds — there is no other invalid
+/// state this can observe (an unknown `session_id` just starts a fresh
+/// session). [`exec_override`] is the real entry point; this exists
+/// separately so the recording logic is testable without a real terminal.
 fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     let root = repo_root(args.repo.as_ref());
     let rules_dir = args
         .rules_dir
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
+    validate_override_rules(&rules_dir, &args.rules)?;
     plan_check_session::record_override(&args.session, &rules_dir, &args.rules, &args.reason);
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Plan check override recorded");
@@ -2430,6 +2490,13 @@ mod tests {
 
     #[test]
     fn test_exec_direct_dispatch_with_no_applicable_rules_returns_ok() {
+        // Reaches `scope::resolve_in`, which caches an index under
+        // `config_dir()` regardless of outcome -- isolated so this can never
+        // land in the real `$HOME` or race a concurrently-running test that
+        // has its own `ACTUAL_CONFIG_DIR` set.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
         let repo = tempdir().unwrap();
         let mut args = base_args();
         args.plan = vec!["a plan".to_string()];
@@ -2439,6 +2506,9 @@ mod tests {
 
     #[test]
     fn test_exec_direct_json_output_with_no_applicable_rules() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
         let repo = tempdir().unwrap();
         let mut args = base_args();
         args.plan = vec!["a plan".to_string()];
@@ -2519,6 +2589,9 @@ mod tests {
     /// returns `Err` at all.
     #[test]
     fn test_exec_direct_errors_when_the_rules_directory_cannot_be_read() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
         let root = tempdir().unwrap();
         let not_a_dir = root.path().join("rules-dir-is-a-file");
         std::fs::write(&not_a_dir, "not a directory").unwrap();
@@ -2533,6 +2606,9 @@ mod tests {
 
     #[test]
     fn test_exec_hook_with_malformed_json_is_a_silent_fail_open() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
         // No panic, no emitted deny -- covered by not panicking, since stdout
         // capture is not exercised at this layer (see the subprocess tests
         // in tests/cli_test.rs for the observable-stdout contract).
@@ -2541,11 +2617,17 @@ mod tests {
 
     #[test]
     fn test_exec_hook_with_no_plan_resolvable() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
         exec_hook_with(&base_args(), "{}");
     }
 
     #[test]
     fn test_exec_hook_with_reports_a_rules_directory_load_failure() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
         let root = tempdir().unwrap();
         let not_a_dir = root.path().join("rules-dir-is-a-file");
         std::fs::write(&not_a_dir, "not a directory").unwrap();
@@ -2558,6 +2640,12 @@ mod tests {
 
     #[test]
     fn test_exec_hook_with_nothing_applies() {
+        // Reaches `scope::resolve_in`, which caches an index under
+        // `config_dir()` regardless of outcome -- isolated for the same
+        // reason as `test_exec_direct_dispatch_with_no_applicable_rules_returns_ok`.
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
         let repo = tempdir().unwrap();
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
@@ -2734,11 +2822,11 @@ mod tests {
         // proving the judge actually ran on the capped batch rather than the
         // round being refused outright.
         assert_eq!(session.cleared.len(), MAX_RULES_JUDGED - 1);
-        // The rules past the cap (R-X-0060..R-X-0064) were never candidates
+        // The rules past the cap (R-X-0040..R-X-0044) were never candidates
         // at all, so they can appear in neither bucket.
         assert!(!session.cleared.contains_key(&plan_check_session::key(
             "cross-cutting-many-abcd",
-            "R-X-0064"
+            "R-X-0044"
         )));
     }
 
@@ -3439,11 +3527,11 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
-        let repo = tempdir().unwrap();
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
 
         let args = PlanCheckOverrideArgs {
             session: "sess-cli-1".to_string(),
-            rules: vec![plan_check_session::key("doc", "R-001")],
+            rules: vec![plan_check_session::key("doc", "R-A-001")],
             reason: "reviewed and accepted".to_string(),
             repo: Some(repo.path().to_path_buf()),
             rules_dir: None,
@@ -3465,10 +3553,11 @@ mod tests {
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let rules_dir = tempdir().unwrap();
+        std::fs::write(rules_dir.path().join("doc.md"), OAUTH_DOC).unwrap();
 
         let args = PlanCheckOverrideArgs {
             session: "sess-cli-2".to_string(),
-            rules: vec![plan_check_session::key("doc", "R-001")],
+            rules: vec![plan_check_session::key("doc", "R-A-001")],
             reason: "reviewed".to_string(),
             repo: None,
             rules_dir: Some(rules_dir.path().to_path_buf()),
@@ -3477,5 +3566,105 @@ mod tests {
 
         let session = plan_check_session::load("sess-cli-2", rules_dir.path());
         assert_eq!(session.overrides.len(), 1);
+    }
+
+    /// APR-004: a syntactically valid but nonexistent rule id must be
+    /// rejected before it is ever recorded, not silently accepted as a
+    /// no-op override.
+    #[test]
+    fn test_exec_override_impl_rejects_an_unknown_rule_id() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-unknown-rule".to_string(),
+            rules: vec![plan_check_session::key("doc", "R-A-999")],
+            reason: "reviewed".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+        let err = exec_override_impl(&args).unwrap_err();
+        assert!(err.to_string().contains("R-A-999"));
+        assert!(err.to_string().contains("not found"));
+
+        // Nothing was recorded -- the corpus rejected it before
+        // `record_override` ever ran.
+        assert_eq!(
+            plan_check_session::load("sess-cli-unknown-rule", &rules_dir),
+            PlanCheckSession::default()
+        );
+    }
+
+    /// Same as the unknown-rule case, but the document slug itself is wrong
+    /// — a typo'd `<doc-slug>` is just as silent a no-op as a typo'd
+    /// `<rule-id>` without this check.
+    #[test]
+    fn test_exec_override_impl_rejects_an_unknown_document_slug() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-unknown-doc".to_string(),
+            rules: vec![plan_check_session::key("no-such-doc", "R-A-001")],
+            reason: "reviewed".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+        let err = exec_override_impl(&args).unwrap_err();
+        assert!(err.to_string().contains("no-such-doc::R-A-001"));
+    }
+
+    /// A `--rules-dir` that does not exist at all must not make every key
+    /// look plausible by accident: an empty corpus rejects everything,
+    /// exactly like a real corpus that simply lacks the named rule.
+    #[test]
+    fn test_exec_override_impl_rejects_everything_under_a_nonexistent_rules_dir() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let missing = tempdir().unwrap().path().join("does-not-exist");
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-missing-dir".to_string(),
+            rules: vec![plan_check_session::key("doc", "R-A-001")],
+            reason: "reviewed".to_string(),
+            repo: None,
+            rules_dir: Some(missing),
+        };
+        assert!(exec_override_impl(&args).is_err());
+    }
+
+    /// Multi-rule atomicity: one unknown key among several must reject the
+    /// whole call, not silently record the valid ones while dropping the
+    /// bad one -- a human asking to clear several rules together would not
+    /// expect a partial result with no indication which half actually took.
+    #[test]
+    fn test_exec_override_impl_is_all_or_nothing_across_multiple_rules() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+        let rules_dir = crate::rules::rules_dir(repo.path());
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-partial".to_string(),
+            rules: vec![
+                plan_check_session::key("doc", "R-A-001"),
+                plan_check_session::key("doc", "R-A-999"),
+            ],
+            reason: "reviewed".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+        assert!(exec_override_impl(&args).is_err());
+        assert_eq!(
+            plan_check_session::load("sess-cli-partial", &rules_dir),
+            PlanCheckSession::default()
+        );
     }
 }
