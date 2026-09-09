@@ -149,6 +149,65 @@ auto-detection. See
 [Getting Started](docs/GETTING_STARTED.md#ask-the-advisor) for the full flag
 reference.
 
+## Check plans against your rules
+
+`actual` can also govern a plan against the rule documents your codebase has
+committed under `.actual/rules/` (the same documents `actual rules ls`
+inspects).
+
+List and rank rule documents directly:
+
+```bash
+actual rules ls                          # list rule documents, level counts, warnings
+actual rules index --rebuild             # (re)build the local scope index
+actual rules select "Add a caching layer in front of the user repository."
+```
+
+`actual rules select` supports `--file <PATH>` (repeatable) to also weigh
+files the plan touches, `--explain` to show why each document was picked, and
+`--no-rank` to skip the runner-backed second stage and return the
+deterministic prefilter alone.
+
+`actual plan-check` judges a plan against the documents selected for it and
+reports one of four outcomes: `conforming`, `conflicting`, `requires_decision`
+(the judge thinks the plan deliberately supersedes a rule — surfaced for
+human review, not auto-approved), or `not_checked` (no rules directory, no
+runner, or the judge call itself failed). Only a real `conflicting` verdict
+exits non-zero; every other outcome, including `requires_decision`, exits 0 —
+a CI job that needs to tell "checked and clean" apart from "could not check"
+should read `--json`'s `status` field instead of the exit code alone:
+
+```bash
+actual plan-check "Add a caching layer in front of the user repository."
+actual plan-check --plan-file plan.md --json
+```
+
+Piped with `--claude-hook`, the same pipeline instead reads a Claude Code
+`PreToolUse` hook envelope from stdin and prints that hook's own JSON
+contract on stdout: nothing at all on a clean pass, or a single-line
+`permissionDecision: "deny"` object naming the conflicting rule and plan
+span. Every infrastructure failure fails open rather than blocking — this is
+an advisory gate, not an enforcement boundary. The `hooks/plan-gate.sh`
+script that drives this mode, and the Claude Code settings that install it,
+live in the separate `actual-skill` plugin repository, not here.
+
+Under `--claude-hook`, a rule already cleared for the session is never
+re-judged, and a single rule stops blocking on its own after `--max-rounds`
+denied rounds (default 3, or `ACTUAL_PLAN_CHECK_MAX_ROUNDS`) so a persistently
+unresolved rule can't get the hook disabled outright. A human can also clear
+a denied rule explicitly:
+
+```bash
+actual plan-check-override --session <id> --rule <doc-slug>::<rule-id> --reason "..."
+```
+
+`--reason` is required, and the command refuses to run anywhere but an
+ordinary interactive terminal — never from a script, an agent's tool call, or
+Claude Code's own integrated terminal — since an override records a human
+decision, not the agent's. Every round, override, and partial-coverage
+disclosure is appended to a durable audit log at
+`~/.actualai/actual/plan-check-overrides.log`.
+
 ## Commands
 
 ```
@@ -164,6 +223,11 @@ actual config path    # print config file location
 actual runners        # list available AI backend runners
 actual models         # list known model names grouped by runner
 actual cache clear    # clear local analysis and tailoring caches
+actual rules ls       # list the rule documents under .actual/rules/
+actual rules index    # build or refresh the local rule scope index
+actual rules select   # select the rule documents that govern a plan
+actual plan-check     # check a plan against the rules selected for it
+actual plan-check-override  # human override for a rule plan-check denied
 ```
 
 For non-interactive (CI / agent) authentication, see
