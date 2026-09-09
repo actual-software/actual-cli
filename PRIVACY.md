@@ -40,6 +40,49 @@ remains one-way hashed -- raw URLs are never sent.
 addresses, IP addresses, file contents, file paths, or source code are
 included in telemetry.
 
+### Plan-governance events (anonymous)
+
+On each `actual plan-check` run (including the `--claude-hook` path Claude
+Code drives automatically) and on `actual plan-check-override`, the CLI
+sends discrete events describing the governance outcome, proxied through
+`api-service.api.prod.actual.ai` to PostHog. The CLI never talks to PostHog
+directly and holds no PostHog credentials — the proxy is its only outbound
+path for this data.
+
+| Event | Sent when |
+|-------|-----------|
+| `plan_governance_check_started` | A plan-check begins evaluating a plan against selected rules |
+| `plan_governance_check_completed` | A plan-check (or `plan-check-override`) finishes |
+| `plan_governance_rule_violation` | One rule did not conform (once per violating rule) |
+
+Each event includes a subset of these properties:
+
+| Property | Description |
+|----------|--------------|
+| `cli_version` | CLI version string |
+| `command` | Which subcommand/mode ran (e.g. `"plan-check"`, `"plan-check --claude-hook"`, `"plan-check-override"`) |
+| `rule_id` | The internal id of the specific rule involved -- an Actual-internal identifier, same category as `adr_ids` above, not a file path |
+| `rule_source` | The rule document's internal slug, derived from its filename -- not a filesystem path |
+| `decision` | `allow`, `warn`, or `block` -- the outcome for this rule or run |
+| `duration_ms` | How long the check took |
+| `exit_code` | The process exit code |
+| `repo_hash` | Same one-way SHA-256 hash as the sync counters above |
+| `repo_url_hash` | Same one-way SHA-256 hash as the sync counters above |
+
+**No plan text, matched rule file paths, or conflicting plan spans are ever
+sent** -- only the rule's internal id/slug and a coarse allow/warn/block
+verdict.
+
+Each event also carries a `distinct_id`: a random, opaque identifier
+generated once on first use and stored locally
+(`~/.actualai/actual/telemetry-id`), never derived from a username, email,
+hostname, or any other identifying material. It exists only so events from
+the same installation can be grouped over time; it is not linked to any
+hashed repository identity, and it does not identify a person.
+
+All three telemetry opt-outs described below disable plan-governance events
+identically -- they share the exact same opt-out check as the sync counters.
+
 ### Project metadata (sent to the Actual API)
 
 When fetching ADRs, the CLI sends a match request containing:
@@ -69,7 +112,8 @@ privacy policy for how they handle this data:
 
 | Destination | Data | Protocol |
 |-------------|------|----------|
-| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata | HTTPS (enforced) |
+| `api-service.api.prod.actual.ai` | Telemetry counters, project metadata, plan-governance events | HTTPS (enforced) |
+| PostHog (via the `api-service.api.prod.actual.ai` proxy only) | Plan-governance events, forwarded server-side | N/A -- the CLI never contacts PostHog directly |
 | Your AI provider (Anthropic/OpenAI) | ADR content + repo context for tailoring | HTTPS |
 
 All non-localhost API communication enforces HTTPS. The CLI will reject

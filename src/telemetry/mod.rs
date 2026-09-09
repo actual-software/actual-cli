@@ -7,4 +7,6 @@
 /// `telemetry` Cargo feature.
 pub mod identity;
 pub mod metrics;
+pub mod opt_out;
+pub mod plan_governance;
 pub mod reporter;

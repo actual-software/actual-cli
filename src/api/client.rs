@@ -11,7 +11,7 @@ use crate::api::types::{
     CanonicalIRFacet, CanonicalIRPayload, CategoriesResponse, ConnectedReposErrorBody,
     ConnectedRepository, FrameworksResponse, GetConnectedReposResponse, HealthResponse,
     LanguagesResponse, MatchFramework, MatchOptions, MatchProject, MatchRequest, MatchResponse,
-    TelemetryRequest,
+    PlanGovernanceEventRequest, PlanGovernanceEventResponse, TelemetryRequest,
 };
 use crate::config::types::Config;
 use crate::error::ActualError;
@@ -289,6 +289,33 @@ impl ActualApiClient {
         Self::handle_response_no_body(response).await
     }
 
+    /// Send a batch of plan-governance telemetry events to the proxy route.
+    ///
+    /// Mirrors [`Self::post_telemetry`]'s shape (same auth header pattern,
+    /// same client) but targets `/plan-governance/record` and, unlike
+    /// `post_telemetry`, parses the response body so callers can inspect
+    /// `failed`/`errors` for diagnostics. `events` must not exceed 100 per
+    /// the proxy's `PlanGovernanceEventRequest` schema
+    /// (`z.array(PlanGovernanceEvent).min(1).max(100)`); callers are
+    /// expected to stay under that by construction rather than this method
+    /// chunking on their behalf.
+    pub async fn post_plan_governance_events(
+        &self,
+        request: &PlanGovernanceEventRequest,
+        service_key: &str,
+    ) -> Result<PlanGovernanceEventResponse, ActualError> {
+        let url = format!("{}/plan-governance/record", self.base_url);
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {service_key}"))
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| ActualError::ApiError(e.to_string()))?;
+        Self::handle_response(response).await
+    }
+
     async fn handle_response_no_body(response: reqwest::Response) -> Result<(), ActualError> {
         let status = response.status();
         if status.is_success() {
@@ -468,7 +495,9 @@ mod tests {
         Framework, FrameworkCategory, Language, LanguageStat, Project, ProjectSelection,
         RepoAnalysis, WorkspaceType,
     };
-    use crate::api::types::{AdvisorJobStatus, AdvisorSink, AdvisorSurface};
+    use crate::api::types::{
+        AdvisorJobStatus, AdvisorSink, AdvisorSurface, PlanGovernanceEvent, PlanGovernanceEventName,
+    };
 
     /// Helper: create a minimal project with the given languages and frameworks.
     fn make_project(
@@ -1307,6 +1336,126 @@ mod tests {
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("400") && msg.contains("failed to parse error response"))
+        );
+        mock.assert_async().await;
+    }
+
+    // --- post_plan_governance_events tests ---
+
+    fn sample_plan_governance_request() -> PlanGovernanceEventRequest {
+        PlanGovernanceEventRequest {
+            events: vec![PlanGovernanceEvent {
+                event: PlanGovernanceEventName::PlanGovernanceCheckStarted,
+                distinct_id: "install-abc123".to_string(),
+                properties: None,
+                timestamp: None,
+                insert_id: None,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_post_plan_governance_events_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/plan-governance/record")
+            .match_header("authorization", "Bearer test-key")
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"recorded": 1, "failed": 0}"#)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let request = sample_plan_governance_request();
+        let result = client
+            .post_plan_governance_events(&request, "test-key")
+            .await;
+        let response = result.unwrap();
+        assert_eq!(response.recorded, 1);
+        assert_eq!(response.failed, 0);
+        assert!(response.errors.is_empty());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_plan_governance_events_partial_failure_body_parsed() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/plan-governance/record")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"recorded": 1, "failed": 1, "errors": ["timeout"]}"#)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let request = sample_plan_governance_request();
+        let response = client
+            .post_plan_governance_events(&request, "test-key")
+            .await
+            .unwrap();
+        assert_eq!(response.recorded, 1);
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.errors, vec!["timeout".to_string()]);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_plan_governance_events_server_error() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/plan-governance/record")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let request = sample_plan_governance_request();
+        let result = client
+            .post_plan_governance_events(&request, "test-key")
+            .await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiError(ref msg) if msg.contains("500"))
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_plan_governance_events_network_error() {
+        let client = ActualApiClient::new("http://127.0.0.1:1").unwrap();
+        let request = sample_plan_governance_request();
+        let result = client
+            .post_plan_governance_events(&request, "test-key")
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ActualError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_post_plan_governance_events_api_error_response() {
+        let mut server = mockito::Server::new_async().await;
+        let body = r#"{"error": {"code": "UNAUTHORIZED", "message": "Invalid service key", "details": null}}"#;
+
+        let mock = server
+            .mock("POST", "/plan-governance/record")
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = ActualApiClient::new(&server.url()).unwrap();
+        let request = sample_plan_governance_request();
+        let result = client
+            .post_plan_governance_events(&request, "bad-key")
+            .await;
+        assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), ActualError::ApiResponseError { ref code, ref message } if code == "UNAUTHORIZED" && message == "Invalid service key")
         );
         mock.assert_async().await;
     }
