@@ -219,6 +219,89 @@ pub struct TelemetryMetric {
     pub tags: HashMap<String, String>,
 }
 
+// --- Plan-governance telemetry types (POST /plan-governance/record) ---
+//
+// Hand-mirrors sprintreview's `packages/api-contract/src/schemas.ts`
+// `PlanGovernance*` Zod schemas (AK-679). There is no shared codegen between
+// this Rust CLI and that TypeScript contract, so these two definitions must
+// be kept in sync manually whenever either side changes.
+//
+// These types are send-only (the CLI builds and POSTs a request; only the
+// response is ever deserialized), so `#[serde(deny_unknown_fields)]` is
+// deliberately not applied here -- that guards a process against unexpected
+// keys in something it *parses* (see `docs/adr/apply-serde-deny-unknown-fields-*`),
+// and the server's `.strict()` schema is the correct place to enforce the
+// payload shape on this side of the wire.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanGovernanceEventName {
+    PlanGovernanceCheckStarted,
+    PlanGovernanceCheckCompleted,
+    PlanGovernanceRuleViolation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanGovernanceDecision {
+    Allow,
+    Warn,
+    Block,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanGovernanceEventProperties {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<PlanGovernanceDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// SHA-256 hex digest, same shape as `TelemetryMetric`'s `repo_hash` tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_hash: Option<String>,
+    /// SHA-256 hex digest, same shape as `TelemetryMetric`'s `repo_url_hash` tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_url_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanGovernanceEvent {
+    pub event: PlanGovernanceEventName,
+    /// Opaque per-installation identifier; never a raw email, username, or
+    /// hostname. See `crate::telemetry::plan_governance::distinct_id`.
+    pub distinct_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub properties: Option<PlanGovernanceEventProperties>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insert_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlanGovernanceEventRequest {
+    pub events: Vec<PlanGovernanceEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct PlanGovernanceEventResponse {
+    pub recorded: u64,
+    pub failed: u64,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
 // --- Advisor query types (POST /v1/advisor/query, GET /v1/advisor/query/:id) ---
 
 /// The client surface initiating an advisor query. The CLI always sends `cli`.
@@ -1164,5 +1247,127 @@ mod tests {
         // Absent `message` (and an ignored, unknown `error` code) defaults to "".
         let body: ConnectedReposErrorBody = serde_json::from_str("{}").unwrap();
         assert_eq!(body.message, "");
+    }
+
+    // --- Plan-governance telemetry types ---
+
+    #[test]
+    fn test_plan_governance_event_name_serializes_to_snake_case() {
+        assert_eq!(
+            serde_json::to_value(PlanGovernanceEventName::PlanGovernanceCheckStarted).unwrap(),
+            "plan_governance_check_started"
+        );
+        assert_eq!(
+            serde_json::to_value(PlanGovernanceEventName::PlanGovernanceCheckCompleted).unwrap(),
+            "plan_governance_check_completed"
+        );
+        assert_eq!(
+            serde_json::to_value(PlanGovernanceEventName::PlanGovernanceRuleViolation).unwrap(),
+            "plan_governance_rule_violation"
+        );
+    }
+
+    #[test]
+    fn test_plan_governance_decision_serializes_to_snake_case() {
+        assert_eq!(
+            serde_json::to_value(PlanGovernanceDecision::Allow).unwrap(),
+            "allow"
+        );
+        assert_eq!(
+            serde_json::to_value(PlanGovernanceDecision::Warn).unwrap(),
+            "warn"
+        );
+        assert_eq!(
+            serde_json::to_value(PlanGovernanceDecision::Block).unwrap(),
+            "block"
+        );
+    }
+
+    #[test]
+    fn test_plan_governance_event_properties_default_serializes_empty() {
+        let props = PlanGovernanceEventProperties::default();
+        let value = serde_json::to_value(&props).unwrap();
+        assert_eq!(value, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_plan_governance_event_properties_full_round_trip() {
+        let props = PlanGovernanceEventProperties {
+            cli_version: Some("1.2.3".to_string()),
+            command: Some("plan-check".to_string()),
+            rule_id: Some("R-A-001".to_string()),
+            rule_source: Some("cross-cutting-jwt-verification".to_string()),
+            decision: Some(PlanGovernanceDecision::Block),
+            duration_ms: Some(1234.5),
+            exit_code: Some(1),
+            repo_hash: Some("a".repeat(64)),
+            repo_url_hash: Some("b".repeat(64)),
+        };
+        let value = serde_json::to_value(&props).unwrap();
+        assert_eq!(value["cli_version"], "1.2.3");
+        assert_eq!(value["command"], "plan-check");
+        assert_eq!(value["rule_id"], "R-A-001");
+        assert_eq!(value["rule_source"], "cross-cutting-jwt-verification");
+        assert_eq!(value["decision"], "block");
+        assert_eq!(value["duration_ms"], 1234.5);
+        assert_eq!(value["exit_code"], 1);
+        assert_eq!(value["repo_hash"], "a".repeat(64));
+        assert_eq!(value["repo_url_hash"], "b".repeat(64));
+        assert_eq!(value.as_object().unwrap().len(), 9);
+    }
+
+    #[test]
+    fn test_plan_governance_event_serializes_expected_shape() {
+        let event = PlanGovernanceEvent {
+            event: PlanGovernanceEventName::PlanGovernanceRuleViolation,
+            distinct_id: "install-abc123".to_string(),
+            properties: Some(PlanGovernanceEventProperties {
+                rule_id: Some("R-A-002".to_string()),
+                decision: Some(PlanGovernanceDecision::Warn),
+                ..Default::default()
+            }),
+            timestamp: None,
+            insert_id: Some("idempotency-key-1".to_string()),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["event"], "plan_governance_rule_violation");
+        assert_eq!(value["distinct_id"], "install-abc123");
+        assert_eq!(value["properties"]["rule_id"], "R-A-002");
+        assert_eq!(value["properties"]["decision"], "warn");
+        assert_eq!(value["insert_id"], "idempotency-key-1");
+        // `timestamp: None` must be omitted, not sent as `null`.
+        assert!(value.get("timestamp").is_none());
+    }
+
+    #[test]
+    fn test_plan_governance_event_request_serializes_events_array() {
+        let request = PlanGovernanceEventRequest {
+            events: vec![PlanGovernanceEvent {
+                event: PlanGovernanceEventName::PlanGovernanceCheckStarted,
+                distinct_id: "install-abc123".to_string(),
+                properties: None,
+                timestamp: None,
+                insert_id: None,
+            }],
+        };
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["events"].as_array().unwrap().len(), 1);
+        assert_eq!(value["events"][0]["event"], "plan_governance_check_started");
+    }
+
+    #[test]
+    fn test_plan_governance_event_response_deserializes() {
+        let json = r#"{"recorded": 2, "failed": 1, "errors": ["timeout"]}"#;
+        let response: PlanGovernanceEventResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.recorded, 2);
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.errors, vec!["timeout".to_string()]);
+    }
+
+    #[test]
+    fn test_plan_governance_event_response_missing_errors_defaults_empty() {
+        let json = r#"{"recorded": 5, "failed": 0}"#;
+        let response: PlanGovernanceEventResponse = serde_json::from_str(json).unwrap();
+        assert!(response.errors.is_empty());
     }
 }

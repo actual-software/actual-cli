@@ -525,6 +525,9 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         .clone()
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
 
+    #[cfg(feature = "telemetry")]
+    let started_at = std::time::Instant::now();
+
     let outcome = run_pipeline(
         &plan_text,
         &root,
@@ -541,13 +544,59 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
         println!("{}", render_panel(&outcome, &plan_text, &rules_dir, width));
     }
 
-    if let Outcome::Verdicts { verdicts, .. } = &outcome {
+    let result = if let Outcome::Verdicts { verdicts, .. } = &outcome {
         let conflicts: Vec<&CheckedRule> = verdicts.iter().filter(|v| v.verdict.blocks()).collect();
         if !conflicts.is_empty() {
-            return Err(ActualError::PlanNotConforming(deny_summary(&conflicts)));
+            Err(ActualError::PlanNotConforming(deny_summary(&conflicts)))
+        } else {
+            Ok(())
         }
+    } else {
+        Ok(())
+    };
+
+    // Only emitted when the pipeline actually reached a verdict -- the
+    // other `Outcome` variants are "could not check" infra states, not
+    // governance decisions, and forcing them into `allow`/`warn`/`block`
+    // would misrepresent an infra failure as a verdict. Direct mode's
+    // `RequiresDecision` only sets `--json`'s status field and never blocks
+    // (see the module doc's "revision loop" section), so it maps to `warn`
+    // here via `verdict.blocks()`, matching that documented behavior.
+    #[cfg(feature = "telemetry")]
+    if let Outcome::Verdicts { verdicts, .. } = &outcome {
+        let decision = if verdicts.iter().any(|v| v.verdict.blocks()) {
+            crate::api::types::PlanGovernanceDecision::Block
+        } else if verdicts
+            .iter()
+            .any(|v| v.verdict == Verdict::RequiresDecision)
+        {
+            crate::api::types::PlanGovernanceDecision::Warn
+        } else {
+            crate::api::types::PlanGovernanceDecision::Allow
+        };
+        let exit_code = result.as_ref().err().map(|e| e.exit_code()).unwrap_or(0);
+        let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
+            .iter()
+            .filter(|v| v.verdict != Verdict::Conforming)
+            .map(|v| {
+                (
+                    v.rule_id.as_str(),
+                    v.doc_slug.as_str(),
+                    crate::telemetry::plan_governance::rule_decision(v.verdict, v.verdict.blocks()),
+                )
+            })
+            .collect();
+        send_plan_governance_events(
+            "plan-check",
+            &root,
+            started_at,
+            decision,
+            exit_code,
+            &violations,
+        );
     }
-    Ok(())
+
+    result
 }
 
 /// Read `reader` into a string, capped at one byte past
@@ -784,6 +833,188 @@ fn deny_summary(conflicts: &[&CheckedRule]) -> String {
         .join("; ")
 }
 
+// ── plan-governance telemetry (AK-678) ──────────────────────────────────
+
+/// SHA-256 `(repo_hash, repo_url_hash)` for `root`, same construction as the
+/// sync pipeline's own telemetry (`crate::telemetry::identity`). Best-effort:
+/// an unreadable git repo or missing `origin` remote hashes an empty string
+/// rather than failing.
+#[cfg(feature = "telemetry")]
+fn repo_identity_hashes(root: &Path) -> (String, String) {
+    use crate::telemetry::identity::{hash_repo_identity, hash_repo_url};
+
+    let repo_url = crate::analysis::cache::get_git_remote_origin_url(root).unwrap_or_default();
+    let commit_hash = crate::analysis::cache::get_git_head(root).unwrap_or_default();
+    (
+        hash_repo_identity(&repo_url, &commit_hash),
+        hash_repo_url(&repo_url),
+    )
+}
+
+/// Send a batch of already-built plan-governance events, fire-and-forget.
+///
+/// Never blocks the caller past its own short internal timeout (see
+/// `telemetry::plan_governance::SEND_TIMEOUT`) and never propagates an
+/// error — a failed or disabled send is silently absorbed, per AK-678's
+/// "telemetry failure never fails or slows a plan check" acceptance
+/// criterion.
+///
+/// `PlanCheckArgs` has no `--api-url` flag (there was never a need for one
+/// in production — see the module's other API calls, which all use the
+/// configured/default URL), which means this module's own unit tests have
+/// no way to redirect this call to a mock server the way e.g. `sync`'s
+/// tests redirect via `SyncArgs::api_url`. The `#[cfg(test)]` twin below
+/// captures events into a thread-local instead of ever touching the network,
+/// so every existing (and future) `exec_hook_with`/`exec_direct`/
+/// `exec_override_impl` test stays hermetic while still letting tests that
+/// care assert on exactly what would have been sent — see
+/// `tests::take_captured_plan_governance_events`.
+#[cfg(all(feature = "telemetry", not(test)))]
+fn dispatch_plan_governance_events(events: Vec<crate::api::types::PlanGovernanceEvent>) {
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    let api_url = cfg
+        .api_url
+        .clone()
+        .unwrap_or_else(|| crate::api::client::DEFAULT_API_URL.to_string());
+
+    if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        rt.block_on(crate::telemetry::plan_governance::send_events(
+            events, &cfg, &api_url,
+        ));
+    }
+}
+
+#[cfg(all(feature = "telemetry", test))]
+fn dispatch_plan_governance_events(events: Vec<crate::api::types::PlanGovernanceEvent>) {
+    tests::CAPTURED_PLAN_GOVERNANCE_EVENTS.with(|cell| cell.borrow_mut().extend(events));
+}
+
+/// Build repo-identity hashes, assemble a started+completed(+violation)
+/// batch of plan-governance events for one `plan-check`/`--claude-hook` run,
+/// and dispatch them. Only rule id/slug and coarse enums ever go into
+/// `violations` — never a rule's span, statement, or reason text; see
+/// `PRIVACY.md`.
+#[cfg(feature = "telemetry")]
+fn send_plan_governance_events(
+    command: &str,
+    root: &Path,
+    started_at: std::time::Instant,
+    decision: crate::api::types::PlanGovernanceDecision,
+    exit_code: i32,
+    violations: &[(&str, &str, crate::api::types::PlanGovernanceDecision)],
+) {
+    use crate::telemetry::plan_governance::EventContext;
+
+    let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
+    let ctx = EventContext::new(command).with_repo_hashes(repo_hash, repo_url_hash);
+    // `duration_ms` uses the precise monotonic elapsed time; both events'
+    // `timestamp` fields are stamped at send time rather than backdating the
+    // started event to when the check actually began -- for this stream's
+    // aggregate-counting use, ordering/dedup is what `timestamp` is for, and
+    // `duration_ms` is already the authoritative latency figure.
+    let duration_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let mut events = vec![
+        ctx.started_event(),
+        ctx.completed_event(decision, duration_ms, exit_code),
+    ];
+    for (rule_id, rule_source, v_decision) in violations {
+        events.push(ctx.violation_event(rule_id, rule_source, *v_decision));
+    }
+
+    dispatch_plan_governance_events(events);
+}
+
+/// Emit one `plan_governance_check_completed`-shaped event per rule an
+/// `actual plan-check-override` call clears, with `command =
+/// "plan-check-override"` distinguishing it from a real check run's
+/// completion — so "overrides recorded" (one of AK-678's candidate
+/// counters) is `count(command == "plan-check-override")` in PostHog,
+/// without a new event name or schema field. `keys` are already
+/// `"<doc-slug>::<rule-id>"` strings (see `plan_check_session::key`),
+/// validated against the rule corpus by [`validate_override_rules`] before
+/// this is ever called.
+#[cfg(feature = "telemetry")]
+fn send_override_events(root: &Path, keys: &[String]) {
+    use crate::api::types::{
+        PlanGovernanceDecision, PlanGovernanceEvent, PlanGovernanceEventName,
+        PlanGovernanceEventProperties,
+    };
+    use crate::telemetry::plan_governance::distinct_id;
+
+    let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
+    let id = distinct_id();
+    let cli_version = env!("CARGO_PKG_VERSION").to_string();
+    let timestamp = chrono::Utc::now().to_rfc3339();
+
+    let events: Vec<PlanGovernanceEvent> = keys
+        .iter()
+        .map(|key| {
+            let (rule_source, rule_id) = key.split_once("::").unwrap_or((key.as_str(), ""));
+            PlanGovernanceEvent {
+                event: PlanGovernanceEventName::PlanGovernanceCheckCompleted,
+                distinct_id: id.clone(),
+                properties: Some(PlanGovernanceEventProperties {
+                    cli_version: Some(cli_version.clone()),
+                    command: Some("plan-check-override".to_string()),
+                    rule_id: Some(rule_id.to_string()),
+                    rule_source: Some(rule_source.to_string()),
+                    decision: Some(PlanGovernanceDecision::Allow),
+                    exit_code: Some(0),
+                    repo_hash: Some(repo_hash.clone()),
+                    repo_url_hash: Some(repo_url_hash.clone()),
+                    ..Default::default()
+                }),
+                timestamp: Some(timestamp.clone()),
+                insert_id: None,
+            }
+        })
+        .collect();
+
+    dispatch_plan_governance_events(events);
+}
+
+/// `--claude-hook`-mode wrapper around [`send_plan_governance_events`]: every
+/// non-conforming verdict this round gets a violation event with the same
+/// `blocked` outcome, since (per the module doc's "revision loop" section) a
+/// round either denies the tool call over every rule in `blocking` together
+/// or lets all of them through together — there is no per-rule split within
+/// one round's outcome.
+#[cfg(feature = "telemetry")]
+fn send_hook_governance_events(
+    root: &Path,
+    started_at: std::time::Instant,
+    decision: crate::api::types::PlanGovernanceDecision,
+    verdicts: &[CheckedRule],
+    blocked: bool,
+) {
+    let violations: Vec<(&str, &str, crate::api::types::PlanGovernanceDecision)> = verdicts
+        .iter()
+        .filter(|v| v.verdict != Verdict::Conforming)
+        .map(|v| {
+            (
+                v.rule_id.as_str(),
+                v.doc_slug.as_str(),
+                crate::telemetry::plan_governance::rule_decision(v.verdict, blocked),
+            )
+        })
+        .collect();
+    // The hook's own contract never returns a non-zero exit -- `exec()`
+    // always returns `Ok(())` after `exec_hook` -- so `exit_code` is always
+    // 0 here regardless of `decision`.
+    send_plan_governance_events(
+        "plan-check --claude-hook",
+        root,
+        started_at,
+        decision,
+        0,
+        &violations,
+    );
+}
+
 // ── --claude-hook mode ───────────────────────────────────────────────────
 
 /// Read the hook payload from real stdin and hand it to [`exec_hook_with`].
@@ -856,6 +1087,9 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
         .map(|id| plan_check_session::load(id, &rules_dir))
         .unwrap_or_default();
     let plan_digest = plan_check_session::plan_digest(&plan_text);
+
+    #[cfg(feature = "telemetry")]
+    let started_at = std::time::Instant::now();
 
     // `use_rank: false`, unconditionally, regardless of `args.no_rank`: the
     // hook's one model call stays reserved for the judge. See the module doc.
@@ -975,6 +1209,17 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                         emit(plan_check_hook::render_notice(&with_override_reminder(
                             message, &session,
                         )));
+                        // Every rule here is `blocked: false` -- the round
+                        // limit let the call through this round -- so this
+                        // is `warn`, not `block`, distinct from a clean pass.
+                        #[cfg(feature = "telemetry")]
+                        send_hook_governance_events(
+                            &root,
+                            started_at,
+                            crate::api::types::PlanGovernanceDecision::Warn,
+                            &verdicts,
+                            false,
+                        );
                         return;
                     }
                     plan_check_session::store(session_id, &rules_dir, &session);
@@ -989,6 +1234,14 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                     deny_reason,
                     &session,
                 )));
+                #[cfg(feature = "telemetry")]
+                send_hook_governance_events(
+                    &root,
+                    started_at,
+                    crate::api::types::PlanGovernanceDecision::Block,
+                    &verdicts,
+                    true,
+                );
                 return;
             }
 
@@ -1028,11 +1281,30 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                 }
             }
             let reminder = override_reminder(&session);
+            // An active override on an otherwise-clean round is still worth
+            // distinguishing from a truly clean allow -- something was once
+            // wrong here and a human waived it, which is exactly the kind of
+            // fact this stream exists to preserve now that AK-662's
+            // traceability criterion is out of MVP scope. `verdicts` this
+            // round holds no non-`Conforming` entries by construction (any
+            // such rule would already be in `blocking`, handled above), so
+            // no violation events are emitted here regardless.
+            #[cfg(feature = "telemetry")]
+            let has_override_reminder = reminder.is_some();
             if let Some(reminder) = reminder {
                 notes.push(reminder);
             }
             if !notes.is_empty() {
                 emit(plan_check_hook::render_notice(&notes.join("\n")));
+            }
+            #[cfg(feature = "telemetry")]
+            {
+                let decision = if partial.is_some() || has_override_reminder {
+                    crate::api::types::PlanGovernanceDecision::Warn
+                } else {
+                    crate::api::types::PlanGovernanceDecision::Allow
+                };
+                send_hook_governance_events(&root, started_at, decision, &verdicts, false);
             }
         }
     }
@@ -1201,6 +1473,8 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
     validate_override_rules(&rules_dir, &args.rules)?;
     plan_check_session::record_override(&args.session, &rules_dir, &args.rules, &args.reason);
+    #[cfg(feature = "telemetry")]
+    send_override_events(&root, &args.rules);
     let width = term_size::terminal_width();
     let mut panel = Panel::titled("Plan check override recorded");
     panel = panel.kv("Session", &args.session);
@@ -1414,6 +1688,36 @@ mod tests {
 
     use crate::rules::types::RuleLevel;
     use crate::testutil::{EnvGuard, ENV_MUTEX};
+
+    // ── plan-governance telemetry capture (AK-678) ──
+    //
+    // `cargo test`'s default runner reuses OS threads across many `#[test]`
+    // functions, so a plain thread-local would leak an earlier test's events
+    // into a later one on the same thread. `take_captured_plan_governance_events`
+    // is a drain (`mem::take`), so a test that wants to assert on exactly its
+    // own call must drain once *before* exercising the code under test (to
+    // discard anything a prior test on this thread left behind) and again
+    // *after* (to collect only what it just produced) — see
+    // `with_captured_plan_governance_events`, which does both around a closure.
+    #[cfg(feature = "telemetry")]
+    thread_local! {
+        pub(super) static CAPTURED_PLAN_GOVERNANCE_EVENTS: std::cell::RefCell<Vec<crate::api::types::PlanGovernanceEvent>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn take_captured_plan_governance_events() -> Vec<crate::api::types::PlanGovernanceEvent> {
+        CAPTURED_PLAN_GOVERNANCE_EVENTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn with_captured_plan_governance_events(
+        f: impl FnOnce(),
+    ) -> Vec<crate::api::types::PlanGovernanceEvent> {
+        take_captured_plan_governance_events();
+        f();
+        take_captured_plan_governance_events()
+    }
 
     const OAUTH_DOC: &str = "# Sign With Asymmetric Keys: Token Signing\n\nThese rules are ALWAYS ACTIVE for OAuth token signing in `services/auth/oauth/`.\n\n### Rules\n\n- **R-A-001** MUST: sign with RS256.\n- **R-A-002** MUST NOT: log the raw signing key.\n";
     const TERRAFORM_DOC: &str = "# Pin Providers: Terraform\n\nThese rules are ALWAYS ACTIVE for Terraform configuration in `infra/terraform/`.\n\n### Rules\n\n- **R-B-001** MUST: pin providers.\n";
@@ -2546,7 +2850,28 @@ mod tests {
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         args.no_rank = true;
 
+        #[cfg(feature = "telemetry")]
+        let events = with_captured_plan_governance_events(|| assert!(exec(&args).is_ok()));
+        #[cfg(not(feature = "telemetry"))]
         assert!(exec(&args).is_ok());
+
+        #[cfg(feature = "telemetry")]
+        {
+            let completed = events
+                .iter()
+                .find(|e| {
+                    e.event
+                        == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+                })
+                .expect("a completed event must be emitted");
+            let props = completed.properties.as_ref().unwrap();
+            assert_eq!(
+                props.decision,
+                Some(crate::api::types::PlanGovernanceDecision::Allow)
+            );
+            assert_eq!(props.exit_code, Some(0));
+            assert_eq!(props.command.as_deref(), Some("plan-check"));
+        }
     }
 
     #[cfg(unix)]
@@ -2578,8 +2903,51 @@ mod tests {
         args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
         args.no_rank = true;
 
-        let err = exec(&args).unwrap_err();
-        assert!(matches!(err, ActualError::PlanNotConforming(_)));
+        #[cfg(feature = "telemetry")]
+        let events = with_captured_plan_governance_events(|| {
+            let err = exec(&args).unwrap_err();
+            assert!(matches!(err, ActualError::PlanNotConforming(_)));
+        });
+        #[cfg(not(feature = "telemetry"))]
+        {
+            let err = exec(&args).unwrap_err();
+            assert!(matches!(err, ActualError::PlanNotConforming(_)));
+        }
+
+        #[cfg(feature = "telemetry")]
+        {
+            let completed = events
+                .iter()
+                .find(|e| {
+                    e.event
+                        == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+                })
+                .expect("a completed event must be emitted");
+            let props = completed.properties.as_ref().unwrap();
+            assert_eq!(
+                props.decision,
+                Some(crate::api::types::PlanGovernanceDecision::Block)
+            );
+            assert_eq!(props.exit_code, Some(1));
+
+            let violations: Vec<_> = events
+                .iter()
+                .filter(|e| {
+                    e.event
+                        == crate::api::types::PlanGovernanceEventName::PlanGovernanceRuleViolation
+                })
+                .collect();
+            assert_eq!(violations.len(), 1);
+            assert_eq!(
+                violations[0]
+                    .properties
+                    .as_ref()
+                    .unwrap()
+                    .rule_id
+                    .as_deref(),
+                Some("R-A-002")
+            );
+        }
     }
 
     /// Direct mode's counterpart to
@@ -2715,6 +3083,77 @@ mod tests {
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
         exec_hook_with(&args, &raw);
+    }
+
+    /// AK-678: a real deny must emit a `block`-decision batch with exactly
+    /// one `plan_governance_rule_violation` event for the conflicting rule
+    /// (not the conforming one), and no event for `R-A-001`.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_exec_hook_with_deny_emits_block_governance_events() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
+            .to_string();
+
+        let events = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+
+        let names: Vec<_> = events.iter().map(|e| e.event).collect();
+        assert!(
+            names.contains(&crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckStarted)
+        );
+        let completed = events
+            .iter()
+            .find(|e| {
+                e.event == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+            })
+            .expect("a completed event must be emitted");
+        let completed_props = completed.properties.as_ref().unwrap();
+        assert_eq!(
+            completed_props.decision,
+            Some(crate::api::types::PlanGovernanceDecision::Block)
+        );
+        assert_eq!(
+            completed_props.command.as_deref(),
+            Some("plan-check --claude-hook")
+        );
+
+        let violations: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.event == crate::api::types::PlanGovernanceEventName::PlanGovernanceRuleViolation
+            })
+            .collect();
+        assert_eq!(
+            violations.len(),
+            1,
+            "only the conflicting rule gets a violation event"
+        );
+        let violation_props = violations[0].properties.as_ref().unwrap();
+        assert_eq!(violation_props.rule_id.as_deref(), Some("R-A-002"));
+        assert_eq!(
+            violation_props.rule_source.as_deref(),
+            Some("cross-cutting-token-signing-1c57")
+        );
+        assert_eq!(
+            violation_props.decision,
+            Some(crate::api::types::PlanGovernanceDecision::Block)
+        );
     }
 
     /// The behavior change this guards: a `requires_decision` verdict must be
@@ -2922,6 +3361,50 @@ mod tests {
         let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
             .to_string();
         exec_hook_with(&args, &raw);
+    }
+
+    /// AK-678: a fully-conforming round emits `allow`, with no violation
+    /// events at all -- distinct from both `warn` and `block`.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_exec_hook_with_clean_pass_emits_allow_governance_events() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.rules_dir = Some(crate::rules::rules_dir(root.path()));
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"tool_input": {"plan": "Sign access tokens with RS256"}})
+            .to_string();
+
+        let events = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+
+        let completed = events
+            .iter()
+            .find(|e| {
+                e.event == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+            })
+            .expect("a completed event must be emitted");
+        assert_eq!(
+            completed.properties.as_ref().unwrap().decision,
+            Some(crate::api::types::PlanGovernanceDecision::Allow)
+        );
+        assert!(
+            !events.iter().any(|e| e.event
+                == crate::api::types::PlanGovernanceEventName::PlanGovernanceRuleViolation),
+            "a fully-conforming round must not emit any violation event"
+        );
     }
 
     // ── the revision loop (AK-677): exclusion, session persistence, ────────
@@ -3205,6 +3688,63 @@ mod tests {
         let log = std::fs::read_to_string(plan_check_session::audit_log_path().unwrap()).unwrap();
         assert!(log.contains("\"kind\":\"round_limit\""));
         assert!(log.contains("sess-limit-1"));
+    }
+
+    /// AK-678: the round-limit pass is a `warn`, not a `block` -- distinct
+    /// from a genuine deny, since the tool call was let through this round.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_exec_hook_with_round_limit_pass_emits_warn_governance_events() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let rules_dir = crate::rules::rules_dir(root.path());
+        let mut args = base_args();
+        args.rules_dir = Some(rules_dir.clone());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.max_rounds = 1;
+        let raw = serde_json::json!({
+            "session_id": "sess-limit-telemetry-1",
+            "tool_input": {"plan": "Sign access tokens with RS256"},
+        })
+        .to_string();
+
+        // Round 1: normal deny, not under test here.
+        exec_hook_with(&args, &raw);
+        // Round 2: round limit exceeded -> pass, `warn` not `block`.
+        let events = with_captured_plan_governance_events(|| exec_hook_with(&args, &raw));
+
+        let completed = events
+            .iter()
+            .find(|e| {
+                e.event == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+            })
+            .expect("a completed event must be emitted");
+        assert_eq!(
+            completed.properties.as_ref().unwrap().decision,
+            Some(crate::api::types::PlanGovernanceDecision::Warn)
+        );
+        let violation = events
+            .iter()
+            .find(|e| {
+                e.event == crate::api::types::PlanGovernanceEventName::PlanGovernanceRuleViolation
+            })
+            .expect("the exhausted rule still gets a violation event");
+        assert_eq!(
+            violation.properties.as_ref().unwrap().decision,
+            Some(crate::api::types::PlanGovernanceDecision::Warn)
+        );
     }
 
     /// The exact bug a review flagged: `rounds` used to increment on every
@@ -3542,6 +4082,57 @@ mod tests {
         let session = plan_check_session::load("sess-cli-1", &rules_dir);
         assert_eq!(session.overrides.len(), 1);
         assert_eq!(session.overrides[0].reason, "reviewed and accepted");
+    }
+
+    /// AK-678: an override emits one `check_completed`-shaped event per
+    /// cleared rule, tagged `command = "plan-check-override"` and
+    /// `decision = allow` -- distinct from a real check run's completion, so
+    /// "overrides recorded" is derivable as `count(command ==
+    /// "plan-check-override")` without a new event name.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_exec_override_impl_emits_governance_events_per_rule() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-telemetry-1".to_string(),
+            rules: vec![
+                plan_check_session::key("doc", "R-A-001"),
+                plan_check_session::key("doc", "R-A-002"),
+            ],
+            reason: "reviewed and accepted".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+
+        let events =
+            with_captured_plan_governance_events(|| assert!(exec_override_impl(&args).is_ok()));
+
+        assert_eq!(events.len(), 2);
+        for event in &events {
+            assert_eq!(
+                event.event,
+                crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+            );
+            let props = event.properties.as_ref().unwrap();
+            assert_eq!(props.command.as_deref(), Some("plan-check-override"));
+            assert_eq!(
+                props.decision,
+                Some(crate::api::types::PlanGovernanceDecision::Allow)
+            );
+            assert_eq!(props.rule_source.as_deref(), Some("doc"));
+        }
+        let rule_ids: std::collections::HashSet<_> = events
+            .iter()
+            .map(|e| e.properties.as_ref().unwrap().rule_id.clone().unwrap())
+            .collect();
+        assert_eq!(
+            rule_ids,
+            std::collections::HashSet::from(["R-A-001".to_string(), "R-A-002".to_string()])
+        );
     }
 
     /// The override must land in the same governed context (`rules_dir`) the
