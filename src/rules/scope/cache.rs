@@ -115,6 +115,14 @@ pub fn clear(rules_dir: &Path) {
 /// many repositories accumulates stale entries. This is the prune. Returns
 /// how many entries were present; an absent or unreadable cache is zero, not
 /// an error.
+///
+/// Removal itself is a single `remove_dir_all` on the whole cache directory,
+/// so it is not limited to `.json` entries: a `<key>.json.tmp` sibling
+/// [`write_secure`](crate::config::paths::write_secure) may have staged and
+/// left behind (a write that failed after staging but before the rename into
+/// place) is removed along with everything else, not orphaned. The count
+/// below is counted the same way, so it doesn't undersell what actually gets
+/// cleared.
 pub fn clear_all() -> usize {
     let Some(dir) = cache_dir() else {
         return 0;
@@ -123,10 +131,9 @@ pub fn clear_all() -> usize {
         Ok(entries) => entries
             .flatten()
             .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.ends_with(".json") || name.ends_with(".json.tmp")
             })
             .count(),
         Err(_) => 0,
@@ -333,6 +340,34 @@ mod tests {
         assert!(load(&dir_b, &index_b.content_digest).is_none());
         // Clearing an empty cache is a no-op, not a failure.
         assert_eq!(clear_all(), 0);
+    }
+
+    /// A `<key>.json.tmp` sibling left behind by a `write_secure` call that
+    /// staged its content but failed before the rename into place must not
+    /// survive `--clear`, and the count `clear_all` returns must include it
+    /// — `clear_all` removes the whole cache directory in one
+    /// `remove_dir_all`, not just the entries its own count-filter matches,
+    /// so a mismatch there would only misreport, not under-clear.
+    #[test]
+    fn test_clear_all_removes_and_counts_a_staged_tmp_sibling() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", home.path().to_str().unwrap());
+        let _clear = EnvGuard::remove("ACTUAL_CONFIG");
+
+        let a = seed(&[("a.md", DOC)]);
+        let dir_a = rules_dir(a.path());
+        store(&dir_a, &build(a.path()));
+        assert!(load(&dir_a, &build(a.path()).content_digest).is_some());
+
+        let orphan = cache_dir()
+            .unwrap()
+            .join("orphan-from-a-failed-write.json.tmp");
+        std::fs::write(&orphan, b"partial").unwrap();
+
+        assert_eq!(clear_all(), 2);
+        assert!(!orphan.exists());
+        assert!(load(&dir_a, &build(a.path()).content_digest).is_none());
     }
 
     /// Every cache operation is best-effort: an unwritable location degrades to

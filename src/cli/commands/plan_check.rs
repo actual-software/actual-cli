@@ -424,26 +424,30 @@ struct GatheredRules {
 /// `plan_digest` before the [`MAX_RULES_JUDGED`] cap is applied — an excluded
 /// rule must never consume cap budget that a rule still worth judging needs.
 ///
-/// When the non-excluded candidate count exceeds the cap, the judged window
-/// is not pinned to index zero every round: it starts at
-/// [`rotation_offset`]`(session.rounds, considered)`, a cap-sized chunk per
-/// completed round, wrapping. A rule left in the truncated tail on round 1
-/// therefore has a real chance of landing inside the judged window on a
-/// later round instead of being silently skipped for the entire life of the
-/// session — session `rounds` only advances when a real judge call
-/// completes (see [`PlanCheckSession::rounds`]), so this only changes
-/// anything once a session has actually run more than one round against a
-/// selection this large. Still fully deterministic — the same session, at
-/// the same round, against the same candidates, always rotates to the same
-/// window — and still only a mitigation, not a guarantee: a plan approved on
-/// its first round always sees round 0's window (offset zero, identical to
-/// the old fixed-prefix behavior), and a session that revises only a few
-/// times before approval may never rotate far enough to reach a very large
-/// tail. Judging the entire candidate set in a single round regardless of
-/// size needs concurrent, sharded judge calls instead of a bigger one, which
-/// is real implementation work tracked separately as AK-743 — this only
-/// ensures the gap moves round over round instead of calcifying on the same
-/// rules forever.
+/// When the non-excluded candidate count exceeds the cap, a rule the
+/// session has already denied at least once is pinned into the judged
+/// window every round (see [`select_judged_window`]) — a proven conflict is
+/// never left to chance. The rest of the window is not pinned to index zero
+/// every round either: it starts at [`rotation_offset`]`(session.rounds,
+/// _)`, a cap-sized chunk per completed round, wrapping. A rule left in the
+/// truncated tail on round 1 therefore has a real chance of landing inside
+/// the judged window on a later round instead of being silently skipped for
+/// the entire life of the session — session `rounds` only advances when a
+/// real judge call completes (see [`PlanCheckSession::rounds`]), so this
+/// only changes anything once a session has actually run more than one
+/// round against a selection this large. Still fully deterministic — the
+/// same session, at the same round, against the same candidates, always
+/// produces the same window — and still only a mitigation, not a guarantee
+/// for the *unproven* remainder: a plan approved on its first round always
+/// sees round 0's window (offset zero, identical to the old fixed-prefix
+/// behavior), and a session that revises only a few times before approval
+/// may never rotate far enough to reach a very large tail of rules it has
+/// not yet judged even once. Judging the entire candidate set in a single
+/// round regardless of size needs concurrent, sharded judge calls instead
+/// of a bigger one, which is real implementation work tracked separately as
+/// AK-743 — this only ensures the gap moves round over round instead of
+/// calcifying on the same never-judged rules forever, and never lets a rule
+/// already known to conflict drop out of view.
 ///
 /// A document that no longer parses (removed, edited to something invalid,
 /// between selection and this read) is skipped rather than failing the whole
@@ -487,8 +491,7 @@ fn gather_rules(
     let considered = candidates.len();
     let truncated = considered > MAX_RULES_JUDGED;
     if truncated {
-        candidates.rotate_left(rotation_offset(session.rounds, considered));
-        candidates.truncate(MAX_RULES_JUDGED);
+        candidates = select_judged_window(candidates, session);
     }
     GatheredRules {
         rules: candidates,
@@ -496,6 +499,42 @@ fn gather_rules(
         truncated,
         excluded,
     }
+}
+
+/// Chooses which [`MAX_RULES_JUDGED`] candidates get judged this round when
+/// there are more than that many. A rule the session has already denied at
+/// least once (present in `session.deny_counts`) is pinned into every
+/// round's window instead of being left to rotation: [`rotation_offset`]
+/// moves the judged window by whole cap-sized chunks, so a proven conflict
+/// can rotate clean out of the window on the very next round, and a plan
+/// revision resets `cleared` (keyed to the plan digest that earned it)
+/// before rotation ever applies — nothing else keeps re-checking a rule
+/// already known to conflict. Only the non-pinned remainder rotates; pinned
+/// rules keep their original selection-then-declaration order ahead of it.
+/// When pinned rules alone meet or exceed the cap, they fill the whole
+/// window on their own (still in that same order) and nothing else rotates
+/// in this round.
+fn select_judged_window(
+    candidates: Vec<RuleForJudging>,
+    session: &PlanCheckSession,
+) -> Vec<RuleForJudging> {
+    let (mut pinned, mut rest): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|rule| {
+        session
+            .deny_counts
+            .contains_key(&plan_check_session::key(&rule.doc_slug, &rule.rule_id))
+    });
+    if pinned.len() >= MAX_RULES_JUDGED {
+        pinned.truncate(MAX_RULES_JUDGED);
+        return pinned;
+    }
+    let remaining = MAX_RULES_JUDGED - pinned.len();
+    if !rest.is_empty() {
+        let offset = rotation_offset(session.rounds, rest.len());
+        rest.rotate_left(offset);
+    }
+    rest.truncate(remaining);
+    pinned.extend(rest);
+    pinned
 }
 
 /// The judged window's starting offset for `round`, into `considered`
@@ -1603,6 +1642,88 @@ mod tests {
         // proving the window actually moved rather than simply grew.
         assert!(!ids.contains(&"R-X-0035"));
         assert!(!ids.contains(&"R-X-0039"));
+    }
+
+    /// A rule already denied at least once must stay in the judged window on
+    /// a later round even though rotation alone would carry it clean out of
+    /// scope — the gap the reviewer flagged in APR-001's rotation mitigation:
+    /// without pinning, a rule proven to conflict on round 0 could go
+    /// unjudged on round 1 while a plan revision resets `cleared` and
+    /// restores the full candidate list.
+    #[test]
+    fn test_gather_rules_pins_a_previously_denied_rule_across_rotation() {
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 5) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Add a new widget in services/widgets".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+        let doc_slug = selection.selected[0].slug.clone();
+
+        // R-X-0000 was denied on round 0 (inside that round's unrotated
+        // window) and would rotate out of round 1's window on its own —
+        // round 1's plain rotated window is R-X-0040..R-X-0044 (see the
+        // rotation test above), which does not include it.
+        let mut session = PlanCheckSession::default();
+        session.rounds = 1;
+        session
+            .deny_counts
+            .insert(plan_check_session::key(&doc_slug, "R-X-0000"), 1);
+
+        let gathered = gather_rules(&selection, root.path(), &session, "test-digest");
+        assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
+        assert!(gathered.truncated);
+
+        let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
+        assert!(
+            ids.contains(&"R-X-0000"),
+            "previously-denied rule must stay pinned in the window: {ids:?}"
+        );
+        // The rotated remainder still reaches into the tail round 0 never
+        // saw (R-X-0044, the very last rule), proving rotation still runs
+        // over the non-pinned candidates alongside the pin.
+        assert!(ids.contains(&"R-X-0044"));
+    }
+
+    /// When previously-denied rules alone meet or exceed the cap, they fill
+    /// the whole judged window on their own — nothing else rotates in, and
+    /// nothing is dropped from the pinned set beyond the cap.
+    #[test]
+    fn test_gather_rules_pinned_rules_alone_fill_the_window_when_they_meet_the_cap() {
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 10) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Add a new widget in services/widgets".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+        let doc_slug = selection.selected[0].slug.clone();
+
+        // Deny every rule up through the cap plus a couple more, so pinned
+        // alone exceeds MAX_RULES_JUDGED.
+        let mut session = PlanCheckSession::default();
+        for i in 0..(MAX_RULES_JUDGED + 2) {
+            session.deny_counts.insert(
+                plan_check_session::key(&doc_slug, &format!("R-X-{i:04}")),
+                1,
+            );
+        }
+
+        let gathered = gather_rules(&selection, root.path(), &session, "test-digest");
+        assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
+        assert!(gathered.truncated);
+
+        let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
+        // First MAX_RULES_JUDGED denied rules in original order, truncated —
+        // never-denied candidates (R-X-0042 onward) do not crowd them out.
+        assert!(ids.contains(&"R-X-0000"));
+        assert!(ids.contains(&format!("R-X-{:04}", MAX_RULES_JUDGED - 1).as_str()));
+        assert!(!ids.contains(&format!("R-X-{MAX_RULES_JUDGED:04}").as_str()));
     }
 
     #[test]
@@ -3666,5 +3787,34 @@ mod tests {
             plan_check_session::load("sess-cli-partial", &rules_dir),
             PlanCheckSession::default()
         );
+    }
+
+    /// Two or more unknown keys must pluralize the rejection message
+    /// ("rules ... were not found", not "rule ... was not found") — the
+    /// singular/plural branch in `validate_override_rules` only runs its
+    /// plural arm when `unknown.len() > 1`.
+    #[test]
+    fn test_exec_override_impl_pluralizes_the_message_for_multiple_unknown_rules() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-multi-unknown".to_string(),
+            rules: vec![
+                plan_check_session::key("doc", "R-A-998"),
+                plan_check_session::key("doc", "R-A-999"),
+            ],
+            reason: "reviewed".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+        let err = exec_override_impl(&args).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("rules"), "message was: {message}");
+        assert!(message.contains("were not found"), "message was: {message}");
+        assert!(message.contains("doc::R-A-998"), "message was: {message}");
+        assert!(message.contains("doc::R-A-999"), "message was: {message}");
     }
 }
