@@ -98,13 +98,11 @@ fn save_cache_file(path: &std::path::Path, cache: &ModelCacheFile) {
     }
     // serde_yml::to_string on a well-formed struct is infallible in practice
     let yaml = serde_yml::to_string(cache).unwrap_or_default();
-    let _ = std::fs::write(path, yaml);
-    // 0600 on unix (model names are not secrets, but consistent with config dir)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
+    // 0600 and stage-then-rename (see `write_secure`'s own doc) -- model
+    // names are not secrets, but this keeps the config directory's write
+    // posture uniform and removes the write-then-chmod window a plain
+    // `std::fs::write` + `set_permissions` pair used to leave open.
+    let _ = crate::config::paths::write_secure(path, yaml.as_bytes());
 }
 
 // ---------------------------------------------------------------------------

@@ -494,37 +494,19 @@ fn file_delete(name: &str) -> Result<(), ActualError> {
     }
 }
 
-/// Write `content` to `path`, creating parents and (on unix) forcing `0600` so
-/// the encrypted blob is never world-readable. Mirrors [`crate::auth::store`].
-#[cfg(unix)]
-fn write_secure(path: &Path, content: &str) -> Result<(), ActualError> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| token_error(format!("failed to create token directory: {e}")))?;
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|e| token_error(format!("failed to open token file for writing: {e}")))?;
-    file.write_all(content.as_bytes())
-        .map_err(|e| token_error(format!("failed to write token file: {e}")))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
+/// Write `content` to `path`, creating parent directories first. The actual
+/// write delegates to [`crate::config::paths::write_secure`] for its atomic
+/// stage-then-rename idiom and `0600` creation (see that function's own
+/// doc) rather than re-implementing that idiom here a second time; this
+/// wrapper exists only to create `path`'s parent directory and to wrap the
+/// result in this module's own error type.
 fn write_secure(path: &Path, content: &str) -> Result<(), ActualError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| token_error(format!("failed to create token directory: {e}")))?;
     }
-    std::fs::write(path, content)
-        .map_err(|e| token_error(format!("failed to write token file: {e}")))?;
-    Ok(())
+    crate::config::paths::write_secure(path, content.as_bytes())
+        .map_err(|e| token_error(format!("failed to write token file: {e}")))
 }
 
 #[cfg(test)]
@@ -1228,8 +1210,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_write_secure_parentless_path_errors() {
-        // A path whose parent is None (the filesystem root) skips the mkdir step;
-        // the open then fails, covering the no-parent branch of write_secure.
+        // A path whose parent is None (the filesystem root) skips the mkdir
+        // step; the delegated paths::write_secure call then fails (no
+        // permission to create anything at the root), covering the
+        // no-parent branch of this wrapper.
         let err = write_secure(Path::new("/"), "x").unwrap_err();
         assert!(matches!(err, ActualError::ConfigError(_)), "got: {err:?}");
     }
