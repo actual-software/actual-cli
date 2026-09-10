@@ -185,8 +185,10 @@ actual plan-check --plan-file plan.md --json
 Piped with `--claude-hook`, the same pipeline instead reads a Claude Code
 `PreToolUse` hook envelope from stdin and prints that hook's own JSON
 contract on stdout: nothing at all on a clean pass, or a single-line
-`permissionDecision: "deny"` object naming the conflicting rule and plan
-span. Every infrastructure failure fails open rather than blocking — this is
+`permissionDecision: "deny"` object naming the offending rule and plan
+span. A `requires_decision` verdict denies there exactly like a conflict,
+pending explicit human review; the exit-0 behavior above is direct mode
+only. Every infrastructure failure fails open rather than blocking — this is
 an advisory gate, not an enforcement boundary. The `hooks/plan-gate.sh`
 script that drives this mode, and the Claude Code settings that install it,
 live in the separate `actual-skill` plugin repository, not here.
