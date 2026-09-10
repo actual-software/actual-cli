@@ -42,17 +42,24 @@ included in telemetry.
 
 ### Plan-governance events (anonymous)
 
-On each `actual plan-check` run (including the `--claude-hook` path Claude
-Code drives automatically) and on `actual plan-check-override`, the CLI
-sends discrete events describing the governance outcome, proxied through
-`api-service.api.prod.actual.ai` to PostHog. The CLI never talks to PostHog
-directly and holds no PostHog credentials — the proxy is its only outbound
-path for this data.
+When `actual plan-check` (including the `--claude-hook` path Claude Code
+drives automatically) reaches a verdict -- i.e. it actually judged the plan
+against at least one selected rule -- and on `actual plan-check-override`,
+the CLI sends discrete events describing the governance outcome, proxied
+through `api-service.api.prod.actual.ai` to PostHog. The CLI never talks to
+PostHog directly and holds no PostHog credentials — the proxy is its only
+outbound path for this data.
+
+A run that fails open before reaching a verdict -- no rules apply, no runner
+is available, or the check itself fails -- sends no plan-governance events at
+all. This stream cannot be used to measure how often `plan-check` runs in
+total, or how often it fails open versus produces a verdict; it only
+describes verdicts that were actually reached.
 
 | Event | Sent when |
 |-------|-----------|
-| `plan_governance_check_started` | A plan-check begins evaluating a plan against selected rules |
-| `plan_governance_check_completed` | A plan-check (or `plan-check-override`) finishes |
+| `plan_governance_check_started` | Built alongside `plan_governance_check_completed` and sent in the same batch, once a run has reached a verdict -- not emitted separately at the actual start of the check |
+| `plan_governance_check_completed` | A plan-check reaches a verdict, or `plan-check-override` records an override (see below -- overrides reuse this same event, distinguished only by `command`) |
 | `plan_governance_rule_violation` | One rule did not conform (once per violating rule) |
 
 Each event includes a subset of these properties:
@@ -73,15 +80,31 @@ Each event includes a subset of these properties:
 sent** -- only the rule's internal id/slug and a coarse allow/warn/block
 verdict.
 
+`actual plan-check-override` reports a cleared rule by sending
+`plan_governance_check_completed` with `command` set to
+`"plan-check-override"` rather than a distinct event type -- it is not a
+real check's completion, and it carries no `duration_ms`. A query over
+`plan_governance_check_completed` that counts "checks run" or averages
+`duration_ms` must filter `command != "plan-check-override"`, or it will mix
+override records into those aggregates.
+
 Each event also carries a `distinct_id`: a random, opaque identifier
 generated once on first use and stored locally
 (`~/.actualai/actual/telemetry-id`), never derived from a username, email,
-hostname, or any other identifying material. It exists only so events from
-the same installation can be grouped over time; it is not linked to any
-hashed repository identity, and it does not identify a person.
+hostname, or any other identifying material. It exists so events from the
+same installation can be grouped over time. It is generated independently of
+`repo_hash`/`repo_url_hash` (i.e. not cryptographically derived from them),
+but **every plan-governance event carries `distinct_id` and
+`repo_hash`/`repo_url_hash` together in the same payload** -- that pairing is
+how events are grouped per installation, and it also means an installation
+can be correlated with the set of repositories it has run `plan-check`
+against over time. It does not, on its own, identify a person.
 
 All three telemetry opt-outs described below disable plan-governance events
-identically -- they share the exact same opt-out check as the sync counters.
+identically -- they share the exact same opt-out check as the sync counters,
+and are checked before any repo-identity hashing or `distinct_id` creation,
+not just before the network send: an opted-out run never touches git and
+never writes `~/.actualai/actual/telemetry-id`.
 
 ### Project metadata (sent to the Actual API)
 
