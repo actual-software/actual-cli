@@ -936,6 +936,13 @@ fn dispatch_plan_governance_events(events: Vec<crate::api::types::PlanGovernance
 /// and dispatch them. Only rule id/slug and coarse enums ever go into
 /// `violations` — never a rule's span, statement, or reason text; see
 /// `PRIVACY.md`.
+///
+/// Checks `opt_out::is_disabled` first, before any repo-identity hashing or
+/// `distinct_id()` — an opted-out user must not have a persistent telemetry
+/// id written to disk (or git subprocesses spawned) just because a check
+/// ran; `send_events`'s own opt-out check is too late for that, since by
+/// then the id file already exists. See `PRIVACY.md`'s "three independent
+/// ways to disable telemetry."
 #[cfg(feature = "telemetry")]
 fn send_plan_governance_events(
     command: &str,
@@ -946,6 +953,11 @@ fn send_plan_governance_events(
     violations: &[(&str, &str, crate::api::types::PlanGovernanceDecision)],
 ) {
     use crate::telemetry::plan_governance::EventContext;
+
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    if crate::telemetry::opt_out::is_disabled(&cfg) {
+        return;
+    }
 
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
     let ctx = EventContext::new(command).with_repo_hashes(repo_hash, repo_url_hash);
@@ -976,6 +988,10 @@ fn send_plan_governance_events(
 /// `"<doc-slug>::<rule-id>"` strings (see `plan_check_session::key`),
 /// validated against the rule corpus by [`validate_override_rules`] before
 /// this is ever called.
+///
+/// Checks `opt_out::is_disabled` first, before any repo-identity hashing or
+/// `distinct_id()` — see `send_plan_governance_events`'s doc comment for why
+/// that ordering matters.
 #[cfg(feature = "telemetry")]
 fn send_override_events(root: &Path, keys: &[String]) {
     use crate::api::types::{
@@ -983,6 +999,11 @@ fn send_override_events(root: &Path, keys: &[String]) {
         PlanGovernanceEventProperties,
     };
     use crate::telemetry::plan_governance::distinct_id;
+
+    let cfg = crate::config::paths::load().unwrap_or_default();
+    if crate::telemetry::opt_out::is_disabled(&cfg) {
+        return;
+    }
 
     let (repo_hash, repo_url_hash) = repo_identity_hashes(root);
     let id = distinct_id();
@@ -2995,6 +3016,52 @@ mod tests {
         }
     }
 
+    /// AK-678 opt-out fix: same as the override-path test above, but for the
+    /// direct `plan-check` path -- `ACTUAL_NO_TELEMETRY` must be checked
+    /// before `send_plan_governance_events` ever hashes repo identity or
+    /// calls `distinct_id()`, so no `telemetry-id` file gets written.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_exec_direct_opt_out_env_var_skips_events_and_id_file() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_telemetry = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.plan = vec![
+            "Sign".to_string(),
+            "access".to_string(),
+            "tokens".to_string(),
+            "with".to_string(),
+            "RS256".to_string(),
+        ];
+        args.repo = Some(root.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.no_rank = true;
+
+        let events = with_captured_plan_governance_events(|| assert!(exec(&args).is_ok()));
+
+        assert!(
+            events.is_empty(),
+            "opted-out user must get no governance events"
+        );
+        assert!(
+            !home.path().join("telemetry-id").exists(),
+            "opted-out user must get no persistent telemetry id file"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_exec_direct_returns_plan_not_conforming_on_a_real_conflict() {
@@ -4253,6 +4320,41 @@ mod tests {
         assert_eq!(
             rule_ids,
             std::collections::HashSet::from(["R-A-001".to_string(), "R-A-002".to_string()])
+        );
+    }
+
+    /// AK-678 opt-out fix: `ACTUAL_NO_TELEMETRY` must stop `distinct_id()`
+    /// from ever running, not just stop the outbound POST -- otherwise an
+    /// opted-out user still gets a persistent `telemetry-id` file written to
+    /// their config dir the first time they record an override. See
+    /// `send_override_events`'s doc comment and `PRIVACY.md`.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_exec_override_impl_opt_out_env_var_skips_events_and_id_file() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let _no_telemetry = EnvGuard::set("ACTUAL_NO_TELEMETRY", "1");
+        let repo = seed(&[("doc.md", OAUTH_DOC)]);
+
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-opt-out-1".to_string(),
+            rules: vec![plan_check_session::key("doc", "R-A-001")],
+            reason: "reviewed and accepted".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+
+        let events =
+            with_captured_plan_governance_events(|| assert!(exec_override_impl(&args).is_ok()));
+
+        assert!(
+            events.is_empty(),
+            "opted-out user must get no governance events"
+        );
+        assert!(
+            !home.path().join("telemetry-id").exists(),
+            "opted-out user must get no persistent telemetry id file"
         );
     }
 
