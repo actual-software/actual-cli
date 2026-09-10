@@ -36,6 +36,17 @@ const DISTINCT_ID_FILE: &str = "telemetry-id";
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const SEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The proxy's `PlanGovernanceEventRequest` schema caps a single batch at
+/// `z.array(PlanGovernanceEvent).min(1).max(100)` — see
+/// `ActualApiClient::post_plan_governance_events`'s doc comment. A normal
+/// `plan-check`/`--claude-hook` run never gets close (started + completed +
+/// at most `MAX_RULES_JUDGED` violations, well under 100), but
+/// `plan-check-override` emits one event per `--rule` flag with no cap of
+/// its own, so its caller must chunk into batches of at most this many
+/// events rather than sending one oversized batch the proxy would reject
+/// whole.
+pub const MAX_EVENTS_PER_BATCH: usize = 100;
+
 /// Get or create this installation's opaque, per-install telemetry
 /// identifier: a random UUIDv4, generated once, persisted under the config
 /// dir, and reused forever after.
@@ -46,6 +57,13 @@ const SEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// under the config dir: an unreadable or unwritable config dir degrades to
 /// a fresh random id for this process only (never blocks, never errors)
 /// rather than disabling telemetry entirely.
+///
+/// Validates that the file's contents parse as a UUID before trusting them
+/// — a truncated write, manual edit, or filesystem corruption could leave
+/// behind non-UUID bytes that would otherwise be sent as `distinct_id`
+/// forever after and might fail the proxy's schema. An invalid file is
+/// treated the same as a missing one: a fresh id is generated and written
+/// over it.
 pub fn distinct_id() -> String {
     let Ok(dir) = crate::config::paths::config_dir() else {
         return uuid::Uuid::new_v4().to_string();
@@ -53,7 +71,7 @@ pub fn distinct_id() -> String {
     let path = dir.join(DISTINCT_ID_FILE);
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let trimmed = existing.trim();
-        if !trimmed.is_empty() {
+        if uuid::Uuid::parse_str(trimmed).is_ok() {
             return trimmed.to_string();
         }
     }
@@ -292,6 +310,27 @@ mod tests {
 
         let id = distinct_id();
         assert!(uuid::Uuid::parse_str(&id).is_ok());
+    }
+
+    #[test]
+    fn test_distinct_id_recovers_from_corrupt_file() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set("ACTUAL_CONFIG_DIR", tmp.path().to_str().unwrap());
+
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join(DISTINCT_ID_FILE), "not-a-uuid\0garbage").unwrap();
+
+        let id = distinct_id();
+        assert!(
+            uuid::Uuid::parse_str(&id).is_ok(),
+            "a non-UUID file must not be trusted as-is"
+        );
+
+        // The regenerated id must also have been persisted, not just
+        // returned for this one call.
+        let on_disk = std::fs::read_to_string(tmp.path().join(DISTINCT_ID_FILE)).unwrap();
+        assert_eq!(on_disk.trim(), id);
     }
 
     #[test]
