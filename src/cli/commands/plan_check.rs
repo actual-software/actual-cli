@@ -1034,7 +1034,13 @@ fn send_override_events(root: &Path, keys: &[String]) {
         })
         .collect();
 
-    dispatch_plan_governance_events(events);
+    // One `--rule` flag per event, uncapped by the CLI itself, so a large
+    // enough override call can exceed the proxy's 100-event batch cap (see
+    // `plan_governance::MAX_EVENTS_PER_BATCH`) -- chunk rather than let one
+    // oversized batch get rejected whole.
+    for chunk in events.chunks(crate::telemetry::plan_governance::MAX_EVENTS_PER_BATCH) {
+        dispatch_plan_governance_events(chunk.to_vec());
+    }
 }
 
 /// `--claude-hook`-mode wrapper around [`send_plan_governance_events`]: every
@@ -4321,6 +4327,53 @@ mod tests {
             rule_ids,
             std::collections::HashSet::from(["R-A-001".to_string(), "R-A-002".to_string()])
         );
+    }
+
+    /// The proxy rejects a batch over 100 events whole (see
+    /// `plan_governance::MAX_EVENTS_PER_BATCH`), and `plan-check-override`
+    /// emits one event per `--rule` flag with no cap of its own -- so an
+    /// override naming more than 100 rules at once must still get every
+    /// event through by chunking, not lose the tail to an oversized batch.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn test_exec_override_impl_chunks_batches_over_the_event_cap() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        const RULE_COUNT: usize = 130;
+        let mut doc = String::from(
+            "# Many Rules\n\nThese rules are ALWAYS ACTIVE for everything.\n\n### Rules\n\n",
+        );
+        for n in 0..RULE_COUNT {
+            doc.push_str(&format!("- **R-A-{n:03}** MUST: satisfy condition {n}.\n"));
+        }
+        let repo = seed(&[("doc.md", &doc)]);
+
+        let rules: Vec<String> = (0..RULE_COUNT)
+            .map(|n| plan_check_session::key("doc", &format!("R-A-{n:03}")))
+            .collect();
+        let args = PlanCheckOverrideArgs {
+            session: "sess-cli-chunking-1".to_string(),
+            rules,
+            reason: "bulk reviewed".to_string(),
+            repo: Some(repo.path().to_path_buf()),
+            rules_dir: None,
+        };
+
+        let events =
+            with_captured_plan_governance_events(|| assert!(exec_override_impl(&args).is_ok()));
+
+        assert_eq!(
+            events.len(),
+            RULE_COUNT,
+            "every override event must survive chunking, not just the first 100"
+        );
+        let rule_ids: std::collections::HashSet<_> = events
+            .iter()
+            .map(|e| e.properties.as_ref().unwrap().rule_id.clone().unwrap())
+            .collect();
+        assert_eq!(rule_ids.len(), RULE_COUNT);
     }
 
     /// AK-678 opt-out fix: `ACTUAL_NO_TELEMETRY` must stop `distinct_id()`
