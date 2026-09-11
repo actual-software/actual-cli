@@ -229,9 +229,9 @@ pub struct TelemetryMetric {
 // These types are send-only (the CLI builds and POSTs a request; only the
 // response is ever deserialized), so `#[serde(deny_unknown_fields)]` is
 // deliberately not applied here -- that guards a process against unexpected
-// keys in something it *parses* (see `docs/adr/apply-serde-deny-unknown-fields-*`),
-// and the server's `.strict()` schema is the correct place to enforce the
-// payload shape on this side of the wire.
+// keys in something it *parses*, and sprintreview's `.strict()` Zod schema
+// is the correct place to enforce the payload shape on this side of the
+// wire.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
