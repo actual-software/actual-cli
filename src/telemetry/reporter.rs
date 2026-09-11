@@ -7,17 +7,16 @@ use crate::telemetry::metrics::SyncMetrics;
 ///
 /// This key is scoped to submitting telemetry via the CLI's ingest routes —
 /// `POST /counter/record` here, and (as of AK-678) `POST
-/// /plan-governance/record` via `telemetry::plan_governance`'s own copy of
-/// this same literal. It does not grant read, admin, or any other access to
+/// /plan-governance/record` via `telemetry::plan_governance`, which reuses
+/// this same constant. It does not grant read, admin, or any other access to
 /// the telemetry service. Embedding it in the compiled binary is
 /// intentional and carries the same risk profile as a public Segment write
 /// key or a Mixpanel project token.
 ///
-/// If this key is rotated, update it here *and* in
-/// `telemetry::plan_governance::SERVICE_KEY` and redeploy — the two are
-/// deliberately separate constants (no shared crate-internal visibility)
-/// but must always hold the same value.
-const SERVICE_KEY: &str = "ak_telemetry_prod_actual_cli";
+/// `pub(crate)` rather than private so `telemetry::plan_governance` shares
+/// this one definition instead of duplicating the literal — a rotation only
+/// needs to update it here.
+pub(crate) const SERVICE_KEY: &str = "ak_telemetry_prod_actual_cli";
 
 /// Send collected sync metrics to the telemetry endpoint.
 ///

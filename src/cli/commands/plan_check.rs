@@ -563,12 +563,16 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
     // (see the module doc's "revision loop" section), so it maps to `warn`
     // here via `verdict.blocks()`, matching that documented behavior.
     #[cfg(feature = "telemetry")]
-    if let Outcome::Verdicts { verdicts, .. } = &outcome {
+    if let Outcome::Verdicts {
+        verdicts, partial, ..
+    } = &outcome
+    {
         let decision = if verdicts.iter().any(|v| v.verdict.blocks()) {
             crate::api::types::PlanGovernanceDecision::Block
         } else if verdicts
             .iter()
             .any(|v| v.verdict == Verdict::RequiresDecision)
+            || partial.is_some()
         {
             crate::api::types::PlanGovernanceDecision::Warn
         } else {
@@ -2899,6 +2903,72 @@ mod tests {
             assert_eq!(props.exit_code, Some(0));
             assert_eq!(props.command.as_deref(), Some("plan-check"));
         }
+    }
+
+    /// The bug a review flagged: direct mode's telemetry block used to
+    /// destructure `Outcome::Verdicts { verdicts, .. }`, dropping `partial`,
+    /// so a run that only judged a prefix of the applicable rules reported
+    /// `decision=allow` -- identical to a run that judged everything. The
+    /// hook path already treats `partial.is_some()` as `warn` (see
+    /// `test_exec_hook_with_round_limit_pass_emits_warn_governance_events`);
+    /// direct mode must match it.
+    #[cfg(all(unix, feature = "telemetry"))]
+    #[test]
+    fn test_exec_direct_partial_coverage_emits_warn_not_allow() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 1) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let bin = tempdir().unwrap();
+        let verdicts: Vec<serde_json::Value> = (0..MAX_RULES_JUDGED)
+            .map(|i| {
+                serde_json::json!({
+                    "doc_slug": "cross-cutting-many-abcd",
+                    "rule_id": format!("R-X-{i:04}"),
+                    "verdict": "conforming",
+                    "span": "",
+                    "reason": "not touched",
+                })
+            })
+            .collect();
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &check_output(serde_json::json!(verdicts)))
+                .to_str()
+                .unwrap(),
+        );
+
+        let mut args = base_args();
+        args.plan = vec![
+            "Add".to_string(),
+            "a".to_string(),
+            "new".to_string(),
+            "widget".to_string(),
+            "in".to_string(),
+            "services/widgets".to_string(),
+        ];
+        args.repo = Some(root.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.no_rank = true;
+
+        let events = with_captured_plan_governance_events(|| assert!(exec(&args).is_ok()));
+
+        let completed = events
+            .iter()
+            .find(|e| {
+                e.event == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+            })
+            .expect("a completed event must be emitted");
+        assert_eq!(
+            completed.properties.as_ref().unwrap().decision,
+            Some(crate::api::types::PlanGovernanceDecision::Warn),
+            "a run that only judged a prefix of the applicable rules must warn, not allow"
+        );
     }
 
     /// AK-678 opt-out fix: same as the override-path test above, but for the
