@@ -56,11 +56,14 @@ coverage locally with the same exclusions as CI:
 ```bash
 cargo install cargo-llvm-cov
 cargo llvm-cov --workspace \
-  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs)' \
+  --ignore-filename-regex '(src/main\.rs|tests/|real_terminal\.rs|sync_kb_poller\.rs|tui/renderer\.rs|pty\.rs|session\.rs|test_support\.rs|cli/commands/login\.rs)' \
   --lcov --output-path lcov.info
 ```
 
 ## Project Structure
+
+For a deeper reference — per-module responsibilities, key types, the sync data
+flow, and extension seams — see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```
 src/
@@ -90,7 +93,9 @@ scripts/           # E2E and helper scripts
 - Use `tracing` for structured logging (not `println!`)
 - Use `serde` for serialization
 - Use `tokio` for the async runtime
-- Prefer `anyhow::Result` in binary code, typed errors in library code
+- Use typed `Result<_, ActualError>` at module boundaries, including `main.rs`
+  and `lib.rs`. `anyhow` is used only inside `analysis::signals`, converted to
+  `ActualError` at that subsystem's public boundary
 - Unit tests go in the same file as the code they test
   (`#[cfg(test)] mod tests`)
 - Integration tests go in `tests/`
