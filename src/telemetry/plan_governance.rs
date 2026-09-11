@@ -16,11 +16,7 @@ use crate::api::types::{
 use crate::config::types::Config;
 use crate::rules::check::Verdict;
 use crate::telemetry::opt_out;
-
-/// Public write-only telemetry key — see `reporter::SERVICE_KEY`'s doc
-/// comment for the security rationale (safe to embed; scoped only to
-/// telemetry ingest routes, no other access).
-const SERVICE_KEY: &str = "ak_telemetry_prod_actual_cli";
+use crate::telemetry::reporter::SERVICE_KEY;
 
 /// Filename under the config dir (sibling to `plan-check-overrides.log`)
 /// holding this installation's persisted anonymous telemetry id.
@@ -477,5 +473,40 @@ mod tests {
             "http://127.0.0.1:1",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_send_events_client_construction_failure_does_not_panic() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+        let ctx = context();
+        // A non-HTTPS, non-loopback URL makes `ActualApiClient::new_with_timeout`
+        // return `Err`, exercising the early return on client construction
+        // failure rather than the network path.
+        send_events(
+            vec![ctx.started_event()],
+            &Config::default(),
+            "http://example.com",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_send_events_server_side_failures_does_not_panic() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::remove("ACTUAL_NO_TELEMETRY");
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/plan-governance/record")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"recorded": 0, "failed": 1, "errors": ["rejected"]}"#)
+            .create_async()
+            .await;
+
+        let ctx = context();
+        send_events(vec![ctx.started_event()], &Config::default(), &server.url()).await;
+        mock.assert_async().await;
     }
 }
