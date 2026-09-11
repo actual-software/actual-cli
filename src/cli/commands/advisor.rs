@@ -213,29 +213,20 @@ fn parse_git_remote_url(url: &str) -> Option<RepoRemote> {
     })
 }
 
-/// Match a parsed origin remote against the org's connected repos. Prefers an
-/// exact `owner`+`name` match (case-insensitive, as GitHub owners and repo names
-/// are); when none match exactly, falls back to a name-only match so a fork whose
-/// owner differs still resolves to its connected upstream. Returns every
-/// candidate — the caller scopes on exactly one and falls back to org level on
-/// zero or several.
+/// Match a parsed origin remote against the org's connected repos using the
+/// exact `owner`+`name` pair (case-insensitive, as GitHub owners and repo names
+/// are). A name alone is not authoritative: it may belong to an unrelated repo
+/// and must fall back to org-level querying instead of silently mis-scoping.
 fn match_remote_to_repos<'a>(
     remote: &RepoRemote,
     repos: &'a [ConnectedRepository],
 ) -> Vec<&'a ConnectedRepository> {
-    let exact: Vec<&ConnectedRepository> = repos
+    repos
         .iter()
         .filter(|r| {
             r.external_owner.eq_ignore_ascii_case(&remote.owner)
                 && r.name.eq_ignore_ascii_case(&remote.name)
         })
-        .collect();
-    if !exact.is_empty() {
-        return exact;
-    }
-    repos
-        .iter()
-        .filter(|r| r.name.eq_ignore_ascii_case(&remote.name))
         .collect()
 }
 
@@ -253,29 +244,6 @@ fn format_repo_scope(qualified_name: Option<&str>, id: &str) -> String {
     }
 }
 
-/// Read the `origin` remote URL of the git repo containing `dir`, or `None` when
-/// there is no repo, no `origin` remote, git is unavailable, or the lookup times
-/// out. Best-effort: every failure collapses to `None` so auto-detection can fall
-/// back to an org-level query. Mirrors the sync pipeline's `git remote get-url`
-/// invocation (piped output, `kill_on_drop`, bounded by a timeout).
-async fn origin_remote_url(dir: &Path) -> Option<String> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.args(["remote", "get-url", "origin"]);
-    cmd.current_dir(dir);
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.kill_on_drop(true);
-    let child = cmd.spawn().ok()?;
-    match tokio::time::timeout(GIT_REMOTE_TIMEOUT, child.wait_with_output()).await {
-        Ok(Ok(output)) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            (!stdout.is_empty()).then_some(stdout)
-        }
-        _ => None,
-    }
-}
-
 /// Best-effort auto-detection of the connected repo for the working tree at
 /// `dir`. Resolves the `origin` remote, matches it against the org's connected
 /// repositories, and returns the `repo_unique_id` when exactly one matches
@@ -283,7 +251,7 @@ async fn origin_remote_url(dir: &Path) -> Option<String> {
 /// when there is no remote, nothing matches, the match is ambiguous, or the
 /// lookup fails; a short note on stderr explains the fallback where it helps.
 async fn auto_detect_repo(dir: &Path, client: &ActualApiClient, org_id: &str) -> Option<String> {
-    let url = origin_remote_url(dir).await?;
+    let url = crate::git::origin_remote_url(dir, GIT_REMOTE_TIMEOUT).await?;
     let remote = parse_git_remote_url(&url)?;
     let repos = match client.list_connected_repos(org_id).await {
         Ok(repos) => repos,
@@ -394,7 +362,7 @@ enum Outcome {
 /// across every per-repo config feature.
 async fn sticky_key(repo_dir: Option<&Path>) -> Option<String> {
     let dir = repo_dir?;
-    let input = origin_remote_url(dir)
+    let input = crate::git::origin_remote_url(dir, GIT_REMOTE_TIMEOUT)
         .await
         .unwrap_or_else(|| dir.to_string_lossy().to_string());
     let mut hasher = Sha256::new();
@@ -1719,19 +1687,19 @@ mod tests {
     }
 
     #[test]
-    fn test_match_remote_name_only_fallback_for_fork() {
-        // A fork's owner differs, but the unique name resolves to the upstream.
+    fn test_match_remote_does_not_guess_from_name_only() {
+        // A different owner is not authoritative evidence that this is a fork
+        // of the connected repo. A coincidental name must not silently scope
+        // an advisor query to unrelated repository data.
         let remote = RepoRemote {
-            owner: "my-fork".to_string(),
+            owner: "unrelated-owner".to_string(),
             name: "actual-cli".to_string(),
         };
         let repos = vec![
             repo("actual-software", "actual-cli", "id-cli"),
             repo("other", "web", "id-web"),
         ];
-        let m = match_remote_to_repos(&remote, &repos);
-        assert_eq!(m.len(), 1);
-        assert_eq!(m[0].repo_unique_id, "id-cli");
+        assert!(match_remote_to_repos(&remote, &repos).is_empty());
     }
 
     #[test]
@@ -1745,8 +1713,9 @@ mod tests {
     }
 
     #[test]
-    fn test_match_remote_many_when_name_shared_across_owners() {
-        // The fork owner matches neither; the shared name is ambiguous.
+    fn test_match_remote_ignores_shared_name_without_owner_match() {
+        // Neither same-name repository has the remote's owner, so neither is
+        // safe to select.
         let remote = RepoRemote {
             owner: "my-fork".to_string(),
             name: "cli".to_string(),
@@ -1755,24 +1724,7 @@ mod tests {
             repo("actual-software", "cli", "id-a"),
             repo("other-org", "cli", "id-b"),
         ];
-        let m = match_remote_to_repos(&remote, &repos);
-        assert_eq!(m.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_origin_remote_url_reads_configured_remote() {
-        let dir = git_repo_with_remote("git@github.com:actual-software/actual-cli.git");
-        assert_eq!(
-            origin_remote_url(dir.path()).await.as_deref(),
-            Some("git@github.com:actual-software/actual-cli.git")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_origin_remote_url_none_outside_repo() {
-        // A plain temp dir is not a git repo → git exits non-zero → None.
-        let dir = tempdir().unwrap();
-        assert!(origin_remote_url(dir.path()).await.is_none());
+        assert!(match_remote_to_repos(&remote, &repos).is_empty());
     }
 
     #[tokio::test]
@@ -1827,7 +1779,7 @@ mod tests {
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
-                r#"{"repositories":[{"repo_unique_id":"a","name":"cli","external_owner":"actual-software","url":"u1"},{"repo_unique_id":"b","name":"cli","external_owner":"other-org","url":"u2"}]}"#,
+                r#"{"repositories":[{"repo_unique_id":"a","name":"cli","external_owner":"my-fork","url":"u1"},{"repo_unique_id":"b","name":"cli","external_owner":"my-fork","url":"u2"}]}"#,
             )
             .create_async()
             .await;
