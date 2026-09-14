@@ -429,8 +429,7 @@ struct GatheredRules {
 /// window every round (see [`select_judged_window`]) — a proven conflict is
 /// never left to chance. The rest of the window is not pinned to index zero
 /// every round either: it starts at [`rotation_offset`]`(session.rounds,
-/// _, _)`, one window-sized chunk per completed round, wrapping, where the
-/// window is the cap less however many rules are pinned. A rule left in the
+/// _)`, a cap-sized chunk per completed round, wrapping. A rule left in the
 /// truncated tail on round 1 therefore has a real chance of landing inside
 /// the judged window on a later round instead of being silently skipped for
 /// the entire life of the session — session `rounds` only advances when a
@@ -506,17 +505,12 @@ fn gather_rules(
 /// there are more than that many. A rule the session has already denied at
 /// least once (present in `session.deny_counts`) is pinned into every
 /// round's window instead of being left to rotation: [`rotation_offset`]
-/// moves the judged window by whole window-sized chunks, so a proven conflict
+/// moves the judged window by whole cap-sized chunks, so a proven conflict
 /// can rotate clean out of the window on the very next round, and a plan
 /// revision resets `cleared` (keyed to the plan digest that earned it)
 /// before rotation ever applies — nothing else keeps re-checking a rule
 /// already known to conflict. Only the non-pinned remainder rotates; pinned
 /// rules keep their original selection-then-declaration order ahead of it.
-/// The remainder strides by the width it actually fills — the cap less the
-/// pinned count — rather than by the cap: a cap-sized stride over a narrower
-/// window revisits the same offsets whenever `gcd(cap, rest.len())` exceeds
-/// the window, and the slots past each of them are then never judged for
-/// the life of the session (41 candidates with one pin never judge the 41st).
 /// When pinned rules alone meet or exceed the cap, they fill the whole
 /// window on their own (still in that same order) and nothing else rotates
 /// in this round.
@@ -535,7 +529,7 @@ fn select_judged_window(
     }
     let remaining = MAX_RULES_JUDGED - pinned.len();
     if !rest.is_empty() {
-        let offset = rotation_offset(session.rounds, remaining, rest.len());
+        let offset = rotation_offset(session.rounds, rest.len());
         rest.rotate_left(offset);
     }
     rest.truncate(remaining);
@@ -544,10 +538,7 @@ fn select_judged_window(
 }
 
 /// The judged window's starting offset for `round`, into `considered`
-/// non-excluded candidates: `round` strides of `stride` in, wrapping.
-/// `stride` is the width of the window the caller is about to fill — the cap
-/// less any pinned rules — so each round's window starts where the previous
-/// round's ended rather than a whole cap further along. Round 0 —
+/// non-excluded candidates: `round` cap-sized chunks in, wrapping. Round 0 —
 /// a session's first call, and every direct-mode call, which never tracks
 /// rounds at all (`PlanCheckSession::default()` always has `rounds: 0`) —
 /// always resolves to offset zero, the same window a plain unrotated cap
@@ -556,11 +547,11 @@ fn select_judged_window(
 /// cannot occur at the only call site (guarded by `truncated`, which implies
 /// `considered > MAX_RULES_JUDGED > 0`), but returns 0 rather than divide by
 /// zero if ever called otherwise.
-fn rotation_offset(round: u32, stride: usize, considered: usize) -> usize {
+fn rotation_offset(round: u32, considered: usize) -> usize {
     if considered == 0 {
         return 0;
     }
-    ((round as u64).saturating_mul(stride as u64) % considered as u64) as usize
+    ((round as u64).saturating_mul(MAX_RULES_JUDGED as u64) % considered as u64) as usize
 }
 
 // ── direct mode ──────────────────────────────────────────────────────────
@@ -1697,51 +1688,6 @@ mod tests {
         assert!(ids.contains(&"R-X-0044"));
     }
 
-    /// The stride must match the window the pin leaves, not the cap. With
-    /// `MAX_RULES_JUDGED + 1` candidates and one denied rule, the pin leaves
-    /// a 39-wide window over 40 rotating candidates: a cap-sized stride lands
-    /// on offset `40 % 40 == 0` every round and never judges the last
-    /// candidate, while a window-sized stride reaches it on round 1.
-    #[test]
-    fn test_gather_rules_judges_the_last_candidate_within_two_rounds_when_a_rule_is_pinned() {
-        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
-        for i in 0..(MAX_RULES_JUDGED + 1) {
-            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
-        }
-        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
-        let report = crate::rules::load_rule_set(root.path()).unwrap();
-        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
-        let query = Query::new("Add a new widget in services/widgets".to_string());
-        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
-        let doc_slug = selection.selected[0].slug.clone();
-        let last = format!("R-X-{MAX_RULES_JUDGED:04}");
-
-        // R-X-0000 was denied on round 0, so it is pinned and the rotating
-        // remainder is R-X-0001..=R-X-0040 judged through a 39-wide window.
-        let mut session = PlanCheckSession::default();
-        session
-            .deny_counts
-            .insert(plan_check_session::key(&doc_slug, "R-X-0000"), 1);
-
-        let mut judged_within_two_rounds = false;
-        for round in 0..2 {
-            session.rounds = round;
-            let gathered = gather_rules(&selection, root.path(), &session, "test-digest");
-            assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
-            assert!(gathered.truncated);
-            let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
-            assert!(
-                ids.contains(&"R-X-0000"),
-                "round {round} must keep the denied rule pinned: {ids:?}"
-            );
-            judged_within_two_rounds |= ids.contains(&last.as_str());
-        }
-        assert!(
-            judged_within_two_rounds,
-            "{last} was truncated on round 0 and never judged on round 1 either"
-        );
-    }
-
     /// When previously-denied rules alone meet or exceed the cap, they fill
     /// the whole judged window on their own — nothing else rotates in, and
     /// nothing is dropped from the pinned set beyond the cap.
@@ -1782,29 +1728,12 @@ mod tests {
 
     #[test]
     fn test_rotation_offset_is_zero_at_round_zero_and_wraps_thereafter() {
-        assert_eq!(rotation_offset(0, MAX_RULES_JUDGED, 45), 0);
-        assert_eq!(rotation_offset(1, MAX_RULES_JUDGED, 45), MAX_RULES_JUDGED);
+        assert_eq!(rotation_offset(0, 45), 0);
+        assert_eq!(rotation_offset(1, 45), MAX_RULES_JUDGED);
         // Wraps back toward the start once enough rounds have passed to
         // cycle through every candidate at least once.
-        assert_eq!(
-            rotation_offset(2, MAX_RULES_JUDGED, 45),
-            (2 * MAX_RULES_JUDGED) % 45
-        );
-        assert_eq!(rotation_offset(0, MAX_RULES_JUDGED, 0), 0);
-    }
-
-    /// With a rule pinned the window is one narrower than the cap, and the
-    /// stride has to follow it: a 39-wide window over 40 rotating candidates
-    /// starts at 39 on round 1, not at `40 % 40 == 0`, which would re-judge
-    /// round 0's window and leave the same candidate unjudged forever.
-    #[test]
-    fn test_rotation_offset_strides_by_the_window_width_not_the_cap() {
-        let window = MAX_RULES_JUDGED - 1;
-        assert_eq!(rotation_offset(1, window, MAX_RULES_JUDGED), window);
-        assert_eq!(
-            rotation_offset(2, window, MAX_RULES_JUDGED),
-            (2 * window) % MAX_RULES_JUDGED
-        );
+        assert_eq!(rotation_offset(2, 45), (2 * MAX_RULES_JUDGED) % 45);
+        assert_eq!(rotation_offset(0, 0), 0);
     }
 
     // ── deny / notice text ───────────────────────────────────────────────
