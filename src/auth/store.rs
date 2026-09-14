@@ -168,14 +168,15 @@ pub fn delete() -> Result<(), ActualError> {
 }
 
 /// Delete credentials at a specific path. Idempotent.
+///
+/// Also removes the `.tmp` staging sibling [`crate::config::paths::write_secure`]
+/// may have left behind if a prior save died between staging and rename —
+/// that sibling holds the same plaintext access and refresh tokens, so
+/// `actual logout` leaving it behind would mean logout did not actually
+/// revoke local access to those credentials.
 pub fn delete_from(path: &Path) -> Result<(), ActualError> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(credentials_error(format!(
-            "Failed to remove credentials file: {e}"
-        ))),
-    }
+    crate::config::paths::remove_secure(path)
+        .map_err(|e| credentials_error(format!("Failed to remove credentials file: {e}")))
 }
 
 /// Write credentials content, ensuring the file is never world-readable.
@@ -252,6 +253,23 @@ mod tests {
         let path = dir.path().join(CREDENTIALS_FILENAME);
         // Idempotent: deleting a non-existent credentials file succeeds.
         delete_from(&path).unwrap();
+    }
+
+    /// The gap this guards: a write that staged the `.tmp` sibling but died
+    /// before rename leaves plaintext tokens on disk that `logout` must
+    /// still remove, not just whatever file happened to complete a rename.
+    #[test]
+    fn test_delete_from_also_removes_a_leftover_tmp_sibling() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(CREDENTIALS_FILENAME);
+        save_to(&sample(), &path).unwrap();
+        let tmp = dir.path().join(format!("{CREDENTIALS_FILENAME}.tmp"));
+        std::fs::write(&tmp, b"stale plaintext tokens from an interrupted save").unwrap();
+
+        delete_from(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(!tmp.exists());
     }
 
     #[cfg(unix)]

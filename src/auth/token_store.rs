@@ -485,13 +485,14 @@ fn file_get(name: &str) -> Result<Option<String>, ActualError> {
     Ok(Some(token))
 }
 
+/// Also removes the `.tmp` staging sibling [`crate::config::paths::write_secure`]
+/// may have left behind if a prior save died between staging and rename —
+/// that sibling holds the same encrypted blob `path` would have, and nothing
+/// else in this module ever sweeps it.
 fn file_delete(name: &str) -> Result<(), ActualError> {
     let path = token_file(name)?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(token_error(format!("failed to remove token file: {e}"))),
-    }
+    crate::config::paths::remove_secure(&path)
+        .map_err(|e| token_error(format!("failed to remove token file: {e}")))
 }
 
 /// Write `content` to `path`, creating parent directories first. The actual
@@ -1152,6 +1153,28 @@ mod tests {
         let (_tmp, _g0, _g1, _g2, _g3) = file_backend_env("pw");
         // Deleting a token that was never stored is a no-op success.
         delete("never-stored").unwrap();
+    }
+
+    /// The gap this guards: a write that staged the `.tmp` sibling but died
+    /// before rename leaves an encrypted blob on disk that deleting the
+    /// token must still remove, not just whatever file happened to complete
+    /// a rename.
+    #[test]
+    fn test_file_delete_also_removes_a_leftover_tmp_sibling() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, _g0, _g1, _g2, _g3) = file_backend_env("pw");
+        store("leftover", "actl_pat_v").unwrap();
+        let path = token_file("leftover").unwrap();
+        let stale_tmp = path.with_file_name(format!(
+            "{}.tmp",
+            path.file_name().unwrap().to_str().unwrap()
+        ));
+        std::fs::write(&stale_tmp, b"stale encrypted blob").unwrap();
+
+        delete("leftover").unwrap();
+
+        assert!(!path.exists());
+        assert!(!stale_tmp.exists());
     }
 
     #[test]

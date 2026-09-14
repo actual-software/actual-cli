@@ -225,6 +225,26 @@ pub fn append_secure(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.write_all(bytes)
 }
 
+/// Remove `path` and, best-effort, the `.tmp` staging sibling
+/// [`write_secure`] may have left behind — a process killed between staging
+/// and rename leaves that sibling holding the same plaintext content `path`
+/// would have received, so a caller deleting `path` for its content (secrets,
+/// credentials) must not leave a readable copy behind under a different
+/// name. Idempotent: a missing `path` or missing sibling is success either
+/// way, matching `write_secure`'s own best-effort staging.
+pub fn remove_secure(path: &Path) -> std::io::Result<()> {
+    remove_if_present(path)?;
+    remove_if_present(&tmp_sibling(path))
+}
+
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +691,42 @@ mod tests {
     fn test_tmp_sibling_appends_rather_than_replaces_the_extension() {
         let path = Path::new("/x/y/session.json");
         assert_eq!(tmp_sibling(path), Path::new("/x/y/session.json.tmp"));
+    }
+
+    #[test]
+    fn test_remove_secure_deletes_both_the_target_and_its_tmp_sibling() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("credentials.yaml");
+        std::fs::write(&path, b"final content").unwrap();
+        // Simulate a prior write that staged but never got to rename.
+        std::fs::write(tmp_sibling(&path), b"stale plaintext tokens").unwrap();
+
+        remove_secure(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(!tmp_sibling(&path).exists());
+    }
+
+    /// The gap this guards: a caller must be able to clean up after a save
+    /// that never got far enough to create the real file at all (crashed
+    /// while staging, before the rename) — not just the common case where
+    /// both files exist.
+    #[test]
+    fn test_remove_secure_is_idempotent_when_only_the_tmp_sibling_exists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("credentials.yaml");
+        std::fs::write(tmp_sibling(&path), b"stale plaintext tokens").unwrap();
+
+        remove_secure(&path).unwrap();
+
+        assert!(!tmp_sibling(&path).exists());
+    }
+
+    #[test]
+    fn test_remove_secure_succeeds_when_neither_file_exists() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("credentials.yaml");
+        remove_secure(&path).unwrap();
     }
 
     #[test]
