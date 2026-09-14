@@ -392,6 +392,19 @@ pub enum Command {
     PlanCheck(PlanCheckArgs),
     /// Explicitly override one or more rules the plan-check revision loop
     /// has denied, for a specific session — a human action, never the agent's
+    ///
+    /// Refused unless run interactively from an ordinary terminal: standard
+    /// input must be a real tty, and this process's environment must not
+    /// carry Claude Code's own `CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT`
+    /// markers (present in every tool call Claude Code itself runs,
+    /// including from its integrated terminal). Neither check is a
+    /// cryptographic proof of human origin — a tool that allocates its own
+    /// pty could still spoof the first, and an agent that scrubs its own
+    /// environment could still clear the second — this raises the cost of
+    /// an agent overriding its own denial by default, it does not guarantee
+    /// against one that goes out of its way to evade detection. A human
+    /// refused from Claude Code's integrated terminal should run the
+    /// command from a separate, ordinary terminal instead.
     #[command(name = "plan-check-override")]
     PlanCheckOverride(PlanCheckOverrideArgs),
 }
@@ -978,8 +991,10 @@ pub const DEFAULT_MAX_ROUNDS: u32 = 3;
 /// agent, explicitly clearing one or more rules that the revision loop
 /// (`--claude-hook`) has denied, for a specific session.
 ///
-/// There is deliberately no way for an agent to invoke this on its own
-/// behalf — the whole point of an override is that it is a human decision,
+/// [`crate::cli::commands::plan_check::exec_override`] refuses to run this
+/// from an agent's default tool-execution environment (see that function's
+/// doc for exactly what the terminal and `CLAUDECODE` checks do and do not
+/// close) — the whole point of an override is that it is a human decision,
 /// made outside the agent's control, and [`crate::cli::commands::plan_check_session::record_override`]
 /// writes a durable, append-only audit-log entry for every one, so an
 /// override is visible, never silent.
@@ -1220,6 +1235,31 @@ mod parse_tests {
             "reviewed",
         ]);
         assert!(result.is_err());
+    }
+
+    /// The gap this guards: clap_derive resets a wrapped args struct's own
+    /// `long_about` to the enum variant's doc comment when that comment is a
+    /// single paragraph, so `actual plan-check-override --help` used to
+    /// print only the one-line summary and never mention either check a
+    /// refusal points a human at. A multi-paragraph variant doc renders in
+    /// full instead.
+    #[test]
+    fn test_plan_check_override_long_help_describes_both_gating_checks() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let mut sub = cmd
+            .find_subcommand("plan-check-override")
+            .expect("plan-check-override is a registered subcommand")
+            .clone();
+        let help = sub.render_long_help().to_string();
+        assert!(
+            help.contains("CLAUDECODE"),
+            "long help does not mention the CLAUDECODE marker check: {help}"
+        );
+        assert!(
+            help.to_lowercase().contains("terminal"),
+            "long help does not mention the terminal check: {help}"
+        );
     }
 
     #[test]

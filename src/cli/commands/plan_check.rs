@@ -429,7 +429,7 @@ struct GatheredRules {
 /// window every round (see [`select_judged_window`]) — a proven conflict is
 /// never left to chance. The rest of the window is not pinned to index zero
 /// every round either: it starts at [`rotation_offset`]`(session.rounds,
-/// _)`, a cap-sized chunk per completed round, wrapping. A rule left in the
+/// _, _)`, a window-sized chunk per completed round, wrapping. A rule left in the
 /// truncated tail on round 1 therefore has a real chance of landing inside
 /// the judged window on a later round instead of being silently skipped for
 /// the entire life of the session — session `rounds` only advances when a
@@ -529,7 +529,7 @@ fn select_judged_window(
     }
     let remaining = MAX_RULES_JUDGED - pinned.len();
     if !rest.is_empty() {
-        let offset = rotation_offset(session.rounds, rest.len());
+        let offset = rotation_offset(session.rounds, remaining, rest.len());
         rest.rotate_left(offset);
     }
     rest.truncate(remaining);
@@ -538,20 +538,26 @@ fn select_judged_window(
 }
 
 /// The judged window's starting offset for `round`, into `considered`
-/// non-excluded candidates: `round` cap-sized chunks in, wrapping. Round 0 —
-/// a session's first call, and every direct-mode call, which never tracks
-/// rounds at all (`PlanCheckSession::default()` always has `rounds: 0`) —
-/// always resolves to offset zero, the same window a plain unrotated cap
-/// would have judged, so this changes nothing until a session completes at
-/// least one round against a selection larger than the cap. `considered == 0`
-/// cannot occur at the only call site (guarded by `truncated`, which implies
-/// `considered > MAX_RULES_JUDGED > 0`), but returns 0 rather than divide by
-/// zero if ever called otherwise.
-fn rotation_offset(round: u32, considered: usize) -> usize {
+/// non-excluded candidates: `round` `window`-sized chunks in, wrapping.
+/// `window` is the actual number of slots [`select_judged_window`] will keep
+/// after truncating — `MAX_RULES_JUDGED` minus however many rules are
+/// pinned this round — not the raw cap: striding by the cap while truncating
+/// to a narrower window left a `gcd(MAX_RULES_JUDGED, considered)`-sized band
+/// permanently unreached whenever `gcd(MAX_RULES_JUDGED, considered) >
+/// window`, which a pinned rule makes almost certain once a session has
+/// denied anything. Round 0 — a session's first call, and every direct-mode
+/// call, which never tracks rounds at all (`PlanCheckSession::default()`
+/// always has `rounds: 0`) — always resolves to offset zero, the same window
+/// a plain unrotated cap would have judged, so this changes nothing until a
+/// session completes at least one round against a selection larger than the
+/// cap. `considered == 0` cannot occur at the only call site (guarded by
+/// `!rest.is_empty()`), but returns 0 rather than divide by zero if ever
+/// called otherwise.
+fn rotation_offset(round: u32, window: usize, considered: usize) -> usize {
     if considered == 0 {
         return 0;
     }
-    ((round as u64).saturating_mul(MAX_RULES_JUDGED as u64) % considered as u64) as usize
+    ((round as u64).saturating_mul(window as u64) % considered as u64) as usize
 }
 
 // ── direct mode ──────────────────────────────────────────────────────────
@@ -2063,12 +2069,55 @@ mod tests {
 
     #[test]
     fn test_rotation_offset_is_zero_at_round_zero_and_wraps_thereafter() {
-        assert_eq!(rotation_offset(0, 45), 0);
-        assert_eq!(rotation_offset(1, 45), MAX_RULES_JUDGED);
+        assert_eq!(rotation_offset(0, MAX_RULES_JUDGED, 45), 0);
+        assert_eq!(rotation_offset(1, MAX_RULES_JUDGED, 45), MAX_RULES_JUDGED);
         // Wraps back toward the start once enough rounds have passed to
         // cycle through every candidate at least once.
-        assert_eq!(rotation_offset(2, 45), (2 * MAX_RULES_JUDGED) % 45);
-        assert_eq!(rotation_offset(0, 0), 0);
+        assert_eq!(
+            rotation_offset(2, MAX_RULES_JUDGED, 45),
+            (2 * MAX_RULES_JUDGED) % 45
+        );
+        assert_eq!(rotation_offset(0, MAX_RULES_JUDGED, 0), 0);
+    }
+
+    /// The gap this guards: striding by the raw cap while the window is
+    /// narrower (because a rule is pinned) used to leave a permanent gap —
+    /// `rotation_offset` must stride by the actual window width instead. 41
+    /// candidates with one denied rule pinned means `rest.len() == 40`; the
+    /// old `rotation_offset(round, 40)` landed on offset 0 every round
+    /// (`round * 40 % 40 == 0`), so the last of the 40 non-pinned candidates
+    /// was never selected into the 39-wide remaining window on any round.
+    #[test]
+    fn test_select_judged_window_rotates_a_pinned_sessions_full_tail_into_view() {
+        let candidates: Vec<RuleForJudging> = (0..(MAX_RULES_JUDGED + 1))
+            .map(|i| {
+                RuleForJudging::new(
+                    "docs".to_string(),
+                    format!("R-X-{i:04}"),
+                    RuleLevel::Must,
+                    format!("rule number {i}"),
+                )
+            })
+            .collect();
+
+        let mut session = PlanCheckSession::default();
+        session
+            .deny_counts
+            .insert(plan_check_session::key("docs", "R-X-0000"), 1);
+
+        let mut seen = std::collections::BTreeSet::new();
+        for round in 0..MAX_RULES_JUDGED as u32 {
+            session.rounds = round;
+            let window = select_judged_window(candidates.clone(), &session);
+            assert_eq!(window.len(), MAX_RULES_JUDGED);
+            seen.extend(window.into_iter().map(|r| r.rule_id));
+        }
+
+        assert_eq!(
+            seen.len(),
+            MAX_RULES_JUDGED + 1,
+            "every candidate, including the pinned one, must surface within {MAX_RULES_JUDGED} rounds"
+        );
     }
 
     // ── deny / notice text ───────────────────────────────────────────────
