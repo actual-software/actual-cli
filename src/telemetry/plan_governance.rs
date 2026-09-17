@@ -37,7 +37,7 @@ const SEND_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// `ActualApiClient::post_plan_governance_events`'s doc comment. A normal
 /// `plan-check`/`--claude-hook` run never gets close (started + completed +
 /// at most `MAX_RULES_JUDGED` violations, well under 100), but
-/// `plan-check-override` emits one event per `--rule` flag with no cap of
+/// `check-override` emits one event per `--rule` flag with no cap of
 /// its own, so its caller must chunk into batches of at most this many
 /// events rather than sending one oversized batch the proxy would reject
 /// whole.

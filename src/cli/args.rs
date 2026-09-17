@@ -292,7 +292,7 @@ fn parse_max_rounds(s: &str) -> Result<u32, String> {
     Ok(val)
 }
 
-/// Parse and validate a `plan-check-override --rule` value, rejecting
+/// Parse and validate a `check-override --rule` value, rejecting
 /// anything that is not `<doc-slug>::<rule-id>`.
 ///
 /// Without this, a value missing the `<doc-slug>::` prefix (an easy mistake
@@ -300,7 +300,7 @@ fn parse_max_rounds(s: &str) -> Result<u32, String> {
 /// design: `hook_deny_reason`'s own doc comment explains why the deny
 /// message deliberately never assembles one) would be silently accepted,
 /// stored, and reported as a successful override that can never actually
-/// match a real rule — `PlanCheckSession::excludes` compares against the
+/// match a real rule — `GovernanceSession::excludes` compares against the
 /// exact `doc_slug::rule_id` key, so a malformed one is a silent no-op the
 /// human has no way to notice short of the same rule denying them again
 /// next round.
@@ -390,6 +390,9 @@ pub enum Command {
     Rules(RulesArgs),
     /// Check an implementation plan against the selected `.actual/rules/`
     PlanCheck(PlanCheckArgs),
+    /// Check a `git diff` against the same committed `.actual/rules/` corpus
+    /// `plan-check` checks plan text against
+    ImplCheck(ImplCheckArgs),
     /// Explicitly override one or more rules the plan-check revision loop
     /// has denied, for a specific session — a human action, never the agent's
     ///
@@ -405,7 +408,7 @@ pub enum Command {
     /// against one that goes out of its way to evade detection. A human
     /// refused from Claude Code's integrated terminal should run the
     /// command from a separate, ordinary terminal instead.
-    #[command(name = "plan-check-override")]
+    #[command(name = "check-override", visible_alias = "plan-check-override")]
     PlanCheckOverride(PlanCheckOverrideArgs),
 }
 
@@ -987,15 +990,135 @@ pub struct PlanCheckArgs {
 /// Default for [`PlanCheckArgs::max_rounds`].
 pub const DEFAULT_MAX_ROUNDS: u32 = 3;
 
-/// Arguments for the `plan-check-override` command: a human, never the
+/// Arguments for the `impl-check` command.
+///
+/// `plan-check`'s implementation-stage counterpart (AK-755): the same
+/// committed `.actual/rules/` corpus, the same shared pipeline
+/// (`crate::cli::commands::check_engine::run_pipeline`), and the same
+/// `--claude-hook` revision loop, judged against a `git diff` instead of plan
+/// text. Two callers, two shapes, exactly like `plan-check`: a human runs
+/// this directly, with the diff read from `--diff-file`, piped stdin, or (by
+/// default) `git diff HEAD` in the resolved repo, and the result is a panel
+/// or `--json`, with a nonzero exit reserved specifically for a `conflicting`
+/// verdict — every other outcome, including `not_checked` and
+/// `requires_decision`, exits 0. A CI job that gates on this command's exit
+/// code alone will not see the difference between "checked and clean" and
+/// "could not check"; a job that needs that distinction should read
+/// `--json`'s `status` field instead. Run with `--claude-hook`, the diff is
+/// always resolved via `git diff HEAD` — there is no envelope field carrying
+/// diff text the way `tool_input.plan` carries plan text — and the result is
+/// the hook's own JSON contract, shared verbatim with `plan-check
+/// --claude-hook`.
+///
+/// This doc comment is not what `--help` shows for this subcommand — clap
+/// takes a subcommand's "about" text from the `Command` enum variant's own
+/// doc comment, not this struct's, so the exit-code explanation above is
+/// real documentation that no CLI user would ever see without the
+/// `after_help` below repeating the load-bearing part of it.
+#[derive(Parser, Debug)]
+#[command(
+    after_help = "Exit codes: 0 for conforming, requires_decision, or not_checked (no \
+runner available, no applicable rules, or the judge call itself failed) -- only a real \
+conflict exits nonzero. A CI job that gates on exit code alone cannot distinguish \"checked \
+and clean\" from \"could not check\"; read --json's `status` field for that distinction."
+)]
+pub struct ImplCheckArgs {
+    /// Read the diff from this file instead of stdin or `git diff HEAD`.
+    /// Mainly for scripting and testing. Ignored under `--claude-hook`, which
+    /// always resolves the diff via `git diff HEAD`.
+    #[arg(long, value_name = "PATH", conflicts_with = "claude_hook")]
+    pub diff_file: Option<std::path::PathBuf>,
+
+    /// Repository root to resolve rules, paths, and `git diff HEAD` against.
+    /// Defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub repo: Option<std::path::PathBuf>,
+
+    /// Rules directory to score against, overriding `<repo>/.actual/rules`.
+    /// This is what `ACTUAL_RULES_DIR` becomes on the way into the CLI: the
+    /// hook resolves the override itself and forwards the resolved path here
+    /// rather than leaving this command to rediscover it from `--repo`.
+    #[arg(long, value_name = "PATH")]
+    pub rules_dir: Option<std::path::PathBuf>,
+
+    /// Parse a Claude Code `PreToolUse` hook envelope from stdin and emit the
+    /// hook's JSON contract on stdout instead of a panel. The diff is always
+    /// resolved via `git diff HEAD` in this mode; every failure degrades to
+    /// fail-open rather than an error exit, per that contract.
+    #[arg(long)]
+    pub claude_hook: bool,
+
+    /// Maximum number of rule documents to judge the diff against.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+
+    /// How many candidates the deterministic prefilter retrieves before the
+    /// limit is applied. Raised to `--limit` when smaller.
+    #[arg(long, default_value_t = crate::rules::scope::DEFAULT_CANDIDATES)]
+    pub candidates: usize,
+
+    /// Skip stage 2 (a runner-backed rank refining which documents apply) and
+    /// select with the deterministic prefilter alone. Direct-mode use only:
+    /// `--claude-hook` always uses the prefilter alone regardless of this
+    /// flag, so its one model call stays reserved for the conformance judge —
+    /// see `crate::cli::commands::plan_check` for why running both there
+    /// risks that budget. A human at a terminal has no such constraint, so
+    /// direct mode runs stage 2 by default, the same way `rules select` does.
+    #[arg(long)]
+    pub no_rank: bool,
+
+    /// Runner to use for stage 2 selection (direct mode only) and the
+    /// conformance judge. Probed automatically when omitted.
+    #[arg(long, value_enum)]
+    pub runner: Option<RunnerChoice>,
+
+    /// Model for stage 2 selection (direct mode only) and the judge,
+    /// overriding the configured one.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Print the result as JSON instead of a panel. Ignored under
+    /// `--claude-hook`, which always emits the hook's own JSON contract.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Rebuild the scope index before selecting.
+    #[arg(long)]
+    pub rebuild: bool,
+
+    /// How many times a single rule may be denied within one Claude Code
+    /// session (`--claude-hook` only) before the gate stops blocking on it
+    /// specifically, regardless of verdict. Tracked per rule, not per round:
+    /// a brand-new conflict always gets its own fresh count, no matter how
+    /// exhausted some other rule's count already is. Direct mode ignores
+    /// this — there is no session outside a hook envelope. Must be at least
+    /// 1: a value of 0 is rejected outright rather than treated as "always
+    /// fail open" (see `parse_max_rounds`).
+    ///
+    /// Uses its own environment variable, distinct from `plan-check`'s
+    /// `ACTUAL_PLAN_CHECK_MAX_ROUNDS`: the two commands' revision loops are
+    /// independent, even though they share the underlying session-state
+    /// module (`crate::cli::commands::governance_session`), keyed separately
+    /// by `session_id`.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_ROUNDS,
+        env = "ACTUAL_IMPL_CHECK_MAX_ROUNDS",
+        value_parser = parse_max_rounds
+    )]
+    pub max_rounds: u32,
+}
+
+/// Arguments for the `check-override` command (formerly `plan-check-override`,
+/// still accepted as a backward-compatible alias): a human, never the
 /// agent, explicitly clearing one or more rules that the revision loop
 /// (`--claude-hook`) has denied, for a specific session.
 ///
-/// [`crate::cli::commands::plan_check::exec_override`] refuses to run this
+/// [`crate::cli::commands::check_engine::exec_override`] refuses to run this
 /// from an agent's default tool-execution environment (see that function's
 /// doc for exactly what the terminal and `CLAUDECODE` checks do and do not
 /// close) — the whole point of an override is that it is a human decision,
-/// made outside the agent's control, and [`crate::cli::commands::plan_check_session::record_override`]
+/// made outside the agent's control, and [`crate::cli::commands::governance_session::record_override`]
 /// writes a durable, append-only audit-log entry for every one, so an
 /// override is visible, never silent.
 #[derive(Parser, Debug)]
@@ -1278,6 +1401,45 @@ mod parse_tests {
         #[rustfmt::skip]
         let Command::PlanCheckOverride(args) = cli.command else { panic!("expected PlanCheckOverride command") };
         assert_eq!(args.rules, vec!["some-doc::R-A-001".to_string()]);
+    }
+
+    /// `check-override` is now the primary, canonical name (AK-755 step 3):
+    /// `plan-check-override` above still parses only because it is kept as a
+    /// `visible_alias`, not because it is still the primary spelling.
+    #[test]
+    fn test_cli_accepts_check_override_as_the_primary_name() {
+        let cli = Cli::try_parse_from([
+            "actual",
+            "check-override",
+            "--session",
+            "s1",
+            "--rule",
+            "some-doc::R-A-001",
+            "--reason",
+            "reviewed",
+        ])
+        .unwrap();
+        #[rustfmt::skip]
+        let Command::PlanCheckOverride(args) = cli.command else { panic!("expected PlanCheckOverride command") };
+        assert_eq!(args.rules, vec!["some-doc::R-A-001".to_string()]);
+    }
+
+    /// `--help` must document both the new primary name and the old one, so
+    /// a user or script that only ever knew `plan-check-override` can
+    /// discover the rename instead of being left with a name that silently
+    /// stopped being mentioned anywhere.
+    #[test]
+    fn test_cli_help_mentions_both_check_override_names() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        assert!(
+            help.contains("check-override"),
+            "top-level help does not list check-override: {help}"
+        );
+        assert!(
+            help.contains("plan-check-override"),
+            "top-level help does not mention the plan-check-override alias: {help}"
+        );
     }
 
     #[test]
@@ -2192,5 +2354,117 @@ mod parse_tests {
     #[test]
     fn test_plan_check_args_from_other_commands_is_none() {
         assert!(plan_check_args_from(&["actual", "status"]).is_none());
+    }
+
+    // ---- ImplCheckArgs / `impl-check` parsing tests ----
+
+    /// Extract `impl-check` arguments from a parsed command.
+    fn impl_check_args_from(argv: &[&str]) -> Option<ImplCheckArgs> {
+        match Cli::try_parse_from(argv).ok()?.command {
+            Command::ImplCheck(args) => Some(args),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_impl_check_parses_with_defaults() {
+        let args =
+            impl_check_args_from(&["actual", "impl-check"]).expect("expected an impl-check command");
+        assert!(!args.claude_hook);
+        assert!(!args.no_rank);
+        assert!(!args.json);
+        assert!(!args.rebuild);
+        assert_eq!(args.limit, 20);
+        assert_eq!(args.candidates, crate::rules::scope::DEFAULT_CANDIDATES);
+        assert!(args.runner.is_none());
+        assert!(args.model.is_none());
+        assert!(args.rules_dir.is_none());
+        assert!(args.diff_file.is_none());
+        assert_eq!(args.max_rounds, DEFAULT_MAX_ROUNDS);
+    }
+
+    #[test]
+    fn test_impl_check_claude_hook_parses() {
+        let args = impl_check_args_from(&["actual", "impl-check", "--claude-hook"])
+            .expect("expected an impl-check command");
+        assert!(args.claude_hook);
+    }
+
+    #[test]
+    fn test_impl_check_diff_file_parses() {
+        let args = impl_check_args_from(&["actual", "impl-check", "--diff-file", "the.diff"])
+            .expect("expected an impl-check command");
+        assert_eq!(
+            args.diff_file.as_deref(),
+            Some(std::path::Path::new("the.diff"))
+        );
+    }
+
+    #[test]
+    fn test_impl_check_rules_dir_and_no_rank_parse() {
+        let args = impl_check_args_from(&[
+            "actual",
+            "impl-check",
+            "--no-rank",
+            "--rules-dir",
+            "/repo/.actual/rules",
+        ])
+        .expect("expected an impl-check command");
+        assert!(args.no_rank);
+        assert_eq!(
+            args.rules_dir.as_deref(),
+            Some(std::path::Path::new("/repo/.actual/rules"))
+        );
+    }
+
+    /// `--diff-file` and `--claude-hook` name mutually exclusive diff
+    /// sources: the hook always resolves the diff via `git diff HEAD`, so
+    /// combining them is a usage error rather than a silently ignored flag.
+    #[test]
+    fn test_impl_check_diff_file_conflicts_with_claude_hook() {
+        assert!(Cli::try_parse_from([
+            "actual",
+            "impl-check",
+            "--claude-hook",
+            "--diff-file",
+            "the.diff",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn test_impl_check_args_from_other_commands_is_none() {
+        assert!(impl_check_args_from(&["actual", "status"]).is_none());
+    }
+
+    #[test]
+    fn test_impl_check_rejects_max_rounds_zero() {
+        let result = Cli::try_parse_from(["actual", "impl-check", "--max-rounds", "0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_impl_check_accepts_valid_max_rounds() {
+        let args = impl_check_args_from(&["actual", "impl-check", "--max-rounds", "5"])
+            .expect("expected an impl-check command");
+        assert_eq!(args.max_rounds, 5);
+    }
+
+    /// `impl-check` must be listed at the top level and its own `--help` must
+    /// document the exit-code contract, the same way `plan-check`'s does.
+    #[test]
+    fn test_impl_check_is_listed_and_documents_exit_codes() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        assert!(
+            cmd.find_subcommand("impl-check").is_some(),
+            "impl-check is not a registered subcommand"
+        );
+        let mut sub = cmd.find_subcommand("impl-check").unwrap().clone();
+        let help = sub.render_long_help().to_string();
+        assert!(
+            help.contains("Exit codes"),
+            "impl-check --help does not document exit codes: {help}"
+        );
     }
 }
