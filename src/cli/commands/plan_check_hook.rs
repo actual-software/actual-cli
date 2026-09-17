@@ -44,7 +44,7 @@ pub const MAX_READ_BYTES: u64 = 1024 * 1024;
 ///
 /// `session_id` is read (unlike the rest of the ignored fields) because it is
 /// the identity the revision loop keys its state on — see
-/// `crate::cli::commands::plan_check_session`. It is optional: an envelope
+/// `crate::cli::commands::governance_session`. It is optional: an envelope
 /// that omits it (an older Claude Code build) simply never engages the
 /// loop/override/round-limit features, the same fail-open posture as every
 /// other hook-only behavior in this module.

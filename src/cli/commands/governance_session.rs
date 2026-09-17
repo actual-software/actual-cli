@@ -1,5 +1,6 @@
-//! Per-session state for the `plan-check --claude-hook` revision loop: which
-//! rules are already settled, how many rounds have run, and the durable,
+//! Per-session state for the `--claude-hook` revision loop (`plan-check
+//! --claude-hook` and `impl-check --claude-hook` both drive it): which rules
+//! are already settled, how many rounds have run, and the durable,
 //! append-only record of every explicit override and round-limit pass.
 //!
 //! # Design
@@ -25,7 +26,7 @@
 //! key) rather than its content: two repos with byte-identical rule text
 //! must still get independent state, because a clearance is a fact about
 //! "this plan, in this governed context," never about the rule's wording.
-//! Direct-mode (`actual plan-check` with no `--claude-hook`) has no
+//! Direct-mode (e.g. `actual plan-check` with no `--claude-hook`) has no
 //! `session_id` and so never engages this module at all — the caller passes
 //! an empty, default session and skips loading/storing one, the same
 //! fail-open posture as every other hook-only feature in this command.
@@ -40,7 +41,7 @@
 //! thing: a non-deterministic judge asked the *same* question twice giving a
 //! different answer. It is not a standing pass. So `cleared` maps a rule key
 //! to the digest of the plan text that was judged conforming for it
-//! ([`plan_digest`]), and [`PlanCheckSession::excludes`] only honors that
+//! ([`content_digest`]), and [`GovernanceSession::excludes`] only honors that
 //! entry while the *current* plan's digest still matches — edit the plan at
 //! all and every rule whose relevant text might have changed is judged
 //! fresh, never silently waved through on a stale verdict. An override is the
@@ -65,7 +66,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Bumped whenever [`PlanCheckSession`]'s on-disk shape changes incompatibly.
+/// Bumped whenever [`GovernanceSession`]'s on-disk shape changes incompatibly.
 /// A mismatched version is treated as a miss (start fresh), the same
 /// tolerance `rules::scope::cache` gives `INDEX_FORMAT_VERSION`.
 ///
@@ -91,7 +92,7 @@ const SESSION_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 
 /// or explicitly overridden, and how many rounds have run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct PlanCheckSession {
+pub struct GovernanceSession {
     format_version: u32,
     /// How many times a real judge call has completed for this session, of
     /// any verdict. Informational only — a round-limit decision is never
@@ -103,7 +104,7 @@ pub struct PlanCheckSession {
     pub rounds: u32,
     /// `"{doc_slug}::{rule_id}"` -> the digest of the plan text that was
     /// last judged [`crate::rules::check::Verdict::Conforming`] for it (see
-    /// [`plan_digest`]). A later clearance for the same rule simply
+    /// [`content_digest`]). A later clearance for the same rule simply
     /// overwrites the entry — only the most recent judgment matters, so this
     /// holds one entry per rule ever cleared, not one per round.
     pub cleared: BTreeMap<String, String>,
@@ -130,7 +131,7 @@ pub struct Override {
     pub round: u32,
 }
 
-impl PlanCheckSession {
+impl GovernanceSession {
     /// True when `key` must never be sent to the judge again for a plan
     /// whose digest is `plan_digest`: either explicitly overridden (session-
     /// scoped, regardless of plan text), or judged conforming against this
@@ -170,17 +171,17 @@ pub fn key(doc_slug: &str, rule_id: &str) -> String {
     format!("{doc_slug}::{rule_id}")
 }
 
-/// A content digest of `plan_text`, for scoping a [`PlanCheckSession`]'s
-/// `cleared` entries to the exact wording that earned them. Same construction
-/// as `rules::scope::cache`'s content-hashed keys (SHA-256, hex-encoded) —
-/// deliberately the raw text's hash, not a normalized or excerpted one:
-/// isolating which rule's *relevant* text changed would need per-rule span
-/// tracking this module does not have, so any edit at all is treated as
-/// "re-judge everything previously cleared in scope," which is the safe
-/// direction to err in.
-pub fn plan_digest(plan_text: &str) -> String {
+/// A content digest of `text` (a plan's or a diff's), for scoping a
+/// [`GovernanceSession`]'s `cleared` entries to the exact wording that earned
+/// them. Same construction as `rules::scope::cache`'s content-hashed keys
+/// (SHA-256, hex-encoded) — deliberately the raw text's hash, not a
+/// normalized or excerpted one: isolating which rule's *relevant* text
+/// changed would need per-rule span tracking this module does not have, so
+/// any edit at all is treated as "re-judge everything previously cleared in
+/// scope," which is the safe direction to err in.
+pub fn content_digest(text: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(plan_text.as_bytes());
+    hasher.update(text.as_bytes());
     let digest = hasher.finalize();
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -211,18 +212,18 @@ fn session_path(session_id: &str, rules_dir: &std::path::Path) -> Option<PathBuf
 /// absent, unreadable, unparseable, or written by an incompatible format
 /// version. Every failure mode degrades to "start fresh" — the same
 /// tolerance `rules::scope::cache::load` gives a stale or corrupt entry.
-pub fn load(session_id: &str, rules_dir: &std::path::Path) -> PlanCheckSession {
+pub fn load(session_id: &str, rules_dir: &std::path::Path) -> GovernanceSession {
     let Some(path) = session_path(session_id, rules_dir) else {
-        return PlanCheckSession::default();
+        return GovernanceSession::default();
     };
     let Ok(text) = std::fs::read_to_string(path) else {
-        return PlanCheckSession::default();
+        return GovernanceSession::default();
     };
-    let Ok(session) = serde_json::from_str::<PlanCheckSession>(&text) else {
-        return PlanCheckSession::default();
+    let Ok(session) = serde_json::from_str::<GovernanceSession>(&text) else {
+        return GovernanceSession::default();
     };
     if session.format_version != FORMAT_VERSION {
-        return PlanCheckSession::default();
+        return GovernanceSession::default();
     }
     session
 }
@@ -233,7 +234,7 @@ pub fn load(session_id: &str, rules_dir: &std::path::Path) -> PlanCheckSession {
 /// Also opportunistically prunes session files older than [`SESSION_MAX_AGE`]
 /// — bounded by one directory listing, so the cost stays proportional to how
 /// many sessions are actually on disk rather than growing unbounded.
-pub fn store(session_id: &str, rules_dir: &std::path::Path, session: &PlanCheckSession) {
+pub fn store(session_id: &str, rules_dir: &std::path::Path, session: &GovernanceSession) {
     let Some(path) = session_path(session_id, rules_dir) else {
         return;
     };
@@ -279,7 +280,7 @@ fn prune_stale(dir: &std::path::Path) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditKind {
-    /// A human ran `actual plan-check-override`.
+    /// A human ran `actual check-override`.
     Override,
     /// The round limit was hit with a rule still conflicting, and the gate
     /// stopped blocking rather than denying indefinitely.
@@ -449,13 +450,13 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_digest_is_stable_for_identical_text() {
-        assert_eq!(plan_digest("Add caching."), plan_digest("Add caching."));
+    fn test_content_digest_is_stable_for_identical_text() {
+        assert_eq!(content_digest("Add caching."), content_digest("Add caching."));
     }
 
     #[test]
-    fn test_plan_digest_differs_for_different_text() {
-        assert_ne!(plan_digest("Add caching."), plan_digest("Add logging."));
+    fn test_content_digest_differs_for_different_text() {
+        assert_ne!(content_digest("Add caching."), content_digest("Add logging."));
     }
 
     /// A fake rules directory path for tests that don't care which one, just
@@ -469,7 +470,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
         let session = load("brand-new-session", &rd());
-        assert_eq!(session, PlanCheckSession::default());
+        assert_eq!(session, GovernanceSession::default());
     }
 
     #[test]
@@ -477,7 +478,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
 
-        let mut session = PlanCheckSession {
+        let mut session = GovernanceSession {
             rounds: 2,
             ..Default::default()
         };
@@ -499,11 +500,11 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
 
-        let mut a = PlanCheckSession::default();
+        let mut a = GovernanceSession::default();
         a.cleared.insert(key("doc", "R-A"), "d".to_string());
         store("session-a", &rd(), &a);
 
-        let mut b = PlanCheckSession::default();
+        let mut b = GovernanceSession::default();
         b.cleared.insert(key("doc", "R-B"), "d".to_string());
         store("session-b", &rd(), &b);
 
@@ -530,7 +531,7 @@ mod tests {
         let rules_dir_a = std::path::PathBuf::from("/repo-a/.actual/rules");
         let rules_dir_b = std::path::PathBuf::from("/repo-b/.actual/rules");
 
-        let mut a = PlanCheckSession::default();
+        let mut a = GovernanceSession::default();
         a.cleared
             .insert(key("cross-cutting-shared-abcd", "R-001"), "d".to_string());
         store("shared-session", &rules_dir_a, &a);
@@ -566,7 +567,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(load("session-x", &rd()), PlanCheckSession::default());
+        assert_eq!(load("session-x", &rd()), GovernanceSession::default());
     }
 
     #[test]
@@ -578,12 +579,12 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{ not json").unwrap();
 
-        assert_eq!(load("session-corrupt", &rd()), PlanCheckSession::default());
+        assert_eq!(load("session-corrupt", &rd()), GovernanceSession::default());
     }
 
     #[test]
     fn test_record_denial_increments_and_returns_the_new_total() {
-        let mut session = PlanCheckSession::default();
+        let mut session = GovernanceSession::default();
         assert_eq!(session.record_denial(&key("doc", "R-A")), 1);
         assert_eq!(session.record_denial(&key("doc", "R-A")), 2);
         assert_eq!(session.record_denial(&key("doc", "R-A")), 3);
@@ -594,7 +595,7 @@ mod tests {
     /// conflict. Each key's count must be independent.
     #[test]
     fn test_record_denial_is_independent_per_key() {
-        let mut session = PlanCheckSession::default();
+        let mut session = GovernanceSession::default();
         session.record_denial(&key("doc", "R-A"));
         session.record_denial(&key("doc", "R-A"));
         session.record_denial(&key("doc", "R-A"));
@@ -607,13 +608,13 @@ mod tests {
 
     #[test]
     fn test_deny_limit_exceeded_false_for_a_never_denied_key() {
-        let session = PlanCheckSession::default();
+        let session = GovernanceSession::default();
         assert!(!session.deny_limit_exceeded(&key("doc", "R-A"), 3));
     }
 
     #[test]
     fn test_deny_limit_exceeded_true_only_once_the_count_exceeds_max_rounds() {
-        let mut session = PlanCheckSession::default();
+        let mut session = GovernanceSession::default();
         session.record_denial(&key("doc", "R-A"));
         session.record_denial(&key("doc", "R-A"));
         session.record_denial(&key("doc", "R-A"));
@@ -624,7 +625,7 @@ mod tests {
 
     #[test]
     fn test_excludes_true_for_both_cleared_and_overridden() {
-        let mut session = PlanCheckSession::default();
+        let mut session = GovernanceSession::default();
         session
             .cleared
             .insert(key("doc", "R-clear"), "digest-v1".to_string());
@@ -647,7 +648,7 @@ mod tests {
     /// text at all: it stays excluded regardless of which digest is asked.
     #[test]
     fn test_excludes_false_for_a_cleared_rule_once_the_plan_digest_changes() {
-        let mut session = PlanCheckSession::default();
+        let mut session = GovernanceSession::default();
         session
             .cleared
             .insert(key("doc", "R-clear"), "digest-v1".to_string());
@@ -699,7 +700,7 @@ mod tests {
         );
 
         // The session file itself was never created by record_round_limit.
-        assert_eq!(load("session-limit", &rd()), PlanCheckSession::default());
+        assert_eq!(load("session-limit", &rd()), GovernanceSession::default());
 
         let log = std::fs::read_to_string(audit_log_path().unwrap()).unwrap();
         assert!(log.contains("R-002"));
@@ -715,7 +716,7 @@ mod tests {
 
         // Same as record_round_limit: a disclosed coverage gap is not a
         // session-state fact, only a durable log entry.
-        assert_eq!(load("session-partial", &rd()), PlanCheckSession::default());
+        assert_eq!(load("session-partial", &rd()), GovernanceSession::default());
 
         let log = std::fs::read_to_string(audit_log_path().unwrap()).unwrap();
         assert!(log.contains("\"kind\":\"partial_coverage\""));
@@ -746,7 +747,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
 
-        store("session-perms", &rd(), &PlanCheckSession::default());
+        store("session-perms", &rd(), &GovernanceSession::default());
         let mode = std::fs::metadata(session_path("session-perms", &rd()).unwrap())
             .unwrap()
             .permissions()
