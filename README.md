@@ -193,22 +193,45 @@ an advisory gate, not an enforcement boundary. The `hooks/plan-gate.sh`
 script that drives this mode, and the Claude Code settings that install it,
 live in the separate `actual-skill` plugin repository, not here.
 
-Under `--claude-hook`, a rule already cleared for the session is never
-re-judged, and a single rule stops blocking on its own after `--max-rounds`
-denied rounds (default 3, or `ACTUAL_PLAN_CHECK_MAX_ROUNDS`) so a persistently
-unresolved rule can't get the hook disabled outright. A human can also clear
-a denied rule explicitly:
+`actual impl-check` runs the same pipeline against a `git diff` instead of
+plan text — same four outcomes, same exit-code contract, same
+`--claude-hook` JSON contract (driven by the separate plugin repo's
+`hooks/impl-gate.sh`), and the same revision-loop/session machinery as
+`plan-check` (a `--claude-hook` session is keyed by `session_id`, independent
+of whether a `plan-check` session for that id ever existed). By default it
+diffs the current repo's working tree against `HEAD`; `--diff-file` or piped
+stdin can supply the diff explicitly instead:
 
 ```bash
-actual plan-check-override --session <id> --rule <doc-slug>::<rule-id> --reason "..."
+actual impl-check                     # git diff HEAD in the current repo
+actual impl-check --diff-file out.diff --json
+git diff HEAD | actual impl-check
 ```
 
-`--reason` is required, and the command refuses to run anywhere but an
-ordinary interactive terminal — never from a script, an agent's tool call, or
-Claude Code's own integrated terminal — since an override records a human
-decision, not the agent's. Every round, override, and partial-coverage
-disclosure is appended to a durable audit log at
-`~/.actualai/actual/plan-check-overrides.log`.
+Under `--claude-hook` (either command), a rule already cleared for the
+session is never re-judged, and a single rule stops blocking on its own
+after `--max-rounds` denied rounds (default 3, or
+`ACTUAL_PLAN_CHECK_MAX_ROUNDS` / `ACTUAL_IMPL_CHECK_MAX_ROUNDS` respectively —
+each command's revision loop is budgeted independently) so a persistently
+unresolved rule can't get the hook disabled outright. A human can also clear
+a denied rule explicitly, for either command:
+
+```bash
+actual check-override --session <id> --rule <doc-slug>::<rule-id> --reason "..."
+```
+
+(`plan-check-override` still works as an alias for `check-override`, for
+anyone with it already scripted or memorized.) `--reason` is required, and
+the command refuses to run anywhere but an ordinary interactive terminal —
+never from a script, an agent's tool call, or Claude Code's own integrated
+terminal — since an override records a human decision, not the agent's. An
+override recorded against a session clears that rule for both `plan-check`
+and `impl-check` checks of that session — one override, not two independent
+mechanisms. Every round, override, and partial-coverage disclosure is
+appended to a durable audit log at
+`~/.actualai/actual/plan-check-overrides.log` (kept under its original
+filename for history continuity, even though the command that appends to it
+is now named `check-override`).
 
 ## Commands
 
@@ -229,7 +252,8 @@ actual rules ls       # list the rule documents under .actual/rules/
 actual rules index    # build or refresh the local rule scope index
 actual rules select   # select the rule documents that govern a plan
 actual plan-check     # check a plan against the rules selected for it
-actual plan-check-override  # human override for a rule plan-check denied
+actual impl-check     # check a git diff against the rules selected for it
+actual check-override # human override for a rule plan-check/impl-check denied
 ```
 
 For non-interactive (CI / agent) authentication, see
