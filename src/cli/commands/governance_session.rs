@@ -199,6 +199,15 @@ impl GovernanceSession {
         }
     }
 
+    /// The mutable counterpart of [`loop_state`](Self::loop_state), for the
+    /// shared hook path, which is generic over the artifact kind.
+    pub fn loop_state_mut(&mut self, kind: ArtifactKind) -> &mut LoopState {
+        match kind {
+            ArtifactKind::Plan => &mut self.plan,
+            ArtifactKind::Diff => &mut self.diff,
+        }
+    }
+
     /// True when `key` must never be sent to the judge again for an artifact
     /// of `kind` whose digest is `artifact_digest`: either explicitly
     /// overridden (session-scoped, regardless of kind or wording), or judged
