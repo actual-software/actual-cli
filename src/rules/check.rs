@@ -1069,9 +1069,16 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_check_times_out_rather_than_hanging_forever() {
-        let err = check(&TimeoutRunner, ArtifactKind::Plan, "a plan", &rules(), None, None)
-            .await
-            .unwrap_err();
+        let err = check(
+            &TimeoutRunner,
+            ArtifactKind::Plan,
+            "a plan",
+            &rules(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ActualError::RunnerTimeout { .. }));
     }
 }
