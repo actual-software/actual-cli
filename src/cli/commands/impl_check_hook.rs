@@ -22,14 +22,11 @@ use serde::Deserialize;
 ///
 /// `session_id` is the field the revision loop actually keys on (see
 /// `crate::cli::commands::governance_session`, keyed on
-/// `(session_id, rules_dir)`); `transcript_path` is carried along for parity
-/// with the plan-check envelope and possible future use, though nothing here
-/// reads it today.
+/// `(session_id, rules_dir)`).
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 pub struct HookEnvelope {
     pub session_id: Option<String>,
-    pub transcript_path: Option<String>,
 }
 
 #[cfg(test)]
@@ -48,13 +45,6 @@ mod tests {
         assert_eq!(env.session_id, None);
     }
 
-    #[test]
-    fn test_envelope_reads_transcript_path() {
-        let env: HookEnvelope =
-            serde_json::from_str(r#"{"transcript_path":"/tmp/t.jsonl"}"#).unwrap();
-        assert_eq!(env.transcript_path.as_deref(), Some("/tmp/t.jsonl"));
-    }
-
     /// The same tolerance `plan_check_hook::HookEnvelope` gives: fields this
     /// struct does not model (including `tool_input`, which this command has
     /// no use for at all) must not fail deserialization.
@@ -71,6 +61,5 @@ mod tests {
     fn test_envelope_defaults_on_malformed_but_valid_json() {
         let env: HookEnvelope = serde_json::from_str(r#"{"unrelated": 1}"#).unwrap();
         assert_eq!(env.session_id, None);
-        assert_eq!(env.transcript_path, None);
     }
 }
