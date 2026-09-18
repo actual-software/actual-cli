@@ -64,8 +64,9 @@ use std::path::Path;
 
 use crate::cli::args::ImplCheckArgs;
 use crate::cli::commands::check_engine::{
-    self, capped_read, deny_summary, hook_deny_reason, override_reminder, partial_coverage_note,
-    render_json, render_panel, round_limit_message, run_pipeline, with_override_reminder, Outcome,
+    self, audit_log_note, capped_read, deny_summary, hook_deny_reason, override_reminder,
+    partial_coverage_note, render_json, render_panel, round_limit_message, run_pipeline,
+    with_override_reminder, Outcome,
 };
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::impl_check_hook::HookEnvelope;
@@ -327,11 +328,20 @@ fn working_tree_diff(root: &Path) -> Result<String, ActualError> {
     )?;
 
     let mut child = git_command(root, Some(&index))
-        .args(["diff", "HEAD"])
+        .args(["diff", "--no-ext-diff", "HEAD"])
         .spawn()
         .map_err(ActualError::IoError)?;
     let stdout = child.stdout.take().expect("stdout was piped");
-    let text = capped_read(stdout, "working-tree diff")?;
+    let text = match capped_read(stdout, "working-tree diff") {
+        Ok(text) => text,
+        Err(e) => {
+            // Over the cap (or unreadable): git may still be writing. Stop it
+            // and reap it rather than leaving a zombie behind the error.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    };
     let mut stderr = String::new();
     if let Some(mut err) = child.stderr.take() {
         let _ = err.read_to_string(&mut stderr);
@@ -347,9 +357,13 @@ fn working_tree_diff(root: &Path) -> Result<String, ActualError> {
     Ok(text)
 }
 
+/// `--no-pager` and `color.ui=never` keep the captured text free of a pager
+/// and ANSI escapes even when the user's config says `color.ui=always`.
+/// (`--no-ext-diff` is a `diff` option, so it lives on the `diff` call.)
 fn git_command(root: &Path, index: Option<&Path>) -> std::process::Command {
     let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(root)
+    cmd.args(["--no-pager", "-c", "color.ui=never"])
+        .current_dir(root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     if let Some(index) = index {
@@ -603,10 +617,10 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
                         judged,
                         total,
                     );
-                    notes.push(
-                        "This is not a silent pass — recorded in plan-check-overrides.log."
-                            .to_string(),
-                    );
+                    notes.push(format!(
+                        "This is not a silent pass — recorded in {}.",
+                        audit_log_note(ArtifactKind::Diff)
+                    ));
                 }
             }
             let reminder = override_reminder(&session);
@@ -1085,6 +1099,36 @@ mod tests {
         assert!(exec(&args).is_err());
     }
 
+    /// A user's `color.ui=always` and `diff.external` must not reach the text
+    /// the judge reads: ANSI escapes and a non-unified external diff would
+    /// both corrupt it.
+    #[cfg(unix)]
+    #[test]
+    fn test_working_tree_diff_ignores_color_and_external_diff_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = git_repo_with_baseline();
+        let bin = tempdir().unwrap();
+        let ext = bin.path().join("ext-diff.sh");
+        std::fs::write(&ext, "#!/bin/sh\necho EXTERNAL-DIFF-OUTPUT\n").unwrap();
+        std::fs::set_permissions(&ext, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run_git(repo.path(), &["config", "color.ui", "always"]);
+        run_git(
+            repo.path(),
+            &["config", "diff.external", ext.to_str().unwrap()],
+        );
+        std::fs::write(repo.path().join("service.rs"), "fn handler() { 4 }\n").unwrap();
+
+        let diff = working_tree_diff(repo.path()).unwrap();
+
+        assert!(
+            diff.contains("diff --git a/service.rs b/service.rs"),
+            "{diff}"
+        );
+        assert!(!diff.contains("EXTERNAL-DIFF-OUTPUT"), "{diff}");
+        assert!(!diff.contains('\u{1b}'), "no ANSI escapes: {diff:?}");
+    }
+
     // ── exec_hook_with: notice/deny branches ────────────────────────────
 
     #[test]
@@ -1426,10 +1470,18 @@ mod tests {
             "reviewed and accepted by the security team",
         );
 
-        // No working runner at all: if the override did not exclude both
-        // rules, run_pipeline would need to resolve one and this would
-        // surface as NoRunner instead of completing silently.
-        let _no_claude = EnvGuard::set("CLAUDE_BINARY", "/nonexistent/path/to/claude");
+        // A working runner that would *deny* R-A-001 if it were ever asked. If
+        // the override failed to exclude the rule, the judge runs and the
+        // denial is recorded; a missing binary could not tell the two apart,
+        // since a failed exclusion would just fail open as `NoRunner`.
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
 
         let mut args = base_args();
         args.repo = Some(repo.path().to_path_buf());
@@ -1439,5 +1491,14 @@ mod tests {
 
         let session = governance_session::load("sess-impl-override-1", &rules);
         assert_eq!(session.overrides.len(), 2);
+        assert_eq!(
+            session.diff.rounds, 0,
+            "both rules are overridden, so no judge round should have run"
+        );
+        assert!(
+            session.diff.deny_counts.is_empty(),
+            "an overridden rule must not be denied: {:?}",
+            session.diff.deny_counts
+        );
     }
 }

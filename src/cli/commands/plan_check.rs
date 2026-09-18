@@ -137,8 +137,9 @@ use std::path::PathBuf;
 
 use crate::cli::args::PlanCheckArgs;
 use crate::cli::commands::check_engine::{
-    capped_read, deny_summary, hook_deny_reason, override_reminder, partial_coverage_note,
-    render_json, render_panel, round_limit_message, run_pipeline, with_override_reminder, Outcome,
+    audit_log_note, capped_read, deny_summary, hook_deny_reason, override_reminder,
+    partial_coverage_note, render_json, render_panel, round_limit_message, run_pipeline,
+    with_override_reminder, Outcome,
 };
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
@@ -572,10 +573,10 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                         judged,
                         total,
                     );
-                    notes.push(
-                        "This is not a silent pass — recorded in plan-check-overrides.log."
-                            .to_string(),
-                    );
+                    notes.push(format!(
+                        "This is not a silent pass — recorded in {}.",
+                        audit_log_note(crate::rules::check::ArtifactKind::Plan)
+                    ));
                 }
             }
             let reminder = override_reminder(&session);

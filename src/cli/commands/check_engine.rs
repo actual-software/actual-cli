@@ -526,6 +526,20 @@ fn artifact_copy(kind: check::ArtifactKind) -> ArtifactCopy {
     }
 }
 
+/// How a user-facing notice names the override/round-limit audit log. The
+/// file keeps its `plan-check-` name for compatibility with existing config
+/// directories, so the impl-check wording says it is the shared log rather
+/// than leaving a reader to wonder why a diff check writes to a plan file.
+pub(super) fn audit_log_note(kind: check::ArtifactKind) -> String {
+    match kind {
+        check::ArtifactKind::Plan => governance_session::AUDIT_LOG_NAME.to_string(),
+        check::ArtifactKind::Diff => format!(
+            "{} (the audit log impl-check shares with plan-check)",
+            governance_session::AUDIT_LOG_NAME
+        ),
+    }
+}
+
 pub(super) fn render_panel(
     outcome: &Outcome,
     text: &str,
@@ -1244,10 +1258,11 @@ pub(super) fn round_limit_message(
     format!(
         "{} hit its round limit ({max_rounds} denials) for {}: proceeding \
          without blocking further on {} specifically. This is not a silent pass — recorded in \
-         plan-check-overrides.log.",
+         {}.",
         copy.governance,
         parts.join(", "),
-        if exhausted.len() == 1 { "it" } else { "them" }
+        if exhausted.len() == 1 { "it" } else { "them" },
+        audit_log_note(kind)
     )
 }
 
@@ -2247,6 +2262,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_audit_log_note_names_the_shared_log_only_for_impl_check() {
+        let plan = audit_log_note(check::ArtifactKind::Plan);
+        assert_eq!(plan, "plan-check-overrides.log");
+
+        let diff = audit_log_note(check::ArtifactKind::Diff);
+        assert!(diff.contains("plan-check-overrides.log"), "{diff}");
+        assert!(diff.contains("shares with plan-check"), "{diff}");
+    }
+
+    #[test]
     fn test_capped_read_reads_content_within_the_limit() {
         assert_eq!(
             capped_read("hello".as_bytes(), "test input").unwrap(),
@@ -2849,6 +2874,12 @@ pub(crate) mod tests {
         let message = round_limit_message(&[&a], &session, check::ArtifactKind::Diff, 3);
         assert!(message.contains("Actual implementation governance"));
         assert!(!message.contains("plan governance"));
+        assert!(
+            message.contains(
+                "plan-check-overrides.log (the audit log impl-check shares with plan-check)"
+            ),
+            "{message}"
+        );
     }
 
     /// Unlike the terminal check, this one carries no restriction on being
