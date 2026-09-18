@@ -142,9 +142,10 @@ pub(super) enum Outcome {
 /// why. Direct mode passes `!args.no_rank`.
 ///
 /// `session` names every rule that must never reach the judge again for
-/// *this* plan text — see [`GovernanceSession::excludes`] for exactly what
-/// that means (an override applies regardless of wording; a clearance only
-/// while the plan digest still matches the one that earned it). Direct mode
+/// *this* artifact — see [`GovernanceSession::excludes`] for exactly what
+/// that means (an override applies regardless of wording or kind; a
+/// clearance only for the matching [`check::ArtifactKind`] while the artifact
+/// digest still matches the one that earned it). Direct mode
 /// always passes [`GovernanceSession::default`]: there is no session outside a
 /// hook envelope, so nothing is ever excluded there. When every rule a
 /// selection would otherwise judge is excluded, this returns
@@ -158,12 +159,12 @@ pub(super) enum Outcome {
 /// see a real error. `--claude-hook` still catches that `Err` and fails open
 /// on it, per the "missing rules directory... must not deny" contract.
 ///
-/// `kind` selects how `plan_text` is described to the judge and the omission
-/// semantics of its verdict criteria — see [`check::ArtifactKind`] —
-/// `plan-check` always passes [`check::ArtifactKind::Plan`]; `impl-check`
-/// passes [`check::ArtifactKind::Diff`]. Everything else about the pipeline
-/// (rule selection, session exclusion, the [`MAX_RULES_JUDGED`] cap) is
-/// identical either way.
+/// `kind` selects how `plan_text` is described to the judge and which
+/// revision-loop memory [`GovernanceSession::excludes`] / the judged-window
+/// rotation consult — see [`check::ArtifactKind`] — `plan-check` always
+/// passes [`check::ArtifactKind::Plan`]; `impl-check` passes
+/// [`check::ArtifactKind::Diff`]. Rule selection and the [`MAX_RULES_JUDGED`]
+/// cap are otherwise identical either way.
 pub(super) fn run_pipeline(
     plan_text: &str,
     root: &Path,
@@ -229,7 +230,7 @@ pub(super) fn run_pipeline(
         return Ok(Outcome::NothingApplies);
     }
 
-    let gathered = gather_rules(&selection, root, session, &plan_digest);
+    let gathered = gather_rules(&selection, root, session, kind, &plan_digest);
     if gathered.rules.is_empty() {
         return Ok(if gathered.excluded > 0 {
             // Every applicable rule was already settled this session: there
@@ -326,19 +327,19 @@ struct GatheredRules {
 /// order (the prefilter's own relevance ranking — the highest-priority
 /// document's rules fill the cap first) and then declaration order within a
 /// document, dropping any rule [`GovernanceSession::excludes`] for
-/// `plan_digest` before the [`MAX_RULES_JUDGED`] cap is applied — an excluded
+/// `kind` and `plan_digest` before the [`MAX_RULES_JUDGED`] cap is applied — an excluded
 /// rule must never consume cap budget that a rule still worth judging needs.
 ///
 /// When the non-excluded candidate count exceeds the cap, a rule the
-/// session has already denied at least once is pinned into the judged
-/// window every round (see [`select_judged_window`]) — a proven conflict is
+/// session has already denied at least once *in this kind's loop* is pinned
+/// into the judged window every round (see [`select_judged_window`]) — a proven conflict is
 /// never left to chance. The rest of the window is not pinned to index zero
-/// every round either: it starts at [`rotation_offset`]`(session.rounds,
-/// _, _)`, a window-sized chunk per completed round, wrapping. A rule left in the
+/// every round either: it starts at [`rotation_offset`]`(loop.rounds,
+/// _, _)`, a window-sized chunk per completed round of *this* loop, wrapping. A rule left in the
 /// truncated tail on round 1 therefore has a real chance of landing inside
 /// the judged window on a later round instead of being silently skipped for
-/// the entire life of the session — session `rounds` only advances when a
-/// real judge call completes (see [`GovernanceSession::rounds`]), so this
+/// the entire life of the session — loop `rounds` only advances when a
+/// real judge call completes for that kind (see [`governance_session::LoopState::rounds`]), so this
 /// only changes anything once a session has actually run more than one
 /// round against a selection this large. Still fully deterministic — the
 /// same session, at the same round, against the same candidates, always
@@ -362,6 +363,7 @@ fn gather_rules(
     selection: &Selection,
     root: &Path,
     session: &GovernanceSession,
+    kind: check::ArtifactKind,
     plan_digest: &str,
 ) -> GatheredRules {
     let mut candidates = Vec::new();
@@ -379,6 +381,7 @@ fn gather_rules(
         };
         for rule in doc.rules {
             if session.excludes(
+                kind,
                 &governance_session::key(&selected.slug, &rule.id),
                 plan_digest,
             ) {
@@ -396,7 +399,7 @@ fn gather_rules(
     let considered = candidates.len();
     let truncated = considered > MAX_RULES_JUDGED;
     if truncated {
-        candidates = select_judged_window(candidates, session);
+        candidates = select_judged_window(candidates, session, kind);
     }
     GatheredRules {
         rules: candidates,
@@ -407,24 +410,27 @@ fn gather_rules(
 }
 
 /// Chooses which [`MAX_RULES_JUDGED`] candidates get judged this round when
-/// there are more than that many. A rule the session has already denied at
-/// least once (present in `session.deny_counts`) is pinned into every
+/// there are more than that many. A rule this kind's loop has already denied
+/// at least once (present in that loop's `deny_counts`) is pinned into every
 /// round's window instead of being left to rotation: [`rotation_offset`]
 /// moves the judged window by whole cap-sized chunks, so a proven conflict
-/// can rotate clean out of the window on the very next round, and a plan
-/// revision resets `cleared` (keyed to the plan digest that earned it)
+/// can rotate clean out of the window on the very next round, and an artifact
+/// revision resets `cleared` (keyed to the digest that earned it)
 /// before rotation ever applies — nothing else keeps re-checking a rule
 /// already known to conflict. Only the non-pinned remainder rotates; pinned
 /// rules keep their original selection-then-declaration order ahead of it.
 /// When pinned rules alone meet or exceed the cap, they fill the whole
 /// window on their own (still in that same order) and nothing else rotates
-/// in this round.
+/// in this round. Denials recorded against the other artifact kind do not
+/// pin or rotate this window.
 fn select_judged_window(
     candidates: Vec<RuleForJudging>,
     session: &GovernanceSession,
+    kind: check::ArtifactKind,
 ) -> Vec<RuleForJudging> {
+    let active = session.loop_state(kind);
     let (mut pinned, mut rest): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|rule| {
-        session
+        active
             .deny_counts
             .contains_key(&governance_session::key(&rule.doc_slug, &rule.rule_id))
     });
@@ -434,7 +440,7 @@ fn select_judged_window(
     }
     let remaining = MAX_RULES_JUDGED - pinned.len();
     if !rest.is_empty() {
-        let offset = rotation_offset(session.rounds, remaining, rest.len());
+        let offset = rotation_offset(active.rounds, remaining, rest.len());
         rest.rotate_left(offset);
     }
     rest.truncate(remaining);
@@ -450,11 +456,11 @@ fn select_judged_window(
 /// to a narrower window left a `gcd(MAX_RULES_JUDGED, considered)`-sized band
 /// permanently unreached whenever `gcd(MAX_RULES_JUDGED, considered) >
 /// window`, which a pinned rule makes almost certain once a session has
-/// denied anything. Round 0 — a session's first call, and every direct-mode
-/// call, which never tracks rounds at all (`GovernanceSession::default()`
+/// denied anything. Round 0 — a loop's first call, and every direct-mode
+/// call, which never tracks rounds at all (`LoopState::default()`
 /// always has `rounds: 0`) — always resolves to offset zero, the same window
 /// a plain unrotated cap would have judged, so this changes nothing until a
-/// session completes at least one round against a selection larger than the
+/// loop completes at least one round against a selection larger than the
 /// cap. `considered == 0` cannot occur at the only call site (guarded by
 /// `!rest.is_empty()`), but returns 0 rather than divide by zero if ever
 /// called otherwise.
@@ -490,7 +496,12 @@ pub(super) fn capped_read<R: Read>(reader: R, source: &str) -> Result<String, Ac
         .map_err(|_| ActualError::ConfigError(format!("{source} is not valid UTF-8")))
 }
 
-pub(super) fn render_panel(outcome: &Outcome, plan: &str, rules_dir: &Path, width: usize) -> String {
+pub(super) fn render_panel(
+    outcome: &Outcome,
+    plan: &str,
+    rules_dir: &Path,
+    width: usize,
+) -> String {
     let mut panel = Panel::titled("Plan check");
     panel = panel.kv("Plan", &truncate(plan, 72));
     panel = panel.kv("Rules dir", &rules_dir.display().to_string());
@@ -1172,13 +1183,15 @@ pub(super) fn partial_coverage_note(judged: usize, total: usize) -> String {
 pub(super) fn round_limit_message(
     exhausted: &[&CheckedRule],
     session: &GovernanceSession,
+    kind: check::ArtifactKind,
     max_rounds: u32,
 ) -> String {
+    let counts = &session.loop_state(kind).deny_counts;
     let parts: Vec<String> = exhausted
         .iter()
         .map(|c| {
             let key = governance_session::key(&c.doc_slug, &c.rule_id);
-            let count = session.deny_counts.get(&key).copied().unwrap_or(0);
+            let count = counts.get(&key).copied().unwrap_or(0);
             format!("{} (denied {count} times)", c.rule_id)
         })
         .collect();
@@ -1278,7 +1291,8 @@ pub(crate) mod tests {
     }
 
     #[cfg(feature = "telemetry")]
-    pub(crate) fn take_captured_plan_governance_events() -> Vec<crate::api::types::PlanGovernanceEvent> {
+    pub(crate) fn take_captured_plan_governance_events(
+    ) -> Vec<crate::api::types::PlanGovernanceEvent> {
         CAPTURED_PLAN_GOVERNANCE_EVENTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
     }
 
@@ -1420,6 +1434,7 @@ pub(crate) mod tests {
             &selection,
             root.path(),
             &GovernanceSession::default(),
+            check::ArtifactKind::Plan,
             "test-digest",
         );
         assert!(!gathered.truncated);
@@ -1446,6 +1461,7 @@ pub(crate) mod tests {
             &selection,
             root.path(),
             &GovernanceSession::default(),
+            check::ArtifactKind::Plan,
             "test-digest",
         );
         assert!(gathered.rules.is_empty());
@@ -1473,6 +1489,7 @@ pub(crate) mod tests {
             &selection,
             root.path(),
             &GovernanceSession::default(),
+            check::ArtifactKind::Plan,
             "test-digest",
         );
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
@@ -1496,6 +1513,7 @@ pub(crate) mod tests {
             &selection,
             root.path(),
             &GovernanceSession::default(),
+            check::ArtifactKind::Plan,
             "test-digest",
         );
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
@@ -1522,6 +1540,7 @@ pub(crate) mod tests {
             &selection,
             root.path(),
             &GovernanceSession::default(),
+            check::ArtifactKind::Plan,
             "test-digest",
         );
         let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
@@ -1548,8 +1567,14 @@ pub(crate) mod tests {
         let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
 
         let mut session = GovernanceSession::default();
-        session.rounds = 1;
-        let gathered = gather_rules(&selection, root.path(), &session, "test-digest");
+        session.plan.rounds = 1;
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &session,
+            check::ArtifactKind::Plan,
+            "test-digest",
+        );
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
         assert_eq!(gathered.considered, MAX_RULES_JUDGED + 5);
         assert!(gathered.truncated);
@@ -1590,12 +1615,19 @@ pub(crate) mod tests {
         // round 1's plain rotated window is R-X-0040..R-X-0044 (see the
         // rotation test above), which does not include it.
         let mut session = GovernanceSession::default();
-        session.rounds = 1;
+        session.plan.rounds = 1;
         session
+            .plan
             .deny_counts
             .insert(governance_session::key(&doc_slug, "R-X-0000"), 1);
 
-        let gathered = gather_rules(&selection, root.path(), &session, "test-digest");
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &session,
+            check::ArtifactKind::Plan,
+            "test-digest",
+        );
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
         assert!(gathered.truncated);
 
@@ -1607,6 +1639,75 @@ pub(crate) mod tests {
         // The rotated remainder still reaches into the tail round 0 never
         // saw (R-X-0044, the very last rule), proving rotation still runs
         // over the non-pinned candidates alongside the pin.
+        assert!(ids.contains(&"R-X-0044"));
+    }
+
+    /// Plan-check rounds must not rotate impl-check's judged window. A
+    /// session that has completed one plan-check round still judges the
+    /// unrotated prefix on the first impl-check round.
+    #[test]
+    fn test_gather_rules_does_not_rotate_diff_from_plan_rounds() {
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 5) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Add a new widget in services/widgets".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+
+        let mut session = GovernanceSession::default();
+        session.plan.rounds = 1;
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &session,
+            check::ArtifactKind::Diff,
+            "test-digest",
+        );
+        let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
+        assert!(ids.contains(&"R-X-0000"));
+        assert!(ids.contains(&"R-X-0039"));
+        assert!(!ids.contains(&"R-X-0044"));
+    }
+
+    /// A rule denied by plan-check must not pin into impl-check's window.
+    /// Round 1's unpinned rotation drops `R-X-0039` (the last of round 0's
+    /// prefix); if this incorrectly read the plan loop's `deny_counts`, that
+    /// rule would be pinned back in.
+    #[test]
+    fn test_gather_rules_does_not_pin_a_plan_denied_rule_on_a_diff_loop() {
+        let mut body = "# Many Rules: Widget Handling\n\nThese rules are ALWAYS ACTIVE for widget handling in `services/widgets/`.\n\n### Rules\n\n".to_string();
+        for i in 0..(MAX_RULES_JUDGED + 5) {
+            body.push_str(&format!("- **R-X-{i:04}** MUST: rule number {i}.\n"));
+        }
+        let root = seed(&[("cross-cutting-many-abcd.md", &body)]);
+        let report = crate::rules::load_rule_set(root.path()).unwrap();
+        let index = crate::rules::scope::ScopeIndex::build(&report, root.path(), "fp".to_string());
+        let query = Query::new("Add a new widget in services/widgets".to_string());
+        let selection = select::prefilter(&index, &query, 10, 30).finish(Stage2::NotRequested);
+        let doc_slug = selection.selected[0].slug.clone();
+
+        let mut session = GovernanceSession::default();
+        session.diff.rounds = 1;
+        session
+            .plan
+            .deny_counts
+            .insert(governance_session::key(&doc_slug, "R-X-0039"), 1);
+
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &session,
+            check::ArtifactKind::Diff,
+            "test-digest",
+        );
+        let ids: Vec<&str> = gathered.rules.iter().map(|r| r.rule_id.as_str()).collect();
+        assert!(
+            !ids.contains(&"R-X-0039"),
+            "a plan-stage denial must not pin the impl-check window: {ids:?}"
+        );
         assert!(ids.contains(&"R-X-0044"));
     }
 
@@ -1630,13 +1731,19 @@ pub(crate) mod tests {
         // alone exceeds MAX_RULES_JUDGED.
         let mut session = GovernanceSession::default();
         for i in 0..(MAX_RULES_JUDGED + 2) {
-            session.deny_counts.insert(
+            session.plan.deny_counts.insert(
                 governance_session::key(&doc_slug, &format!("R-X-{i:04}")),
                 1,
             );
         }
 
-        let gathered = gather_rules(&selection, root.path(), &session, "test-digest");
+        let gathered = gather_rules(
+            &selection,
+            root.path(),
+            &session,
+            check::ArtifactKind::Plan,
+            "test-digest",
+        );
         assert_eq!(gathered.rules.len(), MAX_RULES_JUDGED);
         assert!(gathered.truncated);
 
@@ -1683,13 +1790,15 @@ pub(crate) mod tests {
 
         let mut session = GovernanceSession::default();
         session
+            .plan
             .deny_counts
             .insert(governance_session::key("docs", "R-X-0000"), 1);
 
         let mut seen = std::collections::BTreeSet::new();
         for round in 0..MAX_RULES_JUDGED as u32 {
-            session.rounds = round;
-            let window = select_judged_window(candidates.clone(), &session);
+            session.plan.rounds = round;
+            let window =
+                select_judged_window(candidates.clone(), &session, check::ArtifactKind::Plan);
             assert_eq!(window.len(), MAX_RULES_JUDGED);
             seen.extend(window.into_iter().map(|r| r.rule_id));
         }
@@ -2051,6 +2160,7 @@ pub(crate) mod tests {
             &selection,
             root.path(),
             &GovernanceSession::default(),
+            check::ArtifactKind::Plan,
             "test-digest",
         );
         assert!(gathered.rules.is_empty());
@@ -2076,6 +2186,7 @@ pub(crate) mod tests {
             &selection,
             root.path(),
             &GovernanceSession::default(),
+            check::ArtifactKind::Plan,
             "test-digest",
         );
         assert!(gathered.rules.is_empty());
@@ -2457,22 +2568,21 @@ pub(crate) mod tests {
         let rules_dir = crate::rules::rules_dir(root.path());
         let plan_text = "Sign access tokens with RS256";
         let mut session = GovernanceSession::default();
-        session.cleared.insert(
+        session.plan.cleared.insert(
             governance_session::key("cross-cutting-token-signing-1c57", "R-A-001"),
             governance_session::content_digest(plan_text),
         );
 
-        let outcome =
-            run_pipeline(
-                plan_text,
-                root.path(),
-                &rules_dir,
-                &args.check_knobs(),
-                check::ArtifactKind::Plan,
-                false,
-                &session,
-            )
-            .unwrap();
+        let outcome = run_pipeline(
+            plan_text,
+            root.path(),
+            &rules_dir,
+            &args.check_knobs(),
+            check::ArtifactKind::Plan,
+            false,
+            &session,
+        )
+        .unwrap();
 
         #[rustfmt::skip]
         let Outcome::Verdicts { verdicts, .. } = outcome else { panic!("expected Verdicts, got a different outcome") };
@@ -2587,9 +2697,10 @@ pub(crate) mod tests {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
         let mut session = GovernanceSession::default();
         session
+            .plan
             .deny_counts
             .insert(governance_session::key(&a.doc_slug, &a.rule_id), 4);
-        let message = round_limit_message(&[&a], &session, 3);
+        let message = round_limit_message(&[&a], &session, check::ArtifactKind::Plan, 3);
         assert!(message.contains("R-A-002"));
         assert!(message.contains("denied 4 times"));
         assert!(message.contains("round limit (3"));

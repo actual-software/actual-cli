@@ -1099,10 +1099,10 @@ pub struct ImplCheckArgs {
     /// fail open" (see `parse_max_rounds`).
     ///
     /// Uses its own environment variable, distinct from `plan-check`'s
-    /// `ACTUAL_PLAN_CHECK_MAX_ROUNDS`: the two commands' revision loops are
-    /// independent, even though they share the underlying session-state
-    /// module (`crate::cli::commands::governance_session`), keyed separately
-    /// by `session_id`.
+    /// `ACTUAL_PLAN_CHECK_MAX_ROUNDS`: deny counts, rounds, and content-scoped
+    /// clearances are per artifact kind inside the shared session file, so a
+    /// plan-stage denial cannot spend this budget. Human overrides on the
+    /// same `(session_id, rules_dir)` still apply to both commands.
     #[arg(
         long,
         default_value_t = DEFAULT_MAX_ROUNDS,
