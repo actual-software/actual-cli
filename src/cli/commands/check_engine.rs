@@ -96,7 +96,7 @@ impl PlanCheckArgs {
 /// consideration when the pipeline stopped, so neither caller has to report a
 /// misleading zero for a failure that happened after selection ran.
 pub(super) enum Outcome {
-    /// No committed rule document applied to this plan, or the rules
+    /// No committed rule document applied to this artifact, or the rules
     /// directory holds none. Not a failure — most plans do not touch every
     /// rule in the corpus.
     NothingApplies,
@@ -488,7 +488,7 @@ pub(super) fn capped_read<R: Read>(reader: R, source: &str) -> Result<String, Ac
         .map_err(ActualError::IoError)?;
     if bytes.len() as u64 > plan_check_hook::MAX_READ_BYTES {
         return Err(ActualError::ConfigError(format!(
-            "{source} exceeds the {}-byte plan-check limit",
+            "{source} exceeds the {}-byte check limit",
             plan_check_hook::MAX_READ_BYTES
         )));
     }
@@ -496,20 +496,55 @@ pub(super) fn capped_read<R: Read>(reader: R, source: &str) -> Result<String, Ac
         .map_err(|_| ActualError::ConfigError(format!("{source} is not valid UTF-8")))
 }
 
+/// User-facing nouns for one artifact kind. Shared renderers take `kind`
+/// rather than a pile of string parameters so plan-check and impl-check
+/// cannot drift on a single label.
+struct ArtifactCopy {
+    panel_title: &'static str,
+    artifact_label: &'static str,
+    noun: &'static str,
+    revised: &'static str,
+    governance: &'static str,
+}
+
+fn artifact_copy(kind: check::ArtifactKind) -> ArtifactCopy {
+    match kind {
+        check::ArtifactKind::Plan => ArtifactCopy {
+            panel_title: "Plan check",
+            artifact_label: "Plan",
+            noun: "plan",
+            revised: "A revised plan is re-checked automatically.",
+            governance: "Actual plan governance",
+        },
+        check::ArtifactKind::Diff => ArtifactCopy {
+            panel_title: "Implementation check",
+            artifact_label: "Diff",
+            noun: "diff",
+            revised: "A revised working tree is re-checked automatically.",
+            governance: "Actual implementation governance",
+        },
+    }
+}
+
 pub(super) fn render_panel(
     outcome: &Outcome,
-    plan: &str,
+    text: &str,
     rules_dir: &Path,
     width: usize,
+    kind: check::ArtifactKind,
 ) -> String {
-    let mut panel = Panel::titled("Plan check");
-    panel = panel.kv("Plan", &truncate(plan, 72));
+    let copy = artifact_copy(kind);
+    let mut panel = Panel::titled(copy.panel_title);
+    panel = panel.kv(copy.artifact_label, &truncate(text, 72));
     panel = panel.kv("Rules dir", &rules_dir.display().to_string());
 
     match outcome {
         Outcome::NothingApplies => panel
             .separator()
-            .line("No committed rule document applies to this plan.")
+            .line(&format!(
+                "No committed rule document applies to this {}.",
+                copy.noun
+            ))
             .render(width),
         Outcome::NoRunner {
             documents_selected,
@@ -607,11 +642,15 @@ struct CheckJson {
     partial: Option<PartialCoverage>,
 }
 
-pub(super) fn render_json(outcome: &Outcome) -> String {
+pub(super) fn render_json(outcome: &Outcome, kind: check::ArtifactKind) -> String {
+    let copy = artifact_copy(kind);
     let payload = match outcome {
         Outcome::NothingApplies => CheckJson {
             status: "not_checked",
-            detail: Some("no committed rule document applies to this plan".to_string()),
+            detail: Some(format!(
+                "no committed rule document applies to this {}",
+                copy.noun
+            )),
             runner: None,
             documents_selected: 0,
             verdicts: Vec::new(),
@@ -670,14 +709,15 @@ pub(super) fn render_json(outcome: &Outcome) -> String {
 }
 
 /// The direct-mode error summary: every conflicting rule id, one per line.
-pub(super) fn deny_summary(conflicts: &[&CheckedRule]) -> String {
+pub(super) fn deny_summary(conflicts: &[&CheckedRule], kind: check::ArtifactKind) -> String {
+    let copy = artifact_copy(kind);
     conflicts
         .iter()
         .map(|c| {
             format!(
                 "{}: {}",
                 c.rule_id,
-                non_empty_or(&c.reason, "conflicts with the plan")
+                non_empty_or(&c.reason, &format!("conflicts with the {}", copy.noun))
             )
         })
         .collect::<Vec<_>>()
@@ -1060,7 +1100,7 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
     #[cfg(feature = "telemetry")]
     send_override_events(&root, &args.rules);
     let width = term_size::terminal_width();
-    let mut panel = Panel::titled("Plan check override recorded");
+    let mut panel = Panel::titled("Check override recorded");
     panel = panel.kv("Session", &args.session);
     panel = panel.kv("Rules dir", &rules_dir.display().to_string());
     panel = panel.kv("Reason", &args.reason);
@@ -1079,11 +1119,11 @@ fn exec_override_impl(args: &PlanCheckOverrideArgs) -> Result<(), ActualError> {
 }
 
 /// The deny reason: every conflicting rule id, the rule's own statement
-/// verbatim, the judge's reason, and the quoted plan span, one per line — so
-/// a reader (or the agent revising the plan) sees every violation at once
-/// rather than only the first, and can revise against the rule's actual text
-/// rather than the judge's paraphrase of it. `blocking` names both real
-/// conflicts and `requires_decision` verdicts — a plan claiming it
+/// verbatim, the judge's reason, and the quoted artifact span, one per line —
+/// so a reader (or the agent revising the plan or working tree) sees every
+/// violation at once rather than only the first, and can revise against the
+/// rule's actual text rather than the judge's paraphrase of it. `blocking`
+/// names both real conflicts and `requires_decision` verdicts — a claim it
 /// deliberately supersedes a rule is model output, not a recorded human
 /// decision, so it is denied exactly like an outright conflict (see the
 /// module doc's "advisory gate" section) — labeled `CONFLICT` or `DECISION`
@@ -1123,7 +1163,10 @@ pub(super) fn hook_deny_reason(
     blocking: &[&CheckedRule],
     session_id: Option<&str>,
     partial: Option<(usize, usize)>,
+    kind: check::ArtifactKind,
 ) -> String {
+    let copy = artifact_copy(kind);
+    let fallback = format!("conflicts with the {}", copy.noun);
     let mut lines: Vec<String> = blocking
         .iter()
         .map(|c| {
@@ -1136,11 +1179,12 @@ pub(super) fn hook_deny_reason(
                 _ => "CONFLICT",
             };
             format!(
-                "{label} {} ({}): {} — rule: \"{}\" — plan: \"{}\"",
+                "{label} {} ({}): {} — rule: \"{}\" — {}: \"{}\"",
                 c.rule_id,
                 c.level.as_str(),
-                non_empty_or(&c.reason, "conflicts with the plan"),
+                non_empty_or(&c.reason, &fallback),
                 truncate(&c.statement, 240),
+                copy.noun,
                 truncate(&c.span, 240)
             )
         })
@@ -1150,11 +1194,12 @@ pub(super) fn hook_deny_reason(
     }
     if let Some(session_id) = session_id {
         lines.push(format!(
-            "A revised plan is re-checked automatically. Session: {session_id}. A human \
+            "{} Session: {session_id}. A human \
              reviewing this — not the agent — can override a specific rule explicitly by \
              running `actual check-override` from an interactive terminal (see `actual \
              check-override --help` for the exact flags); that command refuses to run \
-             non-interactively."
+             non-interactively.",
+            copy.revised
         ));
     }
     lines.join("\n")
@@ -1195,10 +1240,12 @@ pub(super) fn round_limit_message(
             format!("{} (denied {count} times)", c.rule_id)
         })
         .collect();
+    let copy = artifact_copy(kind);
     format!(
-        "Actual plan governance hit its round limit ({max_rounds} denials) for {}: proceeding \
+        "{} hit its round limit ({max_rounds} denials) for {}: proceeding \
          without blocking further on {} specifically. This is not a silent pass — recorded in \
          plan-check-overrides.log.",
+        copy.governance,
         parts.join(", "),
         if exhausted.len() == 1 { "it" } else { "them" }
     )
@@ -1820,7 +1867,7 @@ pub(crate) mod tests {
             "log the signing key for debugging",
             "R-A-002 forbids logging the key",
         );
-        let reason = hook_deny_reason(&[&a], None, None);
+        let reason = hook_deny_reason(&[&a], None, None, check::ArtifactKind::Plan);
         assert!(reason.contains("R-A-002"));
         assert!(reason.contains("log the signing key for debugging"));
     }
@@ -1828,7 +1875,7 @@ pub(crate) mod tests {
     #[test]
     fn test_hook_deny_reason_falls_back_when_the_model_reason_is_blank() {
         let a = checked("R-A-002", Verdict::Conflicting, "some span", "");
-        let reason = hook_deny_reason(&[&a], None, None);
+        let reason = hook_deny_reason(&[&a], None, None, check::ArtifactKind::Plan);
         assert!(reason.contains("conflicts with the plan"));
     }
 
@@ -1843,24 +1890,41 @@ pub(crate) mod tests {
             "log the signing key for debugging",
             "R-A-002 forbids logging the key",
         );
-        let reason = hook_deny_reason(&[&a], None, None);
+        let reason = hook_deny_reason(&[&a], None, None, check::ArtifactKind::Plan);
         assert!(reason.contains(&a.statement));
     }
 
     #[test]
     fn test_hook_deny_reason_with_no_session_omits_override_instructions() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], None, None);
+        let reason = hook_deny_reason(&[&a], None, None, check::ArtifactKind::Plan);
         assert!(!reason.contains("plan-check-override"));
     }
 
     #[test]
     fn test_hook_deny_reason_with_a_session_points_at_override_help() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], Some("sess-123"), None);
+        let reason = hook_deny_reason(&[&a], Some("sess-123"), None, check::ArtifactKind::Plan);
         assert!(reason.contains("Session: sess-123"));
         assert!(reason.contains("actual check-override"));
         assert!(reason.contains("--help"));
+        assert!(reason.contains("A revised plan is re-checked automatically"));
+        assert!(reason.contains("plan:"));
+    }
+
+    /// On an implementation gate the deny text is the agent's tool result.
+    /// Telling it to revise a plan would send it back to ExitPlanMode
+    /// instead of the working tree.
+    #[test]
+    fn test_hook_deny_reason_impl_check_tells_the_agent_to_revise_the_working_tree() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "");
+        let reason = hook_deny_reason(&[&a], Some("sess-123"), None, check::ArtifactKind::Diff);
+        assert!(reason.contains("A revised working tree is re-checked automatically"));
+        assert!(reason.contains("diff:"));
+        assert!(reason.contains("conflicts with the diff"));
+        assert!(!reason.contains("revised plan"));
+        assert!(!reason.contains("plan:"));
+        assert!(!reason.contains("conflicts with the plan"));
     }
 
     /// The gap this guards: the deny reason must never hand back a
@@ -1874,7 +1938,7 @@ pub(crate) mod tests {
     #[test]
     fn test_hook_deny_reason_never_assembles_a_working_override_invocation() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], Some("sess-123"), None);
+        let reason = hook_deny_reason(&[&a], Some("sess-123"), None, check::ArtifactKind::Plan);
         assert!(!reason.contains("--session sess-123 --rule"));
         assert!(!reason.contains(&governance_session::key(&a.doc_slug, &a.rule_id)));
         assert!(!reason.to_lowercase().contains(&a.doc_slug.to_lowercase()));
@@ -1893,7 +1957,7 @@ pub(crate) mod tests {
             "span",
             "supersedes it",
         );
-        let reason = hook_deny_reason(&[&a], None, None);
+        let reason = hook_deny_reason(&[&a], None, None, check::ArtifactKind::Plan);
         assert!(reason.contains("DECISION R-A-001"));
         assert!(!reason.contains("CONFLICT R-A-001"));
     }
@@ -1901,7 +1965,7 @@ pub(crate) mod tests {
     #[test]
     fn test_hook_deny_reason_labels_a_conflicting_verdict_distinctly() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], None, None);
+        let reason = hook_deny_reason(&[&a], None, None, check::ArtifactKind::Plan);
         assert!(reason.contains("CONFLICT R-A-002"));
         assert!(!reason.contains("DECISION R-A-002"));
     }
@@ -1909,14 +1973,14 @@ pub(crate) mod tests {
     #[test]
     fn test_hook_deny_reason_discloses_partial_coverage_when_present() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], None, Some((60, 85)));
+        let reason = hook_deny_reason(&[&a], None, Some((60, 85)), check::ArtifactKind::Plan);
         assert!(reason.contains("Only 60 of 85"));
     }
 
     #[test]
     fn test_hook_deny_reason_omits_partial_note_when_absent() {
         let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
-        let reason = hook_deny_reason(&[&a], None, None);
+        let reason = hook_deny_reason(&[&a], None, None, check::ArtifactKind::Plan);
         assert!(!reason.contains("judging cap"));
     }
 
@@ -1929,8 +1993,32 @@ pub(crate) mod tests {
             "a plan",
             Path::new("/x/.actual/rules"),
             80,
+            check::ArtifactKind::Plan,
         );
         assert!(panel.contains("No committed rule document applies"));
+        assert!(panel.contains("Plan check"));
+        assert!(panel.contains("this plan"));
+        assert!(!panel.contains("Implementation check"));
+    }
+
+    /// The gap this guards: impl-check used to call the shared renderer and
+    /// print a "Plan check" panel with a truncated unified diff in the Plan
+    /// row, even though the empty-diff path already knew the title should
+    /// be "Implementation check."
+    #[test]
+    fn test_render_panel_impl_check_titles_implementation_check() {
+        let panel = render_panel(
+            &Outcome::NothingApplies,
+            "diff --git a/oauth.rs b/oauth.rs",
+            Path::new("/x/.actual/rules"),
+            80,
+            check::ArtifactKind::Diff,
+        );
+        assert!(panel.contains("Implementation check"));
+        assert!(panel.contains("Diff"));
+        assert!(panel.contains("this diff"));
+        assert!(!panel.contains("Plan check"));
+        assert!(!panel.contains("this plan"));
     }
 
     #[test]
@@ -1949,7 +2037,13 @@ pub(crate) mod tests {
             runner_label: Some("claude-cli (sonnet)".to_string()),
             partial: None,
         };
-        let panel = render_panel(&outcome, "a plan", Path::new("/x/.actual/rules"), 80);
+        let panel = render_panel(
+            &outcome,
+            "a plan",
+            Path::new("/x/.actual/rules"),
+            80,
+            check::ArtifactKind::Plan,
+        );
         assert!(panel.contains("Conforming"));
         assert!(!panel.contains("CONFLICT"));
     }
@@ -1973,7 +2067,13 @@ pub(crate) mod tests {
             runner_label: Some("claude-cli (sonnet)".to_string()),
             partial: Some((60, 85)),
         };
-        let panel = render_panel(&outcome, "a plan", Path::new("/x/.actual/rules"), 80);
+        let panel = render_panel(
+            &outcome,
+            "a plan",
+            Path::new("/x/.actual/rules"),
+            80,
+            check::ArtifactKind::Plan,
+        );
         assert!(panel.contains("60 of 85"));
     }
 
@@ -2001,7 +2101,13 @@ pub(crate) mod tests {
             runner_label: None,
             partial: None,
         };
-        let panel = render_panel(&outcome, "a plan", Path::new("/x/.actual/rules"), 80);
+        let panel = render_panel(
+            &outcome,
+            "a plan",
+            Path::new("/x/.actual/rules"),
+            80,
+            check::ArtifactKind::Plan,
+        );
         assert!(panel.contains("CONFLICT"));
         assert!(panel.contains("R-A-002"));
         assert!(panel.contains("DECISION"));
@@ -2024,7 +2130,7 @@ pub(crate) mod tests {
             runner_label: None,
             partial: None,
         };
-        let json = render_json(&conforming);
+        let json = render_json(&conforming, check::ArtifactKind::Plan);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "conforming");
         assert!(value.get("partial").is_none());
@@ -2035,7 +2141,7 @@ pub(crate) mod tests {
             runner_label: None,
             partial: None,
         };
-        let json = render_json(&conflicting);
+        let json = render_json(&conflicting, check::ArtifactKind::Plan);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "conflicting");
 
@@ -2045,7 +2151,7 @@ pub(crate) mod tests {
             runner_label: None,
             partial: None,
         };
-        let json = render_json(&requires_decision);
+        let json = render_json(&requires_decision, check::ArtifactKind::Plan);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "requires_decision");
 
@@ -2055,16 +2161,26 @@ pub(crate) mod tests {
             runner_label: None,
             partial: Some((60, 85)),
         };
-        let json = render_json(&partial);
+        let json = render_json(&partial, check::ArtifactKind::Plan);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "conforming");
         assert_eq!(value["partial"]["judged"], 60);
         assert_eq!(value["partial"]["total"], 85);
 
-        let json = render_json(&Outcome::NothingApplies);
+        let json = render_json(&Outcome::NothingApplies, check::ArtifactKind::Plan);
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["status"], "not_checked");
-        assert!(value["detail"].is_string());
+        assert_eq!(
+            value["detail"],
+            "no committed rule document applies to this plan"
+        );
+
+        let json = render_json(&Outcome::NothingApplies, check::ArtifactKind::Diff);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value["detail"],
+            "no committed rule document applies to this diff"
+        );
     }
 
     /// The review finding this guards: `NoRunner` and `CheckFailed` happen
@@ -2077,7 +2193,8 @@ pub(crate) mod tests {
             documents_selected: 7,
             reason: "no ANTHROPIC_API_KEY".to_string(),
         };
-        let value: serde_json::Value = serde_json::from_str(&render_json(&no_runner)).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&no_runner, check::ArtifactKind::Plan)).unwrap();
         assert_eq!(value["status"], "not_checked");
         assert_eq!(value["documents_selected"], 7);
 
@@ -2085,7 +2202,8 @@ pub(crate) mod tests {
             documents_selected: 3,
             reason: "runner timed out".to_string(),
         };
-        let value: serde_json::Value = serde_json::from_str(&render_json(&check_failed)).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&check_failed, check::ArtifactKind::Plan)).unwrap();
         assert_eq!(value["status"], "not_checked");
         assert_eq!(value["documents_selected"], 3);
     }
@@ -2096,7 +2214,13 @@ pub(crate) mod tests {
             documents_selected: 7,
             reason: "no ANTHROPIC_API_KEY".to_string(),
         };
-        let panel = render_panel(&no_runner, "a plan", Path::new("/x/.actual/rules"), 80);
+        let panel = render_panel(
+            &no_runner,
+            "a plan",
+            Path::new("/x/.actual/rules"),
+            80,
+            check::ArtifactKind::Plan,
+        );
         assert!(panel.contains("Documents selected"));
         assert!(panel.contains('7'));
 
@@ -2104,7 +2228,13 @@ pub(crate) mod tests {
             documents_selected: 3,
             reason: "runner timed out".to_string(),
         };
-        let panel = render_panel(&check_failed, "a plan", Path::new("/x/.actual/rules"), 80);
+        let panel = render_panel(
+            &check_failed,
+            "a plan",
+            Path::new("/x/.actual/rules"),
+            80,
+            check::ArtifactKind::Plan,
+        );
         assert!(panel.contains("Documents selected"));
         assert!(panel.contains('3'));
     }
@@ -2704,6 +2834,21 @@ pub(crate) mod tests {
         assert!(message.contains("R-A-002"));
         assert!(message.contains("denied 4 times"));
         assert!(message.contains("round limit (3"));
+        assert!(message.contains("Actual plan governance"));
+        assert!(!message.contains("implementation governance"));
+    }
+
+    #[test]
+    fn test_round_limit_message_impl_check_names_implementation_governance() {
+        let a = checked("R-A-002", Verdict::Conflicting, "span", "reason");
+        let mut session = GovernanceSession::default();
+        session
+            .diff
+            .deny_counts
+            .insert(governance_session::key(&a.doc_slug, &a.rule_id), 4);
+        let message = round_limit_message(&[&a], &session, check::ArtifactKind::Diff, 3);
+        assert!(message.contains("Actual implementation governance"));
+        assert!(!message.contains("plan governance"));
     }
 
     /// Unlike the terminal check, this one carries no restriction on being

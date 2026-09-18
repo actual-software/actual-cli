@@ -188,15 +188,30 @@ fn exec_direct(args: &PlanCheckArgs) -> Result<(), ActualError> {
 
     let width = term_size::terminal_width();
     if args.json {
-        println!("{}", render_json(&outcome));
+        println!(
+            "{}",
+            render_json(&outcome, crate::rules::check::ArtifactKind::Plan)
+        );
     } else {
-        println!("{}", render_panel(&outcome, &plan_text, &rules_dir, width));
+        println!(
+            "{}",
+            render_panel(
+                &outcome,
+                &plan_text,
+                &rules_dir,
+                width,
+                crate::rules::check::ArtifactKind::Plan,
+            )
+        );
     }
 
     let result = if let Outcome::Verdicts { verdicts, .. } = &outcome {
         let conflicts: Vec<&CheckedRule> = verdicts.iter().filter(|v| v.verdict.blocks()).collect();
         if !conflicts.is_empty() {
-            Err(ActualError::PlanNotConforming(deny_summary(&conflicts)))
+            Err(ActualError::PlanNotConforming(deny_summary(
+                &conflicts,
+                crate::rules::check::ArtifactKind::Plan,
+            )))
         } else {
             Ok(())
         }
@@ -510,7 +525,8 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                 // bury the fact that this session still carries a recorded
                 // override elsewhere. See the module doc's "override
                 // visibility" note.
-                let deny_reason = hook_deny_reason(&blocking, session_id, partial);
+                let deny_reason =
+                    hook_deny_reason(&blocking, session_id, partial, ArtifactKind::Plan);
                 emit(plan_check_hook::render_deny(&with_override_reminder(
                     deny_reason,
                     &session,
