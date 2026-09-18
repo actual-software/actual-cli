@@ -64,9 +64,8 @@ use std::path::Path;
 
 use crate::cli::args::ImplCheckArgs;
 use crate::cli::commands::check_engine::{
-    self, audit_log_note, capped_read, deny_summary, hook_deny_reason, override_reminder,
-    partial_coverage_note, render_json, render_panel, round_limit_message, run_pipeline,
-    with_override_reminder, Outcome,
+    self, capped_read, deny_summary, emit, finish_hook, render_json, render_panel, run_pipeline,
+    HookRun, Outcome,
 };
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::impl_check_hook::HookEnvelope;
@@ -74,10 +73,12 @@ use crate::cli::commands::plan_check::repo_root;
 use crate::cli::commands::plan_check_hook;
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
-use crate::rules::check::{ArtifactKind, CheckedRule, Verdict};
+#[cfg(feature = "telemetry")]
+use crate::rules::check::Verdict;
+use crate::rules::check::{ArtifactKind, CheckedRule};
 
 #[cfg(feature = "telemetry")]
-use crate::cli::commands::check_engine::{send_governance_events, send_hook_governance_events};
+use crate::cli::commands::check_engine::send_governance_events;
 
 impl ImplCheckArgs {
     /// Project this command's own scalar fields into the shape
@@ -409,6 +410,11 @@ fn exec_hook(args: &ImplCheckArgs) {
 
 /// Run the `--claude-hook` path against an already-read payload.
 ///
+/// Only resolving the diff and running the pipeline live here; everything
+/// after the pipeline's outcome (session bookkeeping, deny, round limit,
+/// notices, telemetry) is `check_engine::finish_hook`, shared with
+/// `plan-check` so the two gates cannot drift.
+///
 /// INVARIANT: same as `plan_check::exec_hook_with` — every fallible step
 /// below is matched explicitly and turned into a fail-open notice (or, for a
 /// real violation, a deny) rather than propagating an error, so this
@@ -485,177 +491,21 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         }
     };
 
-    match outcome {
-        Outcome::NothingApplies => {
-            emit(plan_check_hook::render_notice(
-                "No committed rule under .actual/rules/ applies to this diff.",
-            ));
-        }
-        Outcome::NoRunner { reason, .. } => {
-            emit(plan_check_hook::render_notice(&format!(
-                "Actual implementation governance did not run: no runner available ({reason})."
-            )));
-        }
-        Outcome::CheckFailed { reason, .. } => {
-            emit(plan_check_hook::render_notice(&format!(
-                "Actual implementation governance did not run: {reason}"
-            )));
-        }
-        Outcome::Verdicts {
-            verdicts,
-            runner_label,
-            partial,
-            ..
-        } => {
-            let judge_ran = runner_label.is_some();
-            if session_id.is_some() {
-                for v in &verdicts {
-                    let key = governance_session::key(&v.doc_slug, &v.rule_id);
-                    if v.verdict == Verdict::Conforming {
-                        session.diff.cleared.insert(key, diff_digest.clone());
-                    } else {
-                        session.diff.cleared.remove(&key);
-                    }
-                }
-                if judge_ran {
-                    session.diff.rounds += 1;
-                }
-            }
-
-            let blocking: Vec<&CheckedRule> = verdicts
-                .iter()
-                .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
-                .collect();
-
-            if !blocking.is_empty() {
-                if session_id.is_some() {
-                    for c in &blocking {
-                        session.record_denial(
-                            ArtifactKind::Diff,
-                            &governance_session::key(&c.doc_slug, &c.rule_id),
-                        );
-                    }
-                }
-
-                if let Some(session_id) = session_id {
-                    let exhausted: Vec<&CheckedRule> = blocking
-                        .iter()
-                        .filter(|c| {
-                            session.deny_limit_exceeded(
-                                ArtifactKind::Diff,
-                                &governance_session::key(&c.doc_slug, &c.rule_id),
-                                args.max_rounds,
-                            )
-                        })
-                        .copied()
-                        .collect();
-                    if !exhausted.is_empty() && exhausted.len() == blocking.len() {
-                        let keys: Vec<String> = exhausted
-                            .iter()
-                            .map(|c| governance_session::key(&c.doc_slug, &c.rule_id))
-                            .collect();
-                        let message = round_limit_message(
-                            &exhausted,
-                            &session,
-                            ArtifactKind::Diff,
-                            args.max_rounds,
-                        );
-                        governance_session::record_round_limit(
-                            session_id,
-                            &rules_dir,
-                            session.diff.rounds,
-                            &keys,
-                            &message,
-                        );
-                        governance_session::store(session_id, &rules_dir, &session);
-                        emit(plan_check_hook::render_notice(&with_override_reminder(
-                            message, &session,
-                        )));
-                        #[cfg(feature = "telemetry")]
-                        send_hook_governance_events(
-                            "impl-check --claude-hook",
-                            &root,
-                            started_at,
-                            crate::api::types::PlanGovernanceDecision::Warn,
-                            &verdicts,
-                            false,
-                        );
-                        return;
-                    }
-                    governance_session::store(session_id, &rules_dir, &session);
-                }
-                let deny_reason =
-                    hook_deny_reason(&blocking, session_id, partial, ArtifactKind::Diff);
-                emit(plan_check_hook::render_deny(&with_override_reminder(
-                    deny_reason,
-                    &session,
-                )));
-                #[cfg(feature = "telemetry")]
-                send_hook_governance_events(
-                    "impl-check --claude-hook",
-                    &root,
-                    started_at,
-                    crate::api::types::PlanGovernanceDecision::Block,
-                    &verdicts,
-                    true,
-                );
-                return;
-            }
-
-            if let Some(session_id) = session_id {
-                governance_session::store(session_id, &rules_dir, &session);
-            }
-
-            let mut notes = Vec::new();
-            if let Some((judged, total)) = partial {
-                notes.push(partial_coverage_note(judged, total));
-                if let Some(session_id) = session_id {
-                    governance_session::record_partial_coverage(
-                        session_id,
-                        &rules_dir,
-                        session.diff.rounds,
-                        judged,
-                        total,
-                    );
-                    notes.push(format!(
-                        "This is not a silent pass — recorded in {}.",
-                        audit_log_note(ArtifactKind::Diff)
-                    ));
-                }
-            }
-            let reminder = override_reminder(&session);
+    finish_hook(
+        &HookRun {
+            kind: ArtifactKind::Diff,
+            command: "impl-check --claude-hook",
+            session_id,
+            artifact_digest: &diff_digest,
+            root: &root,
+            rules_dir: &rules_dir,
+            max_rounds: args.max_rounds,
             #[cfg(feature = "telemetry")]
-            let has_override_reminder = reminder.is_some();
-            if let Some(reminder) = reminder {
-                notes.push(reminder);
-            }
-            if !notes.is_empty() {
-                emit(plan_check_hook::render_notice(&notes.join("\n")));
-            }
-            #[cfg(feature = "telemetry")]
-            {
-                let decision = if partial.is_some() || has_override_reminder {
-                    crate::api::types::PlanGovernanceDecision::Warn
-                } else {
-                    crate::api::types::PlanGovernanceDecision::Allow
-                };
-                send_hook_governance_events(
-                    "impl-check --claude-hook",
-                    &root,
-                    started_at,
-                    decision,
-                    &verdicts,
-                    false,
-                );
-            }
-        }
-    }
-}
-
-/// Print exactly one line — the same "stdout is exactly one JSON object, or
-/// nothing" invariant `plan_check::emit` enforces.
-fn emit(json: String) {
-    println!("{json}");
+            started_at,
+        },
+        &mut session,
+        outcome,
+    );
 }
 
 #[cfg(test)]

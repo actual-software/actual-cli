@@ -1266,6 +1266,271 @@ pub(super) fn round_limit_message(
     )
 }
 
+/// Print exactly one line: the single call site that writes to stdout for
+/// either `--claude-hook` command, so "stdout is exactly one JSON object, or
+/// nothing" is enforceable by inspection rather than by discipline.
+pub(super) fn emit(json: String) {
+    println!("{json}");
+}
+
+/// Everything [`finish_hook`] needs from a `--claude-hook` command that is
+/// not the session or the pipeline's outcome. The two commands differ only in
+/// the values they put here — which artifact kind they judge, the label their
+/// telemetry carries, and where the artifact text came from — never in what
+/// happens once a verdict exists.
+// `command`, `root` and `started_at` only feed telemetry.
+#[cfg_attr(not(feature = "telemetry"), allow(dead_code))]
+pub(super) struct HookRun<'a> {
+    pub kind: check::ArtifactKind,
+    /// The telemetry command label, e.g. `"plan-check --claude-hook"`.
+    pub command: &'static str,
+    pub session_id: Option<&'a str>,
+    /// [`governance_session::content_digest`] of the judged artifact text.
+    pub artifact_digest: &'a str,
+    pub root: &'a Path,
+    pub rules_dir: &'a Path,
+    pub max_rounds: u32,
+    #[cfg(feature = "telemetry")]
+    pub started_at: std::time::Instant,
+}
+
+/// Turn the pipeline's [`Outcome`] into the hook's one line of output and the
+/// session state that goes with it: fail-open notices, session bookkeeping,
+/// the deny / round-limit / partial-coverage / override-reminder decision, and
+/// the governance telemetry for whichever it was.
+///
+/// Shared by `plan-check` and `impl-check` so the two gates cannot drift on a
+/// policy that has to stay identical (they did, twice, while this was copied).
+/// Every user-visible noun comes from [`artifact_copy`] via `run.kind`, and
+/// loop state is reached through [`GovernanceSession::loop_state_mut`], so
+/// nothing in here names a specific gate.
+///
+/// INVARIANT: never returns an error and never panics on its own — every
+/// branch ends in a notice or a deny, so a caller's `--claude-hook` path
+/// cannot reach an ordinary nonzero exit through it.
+pub(super) fn finish_hook(run: &HookRun<'_>, session: &mut GovernanceSession, outcome: Outcome) {
+    let copy = artifact_copy(run.kind);
+    match outcome {
+        Outcome::NothingApplies => {
+            emit(plan_check_hook::render_notice(&format!(
+                "No committed rule under .actual/rules/ applies to this {}.",
+                copy.noun
+            )));
+        }
+        Outcome::NoRunner { reason, .. } => {
+            emit(plan_check_hook::render_notice(&format!(
+                "{} did not run: no runner available ({reason}).",
+                copy.governance
+            )));
+        }
+        Outcome::CheckFailed { reason, .. } => {
+            emit(plan_check_hook::render_notice(&format!(
+                "{} did not run: {reason}",
+                copy.governance
+            )));
+        }
+        Outcome::Verdicts {
+            verdicts,
+            runner_label,
+            partial,
+            ..
+        } => finish_verdicts(run, session, verdicts, runner_label.is_some(), partial),
+    }
+}
+
+fn finish_verdicts(
+    run: &HookRun<'_>,
+    session: &mut GovernanceSession,
+    verdicts: Vec<CheckedRule>,
+    // A round is one *completed judge call* — `runner_label` is only ever
+    // `Some` when `check::check` actually ran (never for the "everything was
+    // already excluded" shortcut in `run_pipeline`).
+    judge_ran: bool,
+    partial: Option<(usize, usize)>,
+) {
+    let kind = run.kind;
+    let session_id = run.session_id;
+    if session_id.is_some() {
+        let state = session.loop_state_mut(kind);
+        for v in &verdicts {
+            let key = governance_session::key(&v.doc_slug, &v.rule_id);
+            if v.verdict == Verdict::Conforming {
+                state.cleared.insert(key, run.artifact_digest.to_string());
+            } else {
+                // A rule that was cleared against an earlier artifact and is
+                // no longer conforming against this one must not leave a
+                // stale entry behind -- it is no longer a true fact about the
+                // current artifact, digest mismatch or not.
+                state.cleared.remove(&key);
+            }
+        }
+        if judge_ran {
+            state.rounds += 1;
+        }
+    }
+
+    // A verdict blocks the tool call when it is a genuine conflict, or when
+    // the judge classifies the artifact as *deliberately* superseding a rule
+    // — that classification is model output, not a recorded human decision,
+    // so it gets exactly the same deny + override treatment as an outright
+    // conflict, not a notice the agent can simply proceed past. See
+    // `plan_check`'s module doc, "advisory gate".
+    let blocking: Vec<&CheckedRule> = verdicts
+        .iter()
+        .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
+        .collect();
+
+    if !blocking.is_empty() {
+        if session_id.is_some() {
+            // Every currently-blocking rule gets its own denial recorded,
+            // independent of any other rule's count — see `plan_check`'s
+            // module doc, "the round limit is per rule".
+            for c in &blocking {
+                session.record_denial(kind, &governance_session::key(&c.doc_slug, &c.rule_id));
+            }
+        }
+
+        if let Some(session_id) = session_id {
+            let exhausted: Vec<&CheckedRule> = blocking
+                .iter()
+                .filter(|c| {
+                    session.deny_limit_exceeded(
+                        kind,
+                        &governance_session::key(&c.doc_slug, &c.rule_id),
+                        run.max_rounds,
+                    )
+                })
+                .copied()
+                .collect();
+            // Fail open only when *every* rule blocking this round has
+            // individually exhausted its own budget. A single rule still
+            // within budget keeps the whole call denied — the hook can only
+            // deny or not deny the tool call as a whole, so an exhausted rule
+            // cannot be waved through while a fresh one still needs to block.
+            if !exhausted.is_empty() && exhausted.len() == blocking.len() {
+                let keys: Vec<String> = exhausted
+                    .iter()
+                    .map(|c| governance_session::key(&c.doc_slug, &c.rule_id))
+                    .collect();
+                let message = round_limit_message(&exhausted, session, kind, run.max_rounds);
+                governance_session::record_round_limit(
+                    session_id,
+                    run.rules_dir,
+                    session.loop_state(kind).rounds,
+                    &keys,
+                    &message,
+                );
+                governance_session::store(session_id, run.rules_dir, session);
+                // The audit log keeps the round-limit message on its own,
+                // undecorated -- the override reminder is only appended to
+                // what the human actually sees, same spirit as the
+                // silent-path `notes` below.
+                emit(plan_check_hook::render_notice(&with_override_reminder(
+                    message, session,
+                )));
+                // Every rule here is `blocked: false` -- the round limit let
+                // the call through this round -- so this is `warn`, not
+                // `block`, distinct from a clean pass.
+                #[cfg(feature = "telemetry")]
+                send_hook_governance_events(
+                    run.command,
+                    run.root,
+                    run.started_at,
+                    crate::api::types::PlanGovernanceDecision::Warn,
+                    &verdicts,
+                    false,
+                );
+                return;
+            }
+            governance_session::store(session_id, run.rules_dir, session);
+        }
+        // A deny is not silence, but it is also not the same as "no active
+        // override" -- a different rule's conflict must not bury the fact
+        // that this session still carries a recorded override elsewhere. See
+        // `plan_check`'s module doc, "override visibility".
+        let deny_reason = hook_deny_reason(&blocking, session_id, partial, kind);
+        emit(plan_check_hook::render_deny(&with_override_reminder(
+            deny_reason,
+            session,
+        )));
+        #[cfg(feature = "telemetry")]
+        send_hook_governance_events(
+            run.command,
+            run.root,
+            run.started_at,
+            crate::api::types::PlanGovernanceDecision::Block,
+            &verdicts,
+            true,
+        );
+        return;
+    }
+
+    if let Some(session_id) = session_id {
+        governance_session::store(session_id, run.rules_dir, session);
+    }
+
+    // Fully conforming (nothing blocking): the contract is silence — UNLESS
+    // this session carries an active override (must stay visible on every
+    // round, never silently absorbed once granted) or this round only covered
+    // a prefix of what applies (a plain "conforming" silence would misreport
+    // partial coverage as complete). Either reason alone is enough to break
+    // silence; both together are joined into one notice.
+    let mut notes = Vec::new();
+    if let Some((judged, total)) = partial {
+        notes.push(partial_coverage_note(judged, total));
+        // This is the one fail-open path with no other durable trace: a deny
+        // keeps per-rule accounting live in the session, and an override or
+        // round-limit pass already writes its own audit entry, but
+        // "conforming, as far as we looked" would otherwise exist only in the
+        // hook response the agent — not a human — is the one actually
+        // reading. See `plan_check`'s module doc, "advisory gate".
+        if let Some(session_id) = session_id {
+            governance_session::record_partial_coverage(
+                session_id,
+                run.rules_dir,
+                session.loop_state(kind).rounds,
+                judged,
+                total,
+            );
+            notes.push(format!(
+                "This is not a silent pass — recorded in {}.",
+                audit_log_note(kind)
+            ));
+        }
+    }
+    let reminder = override_reminder(session);
+    // An active override on an otherwise-clean round is still worth
+    // distinguishing from a truly clean allow -- something was once wrong here
+    // and a human waived it, which is exactly the kind of fact this stream
+    // exists to preserve. `verdicts` this round holds no non-`Conforming`
+    // entries by construction (any such rule would already be in `blocking`,
+    // handled above), so no violation events are emitted here regardless.
+    #[cfg(feature = "telemetry")]
+    let has_override_reminder = reminder.is_some();
+    if let Some(reminder) = reminder {
+        notes.push(reminder);
+    }
+    if !notes.is_empty() {
+        emit(plan_check_hook::render_notice(&notes.join("\n")));
+    }
+    #[cfg(feature = "telemetry")]
+    {
+        let decision = if partial.is_some() || has_override_reminder {
+            crate::api::types::PlanGovernanceDecision::Warn
+        } else {
+            crate::api::types::PlanGovernanceDecision::Allow
+        };
+        send_hook_governance_events(
+            run.command,
+            run.root,
+            run.started_at,
+            decision,
+            &verdicts,
+            false,
+        );
+    }
+}
+
 /// A non-blocking reminder naming every active override on `session`. An
 /// override must stay visible on every round it applies to — never silently
 /// absorbed once granted, whether this round is otherwise fully silent, a
@@ -2861,6 +3126,169 @@ pub(crate) mod tests {
         assert!(message.contains("round limit (3"));
         assert!(message.contains("Actual plan governance"));
         assert!(!message.contains("implementation governance"));
+    }
+
+    // ── finish_hook: the policy shared by plan-check and impl-check ─────────
+
+    fn verdicts_outcome(verdicts: Vec<CheckedRule>) -> Outcome {
+        Outcome::Verdicts {
+            selection: Selection {
+                plan: "p".to_string(),
+                paths: Vec::new(),
+                indexed_documents: 1,
+                limit: 10,
+                selected: vec![],
+                stage2: Stage2::NotRequested,
+            },
+            verdicts,
+            runner_label: Some("claude-cli (sonnet)".to_string()),
+            partial: None,
+        }
+    }
+
+    fn hook_run<'a>(
+        kind: check::ArtifactKind,
+        session_id: Option<&'a str>,
+        rules_dir: &'a Path,
+        max_rounds: u32,
+    ) -> HookRun<'a> {
+        HookRun {
+            kind,
+            command: "test --claude-hook",
+            session_id,
+            artifact_digest: "digest-1",
+            root: rules_dir,
+            rules_dir,
+            max_rounds,
+            #[cfg(feature = "telemetry")]
+            started_at: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn test_finish_hook_records_clearances_and_rounds_on_the_kinds_own_loop() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-001");
+
+        for (kind, other) in [
+            (check::ArtifactKind::Diff, check::ArtifactKind::Plan),
+            (check::ArtifactKind::Plan, check::ArtifactKind::Diff),
+        ] {
+            let mut session = GovernanceSession::default();
+            let run = hook_run(kind, Some("s-clear"), rules.path(), 3);
+            finish_hook(
+                &run,
+                &mut session,
+                verdicts_outcome(vec![checked("R-A-001", Verdict::Conforming, "", "ok")]),
+            );
+
+            let own = session.loop_state(kind);
+            assert_eq!(own.cleared.get(&key).map(String::as_str), Some("digest-1"));
+            assert_eq!(own.rounds, 1);
+            let untouched = session.loop_state(other);
+            assert!(
+                untouched.cleared.is_empty(),
+                "{kind:?} leaked into {other:?}"
+            );
+            assert_eq!(untouched.rounds, 0);
+        }
+    }
+
+    #[test]
+    fn test_finish_hook_does_not_count_a_round_when_no_judge_ran() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let mut session = GovernanceSession::default();
+        let mut outcome = verdicts_outcome(Vec::new());
+        if let Outcome::Verdicts { runner_label, .. } = &mut outcome {
+            *runner_label = None;
+        }
+        finish_hook(
+            &hook_run(
+                check::ArtifactKind::Diff,
+                Some("s-nojudge"),
+                rules.path(),
+                3,
+            ),
+            &mut session,
+            outcome,
+        );
+        assert_eq!(session.diff.rounds, 0);
+    }
+
+    #[test]
+    fn test_finish_hook_counts_a_denial_on_the_kinds_own_loop_only() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
+
+        for (kind, other) in [
+            (check::ArtifactKind::Diff, check::ArtifactKind::Plan),
+            (check::ArtifactKind::Plan, check::ArtifactKind::Diff),
+        ] {
+            let mut session = GovernanceSession::default();
+            finish_hook(
+                &hook_run(kind, Some("s-deny"), rules.path(), 3),
+                &mut session,
+                verdicts_outcome(vec![checked("R-A-002", Verdict::Conflicting, "span", "no")]),
+            );
+            assert_eq!(session.loop_state(kind).deny_counts.get(&key), Some(&1));
+            assert!(session.loop_state(other).deny_counts.is_empty());
+            // Persisted, so the next hook call sees it.
+            let reloaded = governance_session::load("s-deny", rules.path());
+            assert_eq!(reloaded.loop_state(kind).deny_counts.get(&key), Some(&1));
+        }
+    }
+
+    /// Impl-check's round limit: the same fail-open as plan-check's, driven
+    /// by the diff loop's own count, and named for the diff in the audit log.
+    #[test]
+    fn test_finish_hook_diff_round_limit_fails_open_and_writes_the_audit_log() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
+
+        let mut session = GovernanceSession::default();
+        // Already denied `max_rounds` times: this round's denial tips it over.
+        session.diff.deny_counts.insert(key.clone(), 2);
+        finish_hook(
+            &hook_run(check::ArtifactKind::Diff, Some("s-limit"), rules.path(), 2),
+            &mut session,
+            verdicts_outcome(vec![checked("R-A-002", Verdict::Conflicting, "span", "no")]),
+        );
+
+        assert_eq!(session.diff.deny_counts.get(&key), Some(&3));
+        assert!(session.plan.deny_counts.is_empty());
+        let log = std::fs::read_to_string(home.path().join(governance_session::AUDIT_LOG_NAME))
+            .expect("the round-limit pass must be written to the audit log");
+        assert!(
+            log.contains("Actual implementation governance hit its round limit"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn test_finish_hook_without_a_session_id_touches_no_state() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let rules = tempdir().unwrap();
+        let mut session = GovernanceSession::default();
+        finish_hook(
+            &hook_run(check::ArtifactKind::Diff, None, rules.path(), 3),
+            &mut session,
+            verdicts_outcome(vec![checked("R-A-002", Verdict::Conflicting, "span", "no")]),
+        );
+        assert_eq!(session, GovernanceSession::default());
     }
 
     #[test]

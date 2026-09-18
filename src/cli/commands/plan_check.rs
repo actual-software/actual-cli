@@ -137,18 +137,19 @@ use std::path::PathBuf;
 
 use crate::cli::args::PlanCheckArgs;
 use crate::cli::commands::check_engine::{
-    audit_log_note, capped_read, deny_summary, hook_deny_reason, override_reminder,
-    partial_coverage_note, render_json, render_panel, round_limit_message, run_pipeline,
-    with_override_reminder, Outcome,
+    capped_read, deny_summary, emit, finish_hook, render_json, render_panel, run_pipeline, HookRun,
+    Outcome,
 };
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
-use crate::rules::check::{ArtifactKind, CheckedRule, Verdict};
+#[cfg(feature = "telemetry")]
+use crate::rules::check::Verdict;
+use crate::rules::check::{ArtifactKind, CheckedRule};
 
 #[cfg(feature = "telemetry")]
-use crate::cli::commands::check_engine::{send_governance_events, send_hook_governance_events};
+use crate::cli::commands::check_engine::send_governance_events;
 
 pub(super) fn repo_root(explicit: Option<&PathBuf>) -> PathBuf {
     explicit
@@ -326,6 +327,10 @@ fn exec_hook(args: &PlanCheckArgs) {
 
 /// Run the `--claude-hook` path against an already-read payload.
 ///
+/// Resolving the plan and running the pipeline live here; everything after
+/// the pipeline's outcome (session bookkeeping, deny, round limit, notices,
+/// telemetry) is `check_engine::finish_hook`, shared with `impl-check`.
+///
 /// INVARIANT: [`exec`] always sees this path complete normally — every
 /// fallible step below is matched explicitly and turned into a fail-open
 /// notice (or, for a real violation, a deny) rather than propagating an
@@ -391,236 +396,21 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
         }
     };
 
-    match outcome {
-        Outcome::NothingApplies => {
-            emit(plan_check_hook::render_notice(
-                "No committed rule under .actual/rules/ applies to this plan.",
-            ));
-        }
-        Outcome::NoRunner { reason, .. } => {
-            emit(plan_check_hook::render_notice(&format!(
-                "Actual plan governance did not run: no runner available ({reason})."
-            )));
-        }
-        Outcome::CheckFailed { reason, .. } => {
-            emit(plan_check_hook::render_notice(&format!(
-                "Actual plan governance did not run: {reason}"
-            )));
-        }
-        Outcome::Verdicts {
-            verdicts,
-            runner_label,
-            partial,
-            ..
-        } => {
-            // A round is one *completed judge call* — `runner_label` is only
-            // ever `Some` when `check::check` actually ran (never for the
-            // "everything was already excluded" shortcut in `run_pipeline`).
-            let judge_ran = runner_label.is_some();
-            if session_id.is_some() {
-                for v in &verdicts {
-                    let key = governance_session::key(&v.doc_slug, &v.rule_id);
-                    if v.verdict == Verdict::Conforming {
-                        session.plan.cleared.insert(key, plan_digest.clone());
-                    } else {
-                        // A rule that was cleared against an earlier plan and
-                        // is no longer conforming against this one must not
-                        // leave a stale entry behind -- it is no longer a
-                        // true fact about the current plan, digest mismatch
-                        // or not.
-                        session.plan.cleared.remove(&key);
-                    }
-                }
-                if judge_ran {
-                    session.plan.rounds += 1;
-                }
-            }
-
-            // A verdict blocks the tool call when it is a genuine conflict,
-            // or when the judge classifies the plan as *deliberately*
-            // superseding a rule — that classification is model output, not
-            // a recorded human decision, so it gets exactly the same deny +
-            // override treatment as an outright conflict, not a notice the
-            // agent can simply proceed past. See the module doc's "advisory
-            // gate" section.
-            let blocking: Vec<&CheckedRule> = verdicts
-                .iter()
-                .filter(|v| matches!(v.verdict, Verdict::Conflicting | Verdict::RequiresDecision))
-                .collect();
-
-            if !blocking.is_empty() {
-                if session_id.is_some() {
-                    // Every currently-blocking rule gets its own denial
-                    // recorded, independent of any other rule's count — see
-                    // the module doc's "the round limit is per rule" note.
-                    for c in &blocking {
-                        session.record_denial(
-                            ArtifactKind::Plan,
-                            &governance_session::key(&c.doc_slug, &c.rule_id),
-                        );
-                    }
-                }
-
-                if let Some(session_id) = session_id {
-                    let exhausted: Vec<&CheckedRule> = blocking
-                        .iter()
-                        .filter(|c| {
-                            session.deny_limit_exceeded(
-                                ArtifactKind::Plan,
-                                &governance_session::key(&c.doc_slug, &c.rule_id),
-                                args.max_rounds,
-                            )
-                        })
-                        .copied()
-                        .collect();
-                    // Fail open only when *every* rule blocking this round has
-                    // individually exhausted its own budget. A single rule
-                    // still within budget keeps the whole call denied — the
-                    // hook can only deny or not deny the tool call as a
-                    // whole, so an exhausted rule cannot be waved through
-                    // while a fresh one still needs to block.
-                    if !exhausted.is_empty() && exhausted.len() == blocking.len() {
-                        let keys: Vec<String> = exhausted
-                            .iter()
-                            .map(|c| governance_session::key(&c.doc_slug, &c.rule_id))
-                            .collect();
-                        let message = round_limit_message(
-                            &exhausted,
-                            &session,
-                            ArtifactKind::Plan,
-                            args.max_rounds,
-                        );
-                        governance_session::record_round_limit(
-                            session_id,
-                            &rules_dir,
-                            session.plan.rounds,
-                            &keys,
-                            &message,
-                        );
-                        governance_session::store(session_id, &rules_dir, &session);
-                        // The audit log keeps the round-limit message on its
-                        // own, undecorated -- the override reminder is only
-                        // appended to what the human actually sees, same
-                        // spirit as the silent-path `notes` below.
-                        emit(plan_check_hook::render_notice(&with_override_reminder(
-                            message, &session,
-                        )));
-                        // Every rule here is `blocked: false` -- the round
-                        // limit let the call through this round -- so this
-                        // is `warn`, not `block`, distinct from a clean pass.
-                        #[cfg(feature = "telemetry")]
-                        send_hook_governance_events(
-                            "plan-check --claude-hook",
-                            &root,
-                            started_at,
-                            crate::api::types::PlanGovernanceDecision::Warn,
-                            &verdicts,
-                            false,
-                        );
-                        return;
-                    }
-                    governance_session::store(session_id, &rules_dir, &session);
-                }
-                // A deny is not silence, but it is also not the same as "no
-                // active override" -- a different rule's conflict must not
-                // bury the fact that this session still carries a recorded
-                // override elsewhere. See the module doc's "override
-                // visibility" note.
-                let deny_reason =
-                    hook_deny_reason(&blocking, session_id, partial, ArtifactKind::Plan);
-                emit(plan_check_hook::render_deny(&with_override_reminder(
-                    deny_reason,
-                    &session,
-                )));
-                #[cfg(feature = "telemetry")]
-                send_hook_governance_events(
-                    "plan-check --claude-hook",
-                    &root,
-                    started_at,
-                    crate::api::types::PlanGovernanceDecision::Block,
-                    &verdicts,
-                    true,
-                );
-                return;
-            }
-
-            if let Some(session_id) = session_id {
-                governance_session::store(session_id, &rules_dir, &session);
-            }
-
-            // Fully conforming (nothing blocking): the contract is silence —
-            // UNLESS this session carries an active override (must stay
-            // visible on every round, never silently absorbed once granted)
-            // or this round only covered a prefix of what applies (a plain
-            // "conforming" silence would misreport partial coverage as
-            // complete). Either reason alone is enough to break silence;
-            // both together are joined into one notice.
-            let mut notes = Vec::new();
-            if let Some((judged, total)) = partial {
-                notes.push(partial_coverage_note(judged, total));
-                // This is the one fail-open path with no other durable
-                // trace: a deny keeps per-rule accounting live in the
-                // session, and an override or round-limit pass already
-                // writes its own audit entry, but "conforming, as far as we
-                // looked" would otherwise exist only in the hook response
-                // the agent — not a human — is the one actually reading. See
-                // the module doc's "advisory gate" section.
-                if let Some(session_id) = session_id {
-                    governance_session::record_partial_coverage(
-                        session_id,
-                        &rules_dir,
-                        session.plan.rounds,
-                        judged,
-                        total,
-                    );
-                    notes.push(format!(
-                        "This is not a silent pass — recorded in {}.",
-                        audit_log_note(crate::rules::check::ArtifactKind::Plan)
-                    ));
-                }
-            }
-            let reminder = override_reminder(&session);
-            // An active override on an otherwise-clean round is still worth
-            // distinguishing from a truly clean allow -- something was once
-            // wrong here and a human waived it, which is exactly the kind of
-            // fact this stream exists to preserve now that AK-662's
-            // traceability criterion is out of MVP scope. `verdicts` this
-            // round holds no non-`Conforming` entries by construction (any
-            // such rule would already be in `blocking`, handled above), so
-            // no violation events are emitted here regardless.
+    finish_hook(
+        &HookRun {
+            kind: ArtifactKind::Plan,
+            command: "plan-check --claude-hook",
+            session_id,
+            artifact_digest: &plan_digest,
+            root: &root,
+            rules_dir: &rules_dir,
+            max_rounds: args.max_rounds,
             #[cfg(feature = "telemetry")]
-            let has_override_reminder = reminder.is_some();
-            if let Some(reminder) = reminder {
-                notes.push(reminder);
-            }
-            if !notes.is_empty() {
-                emit(plan_check_hook::render_notice(&notes.join("\n")));
-            }
-            #[cfg(feature = "telemetry")]
-            {
-                let decision = if partial.is_some() || has_override_reminder {
-                    crate::api::types::PlanGovernanceDecision::Warn
-                } else {
-                    crate::api::types::PlanGovernanceDecision::Allow
-                };
-                send_hook_governance_events(
-                    "plan-check --claude-hook",
-                    &root,
-                    started_at,
-                    decision,
-                    &verdicts,
-                    false,
-                );
-            }
-        }
-    }
-}
-
-/// Print exactly one line: [`emit`] is the single call site that writes to
-/// stdout for `--claude-hook`, so "stdout is exactly one JSON object, or
-/// nothing" is enforceable by inspection rather than by discipline.
-fn emit(json: String) {
-    println!("{json}");
+            started_at,
+        },
+        &mut session,
+        outcome,
+    );
 }
 
 #[cfg(test)]
