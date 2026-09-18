@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `actual impl-check` (AK-755): judges a `git diff` against the rule documents selected for it, sharing `plan-check`'s discovery/scoring/judging pipeline, revision-loop and telemetry machinery via a new shared `check_engine` module rather than duplicating it — same four outcomes, same exit-code contract, and the same `--claude-hook` JSON contract (driven by the separate plugin repo's `hooks/impl-gate.sh`); defaults to the working tree vs `HEAD` in the current repo (including untracked, non-ignored files, without mutating the user's index), with `--diff-file` or piped stdin to supply the diff explicitly. Its own revision loop is budgeted independently via `--max-rounds`/`ACTUAL_IMPL_CHECK_MAX_ROUNDS` (deny counts, rounds, and content-scoped clearances are per command inside the shared session file). A `check-override` recorded against the session still applies to both commands.
+
+### Changed
+- `plan-check-override` renamed to `check-override` (reflecting that the override mechanism is shared by both `plan-check` and `impl-check` denials), with `plan-check-override` kept as a backward-compatible alias for existing scripts
+- `impl-check` panels, `--json` `not_checked` detail, and `--claude-hook` deny/round-limit copy now name a diff and working tree rather than a plan
+- `impl-check` runs `git` with `--no-pager`, `color.ui=never` and `--no-ext-diff`, so a user's `color.ui=always` or `diff.external` no longer corrupts the diff the judge reads; an over-limit diff now stops and reaps the `git` child; the round-limit and partial-coverage notices say the `plan-check-overrides.log` audit log is shared with `plan-check`
+
 ## [0.3.0] - 2026-09-14
 
 ### Added

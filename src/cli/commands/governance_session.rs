@@ -1,5 +1,6 @@
-//! Per-session state for the `plan-check --claude-hook` revision loop: which
-//! rules are already settled, how many rounds have run, and the durable,
+//! Per-session state for the `--claude-hook` revision loop (`plan-check
+//! --claude-hook` and `impl-check --claude-hook` both drive it): which rules
+//! are already settled, how many rounds have run, and the durable,
 //! append-only record of every explicit override and round-limit pass.
 //!
 //! # Design
@@ -24,39 +25,52 @@
 //! (the same construction `rules::scope::cache::cache_path` uses for its own
 //! key) rather than its content: two repos with byte-identical rule text
 //! must still get independent state, because a clearance is a fact about
-//! "this plan, in this governed context," never about the rule's wording.
-//! Direct-mode (`actual plan-check` with no `--claude-hook`) has no
+//! "this artifact, in this governed context," never about the rule's wording.
+//! Direct-mode (e.g. `actual plan-check` with no `--claude-hook`) has no
 //! `session_id` and so never engages this module at all — the caller passes
 //! an empty, default session and skips loading/storing one, the same
 //! fail-open posture as every other hook-only feature in this command.
+//!
+//! **Loop memory is per [`crate::rules::check::ArtifactKind`], overrides are
+//! not.** `plan-check` and `impl-check` share one file so a human
+//! `check-override` still settles a rule for both gates of the same effort.
+//! Deny counts, round counters, and content-scoped clearances live in
+//! per-kind [`LoopState`] maps inside that file: a plan-stage denial must
+//! not spend the implementation-stage `--max-rounds` budget, and a plan
+//! round must not rotate impl-check's judged window. `ACTUAL_IMPL_CHECK_MAX_ROUNDS`
+//! as its own env var only makes sense under that split.
 //!
 //! **Keying within a session.** A rule id is only unique within its document
 //! (`check::CHECK_OUTPUT_SCHEMA`'s own doc notes the corpus repeats ids across
 //! documents), so every key here is `"{doc_slug}::{rule_id}"`, never a bare
 //! rule id.
 //!
-//! **`cleared` is scoped to the plan text that earned it, `overrides` are
+//! **`cleared` is scoped to the artifact text that earned it, `overrides` are
 //! not — deliberately different.** A cleared rule guards against exactly one
 //! thing: a non-deterministic judge asked the *same* question twice giving a
-//! different answer. It is not a standing pass. So `cleared` maps a rule key
-//! to the digest of the plan text that was judged conforming for it
-//! ([`plan_digest`]), and [`PlanCheckSession::excludes`] only honors that
-//! entry while the *current* plan's digest still matches — edit the plan at
-//! all and every rule whose relevant text might have changed is judged
-//! fresh, never silently waved through on a stale verdict. An override is the
-//! opposite kind of fact: a human decided a specific rule does not block this
+//! different answer. It is not a standing pass. So each loop's `cleared` map
+//! keys a rule to the digest of the plan or diff that was judged conforming
+//! for it ([`content_digest`]), and [`GovernanceSession::excludes`] only
+//! honors that entry for *that* [`crate::rules::check::ArtifactKind`] while
+//! the *current* artifact's digest still matches — edit the plan or the
+//! working tree and every rule whose relevant text might have changed is
+//! judged fresh, never silently waved through on a stale verdict. A plan
+//! clearance therefore cannot skip an impl-check of the same rule (the
+//! digests differ, and the maps are separate). An override is the opposite
+//! kind of fact: a human decided a specific rule does not block this
 //! *effort*, not that one exact wording was fine, so it stays keyed to the
-//! rule alone and survives any number of plan edits until the human revokes
-//! it (there is no revoke command yet — out of scope for this pass).
+//! rule alone, is shared by both loops, and survives any number of plan or
+//! diff edits until the human revokes it (there is no revoke command yet —
+//! out of scope for this pass).
 //!
-//! **Two stores, two lifetimes.** The session file (`cleared`, `deny_counts`,
-//! `overrides`, `rounds`) is mutable, per-conversation, and pruned after
-//! [`SESSION_MAX_AGE`] — it is a cache of "what has this loop already settled
-//! or been told to skip," not a record of anything happening. The audit log
-//! (`plan-check-overrides.log`) is append-only and never pruned: it is the
-//! durable answer to "recorded, not silent" for both an explicit override and
-//! a round-limit pass, and must outlive the session cache entry that
-//! triggered it.
+//! **Two stores, two lifetimes.** The session file (`overrides` plus per-kind
+//! `cleared`/`deny_counts`/`rounds`) is mutable, per-conversation, and pruned
+//! after [`SESSION_MAX_AGE`] — it is a cache of "what has this loop already
+//! settled or been told to skip," not a record of anything happening. The
+//! audit log (`plan-check-overrides.log`) is append-only and never pruned: it
+//! is the durable answer to "recorded, not silent" for both an explicit
+//! override and a round-limit pass, and must outlive the session cache entry
+//! that triggered it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -65,14 +79,23 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Bumped whenever [`PlanCheckSession`]'s on-disk shape changes incompatibly.
+use crate::rules::check::ArtifactKind;
+
+/// Bumped whenever [`GovernanceSession`]'s on-disk shape changes incompatibly.
 /// A mismatched version is treated as a miss (start fresh), the same
 /// tolerance `rules::scope::cache` gives `INDEX_FORMAT_VERSION`.
 ///
 /// 2: `cleared` changed from a flat set of rule keys to a map of rule key ->
-/// the plan digest that cleared it (see the module doc's "scoped to the plan
-/// text" note) — an incompatible shape change, not just a new field.
-const FORMAT_VERSION: u32 = 2;
+/// the plan digest that cleared it (see the module doc's "scoped to the
+/// artifact text" note) — an incompatible shape change, not just a new field.
+///
+/// 3: loop memory (`rounds`, `cleared`, `deny_counts`) nested per
+/// [`ArtifactKind`], with `overrides` remaining shared. v2 files are migrated
+/// on load (top-level fields become the plan loop; the diff loop starts
+/// empty; overrides are kept) rather than discarded — `plan-check` already
+/// shipped format 2.
+const FORMAT_VERSION: u32 = 3;
+const V2_FORMAT_VERSION: u32 = 2;
 
 /// Subdirectory of the config directory holding per-session state.
 const SESSIONS_DIR_NAME: &str = "plan-check-sessions";
@@ -80,42 +103,77 @@ const SESSIONS_DIR_NAME: &str = "plan-check-sessions";
 /// Filename of the append-only override/round-limit audit log, directly
 /// under the config directory (not the sessions subdirectory: it must
 /// outlive any single session's cache entry).
-const AUDIT_LOG_NAME: &str = "plan-check-overrides.log";
+pub(super) const AUDIT_LOG_NAME: &str = "plan-check-overrides.log";
 
 /// A session file older than this is pruned the next time any session is
 /// stored. Bounds disk usage without needing a `SessionEnd` hook, which
 /// Claude Code does not offer here.
 const SESSION_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
-/// One plan-revision loop's memory: what has already been judged conforming
-/// or explicitly overridden, and how many rounds have run.
+/// One artifact kind's revision-loop memory inside a [`GovernanceSession`].
+///
+/// `plan-check` and `impl-check` each own one of these so a plan-stage denial
+/// cannot spend the implementation-stage budget, and a plan-stage round
+/// cannot rotate impl-check's judged window. Overrides live on the parent
+/// session, not here — they are a fact about the effort, not about one gate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct PlanCheckSession {
-    format_version: u32,
-    /// How many times a real judge call has completed for this session, of
-    /// any verdict. Informational only — a round-limit decision is never
-    /// made from this alone (see [`deny_counts`](Self::deny_counts)): three
-    /// clean or mixed rounds must not spend down a budget meant for "how
-    /// many times has this specific rule actually been denied." Fail-open
+pub struct LoopState {
+    /// How many times a real judge call has completed for this loop, of any
+    /// verdict. Informational only — a round-limit decision is never made
+    /// from this alone (see [`deny_counts`](Self::deny_counts)): three clean
+    /// or mixed rounds must not spend down a budget meant for "how many
+    /// times has this specific rule actually been denied." Fail-open
     /// outcomes (no runner, no applicable rules, a crashed judge call) never
     /// increment this — nothing was actually checked.
     pub rounds: u32,
-    /// `"{doc_slug}::{rule_id}"` -> the digest of the plan text that was
+    /// `"{doc_slug}::{rule_id}"` -> the digest of the artifact text that was
     /// last judged [`crate::rules::check::Verdict::Conforming`] for it (see
-    /// [`plan_digest`]). A later clearance for the same rule simply
+    /// [`content_digest`]). A later clearance for the same rule simply
     /// overwrites the entry — only the most recent judgment matters, so this
     /// holds one entry per rule ever cleared, not one per round.
     pub cleared: BTreeMap<String, String>,
     /// `"{doc_slug}::{rule_id}"` -> how many times that specific rule has
     /// been denied (judged [`crate::rules::check::Verdict::Conflicting`]) in
-    /// this session. This is what the round limit actually counts against,
-    /// per rule rather than per session: a brand-new conflict always starts
-    /// at zero and gets its own full budget, no matter how exhausted some
-    /// other rule's count already is — see the module doc.
+    /// this loop. This is what the round limit actually counts against, per
+    /// rule rather than per session: a brand-new conflict always starts at
+    /// zero and gets its own full budget, no matter how exhausted some other
+    /// rule's count already is — see the module doc.
     pub deny_counts: BTreeMap<String, u32>,
+}
+
+impl LoopState {
+    /// Record one more denial of `key` in this loop and return its new total.
+    /// Called exactly once per conflicting rule per round.
+    pub fn record_denial(&mut self, key: &str) -> u32 {
+        let count = self.deny_counts.entry(key.to_string()).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// True when `key` has already been denied more times than `max_rounds`
+    /// allows — this specific rule's round budget is spent in this loop,
+    /// regardless of how many rounds the loop has run in total or how any
+    /// other rule's count stands.
+    pub fn deny_limit_exceeded(&self, key: &str, max_rounds: u32) -> bool {
+        self.deny_counts.get(key).is_some_and(|&n| n > max_rounds)
+    }
+}
+
+/// One conversation's governance memory for a single `(session_id, rules_dir)`:
+/// shared human overrides, plus independent loop state for each artifact kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GovernanceSession {
+    format_version: u32,
     /// Every explicit, human-issued override recorded against this session.
+    /// Shared by both loops: a human decided this rule does not block this
+    /// *effort*.
     pub overrides: Vec<Override>,
+    /// `plan-check --claude-hook`'s deny counts, rounds, and clearances.
+    pub plan: LoopState,
+    /// `impl-check --claude-hook`'s deny counts, rounds, and clearances.
+    pub diff: LoopState,
 }
 
 /// One explicit override: a human, outside the agent's control, telling this
@@ -130,15 +188,41 @@ pub struct Override {
     pub round: u32,
 }
 
-impl PlanCheckSession {
-    /// True when `key` must never be sent to the judge again for a plan
-    /// whose digest is `plan_digest`: either explicitly overridden (session-
-    /// scoped, regardless of plan text), or judged conforming against this
-    /// *exact* plan text already (content-scoped — see the module doc). A
-    /// rule cleared against a plan that has since been edited is not
-    /// excluded: `plan_digest` will not match, so it is judged fresh.
-    pub fn excludes(&self, key: &str, plan_digest: &str) -> bool {
-        self.is_overridden(key) || self.cleared.get(key).is_some_and(|d| d == plan_digest)
+impl GovernanceSession {
+    /// The loop memory for `kind`. `plan-check` always passes
+    /// [`ArtifactKind::Plan`]; `impl-check` always passes
+    /// [`ArtifactKind::Diff`].
+    pub fn loop_state(&self, kind: ArtifactKind) -> &LoopState {
+        match kind {
+            ArtifactKind::Plan => &self.plan,
+            ArtifactKind::Diff => &self.diff,
+        }
+    }
+
+    /// The mutable counterpart of [`loop_state`](Self::loop_state), for the
+    /// shared hook path, which is generic over the artifact kind.
+    pub fn loop_state_mut(&mut self, kind: ArtifactKind) -> &mut LoopState {
+        match kind {
+            ArtifactKind::Plan => &mut self.plan,
+            ArtifactKind::Diff => &mut self.diff,
+        }
+    }
+
+    /// True when `key` must never be sent to the judge again for an artifact
+    /// of `kind` whose digest is `artifact_digest`: either explicitly
+    /// overridden (session-scoped, regardless of kind or wording), or judged
+    /// conforming against this *exact* artifact text already in *this* loop
+    /// (content-scoped — see the module doc). A rule cleared against a plan
+    /// that has since been edited, or cleared in the other loop, is not
+    /// excluded: `artifact_digest` / `kind` will not match, so it is judged
+    /// fresh.
+    pub fn excludes(&self, kind: ArtifactKind, key: &str, artifact_digest: &str) -> bool {
+        self.is_overridden(key)
+            || self
+                .loop_state(kind)
+                .cleared
+                .get(key)
+                .is_some_and(|d| d == artifact_digest)
     }
 
     /// True when `key` was explicitly overridden (as opposed to merely
@@ -148,20 +232,26 @@ impl PlanCheckSession {
         self.overrides.iter().any(|o| o.key == key)
     }
 
-    /// Record one more denial of `key` this session and return its new
+    /// Record one more denial of `key` in `kind`'s loop and return its new
     /// total. Called exactly once per conflicting rule per round.
-    pub fn record_denial(&mut self, key: &str) -> u32 {
-        let count = self.deny_counts.entry(key.to_string()).or_insert(0);
-        *count += 1;
-        *count
+    pub fn record_denial(&mut self, kind: ArtifactKind, key: &str) -> u32 {
+        match kind {
+            ArtifactKind::Plan => self.plan.record_denial(key),
+            ArtifactKind::Diff => self.diff.record_denial(key),
+        }
     }
 
     /// True when `key` has already been denied more times than `max_rounds`
-    /// allows — this specific rule's round budget is spent, regardless of
-    /// how many rounds the session has run in total or how any other rule's
-    /// count stands.
-    pub fn deny_limit_exceeded(&self, key: &str, max_rounds: u32) -> bool {
-        self.deny_counts.get(key).is_some_and(|&n| n > max_rounds)
+    /// allows in `kind`'s loop — this specific rule's round budget is spent
+    /// for that gate, regardless of how the other gate's count stands.
+    pub fn deny_limit_exceeded(&self, kind: ArtifactKind, key: &str, max_rounds: u32) -> bool {
+        self.loop_state(kind).deny_limit_exceeded(key, max_rounds)
+    }
+
+    /// Informational round for audit entries not tied to a single loop
+    /// (`check-override`). Uses the higher of the two loops' round counts.
+    fn effort_rounds(&self) -> u32 {
+        self.plan.rounds.max(self.diff.rounds)
     }
 }
 
@@ -170,17 +260,17 @@ pub fn key(doc_slug: &str, rule_id: &str) -> String {
     format!("{doc_slug}::{rule_id}")
 }
 
-/// A content digest of `plan_text`, for scoping a [`PlanCheckSession`]'s
-/// `cleared` entries to the exact wording that earned them. Same construction
-/// as `rules::scope::cache`'s content-hashed keys (SHA-256, hex-encoded) —
-/// deliberately the raw text's hash, not a normalized or excerpted one:
-/// isolating which rule's *relevant* text changed would need per-rule span
-/// tracking this module does not have, so any edit at all is treated as
-/// "re-judge everything previously cleared in scope," which is the safe
-/// direction to err in.
-pub fn plan_digest(plan_text: &str) -> String {
+/// A content digest of `text` (a plan's or a diff's), for scoping a
+/// [`GovernanceSession`]'s `cleared` entries to the exact wording that earned
+/// them. Same construction as `rules::scope::cache`'s content-hashed keys
+/// (SHA-256, hex-encoded) — deliberately the raw text's hash, not a
+/// normalized or excerpted one: isolating which rule's *relevant* text
+/// changed would need per-rule span tracking this module does not have, so
+/// any edit at all is treated as "re-judge everything previously cleared in
+/// scope," which is the safe direction to err in.
+pub fn content_digest(text: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(plan_text.as_bytes());
+    hasher.update(text.as_bytes());
     let digest = hasher.finalize();
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -209,22 +299,59 @@ fn session_path(session_id: &str, rules_dir: &std::path::Path) -> Option<PathBuf
 
 /// Load the session for `(session_id, rules_dir)`, or a fresh empty one when
 /// absent, unreadable, unparseable, or written by an incompatible format
-/// version. Every failure mode degrades to "start fresh" — the same
-/// tolerance `rules::scope::cache::load` gives a stale or corrupt entry.
-pub fn load(session_id: &str, rules_dir: &std::path::Path) -> PlanCheckSession {
+/// version. Format 2 (flat `rounds`/`cleared`/`deny_counts`) is migrated
+/// into the plan loop rather than discarded — see [`FORMAT_VERSION`]. Every
+/// other failure mode degrades to "start fresh" — the same tolerance
+/// `rules::scope::cache::load` gives a stale or corrupt entry.
+pub fn load(session_id: &str, rules_dir: &std::path::Path) -> GovernanceSession {
     let Some(path) = session_path(session_id, rules_dir) else {
-        return PlanCheckSession::default();
+        return GovernanceSession::default();
     };
     let Ok(text) = std::fs::read_to_string(path) else {
-        return PlanCheckSession::default();
+        return GovernanceSession::default();
     };
-    let Ok(session) = serde_json::from_str::<PlanCheckSession>(&text) else {
-        return PlanCheckSession::default();
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return GovernanceSession::default();
     };
-    if session.format_version != FORMAT_VERSION {
-        return PlanCheckSession::default();
+    let Some(version) = value.get("format_version").and_then(|v| v.as_u64()) else {
+        return GovernanceSession::default();
+    };
+    match version {
+        v if v == u64::from(FORMAT_VERSION) => serde_json::from_value(value).unwrap_or_default(),
+        v if v == u64::from(V2_FORMAT_VERSION) => serde_json::from_value::<V2Session>(value)
+            .map(migrate_v2)
+            .unwrap_or_default(),
+        _ => GovernanceSession::default(),
     }
-    session
+}
+
+/// Format 2's on-disk shape: loop memory was a single flat set of fields,
+/// shared accidentally by both gates. Migrated into the plan loop; the diff
+/// loop starts empty so in-flight plan-check sessions keep their budget and
+/// impl-check starts with a fresh one.
+#[derive(Deserialize)]
+struct V2Session {
+    #[serde(default)]
+    rounds: u32,
+    #[serde(default)]
+    cleared: BTreeMap<String, String>,
+    #[serde(default)]
+    deny_counts: BTreeMap<String, u32>,
+    #[serde(default)]
+    overrides: Vec<Override>,
+}
+
+fn migrate_v2(v2: V2Session) -> GovernanceSession {
+    GovernanceSession {
+        format_version: FORMAT_VERSION,
+        overrides: v2.overrides,
+        plan: LoopState {
+            rounds: v2.rounds,
+            cleared: v2.cleared,
+            deny_counts: v2.deny_counts,
+        },
+        diff: LoopState::default(),
+    }
 }
 
 /// Persist `session` for `(session_id, rules_dir)`. Best-effort: a write
@@ -233,7 +360,7 @@ pub fn load(session_id: &str, rules_dir: &std::path::Path) -> PlanCheckSession {
 /// Also opportunistically prunes session files older than [`SESSION_MAX_AGE`]
 /// — bounded by one directory listing, so the cost stays proportional to how
 /// many sessions are actually on disk rather than growing unbounded.
-pub fn store(session_id: &str, rules_dir: &std::path::Path, session: &PlanCheckSession) {
+pub fn store(session_id: &str, rules_dir: &std::path::Path, session: &GovernanceSession) {
     let Some(path) = session_path(session_id, rules_dir) else {
         return;
     };
@@ -279,7 +406,7 @@ fn prune_stale(dir: &std::path::Path) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditKind {
-    /// A human ran `actual plan-check-override`.
+    /// A human ran `actual check-override`.
     Override,
     /// The round limit was hit with a rule still conflicting, and the gate
     /// stopped blocking rather than denying indefinitely.
@@ -354,12 +481,13 @@ pub fn record_override(
     let mut session = load(session_id, rules_dir);
     let at = Utc::now();
     let rules_dir_str = rules_dir.display().to_string();
+    let round = session.effort_rounds();
     for key in keys {
         session.overrides.push(Override {
             key: key.clone(),
             reason: reason.to_string(),
             at,
-            round: session.rounds,
+            round,
         });
         append_audit(&AuditEntry {
             at,
@@ -367,7 +495,7 @@ pub fn record_override(
             rules_dir: rules_dir_str.clone(),
             key: key.clone(),
             reason: reason.to_string(),
-            round: session.rounds,
+            round,
             kind: AuditKind::Override,
             judged: None,
             total: None,
@@ -449,13 +577,19 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_digest_is_stable_for_identical_text() {
-        assert_eq!(plan_digest("Add caching."), plan_digest("Add caching."));
+    fn test_content_digest_is_stable_for_identical_text() {
+        assert_eq!(
+            content_digest("Add caching."),
+            content_digest("Add caching.")
+        );
     }
 
     #[test]
-    fn test_plan_digest_differs_for_different_text() {
-        assert_ne!(plan_digest("Add caching."), plan_digest("Add logging."));
+    fn test_content_digest_differs_for_different_text() {
+        assert_ne!(
+            content_digest("Add caching."),
+            content_digest("Add logging.")
+        );
     }
 
     /// A fake rules directory path for tests that don't care which one, just
@@ -469,7 +603,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
         let session = load("brand-new-session", &rd());
-        assert_eq!(session, PlanCheckSession::default());
+        assert_eq!(session, GovernanceSession::default());
     }
 
     #[test]
@@ -477,21 +611,27 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
 
-        let mut session = PlanCheckSession {
-            rounds: 2,
+        let mut session = GovernanceSession {
+            plan: LoopState {
+                rounds: 2,
+                ..Default::default()
+            },
             ..Default::default()
         };
         session
+            .plan
             .cleared
             .insert(key("doc-a", "R-001"), "digest-v1".to_string());
         store("session-1", &rd(), &session);
 
         let loaded = load("session-1", &rd());
-        assert_eq!(loaded.rounds, 2);
+        assert_eq!(loaded.plan.rounds, 2);
         assert_eq!(
-            loaded.cleared.get(&key("doc-a", "R-001")),
+            loaded.plan.cleared.get(&key("doc-a", "R-001")),
             Some(&"digest-v1".to_string())
         );
+        assert!(loaded.diff.deny_counts.is_empty());
+        assert_eq!(loaded.diff.rounds, 0);
     }
 
     #[test]
@@ -499,21 +639,24 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
 
-        let mut a = PlanCheckSession::default();
-        a.cleared.insert(key("doc", "R-A"), "d".to_string());
+        let mut a = GovernanceSession::default();
+        a.plan.cleared.insert(key("doc", "R-A"), "d".to_string());
         store("session-a", &rd(), &a);
 
-        let mut b = PlanCheckSession::default();
-        b.cleared.insert(key("doc", "R-B"), "d".to_string());
+        let mut b = GovernanceSession::default();
+        b.plan.cleared.insert(key("doc", "R-B"), "d".to_string());
         store("session-b", &rd(), &b);
 
         assert!(load("session-a", &rd())
+            .plan
             .cleared
             .contains_key(&key("doc", "R-A")));
         assert!(!load("session-a", &rd())
+            .plan
             .cleared
             .contains_key(&key("doc", "R-B")));
         assert!(load("session-b", &rd())
+            .plan
             .cleared
             .contains_key(&key("doc", "R-B")));
     }
@@ -530,8 +673,9 @@ mod tests {
         let rules_dir_a = std::path::PathBuf::from("/repo-a/.actual/rules");
         let rules_dir_b = std::path::PathBuf::from("/repo-b/.actual/rules");
 
-        let mut a = PlanCheckSession::default();
-        a.cleared
+        let mut a = GovernanceSession::default();
+        a.plan
+            .cleared
             .insert(key("cross-cutting-shared-abcd", "R-001"), "d".to_string());
         store("shared-session", &rules_dir_a, &a);
 
@@ -539,10 +683,12 @@ mod tests {
         // not see repo A's clearance.
         let loaded_b = load("shared-session", &rules_dir_b);
         assert!(!loaded_b
+            .plan
             .cleared
             .contains_key(&key("cross-cutting-shared-abcd", "R-001")));
         // Repo A's own state is untouched.
         assert!(load("shared-session", &rules_dir_a)
+            .plan
             .cleared
             .contains_key(&key("cross-cutting-shared-abcd", "R-001")));
     }
@@ -558,15 +704,15 @@ mod tests {
             &path,
             serde_json::json!({
                 "format_version": FORMAT_VERSION + 1,
-                "rounds": 5,
-                "cleared": {},
                 "overrides": [],
+                "plan": {"rounds": 5, "cleared": {}, "deny_counts": {}},
+                "diff": {"rounds": 0, "cleared": {}, "deny_counts": {}},
             })
             .to_string(),
         )
         .unwrap();
 
-        assert_eq!(load("session-x", &rd()), PlanCheckSession::default());
+        assert_eq!(load("session-x", &rd()), GovernanceSession::default());
     }
 
     #[test]
@@ -578,15 +724,24 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{ not json").unwrap();
 
-        assert_eq!(load("session-corrupt", &rd()), PlanCheckSession::default());
+        assert_eq!(load("session-corrupt", &rd()), GovernanceSession::default());
     }
 
     #[test]
     fn test_record_denial_increments_and_returns_the_new_total() {
-        let mut session = PlanCheckSession::default();
-        assert_eq!(session.record_denial(&key("doc", "R-A")), 1);
-        assert_eq!(session.record_denial(&key("doc", "R-A")), 2);
-        assert_eq!(session.record_denial(&key("doc", "R-A")), 3);
+        let mut session = GovernanceSession::default();
+        assert_eq!(
+            session.record_denial(ArtifactKind::Plan, &key("doc", "R-A")),
+            1
+        );
+        assert_eq!(
+            session.record_denial(ArtifactKind::Plan, &key("doc", "R-A")),
+            2
+        );
+        assert_eq!(
+            session.record_denial(ArtifactKind::Plan, &key("doc", "R-A")),
+            3
+        );
     }
 
     /// The gap this guards: a per-session (not per-rule) counter would let a
@@ -594,38 +749,42 @@ mod tests {
     /// conflict. Each key's count must be independent.
     #[test]
     fn test_record_denial_is_independent_per_key() {
-        let mut session = PlanCheckSession::default();
-        session.record_denial(&key("doc", "R-A"));
-        session.record_denial(&key("doc", "R-A"));
-        session.record_denial(&key("doc", "R-A"));
-        session.record_denial(&key("doc", "R-A"));
+        let mut session = GovernanceSession::default();
+        session.record_denial(ArtifactKind::Plan, &key("doc", "R-A"));
+        session.record_denial(ArtifactKind::Plan, &key("doc", "R-A"));
+        session.record_denial(ArtifactKind::Plan, &key("doc", "R-A"));
+        session.record_denial(ArtifactKind::Plan, &key("doc", "R-A"));
         // A brand-new key must start at zero, not inherit R-A's count.
-        assert_eq!(session.record_denial(&key("doc", "R-B")), 1);
-        assert!(!session.deny_limit_exceeded(&key("doc", "R-B"), 3));
-        assert!(session.deny_limit_exceeded(&key("doc", "R-A"), 3));
+        assert_eq!(
+            session.record_denial(ArtifactKind::Plan, &key("doc", "R-B")),
+            1
+        );
+        assert!(!session.deny_limit_exceeded(ArtifactKind::Plan, &key("doc", "R-B"), 3));
+        assert!(session.deny_limit_exceeded(ArtifactKind::Plan, &key("doc", "R-A"), 3));
     }
 
     #[test]
     fn test_deny_limit_exceeded_false_for_a_never_denied_key() {
-        let session = PlanCheckSession::default();
-        assert!(!session.deny_limit_exceeded(&key("doc", "R-A"), 3));
+        let session = GovernanceSession::default();
+        assert!(!session.deny_limit_exceeded(ArtifactKind::Plan, &key("doc", "R-A"), 3));
     }
 
     #[test]
     fn test_deny_limit_exceeded_true_only_once_the_count_exceeds_max_rounds() {
-        let mut session = PlanCheckSession::default();
-        session.record_denial(&key("doc", "R-A"));
-        session.record_denial(&key("doc", "R-A"));
-        session.record_denial(&key("doc", "R-A"));
-        assert!(!session.deny_limit_exceeded(&key("doc", "R-A"), 3));
-        session.record_denial(&key("doc", "R-A"));
-        assert!(session.deny_limit_exceeded(&key("doc", "R-A"), 3));
+        let mut session = GovernanceSession::default();
+        session.record_denial(ArtifactKind::Plan, &key("doc", "R-A"));
+        session.record_denial(ArtifactKind::Plan, &key("doc", "R-A"));
+        session.record_denial(ArtifactKind::Plan, &key("doc", "R-A"));
+        assert!(!session.deny_limit_exceeded(ArtifactKind::Plan, &key("doc", "R-A"), 3));
+        session.record_denial(ArtifactKind::Plan, &key("doc", "R-A"));
+        assert!(session.deny_limit_exceeded(ArtifactKind::Plan, &key("doc", "R-A"), 3));
     }
 
     #[test]
     fn test_excludes_true_for_both_cleared_and_overridden() {
-        let mut session = PlanCheckSession::default();
+        let mut session = GovernanceSession::default();
         session
+            .plan
             .cleared
             .insert(key("doc", "R-clear"), "digest-v1".to_string());
         session.overrides.push(Override {
@@ -635,8 +794,12 @@ mod tests {
             round: 1,
         });
 
-        assert!(session.excludes(&key("doc", "R-clear"), "digest-v1"));
-        assert!(session.excludes(&key("doc", "R-over"), "any-digest-at-all"));
+        assert!(session.excludes(ArtifactKind::Plan, &key("doc", "R-clear"), "digest-v1"));
+        assert!(session.excludes(
+            ArtifactKind::Plan,
+            &key("doc", "R-over"),
+            "any-digest-at-all"
+        ));
         assert!(session.is_overridden(&key("doc", "R-over")));
         assert!(!session.is_overridden(&key("doc", "R-clear")));
     }
@@ -647,8 +810,9 @@ mod tests {
     /// text at all: it stays excluded regardless of which digest is asked.
     #[test]
     fn test_excludes_false_for_a_cleared_rule_once_the_plan_digest_changes() {
-        let mut session = PlanCheckSession::default();
+        let mut session = GovernanceSession::default();
         session
+            .plan
             .cleared
             .insert(key("doc", "R-clear"), "digest-v1".to_string());
         session.overrides.push(Override {
@@ -658,8 +822,8 @@ mod tests {
             round: 1,
         });
 
-        assert!(!session.excludes(&key("doc", "R-clear"), "digest-v2"));
-        assert!(session.excludes(&key("doc", "R-over"), "digest-v2"));
+        assert!(!session.excludes(ArtifactKind::Plan, &key("doc", "R-clear"), "digest-v2"));
+        assert!(session.excludes(ArtifactKind::Plan, &key("doc", "R-over"), "digest-v2"));
     }
 
     #[test]
@@ -675,7 +839,8 @@ mod tests {
         );
 
         let session = load("session-override", &rd());
-        assert!(session.excludes(&key("doc", "R-001"), "whatever-digest"));
+        assert!(session.excludes(ArtifactKind::Plan, &key("doc", "R-001"), "whatever-digest"));
+        assert!(session.excludes(ArtifactKind::Diff, &key("doc", "R-001"), "whatever-digest"));
         assert!(session.is_overridden(&key("doc", "R-001")));
 
         let log_path = audit_log_path().unwrap();
@@ -699,7 +864,7 @@ mod tests {
         );
 
         // The session file itself was never created by record_round_limit.
-        assert_eq!(load("session-limit", &rd()), PlanCheckSession::default());
+        assert_eq!(load("session-limit", &rd()), GovernanceSession::default());
 
         let log = std::fs::read_to_string(audit_log_path().unwrap()).unwrap();
         assert!(log.contains("R-002"));
@@ -715,7 +880,7 @@ mod tests {
 
         // Same as record_round_limit: a disclosed coverage gap is not a
         // session-state fact, only a durable log entry.
-        assert_eq!(load("session-partial", &rd()), PlanCheckSession::default());
+        assert_eq!(load("session-partial", &rd()), GovernanceSession::default());
 
         let log = std::fs::read_to_string(audit_log_path().unwrap()).unwrap();
         assert!(log.contains("\"kind\":\"partial_coverage\""));
@@ -746,7 +911,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = with_config_dir();
 
-        store("session-perms", &rd(), &PlanCheckSession::default());
+        store("session-perms", &rd(), &GovernanceSession::default());
         let mode = std::fs::metadata(session_path("session-perms", &rd()).unwrap())
             .unwrap()
             .permissions()
@@ -783,5 +948,119 @@ mod tests {
         )
         .unwrap();
         assert_ne!(a, b);
+    }
+
+    /// The gap this guards: plan-check denials used to live in the same
+    /// `deny_counts` map impl-check read, so three plan-stage denials of a
+    /// rule already exhausted `ACTUAL_IMPL_CHECK_MAX_ROUNDS` before the first
+    /// impl-check ran.
+    #[test]
+    fn test_record_denial_is_independent_per_artifact_kind() {
+        let mut session = GovernanceSession::default();
+        let key = key("doc", "R-A");
+        session.record_denial(ArtifactKind::Plan, &key);
+        session.record_denial(ArtifactKind::Plan, &key);
+        session.record_denial(ArtifactKind::Plan, &key);
+        session.record_denial(ArtifactKind::Plan, &key);
+        assert!(session.deny_limit_exceeded(ArtifactKind::Plan, &key, 3));
+        assert!(!session.deny_limit_exceeded(ArtifactKind::Diff, &key, 3));
+        assert_eq!(session.record_denial(ArtifactKind::Diff, &key), 1);
+        assert!(!session.deny_limit_exceeded(ArtifactKind::Diff, &key, 3));
+        assert_eq!(session.plan.deny_counts.get(&key), Some(&4));
+        assert_eq!(session.diff.deny_counts.get(&key), Some(&1));
+    }
+
+    /// A plan clearance must not skip impl-check of the same rule. An
+    /// override must skip both, regardless of digest.
+    #[test]
+    fn test_excludes_cleared_is_per_kind_overrides_are_shared() {
+        let mut session = GovernanceSession::default();
+        let key = key("doc", "R-A");
+        session
+            .plan
+            .cleared
+            .insert(key.clone(), "plan-digest".to_string());
+
+        assert!(session.excludes(ArtifactKind::Plan, &key, "plan-digest"));
+        assert!(!session.excludes(ArtifactKind::Diff, &key, "plan-digest"));
+        assert!(!session.excludes(ArtifactKind::Diff, &key, "diff-digest"));
+
+        session.overrides.push(Override {
+            key: key.clone(),
+            reason: "reviewed".to_string(),
+            at: Utc::now(),
+            round: 1,
+        });
+        assert!(session.excludes(ArtifactKind::Plan, &key, "other-plan"));
+        assert!(session.excludes(ArtifactKind::Diff, &key, "other-diff"));
+    }
+
+    /// Format 2 (flat loop memory) must land in the plan loop, leave the
+    /// diff loop empty, and keep overrides — in-flight plan-check sessions
+    /// and existing human overrides survive the upgrade.
+    #[test]
+    fn test_load_migrates_v2_into_the_plan_loop_and_leaves_diff_empty() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = with_config_dir();
+
+        let path = session_path("session-v2", &rd()).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "format_version": 2,
+                "rounds": 4,
+                "cleared": { "doc::R-A": "plan-digest" },
+                "deny_counts": { "doc::R-A": 4 },
+                "overrides": [{
+                    "key": "doc::R-B",
+                    "reason": "reviewed",
+                    "at": "2026-01-01T00:00:00Z",
+                    "round": 2
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = load("session-v2", &rd());
+        assert_eq!(loaded.plan.rounds, 4);
+        assert_eq!(
+            loaded.plan.cleared.get("doc::R-A"),
+            Some(&"plan-digest".to_string())
+        );
+        assert_eq!(loaded.plan.deny_counts.get("doc::R-A"), Some(&4));
+        assert_eq!(loaded.diff.rounds, 0);
+        assert!(loaded.diff.cleared.is_empty());
+        assert!(loaded.diff.deny_counts.is_empty());
+        assert_eq!(loaded.overrides.len(), 1);
+        assert_eq!(loaded.overrides[0].key, "doc::R-B");
+        assert!(loaded.excludes(ArtifactKind::Plan, "doc::R-B", "anything"));
+        assert!(loaded.excludes(ArtifactKind::Diff, "doc::R-B", "anything"));
+        assert!(loaded.deny_limit_exceeded(ArtifactKind::Plan, "doc::R-A", 3));
+        assert!(!loaded.deny_limit_exceeded(ArtifactKind::Diff, "doc::R-A", 3));
+    }
+
+    #[test]
+    fn test_store_writes_v3_nested_loops() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = with_config_dir();
+
+        let mut session = GovernanceSession::default();
+        session.plan.rounds = 2;
+        session.diff.rounds = 1;
+        session.diff.deny_counts.insert(key("doc", "R-A"), 1);
+        store("session-v3", &rd(), &session);
+
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(session_path("session-v3", &rd()).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(raw["format_version"], 3);
+        assert_eq!(raw["plan"]["rounds"], 2);
+        assert_eq!(raw["diff"]["rounds"], 1);
+        assert_eq!(raw["diff"]["deny_counts"]["doc::R-A"], 1);
+        assert!(raw.get("rounds").is_none());
+        assert!(raw.get("deny_counts").is_none());
     }
 }

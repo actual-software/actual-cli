@@ -154,8 +154,19 @@ pub enum ActualError {
     #[error("plan does not conform: {0}")]
     PlanNotConforming(String),
 
+    /// `impl-check` (direct mode, not `--claude-hook`) found at least one
+    /// `conflicting` verdict against the diff it judged. Not a technical
+    /// failure — the check ran fine — but a real finding, so direct-mode use
+    /// as a linter/gate gets a nonzero exit the way any other lint failure
+    /// would. `--claude-hook` never constructs this variant: its own contract
+    /// encodes a deny as JSON on stdout with a clean exit 0, never as a
+    /// process error.
+    #[error("implementation does not conform: {0}")]
+    ImplNotConforming(String),
+
     /// A command that must be run by a human at a real terminal (currently
-    /// only `plan-check-override`) was invoked with no terminal attached.
+    /// only `check-override`, née `plan-check-override`) was invoked with no
+    /// terminal attached.
     ///
     /// Deliberately its own variant rather than a plain [`Self::ConfigError`]:
     /// that variant's hint points the user at `config.yaml`, which is the

@@ -162,7 +162,7 @@ fn tmp_sibling(path: &Path) -> PathBuf {
 /// filesystem is atomic, so `path` is either the previous complete content
 /// or the new complete content, never a partial write. Without this, a
 /// process killed mid-write leaves `path` truncated; for a caller like
-/// `plan_check_session::store` that treats an unparseable file as "start
+/// `governance_session::store` that treats an unparseable file as "start
 /// fresh," a truncated write would silently reset session state — including
 /// dropping a recorded human override — rather than merely losing this one
 /// write. On non-unix, falls back to a plain (non-atomic) write. Shared by
@@ -649,7 +649,7 @@ mod tests {
 
     /// The gap this guards: a crash between an ordinary truncating write and
     /// its data landing on disk leaves the target half-written, which a
-    /// caller like `plan_check_session::load` treats as corrupt and silently
+    /// caller like `governance_session::load` treats as corrupt and silently
     /// resets state. Staging at a `.tmp` sibling and renaming means the
     /// target is only ever the previous complete content or the new complete
     /// content -- this test cannot simulate a mid-write crash directly, but
