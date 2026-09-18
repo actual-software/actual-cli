@@ -784,10 +784,11 @@ impl GovernedImplCheck {
         std::fs::write(repo.path().join("oauth.rs"), "fn sign() {}\n").unwrap();
         run_git(repo.path(), &["add", "."]);
         run_git(repo.path(), &["commit", "-q", "-m", "baseline"]);
-        // The working-tree change `--claude-hook`'s own `git diff HEAD` will
-        // pick up -- `oauth.rs` is already tracked (committed above), so
-        // this modification, unlike a brand-new untracked file, actually
-        // shows up in `git diff HEAD`.
+        // The working-tree change `--claude-hook` will pick up -- `oauth.rs`
+        // is already tracked (committed above). Untracked new files are
+        // included too (see `working_tree_diff`); this fixture still uses a
+        // tracked edit so `--diff-file`/stdin tests can pass a matching
+        // unified diff.
         std::fs::write(
             repo.path().join("oauth.rs"),
             "fn sign() { sign_with_rs256(); }\n",
@@ -882,6 +883,70 @@ fn test_impl_check_direct_mode_reads_the_diff_from_stdin() {
         .stdout(predicate::str::contains(
             "Conforming: no selected rule was violated.",
         ));
+}
+
+/// CI, nohup, and most hook runners attach stdin to `/dev/null` — a
+/// non-terminal character device, not a pipe. That must fall through to
+/// `git diff HEAD` (the documented no-arg default) rather than reading EOF
+/// as an empty diff and silently reporting nothing to check on a dirty tree.
+/// `GovernedImplCheck` seeds a tracked working-tree change, so the fallback
+/// has something to judge.
+///
+/// `assert_cmd` always rebinds stdin to a pipe (`Command::spawn`), so this
+/// drives `std::process::Command` with `Stdio::null()` — the only way to
+/// give the child a character-device stdin from a test.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_direct_mode_uses_git_diff_head_when_stdin_is_dev_null() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_actual"))
+        .args([
+            "impl-check",
+            "--repo",
+            fixture.repo.path().to_str().unwrap(),
+            "--no-rank",
+            "--runner",
+            "claude-cli",
+        ])
+        .env("ACTUAL_CONFIG_DIR", fixture.config_dir.path())
+        .env_remove("ACTUAL_CONFIG")
+        .env_remove("ACTUAL_NO_TELEMETRY")
+        .env("CLAUDE_BINARY", &fixture.fake_claude)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("impl-check should spawn");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Conforming: no selected rule was violated."),
+        "expected git diff HEAD fallback, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Nothing to check"),
+        "stdin=/dev/null must not be treated as an empty diff: {stdout}"
+    );
+}
+
+/// An empty *pipe* is still an explicit diff source: the caller supplied
+/// stdin, it just happened to be blank. That stays "nothing to check" even
+/// when the working tree is dirty — unlike `/dev/null` above. If this fell
+/// through to `git diff HEAD`, the fixture's oauth.rs change would be
+/// judged and this would print Conforming instead.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_direct_mode_empty_piped_stdin_is_nothing_to_check() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+
+    fixture
+        .cmd()
+        .write_stdin("   \n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nothing to check"));
 }
 
 #[cfg(unix)]

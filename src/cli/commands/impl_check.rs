@@ -16,22 +16,35 @@
 //! --claude-hook` can read `tool_input.plan` straight out of the
 //! `PreToolUse` envelope, because Claude Code injects the plan there itself.
 //! There is no equivalent for an implementation diff — no tool call carries
-//! one — so `--claude-hook` mode here always shells out to `git diff HEAD` in
-//! the resolved repository. Direct mode additionally accepts `--diff-file`
-//! (for scripting/testing) and piped stdin, in that priority order, falling
-//! back to `git diff HEAD` only when neither is given and stdin is not
-//! piped — see [`resolve_direct_diff`].
+//! one — so `--claude-hook` mode here always shells out to
+//! [`working_tree_diff`] in the resolved repository. Direct mode additionally
+//! accepts `--diff-file` (for scripting/testing) and piped stdin, in that
+//! priority order, falling back to [`working_tree_diff`] when neither is
+//! given and stdin is not an explicit diff source — a TTY, or a non-terminal
+//! character device such as `/dev/null` (CI, nohup, a hook with no pipe).
+//! Those two are not pipes; treating them as empty stdin would skip the
+//! working-tree diff and report "nothing to check" on a dirty tree. An empty
+//! *pipe* is still "nothing to check," same as an empty `--diff-file` — see
+//! [`resolve_direct_diff`].
+//!
+//! **Untracked files are part of the default diff.** Plain `git diff HEAD`
+//! only shows tracked-file changes, so an agent that only creates files
+//! would produce an empty diff and skip the gate. [`working_tree_diff`]
+//! copies `HEAD` into a throwaway index, `git add --intent-to-add` against
+//! that index (gitignore still applies), then `git diff HEAD` — the user's
+//! real index is never touched. `--diff-file` and piped stdin are unchanged.
 //!
 //! **An empty diff is not a user error.** `plan-check`'s direct mode refuses
 //! an empty plan outright (`resolve_direct_plan` returns
 //! `ActualError::ConfigError`): a plan is something a human or agent is
 //! expected to have written, so nothing at all is almost always a mistake. A
-//! diff is different — `git diff HEAD` legitimately returns nothing the
-//! moment the working tree matches `HEAD`, which is an entirely ordinary
-//! state (freshly cloned, freshly committed, nothing touched yet), not a
-//! missing argument. So an empty diff from *any* source here (including an
-//! explicitly empty `--diff-file` or empty piped stdin, for the same
-//! uniform-treatment reason) is handled as "nothing to check": direct mode
+//! diff is different — the working-tree diff is legitimately empty the
+//! moment the working tree matches `HEAD` and there are no untracked
+//! (non-ignored) files, which is an entirely ordinary state (freshly cloned,
+//! freshly committed, nothing touched yet), not a missing argument. So an
+//! empty diff from *any* source here (including an explicitly empty
+//! `--diff-file` or empty piped stdin, for the same uniform-treatment
+//! reason) is handled as "nothing to check": direct mode
 //! prints a clean, informational result and exits 0 rather than erroring,
 //! and `--claude-hook` mode emits a non-blocking notice and returns, mirroring
 //! exactly how `plan_check_hook::resolve_plan` returning `None` is handled in
@@ -50,8 +63,7 @@ use std::path::Path;
 use crate::cli::args::ImplCheckArgs;
 use crate::cli::commands::check_engine::{
     self, capped_read, deny_summary, hook_deny_reason, override_reminder, partial_coverage_note,
-    render_json, render_panel, round_limit_message, run_pipeline, with_override_reminder,
-    Outcome,
+    render_json, render_panel, round_limit_message, run_pipeline, with_override_reminder, Outcome,
 };
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::impl_check_hook::HookEnvelope;
@@ -200,12 +212,19 @@ fn print_nothing_to_check(json: bool) {
     println!("{panel}");
 }
 
-/// The diff text for direct-mode use: `--diff-file`, then piped stdin (when
-/// stdin is not a real terminal — mirrors `check_engine::exec_override`'s own
-/// `IsTerminal` check, so running this interactively with no piped input
-/// falls through to `git diff HEAD` instead of blocking on a read from a
-/// terminal that will never supply one), then `git diff HEAD` in the
+/// The diff text for direct-mode use: `--diff-file`, then an explicit stdin
+/// source (a pipe or redirected file), then [`working_tree_diff`] in the
 /// resolved repo root.
+///
+/// Stdin is *not* an explicit source just because it fails
+/// [`IsTerminal`]. `/dev/null` (and other non-terminal character devices)
+/// also fail that check, and reading them yields immediate EOF — which this
+/// command would otherwise treat as an empty diff and skip the working-tree
+/// diff, a silent pass in CI, nohup, and hooks that attach stdin to
+/// `/dev/null`. A real pipe or redirected file is not a character device;
+/// those still count as the diff, including an empty one. A TTY is skipped
+/// so an interactive run does not block waiting for a keyboard that will
+/// never supply a diff.
 ///
 /// Returns `None` when the resolved diff is empty — see the module doc for
 /// why that is "nothing to check," not an error, unlike
@@ -216,11 +235,48 @@ fn resolve_direct_diff(args: &ImplCheckArgs, root: &Path) -> Result<Option<Strin
         let text = capped_read(file, &path.display().to_string())?;
         return Ok(non_empty(text));
     }
-    if !std::io::stdin().is_terminal() {
+    if stdin_is_explicit_diff_source() {
         let text = capped_read(std::io::stdin(), "stdin")?;
         return Ok(non_empty(text));
     }
-    Ok(non_empty(git_diff_head(root)?))
+    Ok(non_empty(working_tree_diff(root)?))
+}
+
+/// True when stdin is a pipe or redirected file the caller supplied as the
+/// diff. False for a TTY and for a non-terminal character device (`/dev/null`
+/// in CI): neither is an explicit diff, so [`resolve_direct_diff`] falls
+/// through to [`working_tree_diff`].
+fn stdin_is_explicit_diff_source() -> bool {
+    is_explicit_diff_source(std::io::stdin().is_terminal(), stdin_is_char_device())
+}
+
+fn is_explicit_diff_source(is_terminal: bool, is_char_device: bool) -> bool {
+    !is_terminal && !is_char_device
+}
+
+/// Whether stdin itself is a character device. A TTY is one; so is
+/// `/dev/null`. Callers that already know stdin is not a TTY use this to
+/// tell "no input attached" apart from a pipe.
+fn stdin_is_char_device() -> bool {
+    #[cfg(unix)]
+    {
+        use std::mem::ManuallyDrop;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::io::FromRawFd;
+
+        let fd = std::io::stdin().as_raw_fd();
+        // SAFETY: stdin stays open for the process lifetime. `ManuallyDrop`
+        // keeps `File`'s destructor from closing that fd after `metadata`.
+        let file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+        file.metadata()
+            .map(|m| m.file_type().is_char_device())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 fn non_empty(text: String) -> Option<String> {
@@ -231,27 +287,43 @@ fn non_empty(text: String) -> Option<String> {
     }
 }
 
-/// Shell out to `git diff HEAD` in `root`, capped at the same size limit
-/// every other diff source is capped at ([`plan_check_hook::MAX_READ_BYTES`],
-/// via [`capped_read`], reused directly on the child's own piped stdout
-/// rather than buffering the whole subprocess output first and checking its
-/// size only after).
+/// The default diff: working tree vs `HEAD`, including untracked files that
+/// gitignore would not hide.
 ///
-/// Synchronous, deliberately: this is a local git operation with no network
-/// involved, unlike this repo's async git-remote calls in `advisor.rs` /
-/// `sync/cache.rs`, which specifically guard against a *remote* hang — there
-/// is nothing analogous to wait out here, so no timeout/async machinery is
-/// needed.
-fn git_diff_head(root: &Path) -> Result<String, ActualError> {
-    let mut child = std::process::Command::new("git")
+/// Plain `git diff HEAD` cannot see new files, and an implementation gate
+/// that misses those is a hole — agents create files more often than they
+/// edit tracked ones. Copying `HEAD` into a throwaway `GIT_INDEX_FILE` and
+/// `git add --intent-to-add` against *that* index makes those files show up
+/// as new-file hunks without touching the user's real index (a crash here
+/// must not leave `git add -N` entries behind in the repo they are checking).
+///
+/// Capped at the same size limit every other diff source is capped at
+/// ([`plan_check_hook::MAX_READ_BYTES`], via [`capped_read`] on the child's
+/// own piped stdout). Synchronous, deliberately: this is a local git
+/// operation with no network involved, unlike this repo's async git-remote
+/// calls in `advisor.rs` / `sync/cache.rs`.
+fn working_tree_diff(root: &Path) -> Result<String, ActualError> {
+    let tmp = tempfile::tempdir().map_err(ActualError::IoError)?;
+    let index = tmp.path().join("index");
+    git_ok(
+        root,
+        Some(&index),
+        &["read-tree", "HEAD"],
+        "git read-tree HEAD",
+    )?;
+    git_ok(
+        root,
+        Some(&index),
+        &["add", "--intent-to-add", "--", "."],
+        "git add --intent-to-add",
+    )?;
+
+    let mut child = git_command(root, Some(&index))
         .args(["diff", "HEAD"])
-        .current_dir(root)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(ActualError::IoError)?;
     let stdout = child.stdout.take().expect("stdout was piped");
-    let text = capped_read(stdout, "git diff HEAD")?;
+    let text = capped_read(stdout, "working-tree diff")?;
     let mut stderr = String::new();
     if let Some(mut err) = child.stderr.take() {
         let _ = err.read_to_string(&mut stderr);
@@ -259,12 +331,39 @@ fn git_diff_head(root: &Path) -> Result<String, ActualError> {
     let status = child.wait().map_err(ActualError::IoError)?;
     if !status.success() {
         return Err(ActualError::ConfigError(format!(
-            "git diff HEAD failed in {}: {}",
+            "working-tree diff failed in {}: {}",
             root.display(),
             stderr.trim()
         )));
     }
     Ok(text)
+}
+
+fn git_command(root: &Path, index: Option<&Path>) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
+    cmd
+}
+
+fn git_ok(root: &Path, index: Option<&Path>, args: &[&str], what: &str) -> Result<(), ActualError> {
+    let output = git_command(root, index)
+        .args(args)
+        .output()
+        .map_err(ActualError::IoError)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ActualError::ConfigError(format!(
+            "{what} failed in {}: {}",
+            root.display(),
+            stderr.trim()
+        )));
+    }
+    Ok(())
 }
 
 // ── --claude-hook mode ───────────────────────────────────────────────────
@@ -310,12 +409,12 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         .unwrap_or_else(|| crate::rules::rules_dir(&root));
 
     // Unlike plan text, the diff is never carried on the envelope -- always
-    // `git diff HEAD` in the resolved repo. See the module doc.
-    let diff_text = match git_diff_head(&root) {
+    // the working-tree diff in the resolved repo. See the module doc.
+    let diff_text = match working_tree_diff(&root) {
         Ok(text) => text,
         Err(e) => {
             emit(plan_check_hook::render_notice(&format!(
-                "impl-check could not read git diff HEAD in {}: {e}",
+                "impl-check could not read the working-tree diff in {}: {e}",
                 root.display()
             )));
             return;
@@ -323,7 +422,7 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
     };
     if diff_text.trim().is_empty() {
         emit(plan_check_hook::render_notice(
-            "impl-check found no diff to check (git diff HEAD is empty).",
+            "impl-check found no diff to check (working tree matches HEAD and there are no untracked files).",
         ));
         return;
     }
@@ -593,14 +692,25 @@ mod tests {
         assert!(status.success(), "git {git_args:?} failed");
     }
 
-    /// A real throwaway git repo with a committed baseline, so `git diff
-    /// HEAD` has something to diff against. `oauth.rs` is committed at
-    /// baseline (not left untracked) specifically so a test can overwrite
-    /// its content afterward and have `git diff HEAD` actually show it —
-    /// `git diff HEAD` only ever shows tracked-file changes, never an
-    /// untracked new file, so a test that wants a real diff must modify a
-    /// file this fixture already committed rather than writing a brand-new
-    /// one.
+    fn git_stdout(cwd: &StdPath, git_args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(git_args)
+            .current_dir(cwd)
+            .output()
+            .expect("git is available in the test environment");
+        assert!(
+            output.status.success(),
+            "git {git_args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// A real throwaway git repo with a committed baseline, so a working-tree
+    /// diff has `HEAD` to compare against. `oauth.rs` is committed at
+    /// baseline so tracked-edit tests can overwrite it; untracked files are
+    /// included too (see [`working_tree_diff`]), and those tests write a
+    /// brand-new file instead of modifying this fixture.
     fn git_repo_with_baseline() -> TempDir {
         let dir = tempdir().unwrap();
         run_git(dir.path(), &["init", "-q"]);
@@ -635,7 +745,7 @@ mod tests {
         serde_json::json!({ "verdicts": entries })
     }
 
-    // ── resolve_direct_diff / git_diff_head ─────────────────────────────
+    // ── resolve_direct_diff / working_tree_diff ──────────────────────────
 
     #[test]
     fn test_resolve_direct_diff_reads_diff_file() {
@@ -684,39 +794,141 @@ mod tests {
     }
 
     #[test]
-    fn test_git_diff_head_reads_a_real_working_tree_change() {
+    fn test_working_tree_diff_reads_a_real_working_tree_change() {
         let repo = git_repo_with_baseline();
         std::fs::write(repo.path().join("service.rs"), "fn handler() { todo!() }\n").unwrap();
-        let diff = git_diff_head(repo.path()).unwrap();
+        let diff = working_tree_diff(repo.path()).unwrap();
         assert!(diff.contains("service.rs"));
         assert!(diff.contains("todo!()"));
     }
 
     #[test]
-    fn test_git_diff_head_empty_when_nothing_changed() {
+    fn test_working_tree_diff_includes_an_untracked_new_file() {
         let repo = git_repo_with_baseline();
-        let diff = git_diff_head(repo.path()).unwrap();
+        std::fs::write(
+            repo.path().join("brand_new.rs"),
+            "fn freshly_created() {}\n",
+        )
+        .unwrap();
+        let diff = working_tree_diff(repo.path()).unwrap();
+        assert!(
+            diff.contains("brand_new.rs"),
+            "untracked files must appear in the default diff, got: {diff}"
+        );
+        assert!(diff.contains("freshly_created"));
+    }
+
+    #[test]
+    fn test_working_tree_diff_omits_a_gitignored_untracked_file() {
+        let repo = git_repo_with_baseline();
+        std::fs::write(repo.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(repo.path().join("ignored.rs"), "fn secret() {}\n").unwrap();
+        std::fs::write(repo.path().join("visible.rs"), "fn ok() {}\n").unwrap();
+        let diff = working_tree_diff(repo.path()).unwrap();
+        assert!(diff.contains("visible.rs"));
+        assert!(
+            !diff.contains("+++ b/ignored.rs"),
+            "gitignored untracked files must stay out of the default diff, got: {diff}"
+        );
+        assert!(!diff.contains("fn secret()"));
+    }
+
+    #[test]
+    fn test_working_tree_diff_does_not_mutate_the_real_index() {
+        let repo = git_repo_with_baseline();
+        std::fs::write(
+            repo.path().join("service.rs"),
+            "fn handler() { staged() }\n",
+        )
+        .unwrap();
+        run_git(repo.path(), &["add", "service.rs"]);
+        std::fs::write(repo.path().join("brand_new.rs"), "fn untracked() {}\n").unwrap();
+
+        let cached_before = git_stdout(repo.path(), &["diff", "--cached"]);
+        let staged_before = git_stdout(repo.path(), &["ls-files", "--stage"]);
+        assert!(
+            cached_before.contains("staged()"),
+            "precondition: the real index must hold the staged edit"
+        );
+
+        let diff = working_tree_diff(repo.path()).unwrap();
+        assert!(diff.contains("brand_new.rs"));
+        assert!(diff.contains("staged()"));
+
+        assert_eq!(
+            git_stdout(repo.path(), &["diff", "--cached"]),
+            cached_before,
+            "working_tree_diff must not change git diff --cached"
+        );
+        assert_eq!(
+            git_stdout(repo.path(), &["ls-files", "--stage"]),
+            staged_before,
+            "working_tree_diff must not change the real index"
+        );
+        let status = git_stdout(repo.path(), &["status", "--porcelain"]);
+        assert!(
+            status.contains("?? brand_new.rs"),
+            "the new file must still be untracked in the real repo, got: {status}"
+        );
+    }
+
+    #[test]
+    fn test_working_tree_diff_empty_when_nothing_changed() {
+        let repo = git_repo_with_baseline();
+        let diff = working_tree_diff(repo.path()).unwrap();
         assert_eq!(diff.trim(), "");
     }
 
     #[test]
-    fn test_git_diff_head_errors_outside_a_git_repository() {
+    fn test_working_tree_diff_errors_outside_a_git_repository() {
         let not_a_repo = tempdir().unwrap();
-        let err = git_diff_head(not_a_repo.path()).unwrap_err();
+        let err = working_tree_diff(not_a_repo.path()).unwrap_err();
         assert!(matches!(err, ActualError::ConfigError(_)));
     }
 
     #[test]
-    fn test_resolve_direct_diff_falls_back_to_git_diff_head_with_no_file_and_a_terminal_stdin() {
-        // `IsTerminal` cannot be faked from an in-process test the same way
-        // `check_engine::exec_override`'s own doc explains -- this exercises
-        // the fallback shape indirectly, via `git_diff_head` itself, which is
-        // the only real logic in that final branch. The subprocess-driven
-        // integration test (`tests/cli_test.rs`) covers the full three-way
-        // resolution order with piped stdin, which *is* controllable there.
+    fn test_is_explicit_diff_source_skips_tty_and_char_devices() {
+        assert!(
+            !is_explicit_diff_source(true, false),
+            "a TTY is not an explicit diff — fall through to git diff HEAD"
+        );
+        assert!(
+            !is_explicit_diff_source(true, true),
+            "a TTY is a char device too; still not an explicit diff"
+        );
+        assert!(
+            !is_explicit_diff_source(false, true),
+            "/dev/null is a non-TTY char device — fall through to git diff HEAD"
+        );
+        assert!(
+            is_explicit_diff_source(false, false),
+            "a pipe or redirected file is an explicit diff source"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_dev_null_is_a_character_device() {
+        use std::os::unix::fs::FileTypeExt;
+        let meta = std::fs::metadata("/dev/null").unwrap();
+        assert!(
+            meta.file_type().is_char_device(),
+            "the /dev/null case in stdin_is_char_device depends on this"
+        );
+    }
+
+    #[test]
+    fn test_resolve_direct_diff_falls_back_to_working_tree_diff_with_no_file_and_a_terminal_stdin()
+    {
+        // `IsTerminal` and the stdin fd's file type cannot be faked from an
+        // in-process test the same way `check_engine::exec_override`'s own
+        // doc explains -- this exercises the fallback shape indirectly, via
+        // `working_tree_diff` itself. The subprocess-driven integration test
+        // (`tests/cli_test.rs`) covers `/dev/null` vs an empty pipe, which
+        // *is* controllable there.
         let repo = git_repo_with_baseline();
         std::fs::write(repo.path().join("service.rs"), "fn handler() { 1 }\n").unwrap();
-        let diff = git_diff_head(repo.path()).unwrap();
+        let diff = working_tree_diff(repo.path()).unwrap();
         assert!(!diff.trim().is_empty());
     }
 
@@ -1009,6 +1221,51 @@ mod tests {
             "cross-cutting-token-signing-1c57",
             "R-A-001"
         )));
+    }
+
+    /// An untracked new file, with no tracked-file edits, must still reach
+    /// the judge — the hole `working_tree_diff` exists to close. Rules are
+    /// committed first so they are not themselves the untracked material
+    /// that makes the diff non-empty.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_judges_an_untracked_new_file() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("cross-cutting-token-signing-1c57.md"), OAUTH_DOC).unwrap();
+        run_git(repo.path(), &["add", "."]);
+        run_git(repo.path(), &["commit", "-q", "-m", "rules"]);
+        std::fs::write(
+            repo.path().join("brand_new.rs"),
+            "fn sign() { sign_with_rs256(); }\n",
+        )
+        .unwrap();
+
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conforming", "span": "", "reason": "no logging"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"session_id": "sess-impl-untracked-1"}).to_string();
+        exec_hook_with(&args, &raw);
+
+        let session = governance_session::load("sess-impl-untracked-1", &rules);
+        assert_eq!(
+            session.rounds, 1,
+            "an untracked-only change must be judged, not skipped as an empty diff"
+        );
     }
 
     #[cfg(all(unix, feature = "telemetry"))]
