@@ -581,11 +581,8 @@ mod tests {
             .current_dir(cwd)
             .output()
             .expect("git is available in the test environment");
-        assert!(
-            output.status.success(),
-            "git {git_args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "git {git_args:?} failed: {stderr}");
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
@@ -769,6 +766,64 @@ mod tests {
         assert!(matches!(err, ActualError::ConfigError(_)));
     }
 
+    /// The cap is on the diff, not just on `--diff-file`/stdin: a working tree
+    /// whose diff exceeds it must error rather than buffer it whole. This also
+    /// exercises the kill-and-reap path, so a regression that left `git`
+    /// blocked writing into a pipe nobody reads would hang this test.
+    #[test]
+    fn test_working_tree_diff_errors_when_the_diff_exceeds_the_size_limit() {
+        let repo = git_repo_with_baseline();
+        let oversized = "x".repeat(plan_check_hook::MAX_READ_BYTES as usize + 1);
+        std::fs::write(repo.path().join("huge.txt"), oversized).unwrap();
+
+        let err = working_tree_diff(repo.path()).unwrap_err();
+
+        assert!(matches!(err, ActualError::ConfigError(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("working-tree diff"), "{msg}");
+        assert!(msg.contains("exceeds"), "{msg}");
+    }
+
+    /// An untracked, empty embedded repository is one thing `git add` refuses
+    /// outright ("does not have a commit checked out"), after `read-tree` has
+    /// already succeeded.
+    #[test]
+    fn test_working_tree_diff_errors_when_git_add_fails() {
+        let repo = git_repo_with_baseline();
+        let embedded = repo.path().join("embedded");
+        std::fs::create_dir(&embedded).unwrap();
+        run_git(&embedded, &["init", "-q"]);
+
+        let err = working_tree_diff(repo.path()).unwrap_err();
+
+        assert!(err.to_string().contains("git add --intent-to-add"), "{err}");
+    }
+
+    /// `git diff` itself exiting non-zero (here: HEAD's copy of a modified
+    /// file is missing from the object store) is reported with git's own
+    /// stderr, not swallowed into an empty diff that would pass the gate.
+    #[cfg(unix)]
+    #[test]
+    fn test_working_tree_diff_errors_when_git_diff_exits_nonzero() {
+        let repo = git_repo_with_baseline();
+        let blob = git_stdout(repo.path(), &["rev-parse", "HEAD:service.rs"]);
+        let blob = blob.trim();
+        let object = repo
+            .path()
+            .join(".git/objects")
+            .join(&blob[..2])
+            .join(&blob[2..]);
+        std::fs::remove_file(object).unwrap();
+        std::fs::write(repo.path().join("service.rs"), "fn handler() { 5 }\n").unwrap();
+
+        let err = working_tree_diff(repo.path()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("working-tree diff failed in"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn test_is_explicit_diff_source_skips_tty_and_char_devices() {
         assert!(
@@ -928,6 +983,80 @@ mod tests {
 
         let err = exec(&args).unwrap_err();
         assert!(matches!(err, ActualError::ImplNotConforming(_)));
+    }
+
+    /// `--json` on an empty diff is the same clean, exit-0 "not checked"
+    /// result as the panel, just machine-readable.
+    #[test]
+    fn test_exec_direct_json_prints_not_checked_on_an_empty_diff() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        // An explicit empty `--diff-file`, not the fallback chain: that would
+        // consult the real stdin, which a test harness does not control.
+        let diff_dir = tempdir().unwrap();
+        let diff_file = diff_dir.path().join("empty.diff");
+        std::fs::write(&diff_file, "  \n").unwrap();
+        let mut args = base_args();
+        args.diff_file = Some(diff_file);
+        args.repo = Some(repo.path().to_path_buf());
+        args.json = true;
+        assert!(exec(&args).is_ok());
+    }
+
+    /// A `requires_decision` verdict does not fail direct mode (only a real
+    /// conflict does), but it is not a clean pass either: `--json` reports it
+    /// and the telemetry decision is `warn`.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_direct_json_requires_decision_exits_ok_and_warns() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let root = seed(&[("cross-cutting-token-signing-1c57.md", OAUTH_DOC)]);
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "requires_decision", "span": "logs the key", "reason": "deliberately supersedes the rule"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let diff_dir = tempdir().unwrap();
+        let diff_file = diff_dir.path().join("the.diff");
+        std::fs::write(
+            &diff_file,
+            "diff --git a/oauth.rs b/oauth.rs\n+log the signing key\n",
+        )
+        .unwrap();
+
+        let mut args = base_args();
+        args.diff_file = Some(diff_file);
+        args.repo = Some(root.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        args.no_rank = true;
+        args.json = true;
+
+        #[cfg(feature = "telemetry")]
+        {
+            let events = with_captured_plan_governance_events(|| assert!(exec(&args).is_ok()));
+            let completed = events
+                .iter()
+                .find(|e| {
+                    e.event
+                        == crate::api::types::PlanGovernanceEventName::PlanGovernanceCheckCompleted
+                })
+                .expect("a completed event must be emitted");
+            assert_eq!(
+                completed.properties.as_ref().unwrap().decision,
+                Some(crate::api::types::PlanGovernanceDecision::Warn)
+            );
+        }
+        #[cfg(not(feature = "telemetry"))]
+        assert!(exec(&args).is_ok());
     }
 
     #[test]
