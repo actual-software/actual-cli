@@ -158,12 +158,12 @@ pub(super) enum Outcome {
 /// see a real error. `--claude-hook` still catches that `Err` and fails open
 /// on it, per the "missing rules directory... must not deny" contract.
 ///
-/// `kind` selects only how `plan_text` is described to the judge — see
-/// [`check::ArtifactKind`] — `plan-check` always passes
-/// [`check::ArtifactKind::Plan`]; `impl-check` passes
-/// [`check::ArtifactKind::Diff`]. Everything else about the pipeline (rule
-/// selection, session exclusion, the [`MAX_RULES_JUDGED`] cap) is identical
-/// either way.
+/// `kind` selects how `plan_text` is described to the judge and the omission
+/// semantics of its verdict criteria — see [`check::ArtifactKind`] —
+/// `plan-check` always passes [`check::ArtifactKind::Plan`]; `impl-check`
+/// passes [`check::ArtifactKind::Diff`]. Everything else about the pipeline
+/// (rule selection, session exclusion, the [`MAX_RULES_JUDGED`] cap) is
+/// identical either way.
 pub(super) fn run_pipeline(
     plan_text: &str,
     root: &Path,
