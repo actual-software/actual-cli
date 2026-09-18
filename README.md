@@ -197,8 +197,9 @@ live in the separate `actual-skill` plugin repository, not here.
 plan text — same four outcomes, same exit-code contract, same
 `--claude-hook` JSON contract (driven by the separate plugin repo's
 `hooks/impl-gate.sh`), and the same revision-loop/session machinery as
-`plan-check` (a `--claude-hook` session is keyed by `session_id`, independent
-of whether a `plan-check` session for that id ever existed). By default it
+`plan-check` (a `--claude-hook` session file is keyed by `session_id` and
+rules directory; deny counts, rounds, and clearances are per command, so a
+plan-check run does not spend impl-check's budget). By default it
 diffs the current repo's working tree against `HEAD`, including untracked
 files that gitignore would not hide (the user's index is not touched);
 `--diff-file` or piped stdin can supply the diff explicitly instead:
@@ -209,8 +210,9 @@ actual impl-check --diff-file out.diff --json
 git diff HEAD | actual impl-check
 ```
 
-Under `--claude-hook` (either command), a rule already cleared for the
-session is never re-judged, and a single rule stops blocking on its own
+Under `--claude-hook` (either command), a rule already cleared for *that*
+command's artifact (the same plan text, or the same diff) is never re-judged,
+and a single rule stops blocking on its own
 after `--max-rounds` denied rounds (default 3, or
 `ACTUAL_PLAN_CHECK_MAX_ROUNDS` / `ACTUAL_IMPL_CHECK_MAX_ROUNDS` respectively —
 each command's revision loop is budgeted independently) so a persistently

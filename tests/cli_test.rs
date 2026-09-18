@@ -1040,7 +1040,7 @@ fn test_impl_check_verdict_survives_a_refused_telemetry_endpoint() {
 /// The ticket's cross-command acceptance criterion: one override mechanism
 /// (`check-override`) serves both `plan-check` and `impl-check`, because
 /// `GovernanceSession` is keyed generically on `(session_id, rules_dir)`
-/// with no plan-specific coupling (see `governance_session`'s own module
+/// so one override file serves both gates (see `governance_session`'s own module
 /// doc). This drives a real `impl-check --claude-hook` denial through the
 /// compiled binary, then confirms `check-override`, given the exact session
 /// id and rule key `impl-check` just denied, is gated by exactly the same

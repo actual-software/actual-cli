@@ -51,11 +51,13 @@
 //! `plan_check::exec_hook_with`.
 //!
 //! **The revision loop needs no plan-check bootstrap.** `GovernanceSession`
-//! (see `governance_session`) is keyed generically on `(session_id,
-//! rules_dir)` with zero plan-specific coupling — `impl-check --claude-hook`
+//! is still one file per `(session_id, rules_dir)` so a human override
+//! recorded against the conversation applies to both gates, but deny counts,
+//! rounds, and clearances are per [`ArtifactKind`] — `impl-check --claude-hook`
 //! run with a `session_id` no `plan-check` session has ever touched simply
-//! starts from `GovernanceSession::default()`, the same as any other new
-//! session. There is nothing here to wire up for that to work.
+//! starts from `GovernanceSession::default()`, and a session that *has* run
+//! plan-check still starts impl-check with a fresh deny budget. There is
+//! nothing here to wire up for that to work.
 
 use std::io::{IsTerminal, Read};
 use std::path::Path;
@@ -427,10 +429,11 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
         return;
     }
 
-    // The revision loop keys entirely on `session_id`, generically on
-    // `(session_id, rules_dir)` — a session no prior `impl-check` (or
-    // `plan-check`) call has ever touched simply starts fresh. See the
-    // module doc.
+    // The revision loop keys on `(session_id, rules_dir)` for the file, then
+    // on `ArtifactKind::Diff` for deny counts / rounds / clearances — a
+    // session no prior `impl-check` call has ever touched starts this loop
+    // fresh, even if `plan-check` already wrote overrides into the same file.
+    // See the module doc.
     let session_id = envelope.session_id.as_deref();
     let mut session = session_id
         .map(|id| governance_session::load(id, &rules_dir))
@@ -489,13 +492,13 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
                 for v in &verdicts {
                     let key = governance_session::key(&v.doc_slug, &v.rule_id);
                     if v.verdict == Verdict::Conforming {
-                        session.cleared.insert(key, diff_digest.clone());
+                        session.diff.cleared.insert(key, diff_digest.clone());
                     } else {
-                        session.cleared.remove(&key);
+                        session.diff.cleared.remove(&key);
                     }
                 }
                 if judge_ran {
-                    session.rounds += 1;
+                    session.diff.rounds += 1;
                 }
             }
 
@@ -507,7 +510,10 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
             if !blocking.is_empty() {
                 if session_id.is_some() {
                     for c in &blocking {
-                        session.record_denial(&governance_session::key(&c.doc_slug, &c.rule_id));
+                        session.record_denial(
+                            ArtifactKind::Diff,
+                            &governance_session::key(&c.doc_slug, &c.rule_id),
+                        );
                     }
                 }
 
@@ -516,6 +522,7 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
                         .iter()
                         .filter(|c| {
                             session.deny_limit_exceeded(
+                                ArtifactKind::Diff,
                                 &governance_session::key(&c.doc_slug, &c.rule_id),
                                 args.max_rounds,
                             )
@@ -527,11 +534,16 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
                             .iter()
                             .map(|c| governance_session::key(&c.doc_slug, &c.rule_id))
                             .collect();
-                        let message = round_limit_message(&exhausted, &session, args.max_rounds);
+                        let message = round_limit_message(
+                            &exhausted,
+                            &session,
+                            ArtifactKind::Diff,
+                            args.max_rounds,
+                        );
                         governance_session::record_round_limit(
                             session_id,
                             &rules_dir,
-                            session.rounds,
+                            session.diff.rounds,
                             &keys,
                             &message,
                         );
@@ -580,7 +592,7 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
                     governance_session::record_partial_coverage(
                         session_id,
                         &rules_dir,
-                        session.rounds,
+                        session.diff.rounds,
                         judged,
                         total,
                     );
@@ -1160,7 +1172,7 @@ mod tests {
 
         let session = governance_session::load("sess-impl-1", &rules);
         assert_eq!(
-            session.deny_counts.get(&governance_session::key(
+            session.diff.deny_counts.get(&governance_session::key(
                 "cross-cutting-token-signing-1c57",
                 "R-A-002"
             )),
@@ -1216,8 +1228,8 @@ mod tests {
         // A verdict was reached and persisted -- proof the pipeline actually
         // ran to completion rather than failing to bootstrap.
         let session = governance_session::load(novel_session_id, &rules);
-        assert_eq!(session.rounds, 1);
-        assert!(session.cleared.contains_key(&governance_session::key(
+        assert_eq!(session.diff.rounds, 1);
+        assert!(session.diff.cleared.contains_key(&governance_session::key(
             "cross-cutting-token-signing-1c57",
             "R-A-001"
         )));
@@ -1263,7 +1275,7 @@ mod tests {
 
         let session = governance_session::load("sess-impl-untracked-1", &rules);
         assert_eq!(
-            session.rounds, 1,
+            session.diff.rounds, 1,
             "an untracked-only change must be judged, not skipped as an empty diff"
         );
     }
@@ -1316,6 +1328,66 @@ mod tests {
             props.command.as_deref(),
             Some("impl-check --claude-hook"),
             "impl-check's hook telemetry must not be mislabeled as plan-check's"
+        );
+    }
+
+    /// The gap this guards: plan-stage denials used to live in the same
+    /// `deny_counts` map impl-check read, so an exhausted plan-check budget
+    /// made the first impl-check of that rule fail open.
+    #[cfg(unix)]
+    #[test]
+    fn test_exec_hook_with_plan_denials_do_not_exhaust_impl_check_budget() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempdir().unwrap();
+        let _guards = isolated_config(&home);
+        let repo = git_repo_with_baseline();
+        let rules = repo.path().join(".actual/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("cross-cutting-token-signing-1c57.md"), OAUTH_DOC).unwrap();
+        std::fs::write(
+            repo.path().join("oauth.rs"),
+            "fn sign() { log_signing_key(); }\n",
+        )
+        .unwrap();
+
+        let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
+        let mut prior = GovernanceSession::default();
+        for _ in 0..4 {
+            prior.record_denial(ArtifactKind::Plan, &key);
+        }
+        prior.plan.rounds = 4;
+        governance_session::store("sess-impl-budget-1", &rules, &prior);
+        assert!(prior.deny_limit_exceeded(ArtifactKind::Plan, &key, DEFAULT_MAX_ROUNDS));
+        assert!(!prior.deny_limit_exceeded(ArtifactKind::Diff, &key, DEFAULT_MAX_ROUNDS));
+
+        let bin = tempdir().unwrap();
+        let response = check_output(serde_json::json!([
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-001", "verdict": "conforming", "span": "", "reason": "uses RS256"},
+            {"doc_slug": "cross-cutting-token-signing-1c57", "rule_id": "R-A-002", "verdict": "conflicting", "span": "logs the key", "reason": "forbidden"},
+        ]));
+        let _binary = EnvGuard::set(
+            "CLAUDE_BINARY",
+            fake_claude(bin.path(), &response).to_str().unwrap(),
+        );
+
+        let mut args = base_args();
+        args.repo = Some(repo.path().to_path_buf());
+        args.runner = Some(crate::cli::args::RunnerChoice::ClaudeCli);
+        let raw = serde_json::json!({"session_id": "sess-impl-budget-1"}).to_string();
+        exec_hook_with(&args, &raw);
+
+        let session = governance_session::load("sess-impl-budget-1", &rules);
+        assert_eq!(session.plan.deny_counts.get(&key), Some(&4));
+        assert_eq!(session.diff.deny_counts.get(&key), Some(&1));
+        assert!(
+            !session.deny_limit_exceeded(ArtifactKind::Diff, &key, args.max_rounds),
+            "the first impl-check denial must not already be exhausted"
+        );
+        let log = std::fs::read_to_string(governance_session::audit_log_path().unwrap())
+            .unwrap_or_default();
+        assert!(
+            !log.contains("round_limit"),
+            "a plan-exhausted rule must still deny at impl-check: {log}"
         );
     }
 

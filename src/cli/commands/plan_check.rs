@@ -138,14 +138,13 @@ use std::path::PathBuf;
 use crate::cli::args::PlanCheckArgs;
 use crate::cli::commands::check_engine::{
     capped_read, deny_summary, hook_deny_reason, override_reminder, partial_coverage_note,
-    render_json, render_panel, round_limit_message, run_pipeline, with_override_reminder,
-    Outcome,
+    render_json, render_panel, round_limit_message, run_pipeline, with_override_reminder, Outcome,
 };
 use crate::cli::commands::governance_session::{self, GovernanceSession};
 use crate::cli::commands::plan_check_hook::{self, HookEnvelope};
 use crate::cli::ui::term_size;
 use crate::error::ActualError;
-use crate::rules::check::{CheckedRule, Verdict};
+use crate::rules::check::{ArtifactKind, CheckedRule, Verdict};
 
 #[cfg(feature = "telemetry")]
 use crate::cli::commands::check_engine::{send_governance_events, send_hook_governance_events};
@@ -406,18 +405,18 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                 for v in &verdicts {
                     let key = governance_session::key(&v.doc_slug, &v.rule_id);
                     if v.verdict == Verdict::Conforming {
-                        session.cleared.insert(key, plan_digest.clone());
+                        session.plan.cleared.insert(key, plan_digest.clone());
                     } else {
                         // A rule that was cleared against an earlier plan and
                         // is no longer conforming against this one must not
                         // leave a stale entry behind -- it is no longer a
                         // true fact about the current plan, digest mismatch
                         // or not.
-                        session.cleared.remove(&key);
+                        session.plan.cleared.remove(&key);
                     }
                 }
                 if judge_ran {
-                    session.rounds += 1;
+                    session.plan.rounds += 1;
                 }
             }
 
@@ -439,7 +438,10 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                     // recorded, independent of any other rule's count — see
                     // the module doc's "the round limit is per rule" note.
                     for c in &blocking {
-                        session.record_denial(&governance_session::key(&c.doc_slug, &c.rule_id));
+                        session.record_denial(
+                            ArtifactKind::Plan,
+                            &governance_session::key(&c.doc_slug, &c.rule_id),
+                        );
                     }
                 }
 
@@ -448,6 +450,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                         .iter()
                         .filter(|c| {
                             session.deny_limit_exceeded(
+                                ArtifactKind::Plan,
                                 &governance_session::key(&c.doc_slug, &c.rule_id),
                                 args.max_rounds,
                             )
@@ -465,11 +468,16 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                             .iter()
                             .map(|c| governance_session::key(&c.doc_slug, &c.rule_id))
                             .collect();
-                        let message = round_limit_message(&exhausted, &session, args.max_rounds);
+                        let message = round_limit_message(
+                            &exhausted,
+                            &session,
+                            ArtifactKind::Plan,
+                            args.max_rounds,
+                        );
                         governance_session::record_round_limit(
                             session_id,
                             &rules_dir,
-                            session.rounds,
+                            session.plan.rounds,
                             &keys,
                             &message,
                         );
@@ -544,7 +552,7 @@ fn exec_hook_with(args: &PlanCheckArgs, raw: &str) {
                     governance_session::record_partial_coverage(
                         session_id,
                         &rules_dir,
-                        session.rounds,
+                        session.plan.rounds,
                         judged,
                         total,
                     );
@@ -1279,7 +1287,7 @@ mod tests {
         // tracking, not a separate notice-only path.
         let session = governance_session::load("sess-decision-1", &rules_dir);
         let key = governance_session::key("cross-cutting-token-signing-1c57", "R-A-001");
-        assert_eq!(session.deny_counts.get(&key), Some(&1));
+        assert_eq!(session.plan.deny_counts.get(&key), Some(&1));
     }
 
     /// The behavior change this guards: exceeding `MAX_RULES_JUDGED` must
@@ -1337,7 +1345,7 @@ mod tests {
         let session = governance_session::load("sess-partial-1", &rules_dir);
         // The one conflicting rule in the prefix was denied...
         assert_eq!(
-            session.deny_counts.get(&governance_session::key(
+            session.plan.deny_counts.get(&governance_session::key(
                 "cross-cutting-many-abcd",
                 "R-X-0000"
             )),
@@ -1346,10 +1354,10 @@ mod tests {
         // ...and every other rule in the capped prefix was cleared --
         // proving the judge actually ran on the capped batch rather than the
         // round being refused outright.
-        assert_eq!(session.cleared.len(), MAX_RULES_JUDGED - 1);
+        assert_eq!(session.plan.cleared.len(), MAX_RULES_JUDGED - 1);
         // The rules past the cap (R-X-0040..R-X-0044) were never candidates
         // at all, so they can appear in neither bucket.
-        assert!(!session.cleared.contains_key(&governance_session::key(
+        assert!(!session.plan.cleared.contains_key(&governance_session::key(
             "cross-cutting-many-abcd",
             "R-X-0044"
         )));
@@ -1412,7 +1420,7 @@ mod tests {
         // ran the capped batch to completion rather than the round being
         // refused outright.
         let session = governance_session::load("sess-partial-silent-1", &rules_dir);
-        assert_eq!(session.cleared.len(), MAX_RULES_JUDGED);
+        assert_eq!(session.plan.cleared.len(), MAX_RULES_JUDGED);
 
         // A silent-but-partial round is not silent in the durable log: this
         // is the one fail-open path that previously left no trace anywhere
@@ -1537,10 +1545,13 @@ mod tests {
             exec_hook_with(&args, &raw);
         }
         let after_round1 = governance_session::load("sess-rejudge-1", &rules_dir);
-        assert!(after_round1.cleared.contains_key(&governance_session::key(
-            "cross-cutting-token-signing-1c57",
-            "R-A-001"
-        )));
+        assert!(after_round1
+            .plan
+            .cleared
+            .contains_key(&governance_session::key(
+                "cross-cutting-token-signing-1c57",
+                "R-A-001"
+            )));
 
         // Round 2: the *revised* plan now genuinely violates R-A-001. If the
         // clearance still applied, this rule would never even reach the
@@ -1573,12 +1584,12 @@ mod tests {
         let key_a001 = governance_session::key("cross-cutting-token-signing-1c57", "R-A-001");
         let key_a002 = governance_session::key("cross-cutting-token-signing-1c57", "R-A-002");
         assert!(
-            !after_round2.cleared.contains_key(&key_a001),
+            !after_round2.plan.cleared.contains_key(&key_a001),
             "a rule the judge just called conflicting must not remain cleared"
         );
         assert_ne!(
-            after_round2.cleared.get(&key_a002),
-            after_round1.cleared.get(&key_a002),
+            after_round2.plan.cleared.get(&key_a002),
+            after_round1.plan.cleared.get(&key_a002),
             "a re-cleared rule's stored digest must move to the new plan text"
         );
     }
@@ -1615,12 +1626,12 @@ mod tests {
         exec_hook_with(&args, &raw);
 
         let session = governance_session::load("sess-persist-1", &rules_dir);
-        assert_eq!(session.rounds, 1);
-        assert!(session.cleared.contains_key(&governance_session::key(
+        assert_eq!(session.plan.rounds, 1);
+        assert!(session.plan.cleared.contains_key(&governance_session::key(
             "cross-cutting-token-signing-1c57",
             "R-A-001"
         )));
-        assert!(!session.cleared.contains_key(&governance_session::key(
+        assert!(!session.plan.cleared.contains_key(&governance_session::key(
             "cross-cutting-token-signing-1c57",
             "R-A-002"
         )));
@@ -1662,14 +1673,18 @@ mod tests {
         // Round 1: rounds becomes 1, 1 > max_rounds(1) is false -> normal deny.
         exec_hook_with(&args, &raw);
         assert_eq!(
-            governance_session::load("sess-limit-1", &rules_dir).rounds,
+            governance_session::load("sess-limit-1", &rules_dir)
+                .plan
+                .rounds,
             1
         );
 
         // Round 2: rounds becomes 2, 2 > 1 -> the gate stops denying.
         exec_hook_with(&args, &raw);
         assert_eq!(
-            governance_session::load("sess-limit-1", &rules_dir).rounds,
+            governance_session::load("sess-limit-1", &rules_dir)
+                .plan
+                .rounds,
             2
         );
 
@@ -1779,10 +1794,13 @@ mod tests {
             }
         }
         assert_eq!(
-            governance_session::load("sess-clean-rounds", &rules_dir).rounds,
+            governance_session::load("sess-clean-rounds", &rules_dir)
+                .plan
+                .rounds,
             3
         );
         assert!(governance_session::load("sess-clean-rounds", &rules_dir)
+            .plan
             .deny_counts
             .is_empty());
 
@@ -1809,9 +1827,9 @@ mod tests {
 
         let session = governance_session::load("sess-clean-rounds", &rules_dir);
         let key_a001 = governance_session::key("cross-cutting-token-signing-1c57", "R-A-001");
-        assert_eq!(session.deny_counts.get(&key_a001), Some(&1));
+        assert_eq!(session.plan.deny_counts.get(&key_a001), Some(&1));
         assert!(
-            !session.deny_limit_exceeded(&key_a001, args.max_rounds),
+            !session.plan.deny_limit_exceeded(&key_a001, args.max_rounds),
             "a rule's first-ever denial must never already be exhausted"
         );
         let log = std::fs::read_to_string(governance_session::audit_log_path().unwrap())
@@ -1883,8 +1901,12 @@ mod tests {
             exec_hook_with(&args, &raw);
         }
         let after_round2 = governance_session::load("sess-mixed-exhaustion", &rules_dir);
-        assert!(after_round2.deny_limit_exceeded(&key_a001, args.max_rounds));
-        assert!(!after_round2.deny_limit_exceeded(&key_a002, args.max_rounds));
+        assert!(after_round2
+            .plan
+            .deny_limit_exceeded(&key_a001, args.max_rounds));
+        assert!(!after_round2
+            .plan
+            .deny_limit_exceeded(&key_a002, args.max_rounds));
         let log_after_round2 =
             std::fs::read_to_string(governance_session::audit_log_path().unwrap())
                 .unwrap_or_default();
