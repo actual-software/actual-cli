@@ -103,7 +103,7 @@ const SESSIONS_DIR_NAME: &str = "plan-check-sessions";
 /// Filename of the append-only override/round-limit audit log, directly
 /// under the config directory (not the sessions subdirectory: it must
 /// outlive any single session's cache entry).
-const AUDIT_LOG_NAME: &str = "plan-check-overrides.log";
+pub(super) const AUDIT_LOG_NAME: &str = "plan-check-overrides.log";
 
 /// A session file older than this is pruned the next time any session is
 /// stored. Bounds disk usage without needing a `SessionEnd` hook, which
