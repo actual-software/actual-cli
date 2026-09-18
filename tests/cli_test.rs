@@ -865,9 +865,11 @@ fn test_impl_check_direct_mode_reads_the_diff_from_diff_file() {
         .args(["--diff-file", diff_file.to_str().unwrap()])
         .assert()
         .success()
+        .stdout(predicate::str::contains("Implementation check"))
         .stdout(predicate::str::contains(
             "Conforming: no selected rule was violated.",
-        ));
+        ))
+        .stdout(predicate::str::contains("Plan check").not());
 }
 
 #[cfg(unix)]

@@ -130,15 +130,21 @@ fn exec_direct(args: &ImplCheckArgs) -> Result<(), ActualError> {
 
     let width = term_size::terminal_width();
     if args.json {
-        println!("{}", render_json(&outcome));
+        println!("{}", render_json(&outcome, ArtifactKind::Diff));
     } else {
-        println!("{}", render_panel(&outcome, &diff_text, &rules_dir, width));
+        println!(
+            "{}",
+            render_panel(&outcome, &diff_text, &rules_dir, width, ArtifactKind::Diff)
+        );
     }
 
     let result = if let Outcome::Verdicts { verdicts, .. } = &outcome {
         let conflicts: Vec<&CheckedRule> = verdicts.iter().filter(|v| v.verdict.blocks()).collect();
         if !conflicts.is_empty() {
-            Err(ActualError::ImplNotConforming(deny_summary(&conflicts)))
+            Err(ActualError::ImplNotConforming(deny_summary(
+                &conflicts,
+                ArtifactKind::Diff,
+            )))
         } else {
             Ok(())
         }
@@ -564,7 +570,8 @@ fn exec_hook_with(args: &ImplCheckArgs, raw: &str) {
                     }
                     governance_session::store(session_id, &rules_dir, &session);
                 }
-                let deny_reason = hook_deny_reason(&blocking, session_id, partial);
+                let deny_reason =
+                    hook_deny_reason(&blocking, session_id, partial, ArtifactKind::Diff);
                 emit(plan_check_hook::render_deny(&with_override_reminder(
                     deny_reason,
                     &session,
