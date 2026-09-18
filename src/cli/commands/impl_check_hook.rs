@@ -3,8 +3,9 @@
 //!
 //! Unlike `plan-check`'s hook envelope (`plan_check_hook::HookEnvelope`),
 //! there is no `tool_input.plan`-equivalent field carrying the material to
-//! judge: the diff is always resolved via `git diff HEAD` (see
-//! `impl_check::git_diff_head`), never from the envelope itself, so this
+//! judge: the diff is always resolved via `working_tree_diff` (working tree
+//! vs `HEAD`, including untracked non-ignored files; see
+//! `impl_check::working_tree_diff`), never from the envelope itself, so this
 //! envelope only needs to carry enough to key the revision-loop session.
 //! Deliberately its own, smaller struct rather than reusing
 //! `plan_check_hook::HookEnvelope`, which is coupled to `ToolInput` and other

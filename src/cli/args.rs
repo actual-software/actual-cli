@@ -998,14 +998,15 @@ pub const DEFAULT_MAX_ROUNDS: u32 = 3;
 /// `--claude-hook` revision loop, judged against a `git diff` instead of plan
 /// text. Two callers, two shapes, exactly like `plan-check`: a human runs
 /// this directly, with the diff read from `--diff-file`, piped stdin, or (by
-/// default) `git diff HEAD` in the resolved repo, and the result is a panel
+/// default) the working-tree diff in the resolved repo (tracked changes vs
+/// `HEAD` plus untracked, non-ignored files), and the result is a panel
 /// or `--json`, with a nonzero exit reserved specifically for a `conflicting`
 /// verdict — every other outcome, including `not_checked` and
 /// `requires_decision`, exits 0. A CI job that gates on this command's exit
 /// code alone will not see the difference between "checked and clean" and
 /// "could not check"; a job that needs that distinction should read
 /// `--json`'s `status` field instead. Run with `--claude-hook`, the diff is
-/// always resolved via `git diff HEAD` — there is no envelope field carrying
+/// always resolved from the working tree — there is no envelope field carrying
 /// diff text the way `tool_input.plan` carries plan text — and the result is
 /// the hook's own JSON contract, shared verbatim with `plan-check
 /// --claude-hook`.
@@ -1023,14 +1024,15 @@ conflict exits nonzero. A CI job that gates on exit code alone cannot distinguis
 and clean\" from \"could not check\"; read --json's `status` field for that distinction."
 )]
 pub struct ImplCheckArgs {
-    /// Read the diff from this file instead of stdin or `git diff HEAD`.
-    /// Mainly for scripting and testing. Ignored under `--claude-hook`, which
-    /// always resolves the diff via `git diff HEAD`.
+    /// Read the diff from this file instead of stdin or the working-tree
+    /// diff. Mainly for scripting and testing. Ignored under `--claude-hook`,
+    /// which always resolves the diff from the working tree (tracked changes
+    /// vs `HEAD` plus untracked, non-ignored files).
     #[arg(long, value_name = "PATH", conflicts_with = "claude_hook")]
     pub diff_file: Option<std::path::PathBuf>,
 
-    /// Repository root to resolve rules, paths, and `git diff HEAD` against.
-    /// Defaults to the current directory.
+    /// Repository root to resolve rules, paths, and the working-tree diff
+    /// against. Defaults to the current directory.
     #[arg(long, value_name = "PATH")]
     pub repo: Option<std::path::PathBuf>,
 
@@ -1043,7 +1045,8 @@ pub struct ImplCheckArgs {
 
     /// Parse a Claude Code `PreToolUse` hook envelope from stdin and emit the
     /// hook's JSON contract on stdout instead of a panel. The diff is always
-    /// resolved via `git diff HEAD` in this mode; every failure degrades to
+    /// resolved from the working tree in this mode (tracked changes vs `HEAD`
+    /// plus untracked, non-ignored files); every failure degrades to
     /// fail-open rather than an error exit, per that contract.
     #[arg(long)]
     pub claude_hook: bool,
@@ -2368,8 +2371,8 @@ mod parse_tests {
 
     #[test]
     fn test_impl_check_parses_with_defaults() {
-        let args =
-            impl_check_args_from(&["actual", "impl-check"]).expect("expected an impl-check command");
+        let args = impl_check_args_from(&["actual", "impl-check"])
+            .expect("expected an impl-check command");
         assert!(!args.claude_hook);
         assert!(!args.no_rank);
         assert!(!args.json);
@@ -2418,7 +2421,7 @@ mod parse_tests {
     }
 
     /// `--diff-file` and `--claude-hook` name mutually exclusive diff
-    /// sources: the hook always resolves the diff via `git diff HEAD`, so
+    /// sources: the hook always resolves the diff from the working tree, so
     /// combining them is a usage error rather than a silently ignored flag.
     #[test]
     fn test_impl_check_diff_file_conflicts_with_claude_hook() {

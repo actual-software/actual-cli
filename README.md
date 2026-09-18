@@ -199,11 +199,12 @@ plan text — same four outcomes, same exit-code contract, same
 `hooks/impl-gate.sh`), and the same revision-loop/session machinery as
 `plan-check` (a `--claude-hook` session is keyed by `session_id`, independent
 of whether a `plan-check` session for that id ever existed). By default it
-diffs the current repo's working tree against `HEAD`; `--diff-file` or piped
-stdin can supply the diff explicitly instead:
+diffs the current repo's working tree against `HEAD`, including untracked
+files that gitignore would not hide (the user's index is not touched);
+`--diff-file` or piped stdin can supply the diff explicitly instead:
 
 ```bash
-actual impl-check                     # git diff HEAD in the current repo
+actual impl-check                     # working tree vs HEAD, including untracked files
 actual impl-check --diff-file out.diff --json
 git diff HEAD | actual impl-check
 ```
