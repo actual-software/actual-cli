@@ -980,6 +980,38 @@ fn test_impl_check_claude_hook_reads_a_valid_envelope_from_stdin() {
         .success();
 }
 
+/// `exec_hook`'s own stdin-read-failure branch, `impl-check`'s side: invalid
+/// UTF-8 must fail open with a notice, never block or error the hook.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_claude_hook_fails_open_on_non_utf8_stdin() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+
+    fixture
+        .cmd()
+        .arg("--claude-hook")
+        .write_stdin(vec![0xffu8, 0xfe, 0x00, 0x41])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("could not read the hook payload"));
+}
+
+/// An oversized envelope is refused rather than buffered in full, same as
+/// `plan-check --claude-hook`.
+#[cfg(unix)]
+#[test]
+fn test_impl_check_claude_hook_fails_open_on_oversized_stdin() {
+    let fixture = GovernedImplCheck::new("http://127.0.0.1:1");
+
+    fixture
+        .cmd()
+        .arg("--claude-hook")
+        .write_stdin(vec![b'x'; MAX_READ_BYTES + 1])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("could not read the hook payload"));
+}
+
 /// The dispatcher's whole job, `impl-check`'s side: the started and
 /// completed events for this run reach `POST /plan-governance/record`,
 /// tagged `command":"impl-check"` -- distinct from `plan-check`'s own
