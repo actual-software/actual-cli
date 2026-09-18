@@ -463,6 +463,14 @@ fn test_cli_parse_models() {
 
 #[test]
 fn test_run_models() {
+    // `models` loads the config, which creates the file when it is absent.
+    // Unguarded, that races any sibling test that has `ACTUAL_CONFIG` pointed
+    // at its own path (both stage writes through the same `.tmp` file), so
+    // hold the env lock and give this test a config path of its own.
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config.yaml");
+    let _guard = EnvGuard::set("ACTUAL_CONFIG", config_file.to_str().unwrap(), &_lock);
     let cli = Cli::parse_from(["actual", "models"]);
     assert_eq!(handle_result(run(cli)), 0);
 }
