@@ -100,6 +100,11 @@ how events are grouped per installation, and it also means an installation
 can be correlated with the set of repositories it has run `plan-check`
 against over time. It does not, on its own, identify a person.
 
+Each event also carries an `insert_id`: a fresh random UUID generated per
+event, used only so the proxy can drop an accidental duplicate delivery of the
+same event. It is not stored, not reused across events, and carries no
+information about the installation, repository, or user.
+
 All three telemetry opt-outs described below disable plan-governance events
 identically -- they share the exact same opt-out check as the sync counters,
 and are checked before any repo-identity hashing or `distinct_id` creation,

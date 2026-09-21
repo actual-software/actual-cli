@@ -1349,7 +1349,7 @@ mod tests {
                 distinct_id: "install-abc123".to_string(),
                 properties: None,
                 timestamp: None,
-                insert_id: None,
+                insert_id: "idempotency-key-1".to_string(),
             }],
         }
     }
