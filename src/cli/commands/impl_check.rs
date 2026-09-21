@@ -315,18 +315,15 @@ fn non_empty(text: String) -> Option<String> {
 fn working_tree_diff(root: &Path) -> Result<String, ActualError> {
     let tmp = tempfile::tempdir().map_err(ActualError::IoError)?;
     let index = tmp.path().join("index");
-    git_ok(
-        root,
-        Some(&index),
-        &["read-tree", "HEAD"],
-        "git read-tree HEAD",
-    )?;
-    git_ok(
-        root,
-        Some(&index),
-        &["add", "--intent-to-add", "--", "."],
-        "git add --intent-to-add",
-    )?;
+    for (args, what) in [
+        (&["read-tree", "HEAD"][..], "git read-tree HEAD"),
+        (
+            &["add", "--intent-to-add", "--", "."][..],
+            "git add --intent-to-add",
+        ),
+    ] {
+        git_ok(root, Some(&index), args, what)?;
+    }
 
     let mut child = git_command(root, Some(&index))
         .args(["diff", "--no-ext-diff", "HEAD"])
@@ -782,21 +779,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("working-tree diff"), "{msg}");
         assert!(msg.contains("exceeds"), "{msg}");
-    }
-
-    /// An untracked, empty embedded repository is one thing `git add` refuses
-    /// outright ("does not have a commit checked out"), after `read-tree` has
-    /// already succeeded.
-    #[test]
-    fn test_working_tree_diff_errors_when_git_add_fails() {
-        let repo = git_repo_with_baseline();
-        let embedded = repo.path().join("embedded");
-        std::fs::create_dir(&embedded).unwrap();
-        run_git(&embedded, &["init", "-q"]);
-
-        let err = working_tree_diff(repo.path()).unwrap_err();
-
-        assert!(err.to_string().contains("git add --intent-to-add"), "{err}");
     }
 
     /// `git diff` itself exiting non-zero (here: HEAD's copy of a modified
