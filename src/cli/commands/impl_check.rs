@@ -860,19 +860,39 @@ mod tests {
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let repo = git_repo_with_baseline();
+        // An explicit empty `--diff-file`, not the fallback chain: with no
+        // file, direct mode consults the real stdin, which a test harness does
+        // not control (an empty pipe on CI reads as an empty diff, a
+        // character device falls through to the working tree).
+        let diff_dir = tempdir().unwrap();
+        let diff_file = diff_dir.path().join("empty.diff");
+        std::fs::write(&diff_file, "  \n").unwrap();
         let mut args = base_args();
+        args.diff_file = Some(diff_file);
         args.repo = Some(repo.path().to_path_buf());
         assert!(exec(&args).is_ok());
     }
 
+    /// The pipeline runs and finds nothing that applies: an `Ok` that is not a
+    /// verdict, so neither the conflict exit nor a telemetry decision applies.
+    /// Needs a real diff supplied explicitly for the same reason as above --
+    /// otherwise CI's stdin would short-circuit this into "nothing to check"
+    /// before the pipeline ever ran.
     #[test]
     fn test_exec_direct_dispatch_with_no_applicable_rules_returns_ok() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempdir().unwrap();
         let _guards = isolated_config(&home);
         let repo = git_repo_with_baseline();
-        std::fs::write(repo.path().join("service.rs"), "fn handler() { 2 }\n").unwrap();
+        let diff_dir = tempdir().unwrap();
+        let diff_file = diff_dir.path().join("the.diff");
+        std::fs::write(
+            &diff_file,
+            "diff --git a/service.rs b/service.rs\n+fn handler() { 2 }\n",
+        )
+        .unwrap();
         let mut args = base_args();
+        args.diff_file = Some(diff_file);
         args.repo = Some(repo.path().to_path_buf());
         assert!(exec(&args).is_ok());
     }
